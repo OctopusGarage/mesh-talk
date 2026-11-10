@@ -1,4 +1,4 @@
-import { defineConfig } from "@playwright/test";
+import { defineConfig, devices } from "@playwright/test";
 
 const browser = process.env.EVAL_BROWSER ?? "chromium";
 const tier = process.env.EVAL_TIER ?? "core";
@@ -25,10 +25,14 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: "./e2e",
-  timeout: process.platform === "win32" ? 120_000 : 30_000,
+  // Match the full functional suite's platform-independent safety margin,
+  // retaining the established Windows portable allowance and zero retries.
+  timeout: process.platform === "win32" ? 120_000 : 90_000,
   testMatch: [
+    "browser-error-evidence.spec.ts",
     "portable-core.spec.ts",
     "automatic-delivery.spec.ts",
+    "media-scroll.spec.ts",
     "media-recovery.spec.ts",
     "media-lifecycle.spec.ts",
     "file-send-progress.spec.ts",
@@ -47,20 +51,20 @@ export default defineConfig({
     ["json", { outputFile: `${evidenceRoot}/results.json` }],
   ],
   outputDir: `${evidenceRoot}/artifacts`,
-  use: { baseURL, trace: "on" },
+  use: { baseURL, trace: "on", timezoneId: "Asia/Tokyo" },
   projects: [
     {
       name: browser,
       use: {
+        ...(browser === "chromium" ? devices["Desktop Chrome"] : {}),
         browserName: browser as "chromium" | "webkit" | "firefox",
         viewport: { width: 1280, height: 720 },
       },
     },
   ],
   webServer: {
-    // Portable core scenarios do not exercise optional packs. Use the lite edition so
-    // navigation cannot interrupt background bundled ZIP fetches in WebKit.
-    command: `npm run dev -- --mode lite --host 127.0.0.1 --port ${port} --strictPort`,
+    // All builds start without optional packs.
+    command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
     env: { MESH_TALK_E2E: "1" },
     url: baseURL,
     reuseExistingServer: false,

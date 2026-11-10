@@ -15,7 +15,6 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
-const DRAIN_INTERVAL_SECS: u64 = 3;
 const FILE_PULL_INTERVAL_SECS: u64 = 3;
 
 /// Network inventory supplied by the host; identity and roster come from Node.
@@ -83,7 +82,7 @@ impl PreparedParticipant {
         let announce = shared_announce(&current_announce);
         let discovery_trigger = Arc::new(Notify::new());
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-        tasks.extend(spawn_discovery_with_network_changes(
+        let discovery = spawn_discovery_with_network_changes(
             Arc::clone(&socket),
             Arc::clone(&roster),
             Arc::clone(&announce),
@@ -93,7 +92,12 @@ impl PreparedParticipant {
             Arc::clone(&visibility),
             Some(Arc::clone(&routed)),
             Some(node.network_changes.clone()),
-        ));
+        );
+        #[cfg(test)]
+        let ambient_discovery_ids = discovery.ambient_ids();
+        #[cfg(test)]
+        let ambient_discovery_first_polls = discovery.ambient_first_polls();
+        tasks.extend(discovery.into_handles());
         if let Some(socket_v6) = socket_v6.as_ref() {
             tasks.push(spawn_routed_listener(
                 Arc::clone(socket_v6),
@@ -135,9 +139,10 @@ impl PreparedParticipant {
                             if let Some(sender) = match endpoint {
                                 std::net::SocketAddr::V4(_) => Some(&socket),
                                 std::net::SocketAddr::V6(_) => socket_v6.as_ref(),
-                            } && let Some(_guard) = visibility.routed_send_guard().await
-                            {
-                                let _ = routed.probe(sender, endpoint).await;
+                            } {
+                                let _ = visibility
+                                    .with_routed_send(routed.probe(sender, endpoint))
+                                    .await;
                             }
                             tokio::time::sleep(Duration::from_millis(20)).await;
                         }
@@ -152,19 +157,7 @@ impl PreparedParticipant {
         }
         {
             let node = Arc::clone(&node);
-            tasks.push(tokio::spawn(async move {
-                let mut network = node.network_changes.subscribe();
-                loop {
-                    tokio::select! {
-                        _ = node.drain_from_post_office() => {},
-                        _ = network.changed() => continue,
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(DRAIN_INTERVAL_SECS)) => {},
-                        _ = network.changed() => {},
-                    }
-                }
-            }));
+            tasks.push(tokio::spawn(node.run_post_office_drains()));
         }
         {
             let node = Arc::clone(&node);
@@ -177,7 +170,18 @@ impl PreparedParticipant {
                 let mut roster = node.roster.lock().expect("roster lock not poisoned").subscribe_changes();
                 let mut delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS);
                 loop {
-                    let pending = !node.pending_files.lock().expect("pending files lock not poisoned").is_empty();
+                    let Some(permit) = node.runtime_work.admit() else { break; };
+                    let receiving = Arc::clone(&node);
+                    // The blocking owner destroys captured Node references
+                    // before releasing retirement admission, including when
+                    // the awaiting producer is cancelled.
+                    if let Err(error) = permit.spawn_blocking(move || {
+                        receiving.retry_file_receives();
+                        if let Err(error)=receiving.maintain_media(){log::warn!("media maintenance deferred: {error}");}
+                    }).await {
+                        log::warn!("file receive worker failed: {error}");
+                    }
+                    let pending = node.files.lock().expect("files lock").download_work_pending().unwrap_or_else(|error| {log::warn!("download scheduling observation failed: {error}");true}) || node.group_file_work_pending() || node.pending_channel_file().is_some() || node.media_maintenance_pending().unwrap_or_else(|error|{log::warn!("media scheduling observation failed: {error}");true});
                     tokio::select! {
                         _ = node.pull_pending_files() => {},
                         _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },
@@ -205,6 +209,10 @@ impl PreparedParticipant {
             discovery_health,
             tasks,
             graceful_host_tasks: Vec::new(),
+            #[cfg(test)]
+            ambient_discovery_ids,
+            #[cfg(test)]
+            ambient_discovery_first_polls,
         }
     }
 }
@@ -224,6 +232,126 @@ pub struct ParticipantRuntime {
     discovery_health: Vec<tokio::task::AbortHandle>,
     pub(super) tasks: Vec<JoinHandle<()>>,
     graceful_host_tasks: Vec<GracefulHostTask>,
+    #[cfg(test)]
+    ambient_discovery_ids: [tokio::task::Id; 3],
+    #[cfg(test)]
+    ambient_discovery_first_polls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct AmbientDiscoveryRetirement {
+    pub first_polls: usize,
+    pub removed: usize,
+    pub joined: usize,
+    pub failures: Vec<tokio::task::JoinError>,
+}
+
+#[cfg(test)]
+async fn retire_named_ambient_discovery(
+    tasks: &mut Vec<JoinHandle<()>>,
+    health: &mut Vec<tokio::task::AbortHandle>,
+    ids: &[tokio::task::Id; 3],
+    first_polls: &std::sync::atomic::AtomicUsize,
+) -> AmbientDiscoveryRetirement {
+    let mut ambient = Vec::with_capacity(3);
+    let mut retained = Vec::with_capacity(tasks.len());
+    for task in tasks.drain(..) {
+        if ids.contains(&task.id()) {
+            ambient.push(task);
+        } else {
+            retained.push(task);
+        }
+    }
+    *tasks = retained;
+    for task in &ambient {
+        task.abort();
+    }
+    health.retain(|task| !ambient.iter().any(|removed| removed.id() == task.id()));
+    let mut report = AmbientDiscoveryRetirement {
+        first_polls: first_polls.load(std::sync::atomic::Ordering::SeqCst),
+        removed: ambient.len(),
+        joined: 0,
+        failures: Vec::new(),
+    };
+    // Every removed owner is awaited even if another producer panicked or an
+    // expected task was absent. The caller checks the report after cleanup.
+    for task in ambient {
+        match task.await {
+            Ok(()) => report.joined += 1,
+            Err(error) if error.is_cancelled() => report.joined += 1,
+            Err(error) => report.failures.push(error),
+        }
+    }
+    report
+}
+
+#[cfg(test)]
+mod ambient_retirement_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_named_task_and_panicked_producer_preserve_failure_and_join_other_owners() {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let panicked = tokio::spawn(async move {
+            let _ = entered.send(());
+            panic!("owned ambient panic control");
+        });
+        let entered = ready.await;
+        let cancelled = tokio::spawn(std::future::pending::<()>());
+        let missing = tokio::spawn(std::future::pending::<()>());
+        let unrelated = tokio::spawn(std::future::pending::<()>());
+        let ids = [panicked.id(), cancelled.id(), missing.id()];
+        let survivor_ids = [missing.id(), unrelated.id()];
+        let mut health = vec![
+            panicked.abort_handle(),
+            cancelled.abort_handle(),
+            missing.abort_handle(),
+            unrelated.abort_handle(),
+        ];
+        let mut tasks = vec![panicked, cancelled, unrelated];
+        let mut report = retire_named_ambient_discovery(
+            &mut tasks,
+            &mut health,
+            &ids,
+            &std::sync::atomic::AtomicUsize::new(0),
+        )
+        .await;
+        let retained_ids: Vec<_> = tasks.iter().map(JoinHandle::id).collect();
+        let health_ids: std::collections::HashSet<_> =
+            health.iter().map(tokio::task::AbortHandle::id).collect();
+        let unrelated_live = tasks.iter().all(|task| !task.is_finished());
+        let missing_live = !missing.is_finished();
+        for task in &tasks {
+            task.abort();
+        }
+        missing.abort();
+        let mut cleanup = Vec::new();
+        for task in tasks {
+            cleanup.push(task.await);
+        }
+        cleanup.push(missing.await);
+        assert_eq!(report.removed, 2);
+        assert_eq!(report.joined, 1);
+        assert_eq!(report.failures.len(), 1);
+        let failure = report.failures.pop().unwrap();
+        assert!(failure.is_panic());
+        let payload = failure.into_panic();
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(message, Some("owned ambient panic control"));
+        assert!(entered.is_ok());
+        assert_eq!(retained_ids, vec![survivor_ids[1]]);
+        assert_eq!(health_ids, survivor_ids.into_iter().collect());
+        assert!(unrelated_live && missing_live);
+        assert!(
+            cleanup
+                .into_iter()
+                .all(|result| result.is_err_and(|error| error.is_cancelled()))
+        );
+    }
 }
 
 struct GracefulHostTask {
@@ -232,6 +360,30 @@ struct GracefulHostTask {
 }
 
 impl ParticipantRuntime {
+    #[cfg(test)]
+    pub(super) fn discovery_trace(&self) -> &RoutedDiscovery {
+        &self.routed_discovery
+    }
+
+    #[cfg(test)]
+    pub(super) fn ambient_discovery_first_polls(&self) -> usize {
+        self.ambient_discovery_first_polls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Explicit loopback fixtures retain the listener and all TCP/delivery work.
+    /// Abort every named ambient producer before the first join can yield.
+    #[cfg(test)]
+    pub(super) async fn retire_ambient_discovery_for_test(&mut self) -> AmbientDiscoveryRetirement {
+        retire_named_ambient_discovery(
+            &mut self.tasks,
+            &mut self.discovery_health,
+            &self.ambient_discovery_ids,
+            &self.ambient_discovery_first_polls,
+        )
+        .await
+    }
+
     /// Local discovery producer health; makes no claim about Internet or LAN reachability.
     pub fn discovery_available(&self) -> bool {
         self.discovery_health.iter().all(|task| !task.is_finished())
@@ -271,7 +423,7 @@ impl ParticipantRuntime {
     }
 
     /// Update the signed presence and wake discovery, respecting Node privacy.
-    pub fn set_display_name(&mut self, display_name: &str) -> std::io::Result<()> {
+    pub fn set_display_name(&self, display_name: &str) -> std::io::Result<()> {
         let announce = self.node.signed_announce(display_name, self.tcp_port);
         self.node.update_presence(&announce)?;
         swap_announce(&self.announce, &announce);
@@ -293,29 +445,23 @@ impl ParticipantRuntime {
         endpoint: std::net::SocketAddr,
         authorize: impl FnMut(&mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()> + Send,
     ) -> std::io::Result<()> {
-        if !self.visibility.routed_allowed().await {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "public discovery is disabled",
-            ));
-        }
         let socket = match endpoint {
             std::net::SocketAddr::V4(_) => &self.discovery_socket_v4,
             std::net::SocketAddr::V6(_) => self.discovery_socket_v6.as_ref().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "IPv6 unavailable")
             })?,
         };
-        let _guard = self.visibility.routed_send_guard().await.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "routed discovery is disabled",
-            )
-        })?;
-        if self
-            .routed_discovery
-            .probe_if(socket, endpoint, authorize)
+        let sent = self
+            .visibility
+            .with_routed_send(self.routed_discovery.probe_if(socket, endpoint, authorize))
             .await?
-        {
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "routed discovery is disabled",
+                )
+            })?;
+        if sent {
             Ok(())
         } else {
             Err(std::io::Error::new(

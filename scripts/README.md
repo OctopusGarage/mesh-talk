@@ -11,13 +11,18 @@ below are explicit gates or environment-specific tools.
 | Focused PR review            | [`pr-preflight.sh`](pr-preflight.sh)                                 | After committing, with the relevant Playwright specs                                                                              |
 | Verified PR creation         | [`create-pr.sh`](create-pr.sh)                                       | Runs full preparation, then creates the PR only for the verified candidate                                                        |
 | Native build evidence        | [`validation/native-build.mjs`](validation/native-build.mjs)         | Build source-pinned desktop acceptance binaries before producing native reports                                                   |
+| Native sticker acceptance    | [`diagnostics/native-sticker-acceptance.mjs`](diagnostics/native-sticker-acceptance.mjs) | After a clean source-pinned native build: two disposable desktop profiles verify installed, missing and replaced artwork, retained media and intentional repeated sends |
 | Linux / Windows preflight    | [`pr-platform/run.mjs`](pr-platform/run.mjs)                         | Automatic in PR preflight; `--plan` previews selections without running environments                                              |
 | Comprehensive health         | [`check-health.sh`](check-health.sh)                                 | Before requesting review or in CI; `--fast` is an optional partial check                                                          |
 | Delivery and agent contracts | [`ai-eval-smoke.sh`](ai-eval-smoke.sh), [`ai-eval.mjs`](ai-eval.mjs) | When changing their contracts or in CI; the model-backed runner needs a provider                                                  |
 | Complete real smoke          | [`run-real-smoke.sh`](run-real-smoke.sh)                             | Explicit release validation; includes backend and browser E2E                                                                     |
-| Git hooks                    | [`setup-hooks.sh`](setup-hooks.sh), [`../hooks/`](../hooks/)         | On initial checkout; the commit hook checks source formatting only                                                                |
+| Git hooks                    | [`setup-hooks.sh`](setup-hooks.sh), [`../hooks/`](../hooks/)         | On initial checkout; commit hooks run cheap source/structure/syntax checks, with no suites                                                                |
 | Build retention              | [`build-retention.py`](build-retention.py)                           | After managed builds/tests; five successful build sets and a 40 GiB cache budget; see [configuration](../docs/build-retention.md) |
 | Release                      | [`release/`](release/)                                               | CI release workflow and signed artifact validation                                                                                |
+| Owned full Chromium          | [`ci/ui-runner.mjs`](ci/ui-runner.mjs) | CI full shards; preserves progress and joined cleanup inside the workflow budget |
+| Cheap PR checks             | `make pr-check`, [`create-pr.sh`](create-pr.sh) | Static feedback and verified frontend patch precheck before publication; no implicit suites |
+| Changed syntax              | [`validation/syntax.mjs`](validation/syntax.mjs) | Pre-commit, affected validation and clean PR publication; no runtime suites |
+| Native coverage             | [`ci/workspace-coverage.sh`](ci/workspace-coverage.sh) | CI native partitions or their pinned-tool fixtures, from the declared workspace directory |
 | CI diagnostics               | [`diagnostics/`](diagnostics/) and [`evals/`](evals/)                | Their `.test.mjs` files are selected by CI globs, even when no script names them individually                                     |
 
 ## Opt-in network acceptance
@@ -66,6 +71,11 @@ node scripts/validation/stage.mjs workspace-tests --profile shared --resource he
 MESH_VALIDATION_FRESH=1 ./scripts/check-health.sh
 ```
 
+Use `--deadline EPOCH_MS --result PATH` for a command bounded by an existing job
+budget. Health also retains active-case evidence through
+[`diagnostics/node-test-progress.mjs`](diagnostics/node-test-progress.mjs);
+the Node test runner still owns test acceptance.
+
 Reuse requires a clean identical revision, matching tool/environment/command
 inputs, and intact required artifacts; receipts expire after 24 hours. CI always
 executes. Shared stages exclude PR transport settings from identity because those
@@ -81,3 +91,26 @@ run's port and evidence directory. Neither helper removes required scenarios.
 index, including force-added files. It shares `.gitignore` with pre-commit, CI and
 the health gate. Its focused regression command is
 `node --test scripts/diagnostics/repository-hygiene.test.mjs`.
+
+## Native sticker acceptance
+
+Commit the candidate, then run `node scripts/validation/native-build.mjs` and
+`node scripts/diagnostics/native-sticker-acceptance.mjs` from the repository root.
+The existing build manifest binds both native evaluation processes to the clean
+candidate and bundled frontend. Build retention and the native build lease still
+apply. On Linux, run the evaluation in a real desktop session or the existing
+Xvfb/Openbox/D-Bus environment used by the native CI workflow.
+
+The runner imports a small derived pack from the maintained marketplace fixture
+through the real ZIP input, exercises registered source IPC, and sends through
+the real sticker picker. Missing, identical installed and replaced artwork use
+separate transfer identities; a deliberate repeated send keeps its own message
+identity while reusing compatible transfer bytes. The receiver restarts after
+replacement so obsolete optional cache candidates cannot hide a fallback miss.
+Temporary profiles, screenshots, logs and the source-bound `report.json` stay
+under ignored `target/native-sticker-acceptance` (override with
+`NATIVE_STICKER_OUTPUT`). Existing personal profiles and installed applications
+are not used. The file chooser is supplied through standard WebDriver File and
+Change events; OS picker behavior is outside this check. Native older-peer and
+paired-device alias acceptance remain separate from this scenario; exact legacy
+fallback and alias semantics are covered by their owning protocol/store tests.

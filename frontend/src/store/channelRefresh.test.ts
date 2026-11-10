@@ -28,6 +28,7 @@ function session() {
       { channel_id: "other", name: "Other", owner: "bob", member_count: 1 },
     ]),
     channelMembers: vi.fn(async (id: string) => ({
+      history_policy: "off" as const,
       owner: id === "team" ? "alice" : "bob",
       members: [{ user_id: id === "team" ? "alice" : "bob", name: id }],
     })),
@@ -99,7 +100,7 @@ it("retains one follow-up when a group changes during an active refresh", async 
     expect(s.commands.channelMembers).toHaveBeenCalledTimes(3),
   );
   const followups = Array.from({ length: 20 }, () => s.refresh.request("team"));
-  pending.resolve({ owner: "alice", members: [] });
+  pending.resolve({ history_policy: "off", owner: "alice", members: [] });
   await Promise.all([first, ...followups]);
   expect(s.commands.channelMembers).toHaveBeenCalledTimes(4);
   expect(s.read().members).toEqual([{ user_id: "alice", name: "team" }]);
@@ -135,7 +136,7 @@ it("bounds member query concurrency during a full fallback", async () => {
   await vi.waitFor(() =>
     expect(s.commands.channelMembers).toHaveBeenCalledTimes(4),
   );
-  pending.resolve({ owner: "alice", members: [] });
+  pending.resolve({ history_policy: "off", owner: "alice", members: [] });
   await work;
   expect(s.commands.channelMembers).toHaveBeenCalledTimes(20);
 });
@@ -174,7 +175,7 @@ it("does not overwrite a newly opened group's member snapshot", async () => {
     members: [{ user_id: "new", name: "New" }],
     channelOwner: "new",
   });
-  pending.resolve({ owner: "old", members: [] });
+  pending.resolve({ history_policy: "off", owner: "old", members: [] });
   await work;
   expect(s.read().members).toEqual([{ user_id: "new", name: "New" }]);
   expect(s.read().channelOwner).toBe("new");
@@ -193,7 +194,7 @@ it("repairs missed group invalidations when fallback becomes due during a target
     expect(s.commands.channelMembers).toHaveBeenCalledOnce(),
   );
   const fallback = s.refresh.ifDue();
-  pending.resolve({ owner: "alice", members: [] });
+  pending.resolve({ history_policy: "off", owner: "alice", members: [] });
   await Promise.all([targeted, fallback]);
   expect(s.commands.channelMembers).toHaveBeenCalledWith("other");
 });
@@ -222,4 +223,34 @@ it("publishes healthy members and recovers after a member read never settles", a
     finish({ owner: "obsolete", members: [] });
     vi.useRealTimers();
   }
+});
+
+it("cannot republish an older list after personal deletion invalidates the lane", async () => {
+  const s = session();
+  const old = deferred<Awaited<ReturnType<typeof s.commands.listChannels>>>();
+  const fresh = deferred<Awaited<ReturnType<typeof s.commands.listChannels>>>();
+  s.commands.listChannels
+    .mockReturnValueOnce(old.promise)
+    .mockReturnValueOnce(fresh.promise);
+  const first = s.refresh.request();
+  await vi.waitFor(() =>
+    expect(s.commands.listChannels).toHaveBeenCalledOnce(),
+  );
+  const invalidated = s.refresh.invalidate();
+  old.resolve([
+    {
+      channel_id: "deleted",
+      name: "Must not return",
+      owner: "alice",
+      member_count: 0,
+    },
+  ]);
+  await vi.waitFor(() =>
+    expect(s.commands.listChannels).toHaveBeenCalledTimes(2),
+  );
+  expect(s.read().channels).toEqual([]);
+  fresh.resolve([]);
+  await first;
+  await invalidated;
+  expect(s.read().channels).toEqual([]);
 });

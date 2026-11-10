@@ -5,10 +5,13 @@ import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { Writable } from "node:stream";
 import { homedir } from "node:os";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { inputGroup, inputIdentity, frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 
+const preAdmissionResults = new WeakMap();
 const hash = value => createHash("sha256").update(value).digest("hex");
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function observeInputs(root, configuration) {
@@ -27,21 +30,31 @@ async function observeInputs(root, configuration) {
     close: () => {} };
 }
 
-function processGroupRunning(group) {
-  const result = spawnSync("ps", ["-eo", "pgid=,stat="], { encoding: "utf8", timeout: 5000 });
+function processGroupRunning(group, timeoutMs = 5000) {
+  const result = spawnSync("ps", ["-eo", "pgid=,stat="], { encoding: "utf8", timeout: Math.max(1, Math.ceil(timeoutMs)) });
   if (result.status !== 0) throw Error("Cannot verify process-group termination");
   return result.stdout.split("\n").some(line => {
     const [id, state] = line.trim().split(/\s+/u);
     return Number(id) === group && state && !state.startsWith("Z");
   });
 }
-export async function waitForProcessGroup(group, { probe = processGroupRunning, pause = delay, attempts = 50 } = {}) {
+export async function waitForProcessGroup(group, { probe = processGroupRunning, pause = delay, attempts = 50, now = () => performance.now(), timeoutMs = 5000 } = {}) {
+  const deadline = now() + timeoutMs;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    try { if (!probe(group)) return true; } catch { /* Unknown is not terminated. */ }
-    await pause(100);
+    const remaining = deadline - now();
+    if (remaining <= 0) return false;
+    let retired = false;
+    try { retired = !probe(group, remaining); } catch { /* Unknown is not terminated. */ }
+    // Probes consume the same budget as pauses. An absence observed after the
+    // deadline cannot turn an over-budget cleanup into verified retirement.
+    const afterProbe = deadline - now();
+    if (afterProbe <= 0) return false;
+    if (retired) return true;
+    await pause(Math.min(100, afterProbe));
   }
   return false;
 }
+
 function git(root, args) {
   const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
   if (result.status !== 0) throw Error(result.stderr.trim() || "Git identity unavailable");
@@ -78,7 +91,7 @@ function environmentIdentity(env, profile) {
   // Values are hashed in memory; receipts never expose credentials/configuration.
   return Object.fromEntries(Object.entries(env).filter(([key]) => /^(PATH$|NODE_|RUST|CARGO_|MESH_|VITE_|VITEST_|PLAYWRIGHT_|EVAL_|PATCH_|FAST$|CI$|TZ$|LANG$|LC_|npm_config_|NPM_CONFIG_)/u.test(key) && !/^MESH_VALIDATION_/u.test(key) && !(profile !== "all" && /^MESH_PR_/u.test(key))).sort(([a], [b]) => a.localeCompare(b)));
 }
-async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
+async function lock(directory, { log, signal, timeoutMs = 7_200_000, nonblocking = false, noWork = false }) {
   await mkdir(path.dirname(directory), { recursive: true });
   const started = Date.now();
   let announced = 0;
@@ -87,23 +100,46 @@ async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
     try {
       await mkdir(directory);
       const owner = { pid: process.pid, started: Date.now() };
-      if (process.platform !== "win32" && process.env.MESH_VALIDATION_PROCESS_GROUP_OWNER) {
+      if (noWork) Object.assign(owner, { noWork: true, retirementRequired: false });
+      // PID death cannot prove a crashed Windows job owner retired its work.
+      // Only the live owner with its receipt may release these leases.
+      if (process.platform === "win32" && !noWork) owner.windowsRetirementRequired = true;
+      if (!noWork && process.platform !== "win32" && process.env.MESH_VALIDATION_PROCESS_GROUP_OWNER) {
         const probe = spawnSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" });
         const group = Number(probe.stdout?.trim());
         if (probe.status === 0 && Number.isInteger(group) && group > 1) owner.group = group;
         else owner.quarantined = "Cannot establish nested process group";
       }
-      await writeFile(path.join(directory, "owner.json"), JSON.stringify(owner));
+      const publish = async () => {
+        const temporary = path.join(directory, `owner-${randomUUID()}.tmp`);
+        await writeFile(temporary, JSON.stringify(owner));
+        await rename(temporary, path.join(directory, "owner.json"));
+      };
+      await publish();
       const release = async () => rm(directory, { recursive: true, force: true });
-      release.quarantine = async reason => writeFile(path.join(directory, "owner.json"), JSON.stringify({ ...owner, quarantined: reason }));
+      release.quarantine = async reason => { owner.quarantined = reason; await publish(); };
+      release.requireRetirement = async group => {
+        // Publish unknown ownership BEFORE admission. A crash between spawn and
+        // group publication must never make this a PID-only reapable lease.
+        owner.retirementRequired = true;
+        delete owner.group;
+        if (group !== undefined) owner.group = group;
+        await publish();
+      };
+      release.publishGroup = async group => {
+        if (!Number.isSafeInteger(group) || group <= 1) throw Error("Invalid owned process group");
+        owner.group = group;
+        await publish();
+      };
       return release;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
+      if (nonblocking) throw Error(`Validation evidence is busy or has an unresolved lease: ${directory}; finish or recover its owner before verifying evidence`);
       try {
         const owner = JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8"));
         try { process.kill(owner.pid, 0); }
         catch (probe) {
-          if (probe.code === "ESRCH" && !owner.quarantined) {
+          if (probe.code === "ESRCH" && !owner.quarantined && !owner.windowsRetirementRequired && (!owner.retirementRequired || Number.isSafeInteger(owner.group) && owner.group > 1)) {
             // One reaper rechecks ownership, so a second waiter cannot remove a new lock.
             const reaper = `${directory}.reaper`;
             let acquired = false;
@@ -112,7 +148,8 @@ async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
               const current = JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8"));
               try { process.kill(current.pid, 0); }
               catch (check) {
-                if (check.code === "ESRCH" && !current.quarantined &&
+                if (check.code === "ESRCH" && !current.quarantined && !current.windowsRetirementRequired &&
+                    (!current.retirementRequired || Number.isSafeInteger(current.group) && current.group > 1) &&
                     (!current.group || !processGroupRunning(current.group)))
                   await rm(directory, { recursive: true, force: true });
               }
@@ -134,13 +171,37 @@ function executableCommand(command, env) {
   const cli = candidates.find(candidate => existsSync(candidate));
   return cli ? [process.execPath, cli, ...command.slice(1)] : command;
 }
-async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream }) {
+// The inherited marker names a live supervisor ancestor, not an arbitrary PID.
+// Validate that relationship again before signalling; stale markers cannot grant
+// authority over a re-used PID belonging to another process tree.
+function supervisorAncestor(owner) {
+  if (!Number.isSafeInteger(owner) || owner <= 1 || owner === process.pid) return false;
+  let ancestor = process.ppid;
+  for (let depth = 0; ancestor > 1 && depth < 64; depth++) {
+    if (ancestor === owner) return true;
+    const result = spawnSync("ps", ["-o", "ppid=", "-p", String(ancestor)], { encoding: "utf8", timeout: 5000 });
+    if (result.status !== 0) return false;
+    ancestor = Number(result.stdout.trim());
+  }
+  return false;
+}
+export async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream, onOutput = chunk => process.stdout.write(chunk), detached = true, notifyOwnerOnAbort = false, onSpawn, terminationSignal = "SIGTERM", terminationGraceMs = 2000 }) {
   signal?.throwIfAborted();
+  if (!["SIGTERM", "SIGINT"].includes(terminationSignal)) throw Error("Unsupported command termination signal");
+  if (!Number.isSafeInteger(terminationGraceMs) || terminationGraceMs < 0 || terminationGraceMs > 30000) throw Error("Command termination grace must be an integer from 0 to 30000 ms");
+  if (process.platform === "win32") {
+    const { executeWindows } = await import("./windows-process-owner.mjs");
+    return executeWindows(executableCommand(command, env), { cwd, env, logPath, signal, createLogStream, onOutput });
+  }
+  if (process.platform !== "win32" && !detached && !env.MESH_VALIDATION_PROCESS_GROUP_OWNER)
+    throw Error("Non-detached execution requires an existing managed process-group owner");
   return new Promise(resolve => {
-    const output = createLogStream(logPath);
+    const output = logPath ? createLogStream(logPath) : new Writable({ write(_chunk, _encoding, done) { done(); } });
     let error;
     let failureKind;
     let cleanupUnverified = false;
+    let forcedRetirement = false;
+    let publication = Promise.resolve();
     const argv = executableCommand(command, env);
     // Only the outer stage owns a POSIX process group and its kill timer.
     // Nested stage commands join that group so escalation cannot orphan a
@@ -150,75 +211,173 @@ async function execute(command, { cwd, env, logPath, signal, createLogStream = c
       ...env,
       MESH_VALIDATION_PROCESS_GROUP_OWNER: env.MESH_VALIDATION_PROCESS_GROUP_OWNER || String(process.pid),
     };
-    const child = spawn(argv[0], argv.slice(1), { cwd, env: childEnv, shell: false, windowsHide: true, detached: process.platform !== "win32" && !nestedGroup });
-    const forward = chunk => { output.write(chunk); process.stdout.write(chunk); };
-    child.stdout?.on("data", forward); child.stderr?.on("data", forward);
-    output.on("error", failure => { error = failure.message; failureKind = "failed"; abort(); });
+    const child = spawn(argv[0], argv.slice(1), { cwd, env: childEnv, shell: false, windowsHide: true, detached: process.platform !== "win32" && !nestedGroup && detached });
+    const forward = (chunk, channel) => { output.write(chunk); onOutput(chunk, channel); };
+    child.stdout?.on("data", chunk => forward(chunk, "stdout")); child.stderr?.on("data", chunk => forward(chunk, "stderr"));
+    output.on("error", failure => { error ||= failure.message; failureKind = "failed"; abort(); });
     child.on("error", failure => { error = failure.message; failureKind = ["ENOENT", "EACCES"].includes(failure.code) ? "unavailable" : "failed"; });
     let cleanup;
     const abort = () => {
       if (cleanup) return;
       if (!child.pid) { cleanup = Promise.resolve(); return; }
-      if (process.platform === "win32") {
-        cleanup = new Promise(done => {
-          const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-          killer.on("error", failure => { error = `Process tree cleanup failed: ${failure.message}`; cleanupUnverified = true; child.kill(); });
-          killer.on("close", code => {
-            if (code !== 0) { cleanupUnverified = true; error ||= "Windows process-tree termination could not be verified"; child.kill(); }
-            done();
-          });
-        });
-      } else if (nestedGroup) {
+      if (nestedGroup) {
         // The owner signals and escalates the whole group. Keep this stage's
         // leases until it kills us too: a closed command leader does not prove
         // ignored-stdio descendants have exited. Dead-owner locks are reaped
         // by the next waiter after the group's processes have stopped.
         cleanup = new Promise(() => {});
-        if (!signal?.aborted) {
+        if (!signal?.aborted || notifyOwnerOnAbort) {
           // A local log failure must also notify the outer CLI owner; otherwise
           // nobody would start its group escalation and this lease would hang.
-          try { process.kill(Number(env.MESH_VALIDATION_PROCESS_GROUP_OWNER), "SIGTERM"); }
+          try {
+            const owner = Number(env.MESH_VALIDATION_PROCESS_GROUP_OWNER);
+            if (!supervisorAncestor(owner)) throw Error("Process-group owner is not a live supervisor ancestor");
+            process.kill(owner, "SIGTERM");
+          }
           catch {
             cleanupUnverified = true;
             error ||= "Outer process-group owner is unavailable";
             cleanup = Promise.resolve();
           }
         }
-        child.kill("SIGTERM");
+        child.kill(terminationSignal);
       } else {
-        try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill(); }
+        try { process.kill(-child.pid, terminationSignal); } catch { child.kill(); }
         // The leader may exit while descendants with independent stdio remain.
         // Keep the group escalation and resource lease until cleanup completes.
         cleanup = new Promise(done => setTimeout(async () => {
           try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already exited. */ }
-          cleanupUnverified = !await waitForProcessGroup(child.pid);
-          if (cleanupUnverified) error = "Process-group termination could not be verified";
+          const groupUnverified = !await waitForProcessGroup(child.pid);
+          cleanupUnverified ||= groupUnverified;
+          if (groupUnverified) error ||= "Process-group termination could not be verified";
           done();
-        }, 2000));
+        }, terminationGraceMs));
       }
     };
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
-    child.on("close", async code => {
+    child.once("spawn", () => {
+      publication = Promise.resolve().then(() => onSpawn?.(child.pid)).catch(failure => {
+        error ||= `Owned process-group publication failed: ${failure.message}`;
+        failureKind ||= "failed";
+        abort();
+      });
+    });
+    let finalizingOutput = false;
+    const cancelLog = () => {
+      if (finalizingOutput && !output.writableFinished && !output.destroyed)
+        output.destroy(Error("Command log finalization cancelled"));
+    };
+    const cancel = () => { cancelLog(); abort(); };
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
+    const retireAfterExit = () => {
+      // Only this owner created the child's group. Nested commands share a
+      // live supervisor/sibling group; its final outer stage owns retirement.
+      if (!cleanup && process.platform !== "win32" && !nestedGroup && detached && child.pid) {
+        try {
+          // ESRCH from the kernel proves the owned group is absent. A ps
+          // snapshot can miss a child while its parent is forking/exiting.
+          process.kill(-child.pid, 0);
+          forcedRetirement = true;
+          abort();
+        } catch (failure) {
+          if (failure.code === "ESRCH") {
+            // Retain kernel absence as terminal ownership evidence. Later log
+            // cancellation must not signal a potentially reused group identity.
+            cleanup = Promise.resolve();
+          } else {
+            error ||= "Command descendant retirement could not be verified";
+            failureKind ||= "failed";
+            abort();
+          }
+        }
+      }
+    };
+    let closed = false;
+    let drainTimer;
+    // Owned group retirement does not close pipes inherited by a process that
+    // created another group. Bound only our read ends; unknown groups are never
+    // signal targets and an undrained pipe cannot certify descendant cleanup.
+    child.once("exit", () => {
+      retireAfterExit();
+      if (!nestedGroup && detached && child.pid) {
+        void (async () => {
+          await publication;
+          await cleanup;
+          if (!closed) drainTimer = setTimeout(async () => {
+            // Cancellation may have begun retirement after this drain was armed.
+            await cleanup;
+            if (closed) return;
+            cleanupUnverified = true;
+            error ||= "Command output pipes did not close after owned process-group retirement";
+            failureKind ||= "failed";
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+          }, 2000);
+        })();
+      }
+    });
+    child.on("close", async (code, childSignal) => {
+      closed = true;
+      clearTimeout(drainTimer);
+      await publication;
+      retireAfterExit();
+      finalizingOutput = true;
+      if (signal?.aborted) cancelLog();
       await new Promise(done => output.end(failure => {
         if (failure) { error ||= failure.message; failureKind ||= "failed"; abort(); }
         done();
       }));
       await cleanup;
-      signal?.removeEventListener("abort", abort);
-      resolve({ code: signal?.aborted ? 130 : error ? 1 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind, cleanupUnverified });
+      signal?.removeEventListener("abort", cancel);
+      resolve({ code: signal?.aborted ? 130 : error ? 1 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind, cleanupUnverified, forcedRetirement, exitCode: code, signal: childSignal });
     });
   });
 }
 
-export async function runStage({ root, cwd = root, name, command, env = process.env, artifacts = [], context = {}, resource, profile = "all", inputs, fresh = false, signal, createLogStream, log = message => console.log(`[validation:${name}] ${message}`) }) {
+/** Verify existing local evidence through the normal reuse owner; never execute on a miss. */
+export async function verifyStageEvidence(options) {
+  const record = await runStage({ ...options, reuseOnly: true });
+  if (record.code !== 0 || !record.reused)
+    throw Error(record.error || "Stage evidence changed during verification; regenerate it for the clean candidate");
+  return record;
+}
+
+export async function runStage(options) {
+  const admission = { started: Date.now(), commandAdmitted: false };
+  try { return await runOwnedStage(options, admission); }
+  catch (error) {
+    const signal = options?.signal;
+    if (error && typeof error === "object") preAdmissionResults.delete(error);
+    if (!options?.reuseOnly && !admission.commandAdmitted && signal?.aborted &&
+        error && typeof error === "object" &&
+        (error === signal.reason || error.name === "AbortError")) {
+      const finished = Date.now();
+      const record = { schema: 1, name: options.name, source: admission.source,
+        key: admission.key, receipt: admission.receipt, platform: process.platform, arch: process.arch,
+        code: 130, error: "Validation cancelled before command admission", launched: false,
+        cleanupUnverified: false, forcedRetirement: false, reused: false, artifacts: [],
+        elapsedMs: finished - admission.started, executionMs: 0, queuedMs: finished - admission.started, finished };
+      preAdmissionResults.set(error, record);
+    }
+    throw error;
+  }
+}
+
+async function runOwnedStage({ root, cwd = root, name, command, env = process.env, artifacts = [], context = {}, resource, profile = "all", inputs, fresh = false, reuseOnly = false, signal, createLogStream, log = message => console.log(`[validation:${name}] ${message}`) }, admission) {
   if (!/^[\w:.-]+$/u.test(name) || !command?.length) throw Error("A stage needs a safe name and command");
   if (!["all", "shared"].includes(profile)) throw Error("Unknown validation environment profile");
-  env = { ...env, VITEST_MAX_WORKERS: env.VITEST_MAX_WORKERS || "2", RUST_TEST_THREADS: env.RUST_TEST_THREADS || "1" };
+  // Cargo owns the repository's Rust thread budget. Preserve caller overrides
+  // (including serial sanitizer/Windows runs) without injecting a competing
+  // default into aggregate stages and every Cargo child they launch.
+  env = { ...env, VITEST_MAX_WORKERS: env.VITEST_MAX_WORKERS || "2" };
   root = path.resolve(root); cwd = path.resolve(cwd);
   const started = Date.now();
+  admission.started = started;
   let initial;
   try { initial = source(root); } catch { initial = { dirty: true }; }
+  admission.source = initial.head;
+  if (reuseOnly && (initial.dirty || env.CI || fresh || env.MESH_VALIDATION_FRESH === "1"))
+    throw Error("Cannot verify reusable evidence for dirty source, CI, or fresh execution; produce successful local evidence for the clean candidate first");
   const declared = inputs === undefined ? undefined : await inputIdentity(root, inputs);
   const frontendEnvironment = await frontendEnvironmentIdentity(root);
   const frontendUnchanged = async () => JSON.stringify(await frontendEnvironmentIdentity(root)) === JSON.stringify(frontendEnvironment);
@@ -244,8 +403,9 @@ export async function runStage({ root, cwd = root, name, command, env = process.
   const key = hash(JSON.stringify(identity));
   const directory = path.join(root, "target/validation");
   const receipt = path.join(directory, "receipts", `${key}.json`);
+  admission.key = key; admission.receipt = receipt;
   const reusable = !initial.dirty && !env.CI && !fresh && env.MESH_VALIDATION_FRESH !== "1";
-  const release = await lock(path.join(directory, "locks", key), { log, signal });
+  const release = await lock(path.join(directory, "locks", key), { log, signal, nonblocking: reuseOnly, noWork: reuseOnly });
   let releaseResource;
   let cleanupUnverified = false;
   let observation;
@@ -271,6 +431,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
         }
       } catch { /* Missing, stale or damaged evidence requires execution. */ }
     }
+    if (reuseOnly) throw Error(`Missing, stale, or invalid successful evidence for ${name}; run its existing validation command for this clean candidate first (${receipt})`);
     if (resource) {
       let shared = directory;
       try { shared = git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]); } catch { /* Non-Git development runs use their own directory. */ }
@@ -290,9 +451,32 @@ export async function runStage({ root, cwd = root, name, command, env = process.
     await mkdir(path.dirname(logPath), { recursive: true });
     const queuedMs = Date.now() - started;
     log(`started after ${Math.round(queuedMs / 1000)}s queue; log ${logPath}`);
-    const timer = setInterval(() => log(`running for ${Math.round((Date.now() - started) / 1000)}s; log ${logPath}`), 30_000);
     let result;
-    try { result = await execute(command, { cwd, env, logPath, signal, createLogStream }); }
+    let onSpawn;
+    if (process.platform !== "win32") {
+      let inheritedGroup;
+      if (env.MESH_VALIDATION_PROCESS_GROUP_OWNER) {
+        const probe = spawnSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" });
+        inheritedGroup = Number(probe.stdout?.trim());
+        if (probe.status !== 0 || !Number.isSafeInteger(inheritedGroup) || inheritedGroup <= 1)
+          throw Error("Cannot establish inherited process-group ownership");
+      }
+      await release.requireRetirement(inheritedGroup);
+      await releaseResource?.requireRetirement(inheritedGroup);
+      onSpawn = async pid => {
+        const group = inheritedGroup ?? pid;
+        await release.publishGroup(group);
+        await releaseResource?.publishGroup(group);
+      };
+    }
+    const timer = setInterval(() => log(`running for ${Math.round((Date.now() - started - queuedMs) / 1000)}s; log ${logPath}`), 30_000);
+    try {
+      signal?.throwIfAborted();
+      // From this point the execution owner may admit work. No asynchronous
+      // gap separates the final cancellation check from that handoff.
+      admission.commandAdmitted = true;
+      result = await execute(command, { cwd, env, logPath, signal, createLogStream, onSpawn });
+    }
     finally { clearInterval(timer); }
     cleanupUnverified = result.cleanupUnverified;
     if (cleanupUnverified) {
@@ -302,21 +486,21 @@ export async function runStage({ root, cwd = root, name, command, env = process.
       log(`resource locks quarantined: ${reason}; verify descendant termination before manual recovery`);
     }
     if (result.code === 0 && await observation.changed())
-      result = { code: 1, error: "Source changed during validation (source/configuration metadata)", failureKind: "invalidated" };
+      result = { ...result, code: 1, error: "Source changed during validation (source/configuration metadata)", failureKind: "invalidated" };
     if (result.code === 0 && !await runtimeUnchanged())
-      result = { code: 1, error: "Stage inputs changed during validation (tool/configuration identity)", failureKind: "invalidated" };
+      result = { ...result, code: 1, error: "Stage inputs changed during validation (tool/configuration identity)", failureKind: "invalidated" };
     let measured = [];
     if (result.code === 0) {
       try { measured = await artifactDigests(cwd, artifacts); }
-      catch (error) { result = { code: 1, error: `Required artifact missing: ${error.message}` }; }
+      catch (error) { result = { ...result, code: 1, error: `Required artifact missing: ${error.message}` }; }
     }
     if (result.code === 0 && !initial.dirty) {
       const current = source(root);
-      if (current.dirty || current.head !== initial.head) result = { code: 1, error: "Source changed during validation", failureKind: "invalidated" };
-      else if (JSON.stringify(await frontendEnvironmentIdentity(root)) !== JSON.stringify(frontendEnvironment)) result = { code: 1, error: "Frontend environment changed during validation", failureKind: "invalidated" };
-      else if (declared && JSON.stringify(await inputIdentity(root, inputs)) !== JSON.stringify(declared)) result = { code: 1, error: "Stage inputs changed during validation", failureKind: "invalidated" };
+      if (current.dirty || current.head !== initial.head) result = { ...result, code: 1, error: "Source changed during validation", failureKind: "invalidated" };
+      else if (JSON.stringify(await frontendEnvironmentIdentity(root)) !== JSON.stringify(frontendEnvironment)) result = { ...result, code: 1, error: "Frontend environment changed during validation", failureKind: "invalidated" };
+      else if (declared && JSON.stringify(await inputIdentity(root, inputs)) !== JSON.stringify(declared)) result = { ...result, code: 1, error: "Stage inputs changed during validation", failureKind: "invalidated" };
     }
-    const record = { schema: 1, key, name, platform: process.platform, arch: process.arch, source: initial.head, inputs: declared, reused: false, code: result.code, error: result.error, failureKind: result.failureKind, cleanupUnverified, artifacts: measured, logPath, logDigest: await digest(logPath), elapsedMs: Date.now() - started, executionMs: Date.now() - started - queuedMs, queuedMs, finished: Date.now() };
+    const record = { schema: 1, key, name, platform: process.platform, arch: process.arch, source: initial.head, inputs: declared, reused: false, code: result.code, error: result.error, failureKind: result.failureKind, cleanupUnverified, forcedRetirement: !!result.forcedRetirement, artifacts: measured, logPath, logDigest: await digest(logPath), elapsedMs: Date.now() - started, executionMs: Date.now() - started - queuedMs, queuedMs, finished: Date.now() };
     const cancelledDuringFinalization = async () => {
       if (record.code !== 0 || !signal?.aborted) return false;
       record.code = 130; record.error = "Validation cancelled during finalization";
@@ -378,12 +562,13 @@ export async function runStage({ root, cwd = root, name, command, env = process.
 
 async function main(args) {
   const separator = args.indexOf("--");
-  if (separator < 1) throw Error("Usage: stage.mjs <name> [--artifact path] [--resource name] [--context text] -- command [args]");
-  const name = args[0]; const artifacts = []; let resource; let context = {}; let profile = "all"; let inputs; let resultFile;
+  if (separator < 1) throw Error("Usage: stage.mjs <name> [--artifact path] [--resource name] [--context text] [--deadline epoch-ms] [--result path] -- command [args]");
+  const name = args[0]; const artifacts = []; let resource; let context = {}; let profile = "all"; let inputs; let resultFile; let deadline;
   for (let index = 1; index < separator; index += 2) {
     const value = args[index + 1];
     if (!value) throw Error(`Missing value: ${args[index]}`);
     if (args[index] === "--artifact") artifacts.push(value);
+    else if (args[index] === "--deadline") deadline = Number(value);
     else if (args[index] === "--result") resultFile = path.resolve(value);
     else if (args[index] === "--resource") resource = value;
     else if (args[index] === "--context") context = { value };
@@ -391,19 +576,40 @@ async function main(args) {
     else if (args[index] === "--inputs") inputs = inputGroup(value, name);
     else throw Error(`Unknown option: ${args[index]}`);
   }
+  if (deadline !== undefined && (!Number.isSafeInteger(deadline) || deadline <= Date.now() || deadline - Date.now() > 2147483647)) {
+    const error = "Stage deadline is invalid, exhausted or exceeds the timer range";
+    if (resultFile) {
+      await mkdir(path.dirname(resultFile), { recursive: true });
+      await writeFile(resultFile, JSON.stringify({ code: 1, failureKind: "unavailable", error, launched: false, deadline }));
+    }
+    throw Error(error);
+  }
   const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
   const controller = new AbortController();
+  const timer = deadline === undefined ? undefined : setTimeout(() => controller.abort(), Math.max(1, deadline - Date.now()));
   const stop = () => controller.abort();
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
   try {
-    const result = await runStage({ root, name, command: args.slice(separator + 1), cwd: process.cwd(), artifacts, resource, context, profile, inputs, signal: controller.signal });
-    if (resultFile) {
+    const persist = async record => {
+      if (!resultFile) return;
       await mkdir(path.dirname(resultFile), { recursive: true });
       const temporary = `${resultFile}.${randomUUID()}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(result, null, 2)}\n`);
+      await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`);
       await rename(temporary, resultFile);
+    };
+    let result;
+    try {
+      result = await runStage({ root, name, command: args.slice(separator + 1), cwd: process.cwd(), artifacts, resource, context, profile, inputs, signal: controller.signal });
+    } catch (error) {
+      if (preAdmissionResults.has(error)) result = preAdmissionResults.get(error);
+      else {
+        await persist({ schema: 1, name, code: 1, error: error.message,
+          launched: null, cleanupUnverified: true });
+        throw error;
+      }
     }
+    await persist(result);
     process.exitCode = result.code;
-  } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+  } finally { clearTimeout(timer); process.off("SIGINT", stop); process.off("SIGTERM", stop); }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main(process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });

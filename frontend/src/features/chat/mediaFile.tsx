@@ -2,7 +2,8 @@
 // name, the inline-render size gate, a file glyph, and the lazy decrypted-bytes blob-URL
 // hook. Kept out of MediaPreview.tsx so that file can export only its component (the
 // react-refresh rule flags mixing component + non-component exports in one module).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { MediaObjectUrlCache } from "./mediaObjectUrlCache";
 import {
   FileArchive,
   FileAudio,
@@ -14,7 +15,12 @@ import {
 } from "lucide-react";
 import { chat } from "@/lib/api";
 import { isDirectoryAttachment } from "@/lib/directoryAttachment";
-import { isImage, isVideo, mediaMimeFromName } from "@/lib/mediaTypes";
+import {
+  IMAGE_INLINE_CAP,
+  isImage,
+  isVideo,
+  mediaMimeFromName,
+} from "@/lib/mediaTypes";
 import { useAuth } from "@/store/auth";
 import { useChat, captureChatOwnership } from "@/store/chat";
 
@@ -40,7 +46,7 @@ export function blobMime(
 // Only fetch the whole file into memory for inline rendering when it's small enough.
 // `read_file` decrypts and returns the entire file (bounded only by the 4 GiB hard cap),
 // so we gate on the manifest-reported size before pulling bytes through IPC.
-const IMAGE_INLINE_CAP = 16 * 1024 * 1024; // 16 MB
+
 const VIDEO_INLINE_CAP = 50 * 1024 * 1024; // 50 MB
 
 /** Whether an image/video of `size` bytes is small enough to fetch + render inline. */
@@ -72,7 +78,8 @@ export function fileGlyph(name: string, mime?: string) {
 // instead of decoding the whole clip again. Failures are remembered too, to skip re-decoding
 // a known-undecodable clip. Bounded by a small FIFO cap (posters are tiny but unbounded
 // growth over a long session is avoided).
-const POSTER_CACHE = new Map<string, string>();
+type VideoPosterFrame = { poster: string; width: number; height: number };
+const POSTER_CACHE = new Map<string, VideoPosterFrame>();
 const POSTER_FAILED = new Set<string>();
 const POSTER_CACHE_MAX = 64;
 const POSTER_MAX_EDGE = 1280;
@@ -86,7 +93,7 @@ export function posterCanvasSize(width: number, height: number) {
   };
 }
 
-function rememberPoster(key: string, data: string) {
+function rememberPoster(key: string, data: VideoPosterFrame) {
   if (POSTER_CACHE.size >= POSTER_CACHE_MAX) {
     const oldest = POSTER_CACHE.keys().next().value;
     if (oldest !== undefined) POSTER_CACHE.delete(oldest);
@@ -107,18 +114,23 @@ export function useVideoPoster(
 ): {
   poster: string | null;
   failed: boolean;
+  width?: number;
+  height?: number;
 } {
-  const [poster, setPoster] = useState<string | null>(null);
+  const [frame, setFrame] = useState<
+    (VideoPosterFrame & { url: string }) | null
+  >(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
-    setPoster(null);
+    setFrame(null);
     setFailed(false);
     if (!url) return;
+    const sourceUrl = url;
     // Reuse a previously captured poster / known failure for this file (no re-decode).
     if (cacheKey) {
       const cached = POSTER_CACHE.get(cacheKey);
       if (cached) {
-        setPoster(cached);
+        setFrame({ ...cached, url });
         return;
       }
       if (POSTER_FAILED.has(cacheKey)) {
@@ -167,10 +179,14 @@ export function useVideoPoster(
         const c2d = canvas.getContext("2d");
         if (!c2d) return fail();
         c2d.drawImage(v, 0, 0, size.width, size.height);
-        const data = canvas.toDataURL("image/jpeg", 0.7);
+        const data = {
+          poster: canvas.toDataURL("image/jpeg", 0.7),
+          width: w,
+          height: h,
+        };
         finish(); // settle BEFORE setState so a release-triggered error can't undo it
         if (cacheKey) rememberPoster(cacheKey, data);
-        if (alive) setPoster(data);
+        if (alive) setFrame({ ...data, url: sourceUrl });
       } catch {
         fail();
       }
@@ -199,15 +215,70 @@ export function useVideoPoster(
       finish();
     };
   }, [url, cacheKey]);
-  return { poster, failed };
+  const current = frame?.url === url ? frame : null;
+  return {
+    poster: current?.poster ?? null,
+    width: current?.width,
+    height: current?.height,
+    failed,
+  };
 }
+// Reuse is deliberately opt-in: protected reveals retain their per-mount URLs.
+const mediaUrls = new MediaObjectUrlCache({
+  maxEntries: 64,
+  maxBytes: 32 * 1024 * 1024,
+  idleMs: 30_000,
+});
+let stopMediaCleanup: (() => void) | undefined;
+function observeMediaOwnership() {
+  if (stopMediaCleanup) return;
+  const invalidate = () => {
+    mediaUrls.invalidateStale();
+    POSTER_CACHE.clear();
+    POSTER_FAILED.clear();
+  };
+  const stopAuth = useAuth.subscribe((state, previous) => {
+    if (
+      state.generation !== previous.generation ||
+      state.user?.id !== previous.user?.id
+    )
+      invalidate();
+  });
+  const stopChat = useChat.subscribe((state, previous) => {
+    if (
+      state.runEpoch !== previous.runEpoch ||
+      state.identityEpoch !== previous.identityEpoch ||
+      state.ready !== previous.ready
+    )
+      invalidate();
+  });
+  stopMediaCleanup = () => {
+    stopAuth();
+    stopChat();
+    mediaUrls.clear();
+  };
+}
+if (import.meta.hot) import.meta.hot.dispose(() => stopMediaCleanup?.());
+
 /** Serial durable-first reads keep retrying missing bytes while this identity is mounted.
  * Cleanup prevents later fallback/blob creation; already-admitted native reads may finish. */
 export function useFileObjectUrl(
   fileConv: string,
   enabled: boolean,
   mime?: string,
+  options?: {
+    onReadError?: (error: unknown) => void;
+    retryKey?: number;
+    /** Bounded reuse for ordinary previews; never enable for protected reveals. */
+    reuse?: boolean;
+  },
 ): string | null {
+  const onReadError = useRef(options?.onReadError);
+  useEffect(() => {
+    onReadError.current = options?.onReadError;
+  }, [options?.onReadError]);
+  const retryKey = options?.retryKey;
+  const reuse = options?.reuse === true;
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const run = useChat((s) => s.runEpoch);
@@ -220,6 +291,7 @@ export function useFileObjectUrl(
     identityEpoch,
     fileConv,
     mime,
+    retryKey,
   ]);
   const [result, setResult] = useState<{
     key: string;
@@ -228,10 +300,12 @@ export function useFileObjectUrl(
   } | null>(null);
   useEffect(() => {
     if (!enabled || !owner || !ready || !fileConv) return;
+    if (reuse) observeMediaOwnership();
     const lease = captureChatOwnership();
     let alive = true;
     const ownership = { alive: true };
     let objectUrl: string | null = null;
+    let releaseShared: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
     const current = () =>
@@ -239,20 +313,36 @@ export function useFileObjectUrl(
     const read = async () => {
       if (!current()) return;
       try {
-        let bytes: ArrayBuffer;
-        try {
-          bytes = await chat.readMedia(fileConv);
-        } catch {
+        const readBlob = async (admitted: () => boolean) => {
+          let bytes: ArrayBuffer;
+          try {
+            bytes = await chat.readMedia(fileConv);
+          } catch (error) {
+            if (!admitted()) throw error;
+            bytes = await chat.readFile(fileConv);
+          }
+          return new Blob([bytes], mime ? { type: mime } : {});
+        };
+        if (reuse) {
+          const shared = mediaUrls.acquire(
+            key,
+            readBlob,
+            () => lease.current() && useChat.getState().ready,
+          );
+          releaseShared = shared.release;
+          const url = await shared.result;
+          if (current() && url) setResult({ key, url, ownership });
+        } else {
+          const blob = await readBlob(current);
           if (!current()) return;
-          bytes = await chat.readFile(fileConv);
+          objectUrl = URL.createObjectURL(blob);
+          setResult({ key, url: objectUrl, ownership });
         }
+      } catch (error) {
+        releaseShared?.();
+        releaseShared = undefined;
         if (!current()) return;
-        objectUrl = URL.createObjectURL(
-          new Blob([bytes], mime ? { type: mime } : {}),
-        );
-        setResult({ key, url: objectUrl, ownership });
-      } catch {
-        if (!current()) return;
+        onReadError.current?.(error);
         const delay = Math.min(200 * 2 ** failures, 2000);
         failures = Math.min(failures + 1, 4);
         timer = setTimeout(() => {
@@ -265,14 +355,13 @@ export function useFileObjectUrl(
       alive = false;
       ownership.alive = false;
       if (timer !== undefined) clearTimeout(timer);
+      releaseShared?.();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [key, enabled, owner, ready, fileConv, mime, run]);
-  return enabled &&
-    owner &&
-    ready &&
-    result?.key === key &&
-    result.ownership.alive
-    ? result.url
-    : null;
+  }, [key, enabled, owner, ready, fileConv, mime, run, reuse]);
+  if (!enabled || !owner || !ready) return null;
+  // Reused URLs are owned by the cache, which can revoke them independently of
+  // a component render during session retirement. Never return a stale copy.
+  if (reuse) return mediaUrls.peek(key);
+  return result?.key === key && result.ownership.alive ? result.url : null;
 }

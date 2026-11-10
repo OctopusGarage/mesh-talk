@@ -26,7 +26,8 @@ base_sha="$(git rev-parse --verify "$base_ref")"
 node scripts/pr-platform/run.mjs --plan --base "$base_ref" "$@" >/dev/null
 node scripts/validation/pr-scenarios.mjs verify "$base_ref"
 # Catch selected platform failures before starting comprehensive suites.
-env MESH_VALIDATION_PREFLIGHT=0 "$repo_root/scripts/pr-preflight.sh" "$@"
+# Both children use full-mode identity so successful frontend stages can reuse.
+env FAST=0 MESH_VALIDATION_PREFLIGHT=0 "$repo_root/scripts/pr-preflight.sh" "$@"
 # Full health reuses its individual successful stages. FAST must never weaken
 # publication evidence, even when inherited from the developer's shell.
 env FAST=0 bash "$repo_root/scripts/check-health.sh"

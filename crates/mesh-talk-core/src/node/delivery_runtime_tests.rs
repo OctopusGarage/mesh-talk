@@ -1,6 +1,6 @@
 use super::*;
 use crate::discovery::Announce;
-use crate::eventlog::{ConversationId, EventId};
+use crate::eventlog::{ConversationId, EventId, LogError};
 use crate::identity::{account::Account, device::DeviceIdentity};
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -122,7 +122,167 @@ async fn durable_dm_retries_a_reused_socket_closed_after_checkout() {
         held,
         "stale pooled socket must recover in this delivery attempt"
     );
-    assert!(recipient.log.lock().unwrap().has(&destination.event.id));
+    assert!(
+        recipient
+            .log
+            .lock()
+            .unwrap()
+            .has(&destination.event.id)
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn durable_account_dm_recovers_after_a_fresh_handshake_failure() {
+    use super::test_support::IndependentPeerRuntime;
+    use futures_util::FutureExt;
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let sender_identity = DeviceIdentity::generate();
+    let recipient_identity = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let recipient_account = Account::generate();
+    let sender_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sender_proof = Announce::new_with_account(
+        &sender_identity,
+        &sender_account,
+        "Sender",
+        sender_listener.local_addr().unwrap().port(),
+    );
+    let recipient_proof = Announce::new_with_account(
+        &recipient_identity,
+        &recipient_account,
+        "Recipient",
+        recipient_listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(
+        sender_dir.path(),
+        sender_identity,
+        sender_account,
+        &recipient_proof,
+    );
+    let (recipient, _) = node(
+        recipient_dir.path(),
+        recipient_identity,
+        recipient_account,
+        &sender_proof,
+    );
+    let accepted_message_id = sender
+        .enqueue_to_account(
+            &recipient.account_id(),
+            b"one accepted DM survives first transport failure",
+            None,
+        )
+        .await
+        .unwrap();
+    {
+        let store = sender.delivery.lock().unwrap();
+        let message = store.message(accepted_message_id).unwrap();
+        assert_eq!(message.destinations.len(), 1);
+        assert_eq!(message.logical_id, accepted_message_id);
+        assert_eq!(message.destinations[0].device, recipient.identity.public());
+    }
+    // Only this exact destination is contacted. Read genuine initiator bytes
+    // before closing, so an unrelated dial failure cannot satisfy the control.
+    // Joined futures retain cancellation ownership without a detached server.
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let (_, (recipient_listener, rejected)) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            async {
+                sender.flush_delivery(accepted_message_id).await;
+                stop.send(()).unwrap();
+            },
+            async {
+                let mut rejected = 0;
+                loop {
+                    tokio::select! {
+                        _ = &mut stopped => break,
+                        accepted = recipient_listener.accept() => {
+                            let (mut stream, _) = accepted.unwrap();
+                            stream.read_exact(&mut [0u8; 1]).await.unwrap();
+                            drop(stream);
+                            rejected += 1;
+                        }
+                    }
+                }
+                (recipient_listener, rejected)
+            }
+        )
+    })
+    .await
+    .expect("the exact fresh handshake must fail within the existing observation budget");
+    assert!(
+        rejected > 0,
+        "the actual flush must reach the rejecting endpoint"
+    );
+    assert_eq!(
+        sender.delivery_status(accepted_message_id),
+        Some(super::delivery_store::DeliveryStatus::Awaiting)
+    );
+    assert!(
+        recipient
+            .account_history(&sender.account_id(), 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut peers = Vec::new();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        peers.push(
+            IndependentPeerRuntime::start_multithreaded(sender.clone(), sender_listener).await,
+        );
+        peers.push(
+            IndependentPeerRuntime::start_multithreaded(recipient.clone(), recipient_listener)
+                .await,
+        );
+        for peer in &mut peers {
+            peer.launch();
+        }
+        // No resend or manual flush: the application owns durable recovery.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let history = match recipient.account_history(&sender.account_id(), 10) {
+                    Ok(history) => Some(history),
+                    Err(NodeError::Log(LogError::StaleCursor)) => None,
+                    Err(error) => panic!("account recovery history observation failed: {error}"),
+                };
+                if let Some(history) = history
+                    && history.iter().any(|entry| entry.id == accepted_message_id)
+                {
+                    assert_eq!(history.len(), 1);
+                    assert_eq!(
+                        history[0].text,
+                        b"one accepted DM survives first transport failure"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the real hosts must recover the same accepted DM without resending");
+    })
+    .catch_unwind()
+    .await;
+    let mut cleanup_failure = None;
+    for peer in peers {
+        let stopped = std::panic::AssertUnwindSafe(peer.stop())
+            .catch_unwind()
+            .await;
+        if cleanup_failure.is_none() {
+            cleanup_failure = stopped.err();
+        }
+    }
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+    if let Some(error) = cleanup_failure {
+        std::panic::resume_unwind(error);
+    }
 }
 
 #[tokio::test]
@@ -183,6 +343,262 @@ async fn confirmed_destination_does_not_open_another_relay_connection() {
         "confirmed destination opened an unnecessary relay connection"
     );
     assert!(matches!(result, Ok(false)));
+}
+
+/// Hold exact receipts for a separate authenticated connection, while still
+/// accepting messages and confirming their durable storage on the direct path.
+struct DeferredReceiptStore<S> {
+    inner: S,
+    control: ConversationId,
+    control_seen: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
+    for DeferredReceiptStore<S>
+{
+    fn admission_denied(&self) -> bool {
+        self.inner.admission_denied()
+    }
+    fn durable_have(
+        &self,
+        conversation: &ConversationId,
+        id: &EventId,
+    ) -> Result<bool, crate::eventlog::LogError> {
+        self.inner.durable_have(conversation, id)
+    }
+    fn event_ids(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<Vec<EventId>, crate::eventlog::LogError> {
+        if *conversation == self.control {
+            self.control_seen
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        } else {
+            self.inner.event_ids(conversation)
+        }
+    }
+    fn events_excluding(
+        &self,
+        conversation: &ConversationId,
+        have: &std::collections::HashSet<EventId>,
+    ) -> Result<Vec<crate::eventlog::Event>, crate::eventlog::LogError> {
+        if *conversation == self.control {
+            Ok(Vec::new())
+        } else {
+            self.inner.events_excluding(conversation, have)
+        }
+    }
+    fn ingest(
+        &mut self,
+        event: crate::eventlog::Event,
+    ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+        self.inner.ingest(event)
+    }
+}
+
+#[tokio::test]
+async fn late_exact_receipt_releases_peer_lane_before_a_stalled_relay_finishes() {
+    use std::{sync::atomic::Ordering, time::Duration};
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let relay_dir = tempfile::tempdir().unwrap();
+    let sender_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sender_identity = DeviceIdentity::generate();
+    let recipient_identity = DeviceIdentity::generate();
+    let relay_identity = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let recipient_account = Account::generate();
+    let relay_account = Account::generate();
+    let sender_proof = Announce::new_with_account(
+        &sender_identity,
+        &sender_account,
+        "sender",
+        sender_listener.local_addr().unwrap().port(),
+    );
+    let recipient_address = recipient_listener.local_addr().unwrap();
+    let recipient_proof = Announce::new_with_account(
+        &recipient_identity,
+        &recipient_account,
+        "recipient",
+        recipient_address.port(),
+    );
+    let relay_proof = Announce::new_post_office_with_account(
+        &relay_identity,
+        &relay_account,
+        "held relay",
+        relay_listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(
+        sender_dir.path(),
+        sender_identity,
+        sender_account,
+        &recipient_proof,
+    );
+    let (recipient, _) = node(
+        recipient_dir.path(),
+        recipient_identity,
+        recipient_account,
+        &sender_proof,
+    );
+    let (relay, _) = node(
+        relay_dir.path(),
+        relay_identity,
+        relay_account,
+        &sender_proof,
+    );
+    for (node, dir, own) in [
+        (&sender, sender_dir.path(), &sender_proof),
+        (&recipient, recipient_dir.path(), &recipient_proof),
+    ] {
+        node.configure_privacy(
+            dir,
+            "pw",
+            own,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    relay
+        .configure_privacy(
+            relay_dir.path(),
+            "pw",
+            &relay_proof,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    sender.roster.lock().unwrap().update(
+        &relay_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let control = super::delivery_receipt::delivery_conversation_id(
+        &sender.identity.public(),
+        &recipient.identity.public(),
+    );
+    let control_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // JoinSet owns every listener, socket and worker, including assertion failure.
+    let mut tasks = tokio::task::JoinSet::new();
+    let receiver = recipient.clone();
+    let seen = control_seen.clone();
+    tasks.spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = recipient_listener.accept().await.unwrap();
+            let node = receiver.clone();
+            let seen = seen.clone();
+            connections.spawn(async move {
+                let Ok(mut channel) = node.privacy_accept(stream).await else {
+                    return;
+                };
+                let store = Mutex::new(DeferredReceiptStore {
+                    inner: node
+                        .sync_store(channel.peer_identity())
+                        .into_inner()
+                        .unwrap(),
+                    control,
+                    control_seen: seen,
+                });
+                while let Ok(super::session::Served::Handled(conversation)) =
+                    super::session::serve_one(&mut channel, &store).await
+                {
+                    node.emit_new_messages(conversation);
+                }
+            });
+        }
+    });
+    let (relay_waiting, relay_started) = tokio::sync::oneshot::channel();
+    let (relay_closed, mut relay_closed_rx) = tokio::sync::oneshot::channel();
+    tasks.spawn(async move {
+        let (stream, _) = relay_listener.accept().await.unwrap();
+        let mut channel = relay.privacy_accept(stream).await.unwrap();
+        channel.recv().await.unwrap();
+        let _ = relay_waiting.send(());
+        // The test never releases this response. Correct delivery cancellation
+        // must drop its client socket instead of waiting for a relay timeout.
+        assert!(
+            channel.recv().await.is_err(),
+            "held relay receives client EOF on cancellation"
+        );
+        let _ = relay_closed.send(());
+    });
+    let first = sender
+        .enqueue_to_account(&recipient.account_id(), b"first", None)
+        .await
+        .unwrap();
+    tasks.spawn(sender.clone().run_delivery_loop());
+    tokio::time::timeout(Duration::from_secs(5), relay_started)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if control_seen.load(Ordering::SeqCst)
+                && let Some(channel) = sender
+                    .checkout_reusable_channel(
+                        super::session_pool::SessionProtocol::Sync,
+                        recipient_address,
+                        &recipient_proof.public(),
+                    )
+                    .await
+                    .unwrap()
+            {
+                sender.recycle_sync_channel(channel);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("direct message and empty receipt round complete before the late receipt");
+    assert_eq!(
+        sender.delivery_status(first),
+        Some(DeliveryStatus::Awaiting),
+        "durable custody alone is not recipient delivery"
+    );
+    assert!(
+        !recipient
+            .delivery
+            .lock()
+            .unwrap()
+            .retry_receipts(1)
+            .is_empty()
+    );
+    sender.delivery_status_notify.notify_waiters();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut relay_closed_rx)
+            .await
+            .is_err(),
+        "an unrelated status wake must not retire this pending destination"
+    );
+    sync_delivery_test_stage(&recipient, &sender, &sender_listener, control).await;
+    wait_for_durable_delivery(&sender, first).await;
+    let second = sender
+        .enqueue_to_account(&recipient.account_id(), b"second", None)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if recipient
+                .account_history(&sender.account_id(), 10)
+                .unwrap()
+                .iter()
+                .any(|row| row.id == second)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("second message reaches healthy recipient while relay response stays withheld");
+    tokio::time::timeout(Duration::from_secs(3), relay_closed_rx)
+        .await
+        .expect("retired attempt releases its stalled relay socket")
+        .unwrap();
+    tasks.shutdown().await;
 }
 
 async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
@@ -297,7 +713,7 @@ async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
     let disk_unchanged = persisted() == before_disk;
     let work_unchanged = producer_files() == before_work;
     let staged = progress.load(Ordering::SeqCst);
-    let log_empty = node.log.lock().unwrap().conversations().is_empty();
+    let log_empty = node.log.lock().unwrap().conversations().unwrap().is_empty();
     assert!(matches!(result, Err(NodeError::Authorization(_))));
     assert!(
         node.delivery
@@ -320,7 +736,11 @@ async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
             .next_file_destination(None)
             .is_none()
     );
-    assert!(node.account_history(&remote.account_id(), 10).is_empty());
+    assert!(
+        node.account_history(&remote.account_id(), 10)
+            .unwrap()
+            .is_empty()
+    );
     assert!(node.sentlog.lock().unwrap().conversations().is_empty());
     drop(node);
     let (reopened, _) = self::node(
@@ -358,7 +778,16 @@ async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
         staged, 0,
         "file staging must not start after owner loss before the grant"
     );
-    assert!(log_empty && reopened.log.lock().unwrap().conversations().is_empty());
+    assert!(
+        log_empty
+            && reopened
+                .log
+                .lock()
+                .unwrap()
+                .conversations()
+                .unwrap()
+                .is_empty()
+    );
     assert!(reopened.files.lock().unwrap().file_convs().is_empty());
     assert!(
         reopened
@@ -381,6 +810,81 @@ async fn owner_invalidated_at_privacy_gate_cannot_grant_sticker() {
 #[tokio::test]
 async fn owner_invalidated_at_privacy_gate_cannot_grant_or_stage_file() {
     owner_invalidated_while_waiting_for_local_grant("file").await;
+}
+
+#[tokio::test]
+async fn account_acceptance_does_not_keep_an_unbound_sibling_forgotten_at_privacy_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let remote = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&bob, &remote, "Bob", 1);
+    let (node, _) = node(dir.path(), DeviceIdentity::generate(), account, &proof);
+    let sibling = DeviceIdentity::generate();
+    let sibling_proof = Announce::new_with_account(&sibling, &node.account, "Sibling", 2);
+    node.roster.lock().unwrap().update(
+        &sibling_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &node.user_id(),
+    );
+    node.configure_privacy(
+        dir.path(),
+        "pw",
+        &node.signed_announce("Alice", 3),
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    assert!(
+        node.historical_author(&sibling.public().ed25519_pub)
+            .is_none()
+    );
+    let gate = node.privacy.gate.clone().write_owned().await;
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let worker = node.clone();
+    let target = remote.account_id();
+    let pending = tokio::spawn(async move {
+        let mut entered = Some(entered);
+        worker
+            .enqueue_to_account_if(
+                &target,
+                b"current bound destinations only",
+                None,
+                |commit| {
+                    let result = commit();
+                    if result.is_ok()
+                        && let Some(entered) = entered.take()
+                    {
+                        let _ = entered.send(());
+                    }
+                    result
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    node.roster.lock().unwrap().forget(&sibling.public());
+    drop(gate);
+    let id = pending.await.unwrap().unwrap();
+    let delivery = node.delivery.lock().unwrap();
+    let destinations = &delivery.message(id).unwrap().destinations;
+    assert_eq!(
+        destinations.len(),
+        1,
+        "forgotten uncached siblings must not become unbound accepted destinations"
+    );
+    assert_eq!(destinations[0].device, bob.public());
+    assert_eq!(
+        destinations[0].account.as_deref(),
+        Some(remote.account_id().as_str())
+    );
+    assert!(
+        node.historical_author(&sibling.public().ed25519_pub)
+            .is_none(),
+        "acceptance must not resurrect the forgotten discovery proof"
+    );
 }
 
 #[tokio::test]
@@ -427,7 +931,7 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     assert_eq!(checks, 3);
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     assert!(a.sentlog.lock().unwrap().conversations().is_empty());
-    assert!(a.log.lock().unwrap().conversations().is_empty());
+    assert!(a.log.lock().unwrap().conversations().unwrap().is_empty());
     assert_eq!(
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         before_sessions
@@ -454,10 +958,14 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
         )
         .await;
     assert!(matches!(denied, Err(NodeError::Authorization(_))));
-    assert!(a.account_history(&bob_account.account_id(), 10).is_empty());
+    assert!(
+        a.account_history(&bob_account.account_id(), 10)
+            .unwrap()
+            .is_empty()
+    );
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     // Chunk staging was real, but no local file card/WAL transaction was accepted.
-    assert!(!a.log.lock().unwrap().conversations().is_empty());
+    assert!(!a.log.lock().unwrap().conversations().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -502,7 +1010,7 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
         .unwrap();
     assert_eq!(a.delivery_status(pending), Some(DeliveryStatus::Awaiting));
     let adopted = Account::generate();
-    b.persist_account_adoption(&adopted.account_id(), || Ok(()))
+    b.persist_account_adoption(&adopted.public(), || Ok(()), || Ok(b.account.public()))
         .unwrap();
     drop(b);
     let bob = DeviceIdentity::from_secret_bytes(secret.0, secret.1);
@@ -516,13 +1024,14 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
         super::delivery_receipt::open_receipt(&a.identity, &a.account_id(), &new_proof, &receipt)
             .is_none()
     );
-    assert!(a.log.lock().unwrap().has(&receipt.id));
-    assert!(b.log.lock().unwrap().has(&receipt.id));
+    assert!(a.log.lock().unwrap().has(&receipt.id).unwrap());
+    assert!(b.log.lock().unwrap().has(&receipt.id).unwrap());
     assert_eq!(
         a.sync_store(&new_proof.public())
             .lock()
             .unwrap()
-            .event_ids(&control),
+            .event_ids(&control)
+            .unwrap(),
         vec![receipt.id]
     );
     assert!(
@@ -530,6 +1039,7 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
             .lock()
             .unwrap()
             .event_ids(&control)
+            .unwrap()
             .is_empty()
     );
     assert!(
@@ -537,6 +1047,7 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
             .lock()
             .unwrap()
             .durable_have(&control, &receipt.id)
+            .unwrap()
     );
     let (aio, bio) = tokio::io::duplex(65536);
     let responder = b.clone();
@@ -575,13 +1086,16 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
             .lock()
             .unwrap()
             .durable_have(&control, &receipt.id)
+            .unwrap()
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     assert_eq!(a.delivery_status(pending), Some(DeliveryStatus::Awaiting));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target() {
+    use super::test_support::IndependentPeerRuntime;
+
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let cd = tempfile::tempdir().unwrap();
@@ -594,10 +1108,14 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let other = DeviceIdentity::generate();
     let ca = Account::from_secret_bytes(aa.secret_bytes());
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bob's application stays offline while its unavailable endpoint actively
+    // closes TCP attempts. A merely bound socket can leave an old Dial pending
+    // across the online cut for longer than the target-confirmation budget.
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_address = bob_listener.local_addr().unwrap();
     let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bob_address.port());
     let cp = Announce::new_with_account(&other, &ca, "Own copy", cl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     a.roster
@@ -641,55 +1159,196 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
         .event
         .id;
     assert_ne!(actual, id);
-    let at = tokio::spawn(a.clone().run_accept_loop(al));
-    let ct = tokio::spawn(c.clone().run_accept_loop(cl));
-    let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while c.file_progress(file).is_none() || c.read_file(file).is_err() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-    assert!(own_received.is_ok());
-    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    assert!(c.delivery.lock().unwrap().retry_receipts(1).is_empty());
-    c.save_file(file, &cd.path().join("own-empty.txt")).unwrap();
-    let final_chunk = a
-        .delivery
-        .lock()
-        .unwrap()
-        .file_card(id)
-        .unwrap()
-        .final_chunk
-        .unwrap();
-    assert!(c.historical_file_completion(file, final_chunk, &ap.public()));
-    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
-    let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while a.delivery_status(id) != Some(DeliveryStatus::Delivered)
-            || a.delivery
+    use futures_util::FutureExt;
+    let mut at = None;
+    let mut bt = None;
+    let mut ct = None;
+    let mut bob_rejector = None;
+    let mut stop_rejector = None;
+    // Retain release senders outside catch_unwind so failure releases blocked
+    // fixture workers before the runtime owner joins them.
+    let mut own_copy_releases = Vec::new();
+    let mut own_copy_holds = Vec::new();
+    let held_workers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut phase = "own_copy";
+    let mut confirmed_status = None;
+    let mut pending_destination = None;
+    let outcome = Box::pin(std::panic::AssertUnwindSafe(async {
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        stop_rejector = Some(stop);
+        bob_rejector = Some(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut stopped => break,
+                    accepted = bob_listener.accept() => {
+                        let (mut stream, _) = accepted.unwrap();
+                        let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+                    }
+                }
+            }
+            bob_listener
+        }));
+        // Qualify application unavailability by an actual accepted-and-closed
+        // connection, not platform-specific behavior of a merely bound socket.
+        let unavailable = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut probe = tokio::net::TcpStream::connect(bob_address).await.unwrap();
+            let mut byte = [0];
+            assert_eq!(tokio::io::AsyncReadExt::read(&mut probe, &mut byte).await.unwrap(), 0);
+        }).await;
+        assert!(unavailable.is_ok(), "offline endpoint must close actual connections");
+        // Each simulated application keeps its own protocol workers and I/O
+        // reactor. Synchronous durable work on another device must not consume
+        // this host's workers or the observer's confirmation window.
+        let mut source = IndependentPeerRuntime::start_multithreaded(a.clone(), al).await;
+        let mut own_copy = IndependentPeerRuntime::start_multithreaded(c.clone(), cl).await;
+        source.launch();
+        own_copy.launch();
+        at = Some(source);
+        ct = Some(own_copy);
+        let mut own_copy_pending = true;
+        let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                own_copy_pending = a.delivery.lock().unwrap().contains_file_destination(
+                    id,
+                    id,
+                    &cp.public(),
+                    &cp.account_id(),
+                );
+                if c.file_progress(file).unwrap().is_some()
+                    && c.read_file(file).is_ok()
+                    && !own_copy_pending
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+            assert!(c.delivery.lock().unwrap().retry_receipts(1).is_empty());
+            // Saving reclaims chunk events. Wait for the source's final custody
+            // acknowledgement first, so this phase does not interrupt its Chunks
+            // exchange and introduce a separate reclamation-recovery scenario.
+            c.save_file(file, &cd.path().join("own-empty.txt")).unwrap();
+            let final_chunk = a
+                .delivery
                 .lock()
                 .unwrap()
-                .next_file_destination(None)
-                .is_some()
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                .file_card(id)
+                .unwrap()
+                .final_chunk
+                .unwrap();
+            assert!(
+                c.historical_file_completion(file, final_chunk, &ap.public())
+                    .unwrap()
+            );
+            assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+        })
+        .await;
+        assert!(
+            own_received.is_ok(),
+            "own-copy confirmation failed: phase={phase} pending_destination={own_copy_pending}"
+        );
+        // Once its copy is durable, the sibling may become unresponsive. Hold
+        // both of its actual host workers: target delivery must still progress.
+        // The real-time cutoff only retires a broken negative-control fixture;
+        // successful delivery must observe both workers still held.
+        for _ in 0..2 {
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            own_copy_releases.push(release);
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let held = held_workers.clone();
+            own_copy_holds.push(ct.as_ref().unwrap().runtime_handle().spawn(async move {
+                held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = entered.send(());
+                let _ = released.recv_timeout(super::delivery_runtime::FILE_EXCHANGE_TIMEOUT);
+                held.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+            ready.await.unwrap();
         }
-    })
-    .await;
-    at.abort();
-    bt.abort();
-    ct.abort();
-    let _ = at.await;
-    let _ = bt.await;
-    let _ = ct.await;
-    assert!(confirmed.is_ok());
-    let history = a.account_history(&b.account_id(), 10);
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].id, id);
-    assert_eq!(b.account_history(&a.account_id(), 10)[0].id, actual);
-    assert_eq!(a.delivery_status(actual), None);
-    assert_eq!(b.read_file(file).unwrap(), Vec::<u8>::new());
-    drop(a);
+        phase = "target_confirmation";
+        stop_rejector.take().unwrap().send(()).unwrap();
+        let bl = bob_rejector.take().unwrap().await.unwrap();
+        assert_eq!(bl.local_addr().unwrap(), bob_address);
+        let mut target = IndependentPeerRuntime::start_multithreaded(b.clone(), bl).await;
+        target.launch();
+        bt = Some(target);
+        let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while {
+                confirmed_status = a.delivery_status(id);
+                pending_destination = None;
+                confirmed_status != Some(DeliveryStatus::Delivered) || {
+                    let pending = a.delivery.lock().unwrap().next_file_destination(None).is_some();
+                    pending_destination = Some(pending);
+                    pending
+                }
+            } {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if confirmed.is_err() {
+            eprintln!("target file state: recipient_progress={:?} consent={:?}",
+                b.file_progress(file), a.outgoing_file_consent_status(id, actual));
+        }
+        assert!(confirmed.is_ok(),
+            "target confirmation failed: phase={phase} status={confirmed_status:?} pending_destination={pending_destination:?}");
+        assert_eq!(held_workers.load(std::sync::atomic::Ordering::SeqCst), 2,
+            "target confirmation must not depend on the sibling resuming");
+        let history = a.account_history(&b.account_id(), 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, id);
+        assert_eq!(
+            b.account_history(&a.account_id(), 10).unwrap()[0].id,
+            actual
+        );
+        assert_eq!(a.delivery_status(actual), None);
+        assert_eq!(b.read_file(file).unwrap(), Vec::<u8>::new());
+    }).catch_unwind()).await;
+    drop(own_copy_releases);
+    for hold in own_copy_holds {
+        hold.await.unwrap();
+    }
+    for current in [&a, &b, &c] {
+        current.runtime_work.close();
+    }
+    let mut server_failed = false;
+    if let Some(task) = bob_rejector {
+        task.abort();
+        if let Err(error) = task.await {
+            server_failed |= !error.is_cancelled();
+        }
+    }
+    for server in [at, bt, ct].into_iter().flatten() {
+        server_failed |= std::panic::AssertUnwindSafe(server.stop())
+            .catch_unwind()
+            .await
+            .is_err();
+    }
+    let mut retired = true;
+    for current in [&a, &b, &c] {
+        current.sessions.clear();
+        retired &= tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            current.runtime_work.drain(),
+        )
+        .await
+        .is_ok();
+    }
+    if !retired {
+        let _ = (ad.keep(), bd.keep(), cd.keep());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        panic!("own-copy fixture work did not retire; profiles retained");
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(
+        !server_failed,
+        "own-copy fixture server failed unexpectedly"
+    );
+    a.close_profile().unwrap();
     let (a, _) = node(
         ad.path(),
         DeviceIdentity::from_secret_bytes(source_secret.0, source_secret.1),
@@ -697,7 +1356,7 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
         &bp,
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
-    assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+    assert_eq!(a.account_history(&b.account_id(), 10).unwrap()[0].id, id);
     assert!(
         a.delivery
             .lock()
@@ -841,10 +1500,10 @@ impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
         &self,
         file: &ConversationId,
         manifest: &EventId,
-    ) -> crate::eventlog::sync::FileConsentStatus {
+    ) -> Result<crate::eventlog::sync::FileConsentStatus, LogError> {
         self.inner.file_consent(file, manifest)
     }
-    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
         if *conversation != self.file {
             return self.inner.durable_have(conversation, id);
         }
@@ -861,28 +1520,28 @@ impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.observation.changed.notify_waiters();
         }
-        false
+        Ok(false)
     }
     fn admission_denied(&self) -> bool {
         self.inner.admission_denied()
     }
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
-        if *conversation == self.file || *conversation == self.dm {
-            self.inner.event_ids(conversation)
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
+        Ok(if *conversation == self.file || *conversation == self.dm {
+            self.inner.event_ids(conversation)?
         } else {
             Vec::new()
-        }
+        })
     }
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &std::collections::HashSet<EventId>,
-    ) -> Vec<crate::eventlog::Event> {
-        if *conversation == self.file || *conversation == self.dm {
-            self.inner.events_excluding(conversation, have)
+    ) -> Result<Vec<crate::eventlog::Event>, LogError> {
+        Ok(if *conversation == self.file || *conversation == self.dm {
+            self.inner.events_excluding(conversation, have)?
         } else {
             Vec::new()
-        }
+        })
     }
     fn ingest(
         &mut self,
@@ -940,9 +1599,18 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
     )
     .await
     .expect("file setup sync completes");
-    let ids = a.sync_store(&bp.public()).lock().unwrap().event_ids(&file);
+    let ids = a
+        .sync_store(&bp.public())
+        .lock()
+        .unwrap()
+        .event_ids(&file)
+        .unwrap();
     assert_eq!(
-        b.sync_store(&ap.public()).lock().unwrap().event_ids(&file),
+        b.sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .event_ids(&file)
+            .unwrap(),
         ids
     );
     assert_eq!(b.read_file(file).unwrap(), bytes);
@@ -1022,7 +1690,11 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
             .is_some()
     );
     assert_eq!(
-        a.sync_store(&bp.public()).lock().unwrap().event_ids(&file),
+        a.sync_store(&bp.public())
+            .lock()
+            .unwrap()
+            .event_ids(&file)
+            .unwrap(),
         ids
     );
 }
@@ -1112,7 +1784,7 @@ async fn retained_file_transfer_rechecks_permission_and_exact_account_binding() 
             transfers.is_empty(),
             "stale channels cannot advance a later phase"
         );
-        assert!(b.log.lock().unwrap().events(&file).is_empty());
+        assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
         assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
         workers.shutdown().await;
     }
@@ -1215,6 +1887,30 @@ async fn private_file_restart(delay: FilePeerDelay) {
     private_file_restart_batch(delay, 1).await;
 }
 
+// Grant the original Manual permissions in order while their best-effort
+// presence publications have real inbound handshakes to finish. No application
+// traffic exists yet, and these borrowed futures cannot outlive this setup.
+async fn grant_file_restart_permissions(a: &Node, b: &Node, al: &TcpListener, bl: &TcpListener) {
+    async fn receive_presence(node: &Node, listener: &TcpListener) {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            // The first publication can legitimately be denied before the
+            // reverse Manual grant. Reject/drop it without serving sync frames.
+            let _ = node.privacy_accept(stream).await;
+        }
+    }
+    tokio::select! {
+        _ = async {
+            a.set_allowed(&b.account_id(), true).await.unwrap();
+            b.set_allowed(&a.account_id(), true).await.unwrap();
+        } => {}
+        _ = receive_presence(a, al) => unreachable!("presence setup accept loop does not return"),
+        _ = receive_presence(b, bl) => unreachable!("presence setup accept loop does not return"),
+    }
+    // select! has dropped both scoped accept/handshake futures and their
+    // channels before file creation or the separately driven card ACK rounds.
+}
+
 async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     let mut case = super::delivery_runtime::TestTiming::new("file-restart-case-setup");
     use crate::eventlog::sync::SyncStore;
@@ -1242,8 +1938,14 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         .unwrap();
         node.set_invisible(true).await.unwrap();
     }
-    a.set_allowed(&b.account_id(), true).await.unwrap();
-    b.set_allowed(&a.account_id(), true).await.unwrap();
+    case.phase("file-restart-publish-permissions");
+    Box::pin(tokio::time::timeout(
+        super::transport::HANDSHAKE_TIMEOUT,
+        grant_file_restart_permissions(&a, &b, &al, &bl),
+    ))
+    .await
+    .expect("permission publication completes against live fixture listeners");
+    case.phase("file-restart-permissions-published");
     let bytes = vec![9; crate::file::CHUNK_SIZE * 2 + 1];
     let path = ad.path().join("断点续传.bin");
     std::fs::write(&path, &bytes).unwrap();
@@ -1256,6 +1958,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .iter()
         .map(|e| e.id)
         .collect::<Vec<_>>();
@@ -1263,14 +1966,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     // Reproduce missing volatile scope: DM card/control remain authorized, while
     // chunk disclosure is blocked until durable scope import on reopen.
     for (_, file, _) in &originals {
-        a.privacy
-            .state
-            .write()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .file_scopes
-            .remove(file);
+        a.withheld_file_scopes.lock().unwrap().insert(*file);
     }
     case.phase("file-restart-card-ack-preparation");
     let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -1305,17 +2001,11 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                 .lock()
                 .unwrap()
                 .events(&file)
+                .unwrap()
                 .iter()
                 .map(|e| e.id)
                 .collect();
-            a.privacy
-                .state
-                .write()
-                .unwrap()
-                .as_mut()
-                .unwrap()
-                .file_scopes
-                .remove(&file);
+            a.withheld_file_scopes.lock().unwrap().insert(file);
             // Each card still has its own deadline. Windows CI can briefly
             // stall a handshake while running the full workspace in parallel.
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -1335,6 +2025,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             originals.push((id, file, ids));
         }
     }
+    case.phase("file-restart-all-cards-acknowledged");
     drop(al);
     drop(bl);
     assert!(confirmed.is_ok());
@@ -1344,14 +2035,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         assert!(b.read_file(*file).is_err(), "every card precedes download");
     }
     assert!(
-        !a.privacy
-            .state
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .file_scopes
-            .contains_key(&file),
+        !a.has_file_scope(file).unwrap(),
         "card ACK is installed before the missing chunk scope is restored"
     );
     assert!(
@@ -1365,6 +2049,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .next_file_destination(None)
             .is_some()
     );
+    case.phase("file-restart-reopen");
     drop(a);
     let al = TcpListener::bind(("127.0.0.1", ap.tcp_port)).await.unwrap();
     let bl = TcpListener::bind(("127.0.0.1", bp.tcp_port)).await.unwrap();
@@ -1382,10 +2067,11 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     )
     .unwrap();
     if count == 1 {
-        assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+        assert_eq!(a.account_history(&b.account_id(), 10).unwrap()[0].id, id);
     } else {
         assert!(
             a.account_history(&b.account_id(), 100)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.id == id)
         );
@@ -1396,22 +2082,32 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .lock()
             .unwrap()
             .events(&file)
+            .unwrap()
             .iter()
             .map(|e| e.id)
             .collect::<Vec<_>>(),
         ids
     );
     assert_eq!(
-        a.sync_store(&bp.public()).lock().unwrap().event_ids(&file),
+        a.sync_store(&bp.public())
+            .lock()
+            .unwrap()
+            .event_ids(&file)
+            .unwrap(),
         ids,
         "restart restores the original authorized chunk projection"
     );
     for (_, file, ids) in &originals {
         assert_eq!(
-            a.sync_store(&bp.public()).lock().unwrap().event_ids(file),
+            a.sync_store(&bp.public())
+                .lock()
+                .unwrap()
+                .event_ids(file)
+                .unwrap(),
             *ids
         );
     }
+    case.phase("file-restart-restored-start-workers");
     let mut workers = tokio::task::JoinSet::new();
     workers.spawn(a.clone().run_accept_loop(al));
     let observation = Arc::new(FilePeerObservation::default());
@@ -1428,10 +2124,11 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     }
     let first_progress = if count > 1 {
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            while !originals
-                .iter()
-                .any(|(_, file, _)| b.file_progress(*file).is_some_and(|p| p.done == p.total))
-            {
+            while !originals.iter().any(|(_, file, _)| {
+                b.file_progress(*file)
+                    .unwrap()
+                    .is_some_and(|p| p.done == p.total)
+            }) {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
@@ -1440,6 +2137,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     } else {
         true
     };
+    case.phase("file-restart-first-progress-observed");
     let mut slowest_poll = std::time::Duration::ZERO;
     let completed = tokio::time::timeout(
         // This observes full file and receipt convergence, including a retry
@@ -1450,7 +2148,11 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         } else if count == 1 {
             10
         } else {
-            60
+            // This fixed 24-file aggregate checks eventual completion, with
+            // ASan overhead on every authenticated exchange. Its watchdog is
+            // separate from the unchanged 20s first-progress fairness check
+            // and each production exchange deadline.
+            120
         }),
         async {
             if !first_progress {
@@ -1467,7 +2169,9 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                         // Repeated debug AEAD/checksum reads across 24 files
                         // measured 534ms and blocked this single-thread
                         // executor. Verify all original bytes once below.
-                        b.file_progress(*file).is_some_and(|p| p.done == p.total)
+                        b.file_progress(*file)
+                            .unwrap()
+                            .is_some_and(|p| p.done == p.total)
                     }
                 });
                 slowest_poll = slowest_poll.max(started.elapsed());
@@ -1485,7 +2189,9 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         },
     )
     .await;
+    case.phase("file-restart-converged-stop-workers");
     workers.shutdown().await;
+    case.phase("file-restart-final-invariants");
     if !first_progress {
         let completed = originals
             .iter()
@@ -1505,7 +2211,10 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             slowest_poll.as_millis(),
             originals
                 .iter()
-                .filter(|(_, file, _)| b.file_progress(*file).is_some_and(|p| p.done == p.total))
+                .filter(|(_, file, _)| b
+                    .file_progress(*file)
+                    .unwrap()
+                    .is_some_and(|p| p.done == p.total))
                 .count(),
             count,
             observation
@@ -1520,12 +2229,13 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .read_file(file)
             .as_ref()
             .is_ok_and(|actual| actual == &bytes);
-        let counts = b.file_progress(file).map(|p| (p.done, p.total));
+        let counts = b.file_progress(file).unwrap().map(|p| (p.done, p.total));
         let held = b
             .sync_store(&ap.public())
             .lock()
             .unwrap()
-            .durable_have(&file, &final_chunk);
+            .durable_have(&file, &final_chunk)
+            .unwrap();
         let pending = a
             .delivery
             .lock()
@@ -1537,6 +2247,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .lock()
             .unwrap()
             .events(&file)
+            .unwrap()
             .iter()
             .map(|e| e.id)
             .collect::<Vec<_>>()
@@ -1592,6 +2303,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                 .lock()
                 .unwrap()
                 .events(file)
+                .unwrap()
                 .iter()
                 .map(|e| e.id)
                 .collect::<Vec<_>>(),
@@ -1602,6 +2314,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                 .lock()
                 .unwrap()
                 .durable_have(file, ids.last().unwrap())
+                .unwrap()
         );
     }
     if delay == FilePeerDelay::PartialChunk {
@@ -1630,10 +2343,11 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     if count == 1 {
-        assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+        assert_eq!(a.account_history(&b.account_id(), 10).unwrap()[0].id, id);
     } else {
         assert!(
             a.account_history(&b.account_id(), 100)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.id == id)
         );
@@ -1691,7 +2405,7 @@ async fn delayed_private_file_peer(
                     });
                     if file_channel.is_none()
                         && super::session::round_request_conversation(&bytes)
-                            .is_some_and(|conv| node.file_progress(conv).is_some())
+                            .is_some_and(|conv| node.file_progress(conv).unwrap().is_some())
                     {
                         let active = observation
                             .active_file_channels
@@ -1716,6 +2430,7 @@ async fn delayed_private_file_peer(
                         && super::session::is_followup(&bytes, file)
                         && node
                             .file_progress(file)
+                            .unwrap()
                             .is_some_and(|progress| progress.done == 1)
                         && !observation
                             .interrupted
@@ -1747,7 +2462,10 @@ async fn delayed_private_file_peer(
                                     != observation
                                         .interrupted_connection
                                         .load(std::sync::atomic::Ordering::SeqCst)
-                                && node.file_progress(file).is_some_and(|p| p.done == p.total)
+                                && node
+                                    .file_progress(file)
+                                    .unwrap()
+                                    .is_some_and(|p| p.done == p.total)
                             {
                                 observation
                                     .fresh_completion
@@ -1812,7 +2530,7 @@ fn erased_static_manifest_reopen(adopt: bool) {
     );
     b.log.lock().unwrap().append_durable(event.clone()).unwrap();
     b.process_file_events(conv);
-    assert_eq!(b.account_history(&aa.account_id(), 10).len(), 1);
+    assert_eq!(b.account_history(&aa.account_id(), 10).unwrap().len(), 1);
     assert_eq!(
         b.delete_account_message(&aa.account_id(), event.id)
             .unwrap(),
@@ -1820,7 +2538,7 @@ fn erased_static_manifest_reopen(adopt: bool) {
     );
     if adopt {
         let account = Account::generate();
-        b.persist_account_adoption(&account.account_id(), || Ok(()))
+        b.persist_account_adoption(&account.public(), || Ok(()), || Ok(b.account.public()))
             .unwrap();
         account_secret = account.secret_bytes();
     }
@@ -1833,7 +2551,7 @@ fn erased_static_manifest_reopen(adopt: bool) {
     );
     b.process_file_events(conv);
     assert!(
-        b.account_history(&aa.account_id(), 10).is_empty(),
+        b.account_history(&aa.account_id(), 10).unwrap().is_empty(),
         "static manifest must stay locally erased"
     );
     assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
@@ -1841,7 +2559,8 @@ fn erased_static_manifest_reopen(adopt: bool) {
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
+            .unwrap()
             .is_none()
     );
 }
@@ -1894,6 +2613,282 @@ async fn automatic_file_card_receipt_and_chunk_resume_without_manual_flush() {
 }
 
 #[tokio::test]
+async fn protected_image_loopback_retains_policy_and_blocks_ordinary_receive_reads() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob_account = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, mut files) = node_with_files(bd.path(), bob, bob_account, &ap);
+    let bytes = b"\x89PNG\r\n\x1a\nprivate image bytes".to_vec();
+    let path = ad.path().join("sensitive-name.png");
+    std::fs::write(&path, &bytes).unwrap();
+    let (id, file) = a
+        .enqueue_protected_file_to_account_progress_expiring_if(
+            &b.account_id(),
+            &path,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            MessageProtection::Authenticate,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let reference = SearchReference::Account {
+        account_id: a.account_id(),
+        message_id: Some(id),
+    };
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(6), async {
+            loop {
+                if a.delivery_status(id) == Some(DeliveryStatus::Delivered)
+                    && b.protected_image_content(&reference).unwrap().is_some_and(
+                        |(mode, actual)| mode == MessageProtection::Authenticate && actual == bytes,
+                    )
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    assert!(
+        result.is_ok(),
+        "automatic immutable chunks must continue after card confirmation"
+    );
+    let received = files.try_recv().unwrap();
+    assert_eq!(received.protection, Some(MessageProtection::Authenticate));
+    assert_eq!(received.name, "Protected image");
+    assert!(!format!("{received:?}").contains("sensitive-name"));
+    assert!(b.read_file(file).is_err());
+    assert!(b.read_media(file).is_none());
+    assert_eq!(
+        b.account_history(&a.account_id(), 10).unwrap()[0].protection,
+        Some(MessageProtection::Authenticate)
+    );
+    a.recall_account(&b.account_id(), id).await.unwrap();
+    assert!(
+        a.protected_image_content(&SearchReference::Account {
+            account_id: b.account_id(),
+            message_id: Some(id)
+        })
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn accepted_channel_file_sidecar_failure_recovers_same_identity_and_protection() {
+    for protection in [
+        None,
+        Some(MessageProtection::Click),
+        Some(MessageProtection::Authenticate),
+    ] {
+        for reopen in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let proof = Announce::new_with_account(
+                &DeviceIdentity::generate(),
+                &Account::generate(),
+                "Peer",
+                9,
+            );
+            let identity = DeviceIdentity::generate();
+            let account = Account::generate();
+            let keys = identity.secret_bytes();
+            let account_keys = account.secret_bytes();
+            let (mut node, _) = node(dir.path(), identity, account, &proof);
+            let channel = node.create_channel("images", vec![]).await.unwrap();
+            node.received_files
+                .lock()
+                .unwrap()
+                .fail_appends_for_test(true)
+                .unwrap();
+            let bytes = b"\x89PNG\r\n\x1a\nchannel image";
+            let path = dir.path().join("image.png");
+            std::fs::write(&path, bytes).unwrap();
+            let mut checks = 0;
+            let mut authorize = |accept: &mut dyn FnMut() -> Result<(), NodeError>| {
+                checks += 1;
+                if checks <= 2 {
+                    accept()
+                } else {
+                    Err(NodeError::Authorization(
+                        "locked after durable acceptance".into(),
+                    ))
+                }
+            };
+            let accepted = if let Some(mode) = protection {
+                node.enqueue_protected_file_channel_progress_expiring_if(
+                    channel,
+                    &path,
+                    crate::file::FileKind::Media,
+                    |_| {},
+                    None,
+                    mode,
+                    &mut authorize,
+                )
+                .await
+            } else {
+                node.enqueue_file_channel_progress_expiring_if(
+                    channel,
+                    &path,
+                    crate::file::FileKind::Media,
+                    |_| {},
+                    None,
+                    &mut authorize,
+                )
+                .await
+            };
+            let (id, file) =
+                accepted.expect("durable acceptance must not become a retryable rejection");
+            assert_eq!(checks, 2, "no authorization after WAL acceptance");
+            let history = node.channel_history(channel, 10).unwrap();
+            assert_eq!(history.len(), 1, "pending WAL card remains visible");
+            assert_eq!(history[0].id, id);
+            assert_eq!(history[0].protection, protection);
+            assert_eq!(history[0].file.as_ref().unwrap().file_conv, file);
+            assert_eq!(
+                node.delivery.lock().unwrap().pending_transactions().len(),
+                1
+            );
+            node.received_files
+                .lock()
+                .unwrap()
+                .fail_appends_for_test(false)
+                .unwrap();
+            if reopen {
+                drop(node);
+                node = self::node(
+                    dir.path(),
+                    DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+                    Account::from_secret_bytes(account_keys),
+                    &proof,
+                )
+                .0;
+            } else {
+                node.recover_delivery(&mut node.delivery.lock().unwrap())
+                    .unwrap();
+            }
+            let history = node.channel_history(channel, 10).unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].id, id);
+            assert_eq!(history[0].protection, protection);
+            assert!(
+                node.delivery
+                    .lock()
+                    .unwrap()
+                    .pending_transactions()
+                    .is_empty()
+            );
+            let log = node.log.lock().unwrap();
+            let manifests: Vec<_> = log
+                .events(&channel)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == crate::eventlog::EventKind::FileManifest)
+                .collect();
+            assert_eq!(manifests.len(), 1);
+            assert_eq!(manifests[0].id, id);
+            drop(log);
+            if let Some(protection) = protection {
+                assert!(node.read_file(file).is_err());
+                assert!(node.read_media(file).is_none());
+                assert_eq!(
+                    node.protected_image_content(&SearchReference::Channel {
+                        channel_id: channel,
+                        message_id: Some(id),
+                    })
+                    .unwrap(),
+                    Some((protection, bytes.to_vec()))
+                );
+            } else {
+                assert_eq!(node.read_file(file).unwrap(), bytes);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn channel_file_authorization_rejects_before_staging_or_wal_acceptance() {
+    for reject_at in [1, 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Peer",
+            9,
+        );
+        let (node, _) = node(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node.create_channel("images", vec![]).await.unwrap();
+        let before = node.log.lock().unwrap().conversations().unwrap().len();
+        let path = dir.path().join("image.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nchannel image").unwrap();
+        let mut checks = 0;
+        let result = node
+            .enqueue_protected_file_channel_progress_expiring_if(
+                channel,
+                &path,
+                crate::file::FileKind::Media,
+                |_| {},
+                None,
+                MessageProtection::Authenticate,
+                |accept| {
+                    checks += 1;
+                    if checks == reject_at {
+                        Err(NodeError::Authorization("locked before acceptance".into()))
+                    } else {
+                        accept()
+                    }
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(NodeError::Authorization(_))));
+        assert_eq!(checks, reject_at);
+        assert!(node.channel_history(channel, 10).unwrap().is_empty());
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        assert!(
+            node.log
+                .lock()
+                .unwrap()
+                .events(&channel)
+                .unwrap()
+                .iter()
+                .all(|event| event.kind != crate::eventlog::EventKind::FileManifest)
+        );
+        if reject_at == 1 {
+            assert_eq!(
+                node.log.lock().unwrap().conversations().unwrap().len(),
+                before
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
     for reopen in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -1904,9 +2899,6 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
         let keys = identity.secret_bytes();
         let account_keys = account.secret_bytes();
         let (mut a, _) = node(dir.path(), identity, account, &bp);
-        let sidecar = dir.path().join("sidecar");
-        *a.received_files.lock().unwrap() =
-            ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
         a.received_files
             .lock()
             .unwrap()
@@ -1918,7 +2910,7 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
             .enqueue_file_dm(&bob.user_id(), &path, crate::file::FileKind::File)
             .await
             .unwrap();
-        let history = a.dm_history(&bob.public(), 10);
+        let history = a.dm_history(&bob.public(), 10).unwrap();
         assert_eq!(
             history.len(),
             1,
@@ -1945,14 +2937,16 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
             let mut store = a.delivery.lock().unwrap();
             a.recover_delivery(&mut store).unwrap();
         }
-        assert_eq!(a.dm_history(&bob.public(), 10)[0].id, id);
+        assert_eq!(a.dm_history(&bob.public(), 10).unwrap()[0].id, id);
         assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
         assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
-        assert!(a.files.lock().unwrap().manifest(&file).is_some());
+        assert!(a.files.lock().unwrap().manifest(file).unwrap().is_some());
     }
 }
 
-#[tokio::test]
+// Delivery and ACK persistence share the production multithreaded host. Keep
+// their protocol workers independent of this fixture's observation future.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     let dir = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
@@ -1984,7 +2978,7 @@ async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     );
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     assert!(a.sentlog.lock().unwrap().conversations().is_empty());
-    assert!(a.log.lock().unwrap().conversations().is_empty());
+    assert!(a.log.lock().unwrap().conversations().unwrap().is_empty());
     assert_eq!(
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         sessions
@@ -1996,18 +2990,39 @@ async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
     let received = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv()).await;
-    let delivered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        observe_durable_delivery(&a, id),
+    )
     .await;
+    let status_at_cutoff = a.delivery_status(id);
+    a.runtime_work.close();
+    b.runtime_work.close();
     at.abort();
     bt.abort();
     let _ = at.await;
     let _ = bt.await;
+    let mut retired = true;
+    for current in [&a, &b] {
+        current.sessions.clear();
+        retired &= tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            current.runtime_work.drain(),
+        )
+        .await
+        .is_ok();
+    }
+    if !retired {
+        let profiles = (dir.keep(), bd.keep());
+        panic!(
+            "valid-message fixture work did not retire; profiles retained at {profiles:?}; status_at_cutoff={status_at_cutoff:?}"
+        );
+    }
     assert_eq!(received.unwrap().unwrap().text, b"small after rejection");
-    assert!(delivered.is_ok());
+    assert!(
+        delivered.is_ok(),
+        "authenticated valid-message ACK must be durably installed within 3s; status_at_cutoff={status_at_cutoff:?}"
+    );
 }
 
 #[tokio::test]
@@ -2032,8 +3047,6 @@ async fn live_receive_recovery_emits_exactly_one_callback_after_durable_install(
         .event
         .clone();
     b.log.lock().unwrap().append_durable(event.clone()).unwrap();
-    let sidecar = bd.path().join("sidecar");
-    *b.received.lock().unwrap() = ReceivedLog::open(&sidecar.join("received"), "pw").unwrap();
     b.received
         .lock()
         .unwrap()
@@ -2094,6 +3107,7 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
             Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
         let (a, _) = node(ad.path(), alice, aa, &bp);
         let (mut b, _, mut files) = node_with_files(bd.path(), bob, bob_account, &ap);
+        let reception_start = b.reception_head().unwrap();
         let path = ad.path().join("empty.txt");
         std::fs::write(&path, []).unwrap();
         let (id, file) = a
@@ -2104,9 +3118,6 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
             .event
             .clone();
         b.log.lock().unwrap().append_durable(event.clone()).unwrap();
-        let sidecar = bd.path().join("sidecar");
-        *b.received_files.lock().unwrap() =
-            ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
         b.received_files
             .lock()
             .unwrap()
@@ -2115,7 +3126,8 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         b.process_file_events(event.conversation_id);
         assert!(files.try_recv().is_err());
         assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
-        assert!(b.files.lock().unwrap().manifest(&file).is_none());
+        assert!(b.files.lock().unwrap().manifest(file).unwrap().is_none());
+        assert_eq!(b.reception_head().unwrap(), reception_start);
         b.received_files
             .lock()
             .unwrap()
@@ -2152,8 +3164,25 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         assert!(files.try_recv().is_err());
         b.process_file_events(event.conversation_id);
         assert!(files.try_recv().is_err());
-        assert_eq!(b.account_history(&a.account_id(), 10).len(), 1);
-        assert!(b.files.lock().unwrap().manifest(&file).is_some());
+        assert_eq!(b.account_history(&a.account_id(), 10).unwrap().len(), 1);
+        assert!(b.files.lock().unwrap().manifest(file).unwrap().is_some());
+        let page = b
+            .reception_page(reception_start, None, Default::default())
+            .unwrap();
+        assert_eq!(
+            page.receipts.len(),
+            1,
+            "the durable host effect survives live retry and restart"
+        );
+        let super::HostReception::File(received) = &page.receipts[0] else {
+            panic!("expected file reception");
+        };
+        assert_eq!(received.file_conv, file);
+        assert_eq!(received.arrival_kind, "live");
+        assert!(!received.own_device);
+        assert_eq!(received.batch_size, 1);
+        assert!(received.batch_complete);
+        assert!(received.batch_id.is_none());
     }
 }
 
@@ -2246,13 +3275,20 @@ fn incoming_manifest_rejects_malformed_public_conversation_and_live_key_collisio
     let valid = seal(&manifest, conv, 2, vec![]);
     b.log.lock().unwrap().append_durable(valid.clone()).unwrap();
     b.process_file_events(conv);
-    assert_eq!(b.account_history(&ap.account_id().unwrap(), 10).len(), 1);
+    assert_eq!(
+        b.account_history(&ap.account_id().unwrap(), 10)
+            .unwrap()
+            .len(),
+        1
+    );
     manifest.file_key = [7; 32];
     let collision = seal(&manifest, conv, 3, vec![valid.id]);
     b.log.lock().unwrap().append_durable(collision).unwrap();
     b.process_file_events(conv);
     assert_eq!(
-        b.account_history(&ap.account_id().unwrap(), 10).len(),
+        b.account_history(&ap.account_id().unwrap(), 10)
+            .unwrap()
+            .len(),
         1,
         "conflicting file key must not be accepted"
     );
@@ -2349,7 +3385,8 @@ fn incoming_manifest_requires_dense_signed_chunk_prefix_before_card_acceptance()
             b.files
                 .lock()
                 .unwrap()
-                .manifest(&manifest.file_conv)
+                .manifest(manifest.file_conv)
+                .unwrap()
                 .is_some(),
             accepted
         );
@@ -2389,6 +3426,30 @@ fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() 
             let account = Account::generate();
             let account_secret = account.secret_bytes();
             let (b, _, _) = node_with_files(dir.path(), identity, account, &ap);
+            // Node::open completed an empty import. Before staging the legacy
+            // corpus, put only this pristine fixture at its pre-startup import
+            // checkpoint; never reset accepted bindings or processing evidence.
+            b.storage
+                .database()
+                .transaction(|c| {
+                    assert_eq!(
+                        c.execute(
+                            concat!(
+                                "UPDATE file_book_owners SET imported=0 ",
+                                "WHERE account=?1 AND imported=1 ",
+                                "AND after_ordinal IS NULL AND revision=0 ",
+                                "AND NOT EXISTS(SELECT 1 FROM transcript_rows WHERE kind=3) ",
+                                "AND NOT EXISTS(SELECT 1 FROM file_book_bindings WHERE account=?1) ",
+                                "AND NOT EXISTS(SELECT 1 FROM file_book_processed WHERE account=?1)"
+                            ),
+                            [b.account.public().ed25519_pub.as_slice()],
+                        )?,
+                        1,
+                        "only an empty pre-corpus fixture may initialize pending import"
+                    );
+                    Ok(())
+                })
+                .unwrap();
             let wire =
                 super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
             let host = super::conversation::account_conversation_id(
@@ -2490,13 +3551,23 @@ fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() 
                 );
                 (b, Some(rx))
             } else {
-                b.reseed_live_file_book(&b.delivery.lock().unwrap());
+                super::files::import_file_book(
+                    &b.files.lock().unwrap(),
+                    &b.received_files.lock().unwrap(),
+                    &b.log.lock().unwrap(),
+                    &b.account_file_proofs.lock().unwrap(),
+                    &b.delivery.lock().unwrap(),
+                    &b.file_message_identities.lock().unwrap(),
+                    &b.account_suppression.lock().unwrap(),
+                )
+                .unwrap();
                 (b, None)
             };
             let book = b.files.lock().unwrap();
+            assert!(book.import_position().unwrap().is_none());
             let expected = matches!(shape, "valid-account-host" | "conflicting-alias");
             assert_eq!(
-                book.manifest(&manifest.file_conv).is_some(),
+                book.manifest(manifest.file_conv).unwrap().is_some(),
                 expected,
                 "{shape}, reopen={reopen}"
             );
@@ -2511,7 +3582,7 @@ fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() 
                     "conflicting alias must not suppress reprocessing"
                 );
                 assert!(super::files::same_file_transfer(
-                    book.manifest(&manifest.file_conv).unwrap(),
+                    &book.manifest(manifest.file_conv).unwrap().unwrap(),
                     &crate::file::AnyManifest::V1(manifest.clone())
                 ));
             }
@@ -2545,11 +3616,20 @@ fn file_book_rebuild_does_not_restore_outgoing_card_scope_from_mismatched_row() 
     let id = a
         .accept_staged_manifest(&[target], host, proof.account_id(), &manifest)
         .unwrap();
-    let mut row = a.received_files.lock().unwrap().entry(id).unwrap().clone();
+    let mut row = a
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(id)
+        .unwrap()
+        .unwrap()
+        .clone();
     row.wall_clock += 1;
-    let mut rows = ReceivedLog::open(&dir.path().join("corrupted-files.log"), "pw").unwrap();
-    rows.record_durable(&row).unwrap();
-    *a.received_files.lock().unwrap() = rows;
+    {
+        let mut rows = a.received_files.lock().unwrap();
+        rows.remove_where(|_| true).unwrap();
+        rows.record_durable(&row).unwrap();
+    }
     a.configure_privacy(
         dir.path(),
         "pw",
@@ -2557,17 +3637,8 @@ fn file_book_rebuild_does_not_restore_outgoing_card_scope_from_mismatched_row() 
         Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
     )
     .unwrap();
-    assert!(a.files.lock().unwrap().manifest(&file).is_none());
-    assert!(
-        !a.privacy
-            .state
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .file_scopes
-            .contains_key(&file)
-    );
+    assert!(a.files.lock().unwrap().manifest(file).unwrap().is_none());
+    assert!(!a.has_file_scope(file).unwrap());
 }
 
 #[test]
@@ -2604,24 +3675,26 @@ fn durable_file_erase_removes_live_key_even_when_sidecar_rewrite_fails() {
     );
     b.log.lock().unwrap().append_durable(event.clone()).unwrap();
     b.process_file_events(conv);
-    let host =
-        super::conversation::account_conversation_id(&b.account_id(), &ap.account_id().unwrap());
-    let row = b.received_files.lock().unwrap().entries(&host)[0].clone();
-    let sidecar = dir.path().join("sidecar");
-    let mut files = ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
-    files.record_durable(&row).unwrap();
-    *b.received_files.lock().unwrap() = files;
-    std::fs::create_dir(sidecar.join("files.compact-tmp")).unwrap();
+    b.received_files
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
     assert!(
         b.delete_account_message(&ap.account_id().unwrap(), event.id)
             .is_err()
     );
-    assert!(b.account_history(&ap.account_id().unwrap(), 10).is_empty());
+    assert!(
+        b.account_history(&ap.account_id().unwrap(), 10)
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
+            .unwrap()
             .is_none(),
         "durable erase must remove key despite later sidecar failure"
     );
@@ -2662,17 +3735,21 @@ fn legacy_file_erasure_capacity_refusal_preserves_durable_row_and_key() {
         crate::dm::seal(&alice, &b.identity.public().x25519_pub, &manifest.encode()).unwrap(),
     );
     let id = event.id;
-    b.log.lock().unwrap().append_durable(event).unwrap();
+    b.log.lock().unwrap().append_durable(event.clone()).unwrap();
     b.received_files
         .lock()
         .unwrap()
-        .record_durable(&ReceivedEntry {
-            event_id: id,
-            conversation: host,
-            from: alice.user_id(),
-            wall_clock: 1,
-            plaintext: manifest.encode(),
-        })
+        .record_file_with_reception(
+            &ReceivedEntry {
+                event_id: id,
+                conversation: host,
+                from: alice.user_id(),
+                wall_clock: 1,
+                plaintext: manifest.encode(),
+            },
+            Some(&event),
+            None,
+        )
         .unwrap();
     let mut store = DeliveryStore::open_with_limits(
         &dir.path().join("tight"),
@@ -2691,18 +3768,30 @@ fn legacy_file_erasure_capacity_refusal_preserves_durable_row_and_key() {
             &b.account_id(),
         )
         .unwrap();
-    b.reseed_live_file_book(&store);
+    b.reseed_live_file_book(&store).unwrap();
     *b.delivery.lock().unwrap() = store;
     assert!(
         b.delete_account_message(&ap.account_id().unwrap(), id)
             .is_err()
     );
-    assert_eq!(b.account_history(&ap.account_id().unwrap(), 10)[0].id, id);
+    assert!(
+        !b.account_suppression
+            .lock()
+            .unwrap()
+            .contains(host, id)
+            .unwrap(),
+        "a refused erase must not commit a visibility tombstone"
+    );
+    assert_eq!(
+        b.account_history(&ap.account_id().unwrap(), 10).unwrap()[0].id,
+        id
+    );
     assert!(
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
+            .unwrap()
             .is_some()
     );
     assert_eq!(b.received_files.lock().unwrap().entries(&host).len(), 1);
@@ -2767,29 +3856,31 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
         b.process_file_events(conv);
         originals.push(event);
     }
-    assert_eq!(b.account_history(&aa.account_id(), 10).len(), 1);
-    assert_eq!(b.account_history(&ca.account_id(), 10).len(), 1);
+    assert_eq!(b.account_history(&aa.account_id(), 10).unwrap().len(), 1);
+    assert_eq!(b.account_history(&ca.account_id(), 10).unwrap().len(), 1);
     assert_eq!(
-        b.attachment_consent_status(manifest.file_conv),
+        b.attachment_consent_status(manifest.file_conv).unwrap(),
         Some(crate::node::ReceiveDecision::Pending)
     );
     b.set_attachment_contact_auto(&ca.account_id(), Some(true))
         .unwrap();
     assert_eq!(
-        b.attachment_consent_status(manifest.file_conv),
+        b.attachment_consent_status(manifest.file_conv).unwrap(),
         Some(crate::node::ReceiveDecision::Pending),
         "one automatic alias must not hide the other sender's approval controls"
     );
     b.decide_attachment(manifest.file_conv, true).unwrap();
     assert_eq!(
-        b.attachment_consent_status(manifest.file_conv),
+        b.attachment_consent_status(manifest.file_conv).unwrap(),
         Some(crate::node::ReceiveDecision::Accepted)
     );
     b.delete_account_message(&aa.account_id(), originals[0].id)
         .unwrap();
     {
-        let state = b.privacy.state.read().unwrap();
-        let scopes = &state.as_ref().unwrap().file_scopes[&manifest.file_conv];
+        let scopes = b
+            .manifest_scopes(manifest.file_conv)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert!(
             scopes.iter().all(|scope| scope.event != originals[0].id),
             "erased alias scope must be removed"
@@ -2800,7 +3891,8 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
+            .unwrap()
             .is_some()
     );
     assert_eq!(b.delivery.lock().unwrap().retry_receipts(10).len(), 1);
@@ -2823,16 +3915,17 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
     )
     .unwrap();
     b.process_file_events(originals[0].conversation_id);
-    assert!(b.account_history(&aa.account_id(), 10).is_empty());
+    assert!(b.account_history(&aa.account_id(), 10).unwrap().is_empty());
     assert_eq!(
-        b.account_history(&ca.account_id(), 10)[0].id,
+        b.account_history(&ca.account_id(), 10).unwrap()[0].id,
         originals[1].id
     );
     assert!(
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
+            .unwrap()
             .is_some()
     );
     assert_eq!(b.prune_older_than(101).unwrap(), 1);
@@ -2840,7 +3933,8 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
+            .unwrap()
             .is_none()
     );
     assert!(b.delivery.lock().unwrap().retry_receipts(10).is_empty());
@@ -2863,7 +3957,7 @@ async fn offline_file_card_has_durable_awaiting_id_and_no_text_history_row() {
         .send_file_dm(&bob.user_id(), &path, crate::file::FileKind::File)
         .await
         .unwrap();
-    let history = a.dm_history(&bob.public(), 10);
+    let history = a.dm_history(&bob.public(), 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].file.as_ref().unwrap().file_conv, file_conv);
     assert_eq!(
@@ -2900,7 +3994,7 @@ fn large_manifest_uses_compact_wire_format_before_staging_chunks() {
         },
         kind: crate::file::FileKind::File,
     };
-    let before = a.log.lock().unwrap().conversations();
+    let before = a.log.lock().unwrap().conversations().unwrap();
     assert!(super::files::compact_manifest_needed(&a.identity, &prospective).unwrap());
     assert!(
         super::files::compact_manifest_needed(
@@ -2916,42 +4010,7 @@ fn large_manifest_uses_compact_wire_format_before_staging_chunks() {
         )
         .is_ok_and(|compact| !compact)
     );
-    assert_eq!(a.log.lock().unwrap().conversations(), before);
-}
-
-#[tokio::test]
-#[ignore = "large disk transfer runs separately in backend E2E"]
-async fn large_directory_enqueue_uses_compact_manifest_instead_of_frame_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let bob = DeviceIdentity::generate();
-    let bp = Announce::new_with_account(&bob, &Account::generate(), "Bob", 9);
-    let (alice, _) = node(
-        dir.path(),
-        DeviceIdentity::generate(),
-        Account::generate(),
-        &bp,
-    );
-    let folder = dir.path().join("paintings");
-    std::fs::create_dir(&folder).unwrap();
-    // Write actual data: sparse files can be encoded differently by tar on CI.
-    let mut source = std::fs::File::create(folder.join("large.bin")).unwrap();
-    let block = vec![0xA5; 1024 * 1024];
-    for _ in 0..110 {
-        std::io::Write::write_all(&mut source, &block).unwrap();
-    }
-    drop(source);
-
-    let (_, file_conv) = alice
-        .enqueue_file_dm(&bob.user_id(), &folder, crate::file::FileKind::File)
-        .await
-        .unwrap();
-    let files = alice.files.lock().unwrap();
-    let Some(crate::file::AnyManifest::V4(manifest)) = files.manifest(&file_conv) else {
-        panic!("large folder must use the compact manifest");
-    };
-    assert_eq!(manifest.v3.v2.name, "paintings.tar");
-    assert_eq!(manifest.v3.v2.mime, crate::file::directory::MIME);
-    assert!(manifest.v3.v2.chunk_count > 2_000);
+    assert_eq!(a.log.lock().unwrap().conversations().unwrap(), before);
 }
 
 #[test]
@@ -3037,6 +4096,7 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
                 .lock()
                 .unwrap()
                 .events(&conv)
+                .unwrap()
                 .iter()
                 .any(|e| e.id == original.id)
         );
@@ -3074,17 +4134,29 @@ async fn accepted_account_file_card_carries_fixed_deadline() {
         .unwrap()
         .entry(id)
         .unwrap()
+        .unwrap()
         .clone();
     assert_eq!(crate::expiry::deadline(&row.plaintext), Some(deadline));
     assert!(crate::file::decode_manifest(&row.plaintext).is_some());
     assert_eq!(
-        node.account_history(&remote.account_id(), 10)[0].expires_at_ms,
+        node.account_history(&remote.account_id(), 10).unwrap()[0].expires_at_ms,
         Some(deadline)
     );
     Arc::get_mut(&mut node).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
-    assert!(node.account_history(&remote.account_id(), 10).is_empty());
+    assert!(
+        node.account_history(&remote.account_id(), 10)
+            .unwrap()
+            .is_empty()
+    );
     assert!(node.prune_expired_received().unwrap() > 0);
-    assert!(node.received_files.lock().unwrap().entry(id).is_none());
+    assert!(
+        node.received_files
+            .lock()
+            .unwrap()
+            .entry(id)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -3146,7 +4218,10 @@ async fn expired_pending_acceptance_erases_text_and_file_before_sidecar_recovery
             sender.delivery.lock().unwrap().pending_transactions().len(),
             1
         );
-        assert_eq!(sender.account_history(&remote.account_id(), 10)[0].id, id);
+        assert_eq!(
+            sender.account_history(&remote.account_id(), 10).unwrap()[0].id,
+            id
+        );
         sender
             .received_files
             .lock()
@@ -3163,7 +4238,12 @@ async fn expired_pending_acceptance_erases_text_and_file_before_sidecar_recovery
         Arc::get_mut(&mut sender).unwrap().expiry_clock_start =
             (std::time::Instant::now(), deadline + 1);
         assert!(sender.prune_expired_received().unwrap() > 0);
-        assert!(sender.account_history(&remote.account_id(), 10).is_empty());
+        assert!(
+            sender
+                .account_history(&remote.account_id(), 10)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(sender.delivery_status(id), None);
         assert!(
             sender
@@ -3234,11 +4314,11 @@ async fn expiring_account_message_arrives_over_loopback_and_expires_on_both_side
         .unwrap();
     assert_eq!(received.text, b"expires on both sides");
     assert_eq!(
-        a.account_history(&b.account_id(), 10)[0].expires_at_ms,
+        a.account_history(&b.account_id(), 10).unwrap()[0].expires_at_ms,
         Some(deadline)
     );
     assert_eq!(
-        b.account_history(&a.account_id(), 10)[0].expires_at_ms,
+        b.account_history(&a.account_id(), 10).unwrap()[0].expires_at_ms,
         Some(deadline)
     );
     at.abort();
@@ -3257,14 +4337,123 @@ async fn expiring_account_message_arrives_over_loopback_and_expires_on_both_side
     .expect("connection and cleanup tasks must release both nodes");
     Arc::get_mut(&mut a).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
     Arc::get_mut(&mut b).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
-    assert!(a.account_history(&b.account_id(), 10).is_empty());
-    assert!(b.account_history(&a.account_id(), 10).is_empty());
+    assert!(a.account_history(&b.account_id(), 10).unwrap().is_empty());
+    assert!(b.account_history(&a.account_id(), 10).unwrap().is_empty());
     assert!(a.prune_expired_received().unwrap() > 0);
     assert!(b.prune_expired_received().unwrap() > 0);
     let conv = super::conversation::account_conversation_id(&a.account_id(), &b.account_id());
     assert!(a.sent_entries_for_history(conv).is_empty());
     assert!(b.received.lock().unwrap().entries(&conv).is_empty());
-    assert!(a.account_suppression.lock().unwrap().contains(conv, id));
+    assert!(
+        a.account_suppression
+            .lock()
+            .unwrap()
+            .contains(conv, id)
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn protected_account_message_arrives_redacted_and_exact_reveal_expires() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let (mut a, _) = node(ad.path(), alice, aa, &bp);
+    let (mut b, mut incoming) = node(bd.path(), bob, bob_account, &ap);
+    let deadline = super::node::now_millis() + 300_000;
+    let id = a
+        .enqueue_protected_to_account_expiring_if(
+            &b.account_id(),
+            b"expires on both sides",
+            None,
+            Some(deadline),
+            super::MessageProtection::Authenticate,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let received = tokio::time::timeout(std::time::Duration::from_secs(8), incoming.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(received.text.is_empty());
+    assert_eq!(
+        received.protection,
+        Some(super::MessageProtection::Authenticate)
+    );
+    let ar = super::SearchReference::Account {
+        account_id: b.account_id(),
+        message_id: Some(id),
+    };
+    let br = super::SearchReference::Account {
+        account_id: a.account_id(),
+        message_id: Some(id),
+    };
+    for (node, reference) in [(&a, &ar), (&b, &br)] {
+        assert_eq!(
+            node.protected_message_content(reference).unwrap(),
+            Some((
+                super::MessageProtection::Authenticate,
+                b"expires on both sides".to_vec()
+            ))
+        );
+        assert!(node.search("expires").unwrap().is_empty());
+        assert!(node.search_recent("expires").unwrap().hits.is_empty());
+        assert!(
+            node.search_context(reference).unwrap().unwrap().messages[0]
+                .text
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        a.account_history(&b.account_id(), 10).unwrap()[0].expires_at_ms,
+        Some(deadline)
+    );
+    assert_eq!(
+        b.account_history(&a.account_id(), 10).unwrap()[0].expires_at_ms,
+        Some(deadline)
+    );
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    // JoinSet abort requests are asynchronous, and a blocking cleanup may still
+    // own the node after the accept-loop future has finished. Wait for teardown
+    // before changing the test clock through exclusive ownership.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while Arc::strong_count(&a) != 1 || Arc::strong_count(&b) != 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("connection and cleanup tasks must release both nodes");
+    Arc::get_mut(&mut a).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    Arc::get_mut(&mut b).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    assert!(a.protected_message_content(&ar).unwrap().is_none());
+    assert!(b.protected_message_content(&br).unwrap().is_none());
+    assert!(a.account_history(&b.account_id(), 10).unwrap().is_empty());
+    assert!(b.account_history(&a.account_id(), 10).unwrap().is_empty());
+    assert!(a.prune_expired_received().unwrap() > 0);
+    assert!(b.prune_expired_received().unwrap() > 0);
+    let conv = super::conversation::account_conversation_id(&a.account_id(), &b.account_id());
+    assert!(a.sent_entries_for_history(conv).is_empty());
+    assert!(b.received.lock().unwrap().entries(&conv).is_empty());
+    assert!(
+        a.account_suppression
+            .lock()
+            .unwrap()
+            .contains(conv, id)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -3354,19 +4543,24 @@ async fn sync_delivery_test_stage(
     timing.finish();
 }
 
+async fn observe_durable_delivery(node: &Node, id: EventId) {
+    loop {
+        let notified = node.delivery_status_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if node.delivery_status(id) == Some(DeliveryStatus::Delivered) {
+            return;
+        }
+        notified.await;
+    }
+}
+
 async fn wait_for_durable_delivery(node: &Node, id: EventId) {
     let mut timing = super::delivery_runtime::TestTiming::new("receipt-durable-wait-3s");
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let notified = node.delivery_status_notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if node.delivery_status(id) == Some(DeliveryStatus::Delivered) {
-                break;
-            }
-            notified.await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        observe_durable_delivery(node, id),
+    )
     .await
     .expect("authenticated receipt durably installed within 3s");
     timing.finish();
@@ -3476,7 +4670,8 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
         p.sync_store(&bob.public())
             .lock()
             .unwrap()
-            .event_ids(&control),
+            .event_ids(&control)
+            .unwrap(),
         vec![ack.id]
     );
     assert!(
@@ -3484,6 +4679,7 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .lock()
             .unwrap()
             .durable_have(&control, &ack.id)
+            .unwrap()
     );
     let outsider = DeviceIdentity::generate();
     let forged = Event::new(
@@ -3511,6 +4707,7 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .lock()
             .unwrap()
             .event_ids(&control)
+            .unwrap()
             .is_empty()
     );
     assert!(
@@ -3518,6 +4715,7 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .lock()
             .unwrap()
             .durable_have(&control, &ack.id)
+            .unwrap()
     );
 }
 
@@ -3585,7 +4783,7 @@ async fn automatic_worker_stalled_fanout_does_not_starve_other_messages_and_drop
     })
     .await
     .unwrap();
-    assert_eq!(b.account_history(&a.account_id(), 10).len(), 2);
+    assert_eq!(b.account_history(&a.account_id(), 10).unwrap().len(), 2);
     at.abort();
     let _ = at.await;
     let third = a
@@ -3671,7 +4869,8 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                 b.sync_store(&ap.public())
                     .lock()
                     .unwrap()
-                    .event_ids(&control),
+                    .event_ids(&control)
+                    .unwrap(),
                 vec![receipt.destination.event.id]
             );
             if clear {
@@ -3699,8 +4898,13 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .event_ids(&control)
+                        .unwrap()
                         .is_empty()
                 );
+                // Admission guards retain the profile lease until the owned
+                // transport sessions close, even after their policy is revoked.
+                drop(channel);
+                drop(receiver);
                 drop(b);
                 let (b, _) = node(
                     bd.path(),
@@ -3720,6 +4924,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .event_ids(&control)
+                        .unwrap()
                         .is_empty()
                 );
             } else {
@@ -3730,6 +4935,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                             .lock()
                             .unwrap()
                             .event_ids(&control)
+                            .unwrap()
                             .is_empty()
                     );
                     b.set_allowed(&own, true).await.unwrap();
@@ -3752,6 +4958,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .event_ids(&control)
+                        .unwrap()
                         .is_empty()
                 );
                 assert!(
@@ -3759,6 +4966,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .durable_have(&control, &receipt.destination.event.id)
+                        .unwrap()
                 );
                 let substituted = Announce::new_with_account(
                     &DeviceIdentity::from_secret_bytes(akeys.0, [77; 32]),
@@ -3777,6 +4985,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .event_ids(&control)
+                        .unwrap()
                         .is_empty()
                 );
             }
@@ -3878,7 +5087,7 @@ async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(received.text, b"strict automatic offline");
-    assert_eq!(b.account_history(&own, 10).len(), 1);
+    assert_eq!(b.account_history(&own, 10).unwrap().len(), 1);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !b.delivery.lock().unwrap().retry_receipts(1).is_empty() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -3889,7 +5098,7 @@ async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
     assert!(brx.try_recv().is_err());
     let control =
         super::delivery_receipt::delivery_conversation_id(&b.identity.public(), &ap.public());
-    let ack = b.log.lock().unwrap().events(&control)[0].clone();
+    let ack = b.log.lock().unwrap().events(&control).unwrap()[0].clone();
     if evict {
         let mut po = relay.lock().unwrap();
         po.set_retention_cap(0, 0);
@@ -3941,11 +5150,14 @@ async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
     })
     .await
     .unwrap();
-    assert_eq!(a.account_history(&target, 10)[0].id, id);
-    assert_eq!(a.account_history(&target, 10).len(), 1);
+    assert_eq!(a.account_history(&target, 10).unwrap()[0].id, id);
+    assert_eq!(a.account_history(&target, 10).unwrap().len(), 1);
     assert!(arx.try_recv().is_err());
     if let Some(b) = b {
-        assert_eq!(b.log.lock().unwrap().events(&control), vec![&ack]);
+        assert_eq!(
+            b.log.lock().unwrap().events(&control).unwrap(),
+            vec![ack.clone()]
+        );
     }
     assert!(brx.try_recv().is_err());
     at.abort();
@@ -4160,6 +5372,7 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
 
 #[tokio::test]
 async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnects() {
+    let mut timing = super::delivery_runtime::TestTiming::new("relay-file-fixture-setup");
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
@@ -4198,11 +5411,35 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     let source = ad.path().join("offline-file.bin");
     let bytes = vec![7; crate::file::CHUNK_SIZE + 17];
     std::fs::write(&source, &bytes).unwrap();
+    timing.phase("relay-file-enqueue-card");
     let (card, file) = a
         .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
         .await
         .unwrap();
-    a.flush_delivery(card).await;
+    timing.phase("relay-file-flush-card");
+    // The recipient does not serve application frames yet: both original
+    // direct card/receipt attempts must fail, leaving the live relay to carry
+    // the offer. Complete real Noise handshakes and close immediately instead
+    // of stalling at listeners until two unrelated authentication deadlines.
+    let setup_eof = std::cell::Cell::new(0usize);
+    tokio::select! {
+        _ = a.flush_delivery(card) => {}
+        _ = async {
+            loop {
+                let (stream, _) = bl.accept().await.unwrap();
+                let channel = b.privacy_accept(stream).await.unwrap();
+                assert_eq!(channel.peer_identity(), &a.identity.public());
+                drop(channel);
+                setup_eof.set(setup_eof.get() + 1);
+            }
+        } => unreachable!("the scoped authenticated-EOF responder does not return"),
+    }
+    assert_eq!(
+        setup_eof.get(),
+        2,
+        "both direct best-effort legs closed before the relay supplies the offer"
+    );
+    timing.phase("relay-file-drain-offer");
     b.drain_from_post_office().await;
     let offer = tokio::time::timeout(std::time::Duration::from_secs(5), offers.recv())
         .await
@@ -4211,6 +5448,7 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     assert_eq!(offer.file_conv, file);
     b.decide_attachment(file, true).unwrap();
 
+    timing.phase("relay-file-consent-exchange");
     let recipient_task = tokio::spawn(b.clone().run_accept_loop(bl));
     let recipient = a.routing_peer(&b.user_id()).unwrap();
     let mut channel = a
@@ -4274,18 +5512,22 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     )
     .unwrap();
     let outer_final = mailbox
-        .wrap(a.log.lock().unwrap().get(&final_chunk).unwrap())
+        .wrap(&a.log.lock().unwrap().get(&final_chunk).unwrap().unwrap())
         .unwrap()
         .id;
     // The immediate flush API is one bounded best-effort turn. Exercise the
     // retained production worker until the live fallback actually owns the bytes.
+    timing.phase("relay-file-closed-endpoint-fallback-custody");
     let worker = tokio::spawn(a.clone().run_delivery_loop());
-    let custody = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    // This asserts eventual exact custody, not a five-second latency contract.
+    // Windows can spend two seconds rejecting each closed loopback endpoint.
+    let custody = tokio::time::timeout(super::route_timing::MAX_AUTHENTICATION_DEADLINE, async {
         while !relay.lock().unwrap().has(&outer_final) {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await;
+    timing.phase("relay-file-custody-stop-worker");
     worker.abort();
     let _ = worker.await;
     assert!(
@@ -4302,6 +5544,7 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     );
     assert!(!relay.lock().unwrap().has(&final_chunk));
 
+    timing.phase("relay-file-recipient-drain");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             b.drain_from_post_office().await;
@@ -4316,8 +5559,10 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     })
     .await
     .unwrap();
+    timing.phase("relay-file-stop-relay");
     relay_task.abort();
     let _ = relay_task.await;
+    timing.finish();
 }
 
 /// Real LAN custody tests require the installed relay's signed device ID.
@@ -4469,7 +5714,7 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         .expect("recipient did not receive offline offer from installed relay")
         .expect("file offer channel closed");
     assert_eq!(offer.file_conv, file);
-    assert!(!b.file_ready_to_save(file));
+    assert!(!b.file_ready_to_save(file).unwrap());
     b.decide_attachment(file, true).unwrap();
 
     // Authenticate a live recipient's consent, then close their only listener.
@@ -4500,8 +5745,8 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
     drop(channel);
     bt.abort();
     let _ = bt.await;
-    assert!(!b.file_ready_to_save(file));
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(!b.file_ready_to_save(file).unwrap());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
 
     // Confirm every encrypted chunk at the relay before removing the only sender.
     // A best-effort flush turn alone is not a complete-upload barrier.
@@ -4524,8 +5769,9 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .map(|event| mailbox.wrap(event).unwrap().id)
+        .map(|event| mailbox.wrap(&event).unwrap().id)
         .collect::<Vec<_>>();
     assert!(!outer_chunks.is_empty());
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -4560,8 +5806,8 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         !a.outgoing_file_progress(card).unwrap().delivered,
         "relay custody must not claim recipient completion"
     );
-    assert!(!b.file_ready_to_save(file));
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(!b.file_ready_to_save(file).unwrap());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     drop(a);
 
     // The relay is restarted while it alone holds the bytes, then the recipient
@@ -4594,7 +5840,8 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
     .expect("installed relay did not redeliver complete file bytes after restart");
     assert_eq!(b.read_file(file).unwrap(), bytes);
     assert!(
-        !b.historical_file_completion(file, final_chunk, &ap.public()),
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap(),
         "recovered chunks alone must not record a verified save"
     );
     let destination = bd.path().join("recovered.bin");
@@ -4605,7 +5852,8 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         Sha256::digest(&bytes)
     );
     assert!(
-        b.historical_file_completion(file, final_chunk, &ap.public()),
+        b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap(),
         "verified save must retain exact-file completion while sender remains stopped"
     );
 }
@@ -4669,9 +5917,10 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     assert!(b.read_file(file).is_err());
     b.pull_pending_files().await;
     assert_eq!(b.read_media(file).unwrap(), bytes);
-    assert_eq!(b.file_progress(file).unwrap().done, 0);
-    assert!(b.file_ready_to_save(file));
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    let progress = b.file_progress(file).unwrap().unwrap();
+    assert!(progress.total > 0 && progress.done == progress.total);
+    assert!(b.file_ready_to_save(file).unwrap());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     assert!(
         a.delivery
             .lock()
@@ -4702,9 +5951,18 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     let (a, _) = node(ad.path(), alice, aa, &bp);
     let (b, _) = node(bd.path(), bob, bob_account, &ap);
     assert_eq!(b.read_media(file).unwrap(), bytes);
-    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
-    assert!(!b.historical_file_completion(file, EventId::new([1; 32]), &ap.public()));
-    assert!(!b.historical_file_completion(file, final_chunk, &DeviceIdentity::generate().public()));
+    assert!(
+        b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
+    assert!(
+        !b.historical_file_completion(file, EventId::new([1; 32]), &ap.public())
+            .unwrap()
+    );
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &DeviceIdentity::generate().public())
+            .unwrap()
+    );
     let exported = b.save_file_into_dir(file, bd.path()).unwrap();
     assert_eq!(std::fs::read(exported).unwrap(), bytes);
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
@@ -4719,11 +5977,11 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
             .is_none()
     );
     assert!(
-        b.log.lock().unwrap().events(&file).is_empty(),
+        b.log.lock().unwrap().events(&file).unwrap().is_empty(),
         "completed/pruned media must not be retransmitted and retained merely to satisfy exact final custody"
     );
     std::fs::remove_file(b.media.path(file).unwrap()).unwrap();
-    assert!(!b.file_ready_to_save(file));
+    assert!(!b.file_ready_to_save(file).unwrap());
 }
 
 async fn completed_file_fixture(
@@ -4769,8 +6027,8 @@ async fn completed_file_fixture(
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     let final_chunk = chunks.last().unwrap().id;
     for chunk in chunks {
@@ -4789,11 +6047,14 @@ async fn generic_save_completion_prunes_and_retires_without_second_transfer_but_
     let source_copy = ad.path().join("source-export.bin");
     a.save_file(file, &source_copy).unwrap();
     assert_eq!(std::fs::read(source_copy).unwrap(), bytes);
-    assert!(!a.log.lock().unwrap().events(&file).is_empty());
+    assert!(!a.log.lock().unwrap().events(&file).unwrap().is_empty());
     let exported = b.save_file_into_dir(file, bd.path()).unwrap();
     assert_eq!(std::fs::read(exported).unwrap(), bytes);
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
-    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
+    assert!(
+        b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proof = Announce::new_with_account(
         &b.identity,
@@ -4821,15 +6082,15 @@ async fn generic_save_completion_prunes_and_retires_without_second_transfer_but_
             .next_file_destination(None)
             .is_none()
     );
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
-    assert_eq!(b.file_progress(file).unwrap().done, 0);
-    assert!(!b.file_ready_to_save(file));
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
+    assert_eq!(b.file_progress(file).unwrap().unwrap().done, 0);
+    assert!(!b.file_ready_to_save(file).unwrap());
     // Local file-save proofs have no status authority: the queued card ACK is separate.
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     a.save_file(file, &ad.path().join("source-after-retirement.bin"))
         .unwrap();
     assert!(
-        a.log.lock().unwrap().events(&file).is_empty(),
+        a.log.lock().unwrap().events(&file).unwrap().is_empty(),
         "source chunks become reclaimable once all immutable fanout retires"
     );
 }
@@ -4843,7 +6104,10 @@ async fn save_and_completion_metadata_filesystem_failures_keep_chunks_and_no_his
     let blocked = bd.path().join("blocked");
     std::fs::write(&blocked, []).unwrap();
     assert!(b.save_file(file, &blocked.join("file.bin")).is_err());
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
     assert_eq!(b.read_file(file).unwrap(), bytes);
     let outbox = bd.path().join("events.log.delivery-outbox");
     let moved = bd.path().join("outbox-held");
@@ -4851,12 +6115,18 @@ async fn save_and_completion_metadata_filesystem_failures_keep_chunks_and_no_his
     let destination = bd.path().join("saved.bin");
     b.save_file(file, &destination).unwrap();
     assert_eq!(std::fs::read(destination).unwrap(), bytes);
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
     assert_eq!(b.read_file(file).unwrap(), bytes);
     std::fs::rename(moved, outbox).unwrap();
     b.save_file(file, &bd.path().join("saved-again.bin"))
         .unwrap();
-    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -4870,8 +6140,8 @@ async fn same_ciphertext_signed_by_wrong_chunk_author_cannot_create_completion_o
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     b.log.lock().unwrap().drop_conversation(&file).unwrap();
     let stranger = DeviceIdentity::generate();
@@ -4894,8 +6164,11 @@ async fn same_ciphertext_signed_by_wrong_chunk_author_cannot_create_completion_o
     assert_eq!(b.read_file(file).unwrap(), bytes);
     b.save_file(file, &bd.path().join("saved.bin")).unwrap();
     assert!(!b.has_verified_file_completion(file));
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
-    assert!(!b.log.lock().unwrap().events(&file).is_empty());
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
+    assert!(!b.log.lock().unwrap().events(&file).unwrap().is_empty());
 }
 
 fn size_mismatch_file_fixture(
@@ -4973,7 +6246,7 @@ fn size_mismatch_file_fixture(
     );
     let final_chunk = chunk.id;
     receiver.log.lock().unwrap().append_durable(chunk).unwrap();
-    assert_eq!(receiver.completion_candidates(file).len(), 1);
+    assert_eq!(receiver.completion_candidates(file).unwrap().len(), 1);
     (receiver, proof, file, final_chunk)
 }
 
@@ -4994,8 +6267,12 @@ fn initial_file_save_rejects_signed_content_shorter_or_longer_than_declared_size
             assert!(!directory.path().join("saved.bin.part").exists());
             assert!(receiver.read_file(file).is_err());
             assert!(!receiver.has_verified_file_completion(file));
-            assert!(!receiver.historical_file_completion(file, final_chunk, &proof.public()));
-            assert_eq!(receiver.log.lock().unwrap().events(&file).len(), 1);
+            assert!(
+                !receiver
+                    .historical_file_completion(file, final_chunk, &proof.public())
+                    .unwrap()
+            );
+            assert_eq!(receiver.log.lock().unwrap().events(&file).unwrap().len(), 1);
         }
     }
 }
@@ -5015,8 +6292,12 @@ fn initial_media_completion_rejects_signed_content_shorter_or_longer_than_declar
             assert!(receiver.read_file(file).is_err());
             assert!(!receiver.media.contains(file));
             assert!(!receiver.has_verified_file_completion(file));
-            assert!(!receiver.historical_file_completion(file, final_chunk, &proof.public()));
-            assert_eq!(receiver.log.lock().unwrap().events(&file).len(), 1);
+            assert!(
+                !receiver
+                    .historical_file_completion(file, final_chunk, &proof.public())
+                    .unwrap()
+            );
+            assert_eq!(receiver.log.lock().unwrap().events(&file).unwrap().len(), 1);
         }
     }
 }
@@ -5039,14 +6320,23 @@ async fn historical_completion_requires_current_exact_origin_and_owner_and_permi
         .await
         .unwrap();
     b.save_file(file, &bd.path().join("saved.bin")).unwrap();
-    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
     let mut wrong_x = ap.public();
     wrong_x.x25519_pub = [9; 32];
-    assert!(!b.historical_file_completion(file, final_chunk, &wrong_x));
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &wrong_x)
+            .unwrap()
+    );
     b.set_allowed(&ap.account_id().unwrap(), false)
         .await
         .unwrap();
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
     b.set_allowed(&ap.account_id().unwrap(), true)
         .await
         .unwrap();
@@ -5059,12 +6349,18 @@ async fn historical_completion_requires_current_exact_origin_and_owner_and_permi
     b.initiate_contact(&rebound_account.account_id())
         .await
         .unwrap();
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
     let account = Account::generate();
-    let owner = account.account_id();
     let keys = b.identity.secret_bytes();
-    b.persist_account_adoption(&owner, || Ok(())).unwrap();
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    b.persist_account_adoption(&account.public(), || Ok(()), || Ok(b.account.public()))
+        .unwrap();
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
     drop(b);
     let (b, _) = node(
         bd.path(),
@@ -5072,7 +6368,10 @@ async fn historical_completion_requires_current_exact_origin_and_owner_and_permi
         account,
         &ap,
     );
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -5107,22 +6406,28 @@ async fn completion_alias_erasure_keeps_other_alias_and_failed_row_cleanup_never
         2
     );
     b.delete_message(host, id, false).unwrap();
-    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
-    let row = b
-        .received_files
+    assert!(
+        b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
+    b.received_files
         .lock()
         .unwrap()
-        .entry(alias.id)
-        .unwrap()
-        .clone();
-    let sidecar = bd.path().join("alternate-sidecar");
-    let mut files = ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
-    files.record_durable(&row).unwrap();
-    *b.received_files.lock().unwrap() = files;
-    std::fs::create_dir(sidecar.join("files.compact-tmp")).unwrap();
+        .fail_appends_for_test(true)
+        .unwrap();
     assert!(b.delete_message(host, alias.id, false).is_err());
-    assert!(b.received_files.lock().unwrap().entry(alias.id).is_some());
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        b.received_files
+            .lock()
+            .unwrap()
+            .entry(alias.id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -5156,8 +6461,8 @@ async fn legacy_device_only_media_completion_qualifies_exact_origin_without_acco
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     let final_chunk = chunks.last().unwrap().id;
     for chunk in chunks {
@@ -5165,8 +6470,14 @@ async fn legacy_device_only_media_completion_qualifies_exact_origin_without_acco
     }
     assert!(b.persist_media_if_complete(file));
     assert_eq!(b.read_media(file).unwrap(), bytes);
-    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
-    assert!(!b.historical_file_completion(file, final_chunk, &DeviceIdentity::generate().public()));
+    assert!(
+        b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &DeviceIdentity::generate().public())
+            .unwrap()
+    );
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bp = Announce::new(&b.identity, "Bob", bl.local_addr().unwrap().port());
     a.roster
@@ -5189,14 +6500,17 @@ async fn legacy_device_only_media_completion_qualifies_exact_origin_without_acco
             .next_file_destination(None)
             .is_none()
     );
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     let rebound = Announce::new_with_account(&a.identity, &Account::generate(), "Alice", 9);
     b.roster
         .lock()
         .unwrap()
         .update(&rebound, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
     let own = Announce::new_with_account(&b.identity, &b.account, "Bob", 9);
     b.configure_privacy(
         bd.path(),
@@ -5206,7 +6520,51 @@ async fn legacy_device_only_media_completion_qualifies_exact_origin_without_acco
     )
     .unwrap();
     b.set_invisible(true).await.unwrap();
-    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public())
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn channel_media_source_keeps_signed_chunks_when_local_preview_completes() {
+    for sharing in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let other = DeviceIdentity::generate();
+        let proof = Announce::new(&other, "Other", 9);
+        let (sender, _) = node(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = sender
+            .create_channel("Photos", vec![other.public()])
+            .await
+            .unwrap();
+        if !sharing {
+            sender
+                .set_channel_replica_enabled(channel, false)
+                .await
+                .unwrap();
+        }
+        let bytes = [b"\x89PNG\r\n\x1a\n".as_slice(), &vec![3; 128 * 1024]].concat();
+        let path = dir.path().join("source.png");
+        std::fs::write(&path, &bytes).unwrap();
+        let file = sender
+            .send_file_channel(channel, &path, crate::file::FileKind::Media)
+            .await
+            .unwrap();
+        // An incoming file fingerprint is a handled sync frame and invokes
+        // this callback before the requester asks for its first chunk page.
+        sender.process_file_events(file);
+        assert_eq!(sender.read_media(file).unwrap(), bytes);
+        assert_eq!(
+            sender.file_progress(file).unwrap().unwrap().done,
+            crate::file::chunk_count_for(bytes.len() as u64),
+            "a local preview must not reclaim the source's signed channel photo before members fetch it; sharing={sharing}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -5229,21 +6587,22 @@ async fn untracked_channel_media_local_export_verifies_retained_row_and_managed_
         .await
         .unwrap();
     assert!(a.persist_media_if_complete(file));
-    assert!(a.log.lock().unwrap().events(&file).is_empty());
-    assert_eq!(a.file_progress(file).unwrap().done, 0);
-    assert!(a.file_ready_to_save(file));
+    assert!(a.log.lock().unwrap().events(&file).unwrap().is_empty());
+    let progress = a.file_progress(file).unwrap().unwrap();
+    assert!(progress.total > 0 && progress.done == progress.total);
+    assert!(a.file_ready_to_save(file).unwrap());
     assert!(!a.has_verified_file_completion(file));
     let exported = a.save_file_into_dir(file, dir.path()).unwrap();
     assert_eq!(std::fs::read(exported).unwrap(), bytes);
     let cached = a.media.path(file).unwrap();
     std::fs::write(&cached, b"wrong bytes").unwrap();
-    assert!(a.file_ready_to_save(file)); // A present eligible copy is attempted, then verified by save.
+    assert!(a.file_ready_to_save(file).unwrap()); // A present eligible copy is attempted, then verified by save.
     assert!(
         a.save_file(file, &dir.path().join("bad-export.png"))
             .is_err()
     );
     std::fs::remove_file(cached).unwrap();
-    assert!(!a.file_ready_to_save(file));
+    assert!(!a.file_ready_to_save(file).unwrap());
 }
 
 #[tokio::test]
@@ -5263,7 +6622,7 @@ async fn durable_enqueue_is_awaiting_without_transport_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    assert_eq!(a.account_history(&target, 10)[0].id, id);
+    assert_eq!(a.account_history(&target, 10).unwrap()[0].id, id);
     drop(a);
     let (a, _) = node(
         dir.path(),
@@ -5272,7 +6631,7 @@ async fn durable_enqueue_is_awaiting_without_transport_and_survives_restart() {
         &proof,
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    assert_eq!(a.account_history(&target, 10).len(), 1);
+    assert_eq!(a.account_history(&target, 10).unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -5311,7 +6670,7 @@ async fn actual_durable_receive_sends_control_receipt_without_chat_callback() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
-    assert_eq!(b.account_history(&own, 10)[0].text, b"confirmed");
+    assert_eq!(b.account_history(&own, 10).unwrap()[0].text, b"confirmed");
     for _ in 0..200 {
         if b.delivery.lock().unwrap().retry_receipts(1).is_empty() {
             break;
@@ -5337,7 +6696,7 @@ async fn actual_durable_receive_sends_control_receipt_without_chat_callback() {
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     let control = super::delivery_receipt::delivery_conversation_id(&ap.public(), &bp.public());
-    assert!(!a.log.lock().unwrap().events(&control).is_empty());
+    assert!(!a.log.lock().unwrap().events(&control).unwrap().is_empty());
     a.emit_new_messages(control);
     assert!(rx.try_recv().is_err());
 }
@@ -5390,6 +6749,7 @@ async fn malformed_routes_and_control_scopes_never_advance_live_ratchet_or_emit(
             .lock()
             .unwrap()
             .events(&scope)
+            .unwrap()
             .into_iter()
             .find(|e| e.seq == event)
             .unwrap()
@@ -5418,9 +6778,6 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
         Account::generate(),
         &proof,
     );
-    let sidecar_dir = dir.path().join("sidecar");
-    *a.sentlog.lock().unwrap() =
-        super::sentlog::SentLog::open(&sidecar_dir.join("sent"), "pw").unwrap();
     a.sentlog
         .lock()
         .unwrap()
@@ -5431,17 +6788,23 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
         .await
         .unwrap();
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    assert_eq!(a.account_history(&target, 10).len(), 1);
-    assert_eq!(a.account_history(&target, 10)[0].id, id);
-    assert_eq!(a.account_history(&target, 10)[0].text, b"accepted once");
+    assert_eq!(a.account_history(&target, 10).unwrap().len(), 1);
+    assert_eq!(a.account_history(&target, 10).unwrap()[0].id, id);
+    assert_eq!(
+        a.account_history(&target, 10).unwrap()[0].text,
+        b"accepted once"
+    );
     let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
     let conv = super::conversation::dm_conversation_id(&a.identity.public(), &bob.public());
-    let versions = a.log.lock().unwrap().version_vector(&conv);
+    let versions = a.log.lock().unwrap().version_vector(&conv).unwrap();
     assert!(
         a.append_event(conv, crate::eventlog::EventKind::React, vec![2])
             .is_err()
     );
-    assert_eq!(a.log.lock().unwrap().version_vector(&conv), versions);
+    assert_eq!(
+        a.log.lock().unwrap().version_vector(&conv).unwrap(),
+        versions
+    );
     assert!(
         a.enqueue_to_account(&target, b"must wait", None)
             .await
@@ -5469,11 +6832,11 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
     .unwrap();
     worker.abort();
     let _ = worker.await;
-    assert_eq!(a.account_history(&target, 10).len(), 1);
+    assert_eq!(a.account_history(&target, 10).unwrap().len(), 1);
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     assert_eq!(a.delete_account_message(&target, id).unwrap(), 1);
     assert_eq!(a.delivery_status(id), None);
-    assert!(a.account_history(&target, 10).is_empty());
+    assert!(a.account_history(&target, 10).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -5498,7 +6861,11 @@ async fn oversized_enqueue_rejects_before_durable_ratchet_or_history() {
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         sessions
     );
-    assert!(a.account_history(&bob_account.account_id(), 10).is_empty());
+    assert!(
+        a.account_history(&bob_account.account_id(), 10)
+            .unwrap()
+            .is_empty()
+    );
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
 }
 
@@ -5520,15 +6887,19 @@ async fn failed_account_save_preserves_queue_and_successful_adoption_suspends_ol
     let blocked_keystore = dir.path().join("blocked.keystore");
     std::fs::create_dir(&blocked_keystore).unwrap();
     assert!(
-        a.persist_account_adoption(&new_account.account_id(), || {
-            crate::identity::account_keystore::save(&blocked_keystore, "pw", &new_account)
-                .map_err(|e| NodeError::Channel(e.to_string()))
-        })
+        a.persist_account_adoption(
+            &new_account.public(),
+            || {
+                crate::identity::account_keystore::save(&blocked_keystore, "pw", &new_account)
+                    .map_err(|e| NodeError::Channel(e.to_string()))
+            },
+            || Ok(a.account.public())
+        )
         .is_err()
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     assert_eq!(a.delivery.lock().unwrap().retry_messages(10).len(), 1);
-    a.persist_account_adoption(&new_account.account_id(), || Ok(()))
+    a.persist_account_adoption(&new_account.public(), || Ok(()), || Ok(a.account.public()))
         .unwrap();
     assert!(
         a.enqueue_to_account(&bob_account.account_id(), b"old runtime must stop", None)
@@ -5596,7 +6967,10 @@ async fn adoption_marker_before_account_save_reopens_old_queue_and_unmarked_none
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     assert_eq!(a.delivery.lock().unwrap().retry_messages(8).len(), 1);
-    assert_eq!(a.account_history(&bob_account.account_id(), 8)[0].id, id);
+    assert_eq!(
+        a.account_history(&bob_account.account_id(), 8).unwrap()[0].id,
+        id
+    );
     assert!(
         a.delivery
             .lock()
@@ -5685,8 +7059,6 @@ async fn receiver_write_failure_keeps_plaintext_intent_until_restart_and_no_earl
         .event
         .clone();
     b.log.lock().unwrap().append_durable(event.clone()).unwrap();
-    let sidecar = bd.path().join("sidecar");
-    *b.received.lock().unwrap() = ReceivedLog::open(&sidecar.join("received"), "pw").unwrap();
     b.received
         .lock()
         .unwrap()
@@ -5709,7 +7081,7 @@ async fn receiver_write_failure_keeps_plaintext_intent_until_restart_and_no_earl
         &ap,
     );
     assert_eq!(
-        b.account_history(&a.account_id(), 10)[0].text,
+        b.account_history(&a.account_id(), 10).unwrap()[0].text,
         b"recover recipient"
     );
     assert_eq!(b.delivery.lock().unwrap().retry_receipts(10).len(), 1);
@@ -5921,7 +7293,7 @@ async fn queued_private_file_work_stops_on_permission_revoke_and_exact_account_r
     a.flush_delivery(id).await;
     a.flush_file_delivery(id).await;
     assert!(files.try_recv().is_err());
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     a.initiate_contact_locally(&b.account_id()).await.unwrap();
     let new_account = Account::generate();
@@ -5941,7 +7313,7 @@ async fn queued_private_file_work_stops_on_permission_revoke_and_exact_account_r
     a.flush_delivery(id).await;
     a.flush_file_delivery(id).await;
     assert!(files.try_recv().is_err());
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     assert!(
         a.delivery
@@ -6040,10 +7412,22 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     assert_eq!(a.delivery_status(second), Some(DeliveryStatus::Delivered));
     let stale_bp = bp.clone();
     let adopted = Account::generate();
-    b.persist_account_adoption(&adopted.account_id(), || {
-        crate::identity::account_keystore::save(&bd.path().join("account.keystore"), "pw", &adopted)
+    b.persist_account_adoption(
+        &adopted.public(),
+        || {
+            crate::identity::account_keystore::save(
+                &bd.path().join("account.keystore"),
+                "pw",
+                &adopted,
+            )
             .map_err(|e| NodeError::Channel(e.to_string()))
-    })
+        },
+        || {
+            crate::identity::account_keystore::load(&bd.path().join("account.keystore"), "pw")
+                .map(|account| account.public())
+                .map_err(|e| NodeError::Channel(e.to_string()))
+        },
+    )
     .unwrap();
     bt.abort();
     let _ = bt.await;
@@ -6199,22 +7583,26 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
         confirmations: Arc<AtomicUsize>,
     }
     impl SyncStore for ObservedRelay {
-        fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
-            let held = self.inner.durable_have(conversation, id);
+        fn durable_have(
+            &self,
+            conversation: &ConversationId,
+            id: &EventId,
+        ) -> Result<bool, LogError> {
+            let held = self.inner.durable_have(conversation, id)?;
             if held && let Some(file) = self.final_chunks.lock().unwrap().get(id) {
                 self.confirmed_files.lock().unwrap().insert(*file);
                 self.confirmations.fetch_add(1, Ordering::SeqCst);
             }
-            held
+            Ok(held)
         }
-        fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+        fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
             self.inner.event_ids(conversation)
         }
         fn events_excluding(
             &self,
             conversation: &ConversationId,
             have: &std::collections::HashSet<EventId>,
-        ) -> Vec<crate::eventlog::Event> {
+        ) -> Result<Vec<crate::eventlog::Event>, LogError> {
             self.inner.events_excluding(conversation, have)
         }
         fn ingest(
@@ -6336,7 +7724,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
                 .unwrap()
                 .final_chunk
                 .unwrap();
-            a.log.lock().unwrap().get(&id).unwrap().clone()
+            a.log.lock().unwrap().get(&id).unwrap().unwrap().clone()
         };
         for mailbox in [
             crate::postoffice::opaque::RelayMailbox::new(
@@ -6381,7 +7769,8 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
         );
         assert!(
             files.iter().all(|(_, file, _, b)| {
-                !b.file_ready_to_save(*file) && b.log.lock().unwrap().events(file).is_empty()
+                !b.file_ready_to_save(*file).unwrap()
+                    && b.log.lock().unwrap().events(file).unwrap().is_empty()
             }),
             "recipient must remain without chunks until all relay custody is confirmed"
         );
@@ -6392,7 +7781,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
             }
             if files
                 .iter()
-                .all(|(_, file, _, recipient)| recipient.file_ready_to_save(*file))
+                .all(|(_, file, _, recipient)| recipient.file_ready_to_save(*file).unwrap())
             {
                 break;
             }
@@ -6420,7 +7809,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
         files.len(),
         files
             .iter()
-            .filter(|(_, file, _, recipient)| recipient.file_ready_to_save(*file))
+            .filter(|(_, file, _, recipient)| recipient.file_ready_to_save(*file).unwrap())
             .count(),
         files.len(),
         recipient_drains,
@@ -6509,6 +7898,7 @@ async fn retained_relay_file_exchange_rechecks_signed_consent_and_relay_role() {
             .lock()
             .unwrap()
             .get(&card.final_chunk.unwrap())
+            .unwrap()
             .unwrap()
             .clone();
         let outer = crate::postoffice::opaque::RelayMailbox::new(
@@ -6677,6 +8067,7 @@ async fn outgoing_channel_request_is_guarded_and_shared_with_ordinary_sends() {
             .lock()
             .unwrap()
             .events(&channel)
+            .unwrap()
             .iter()
             .filter(|e| e.kind == crate::eventlog::EventKind::Message)
             .count(),
@@ -6709,10 +8100,10 @@ async fn outgoing_request_concurrent_retry_and_revocation_do_not_advance_ratchet
     let (one, two) = (one.unwrap(), two.unwrap());
     assert_eq!(one.message_id, two.message_id);
     assert_ne!(one.duplicate, two.duplicate);
-    let conversations = sender.log.lock().unwrap().conversations();
+    let conversations = sender.log.lock().unwrap().conversations().unwrap();
     let before = conversations
         .iter()
-        .map(|conv| sender.log.lock().unwrap().events(conv).len())
+        .map(|conv| sender.log.lock().unwrap().events(conv).unwrap().len())
         .sum::<usize>();
     let mut denied = request.clone();
     denied.request_id = [45; 32];
@@ -6733,10 +8124,10 @@ async fn outgoing_request_concurrent_retry_and_revocation_do_not_advance_ratchet
             .unwrap()
             .is_none()
     );
-    let conversations = sender.log.lock().unwrap().conversations();
+    let conversations = sender.log.lock().unwrap().conversations().unwrap();
     let after = conversations
         .iter()
-        .map(|conv| sender.log.lock().unwrap().events(conv).len())
+        .map(|conv| sender.log.lock().unwrap().events(conv).unwrap().len())
         .sum::<usize>();
     assert_eq!(before, after);
 }
@@ -6815,6 +8206,7 @@ async fn outgoing_channel_request_recovers_after_durable_acceptance_and_sidecar_
     let log = sender.log.lock().unwrap();
     let messages: Vec<_> = log
         .events(&channel)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == crate::eventlog::EventKind::Message)
         .collect();
@@ -6950,7 +8342,8 @@ async fn received_manifest_stays_saveable_after_reseed_and_restart() {
             b.log.lock().unwrap().append_durable(chunk).unwrap();
         }
         assert_eq!(b.read_file(file).unwrap(), payload);
-        b.reseed_live_file_book(&b.delivery.lock().unwrap());
+        b.reseed_live_file_book(&b.delivery.lock().unwrap())
+            .unwrap();
         assert_eq!(b.read_file(file).unwrap(), payload);
         drop(b);
         let (b, _, _) = node_with_files(
@@ -6964,6 +8357,98 @@ async fn received_manifest_stays_saveable_after_reseed_and_restart() {
         assert_eq!(
             std::fs::read(dir.path().join("saved.mov")).unwrap(),
             payload
+        );
+    }
+}
+
+#[test]
+fn indexed_file_runtime_warm_open_does_not_hydrate_retained_manifest_history() {
+    use crate::eventlog::{Event, EventKind};
+    for count in [8u8, 80] {
+        let directory = tempfile::tempdir().unwrap();
+        let sender = DeviceIdentity::generate();
+        let sender_account = Account::generate();
+        let announce = Announce::new_with_account(&sender, &sender_account, "Sender", 9);
+        let identity = DeviceIdentity::generate();
+        let secret = identity.secret_bytes();
+        let account = Account::generate();
+        let account_secret = account.secret_bytes();
+        let (receiver, _, _files) = node_with_files(directory.path(), identity, account, &announce);
+        let conversation =
+            super::conversation::dm_conversation_id(&sender.public(), &receiver.identity.public());
+        let mut parent = None;
+        for n in 1..=count {
+            let manifest = crate::file::FileManifest {
+                name: format!("retained-{n}.txt"),
+                size: 0,
+                mime: "text/plain".into(),
+                checksum: crate::file::file_checksum(&[]),
+                file_key: [6; 32],
+                file_conv: ConversationId::new([n; 32]),
+                chunk_count: 1,
+            };
+            let event = Event::new(
+                &sender,
+                conversation,
+                u64::from(n),
+                parent.into_iter().collect(),
+                u64::from(n),
+                100,
+                EventKind::FileManifest,
+                crate::dm::seal(
+                    &sender,
+                    &receiver.identity.public().x25519_pub,
+                    &manifest.encode(),
+                )
+                .unwrap(),
+            );
+            parent = Some(event.id);
+            receiver.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        receiver.process_file_events(conversation);
+        let host = super::conversation::account_conversation_id(
+            &receiver.account_id(),
+            &sender_account.account_id(),
+        );
+        assert_eq!(
+            receiver
+                .received_files
+                .lock()
+                .unwrap()
+                .entries_ref(&host)
+                .len(),
+            usize::from(count)
+        );
+        drop(receiver);
+        let (reopened, _, _) = node_with_files(
+            directory.path(),
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            Account::from_secret_bytes(account_secret),
+            &announce,
+        );
+        assert_eq!(
+            reopened.received_files.lock().unwrap().body_reads(),
+            0,
+            "warm startup must use file eligibility and pending-work metadata for {count} retained cards"
+        );
+        let before = reopened
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        reopened.process_file_events(conversation);
+        assert_eq!(
+            reopened
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before,
+            "unchanged file receive turns must not load {count} processed signed manifests"
         );
     }
 }
@@ -7020,20 +8505,24 @@ fn expired_received_attachment_loses_readiness_after_cleanup() {
         crate::file::seal_chunk(&key, payload).unwrap(),
     );
     b.log.lock().unwrap().append_durable(chunk).unwrap();
-    assert!(b.file_ready_to_save(file));
+    assert!(b.file_ready_to_save(file).unwrap());
     assert_eq!(b.read_file(file).unwrap(), payload);
     b.expiry_first_seen.lock().unwrap().insert(
         event.id,
         std::time::Instant::now() - std::time::Duration::from_secs(301),
     );
-    assert!(!b.file_ready_to_save(file));
+    assert!(!b.file_ready_to_save(file).unwrap());
     let output = dir.path().join("expired.mov");
     assert!(
         matches!(b.save_file(file, &output), Err(NodeError::File(reason)) if reason == "file expired")
     );
     assert_eq!(b.prune_expired_received().unwrap(), 1);
-    assert!(!b.file_ready_to_save(file));
-    assert!(b.account_history(&account.account_id(), 10).is_empty());
+    assert!(!b.file_ready_to_save(file).unwrap());
+    assert!(
+        b.account_history(&account.account_id(), 10)
+            .unwrap()
+            .is_empty()
+    );
     // Cleanup deliberately erases the plaintext manifest and its deadline. A stale UI
     // must refresh readiness rather than offering Save based on the previous result.
     assert!(
@@ -7398,6 +8887,444 @@ async fn authenticated_silent_preferred_relay_does_not_block_upload_or_drain_fal
 }
 
 #[tokio::test]
+async fn healthy_relay_receive_cadence_is_independent_of_unrelated_silent_relay() {
+    relay_receive_cadence_fixture(false, RelayReceiveReset::None).await;
+}
+
+#[tokio::test]
+async fn healthy_relay_receive_cadence_preserves_slow_alternative_during_roster_churn() {
+    relay_receive_cadence_fixture(true, RelayReceiveReset::None).await;
+}
+
+#[tokio::test]
+async fn receive_worker_network_reset_cancels_active_exchange_and_recovers() {
+    relay_receive_cadence_fixture(false, RelayReceiveReset::Network).await;
+}
+
+#[tokio::test]
+async fn receive_worker_permission_change_cancels_active_exchange_and_recovers() {
+    relay_receive_cadence_fixture(false, RelayReceiveReset::Permission).await;
+}
+
+#[tokio::test]
+async fn receive_worker_master_change_cancels_active_exchange_and_recovers() {
+    relay_receive_cadence_fixture(false, RelayReceiveReset::Master).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelayReceiveReset {
+    None,
+    Network,
+    Permission,
+    Master,
+}
+
+async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: RelayReceiveReset) {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let relay_dir = tempfile::tempdir().unwrap();
+    let alternative_dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob_account = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
+    let (a, _) = node(source.path(), alice, aa, &bp);
+    let (b, mut inbox) = node(target.path(), bob, bob_account, &ap);
+    b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+    let silent = DeviceIdentity::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_proof =
+        Announce::new_post_office(&silent, "Silent", listener.local_addr().unwrap().port());
+    let keys = silent.secret_bytes();
+    let alternate_store = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(
+            &alternative_dir.path().join("relay"),
+            "pw",
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        )
+        .unwrap(),
+    ));
+    let slow_recipient = b.identity.public();
+    let (authenticated, mut silent_ready) = mpsc::unbounded_channel();
+    let silent_task = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let keys = silent.secret_bytes();
+                    let authenticated = authenticated.clone();
+                    let alternate_store = alternate_store.clone();
+                    let slow_recipient = slow_recipient.clone();
+                    connections.spawn(async move {
+                        let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                        let channel = super::transport::secure_accept(stream, &identity).await.unwrap();
+                        if channel.peer_identity() == &slow_recipient {
+                            let _ = authenticated.send(());
+                            if progressing_alternative {
+                                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                        super::postbox::serve_relay_connection(channel, alternate_store).await;
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    // Rank synthetic churn offices ahead of the healthy office when its moved
+    // endpoint is cold and the policy reset creates a fresh schedule. Held
+    // listeners make their unresponsiveness deterministic instead of relying on
+    // platform-specific refusal of ports 9/10.
+    let mut identities = std::array::from_fn::<_, 3, _>(|_| DeviceIdentity::generate());
+    identities.sort_by_key(DeviceIdentity::user_id);
+    let [first_churn, second_churn, live] = identities;
+    let mut churn_offices = Vec::new();
+    let mut churn_listeners = Vec::new();
+    if progressing_alternative {
+        for identity in [first_churn, second_churn] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            churn_offices.push(Announce::new_post_office(
+                &identity,
+                "Synthetic unrelated office",
+                listener.local_addr().unwrap().port(),
+            ));
+            churn_listeners.push(listener);
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let live_proof =
+        Announce::new_post_office(&live, "Healthy", listener.local_addr().unwrap().port());
+    let keys = live.secret_bytes();
+    let relay = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(&relay_dir.path().join("relay"), "pw", live).unwrap(),
+    ));
+    let replacement_store = relay.clone();
+    let (completed, mut rounds) = mpsc::unbounded_channel();
+    let recipient = b.identity.public();
+    let live_task = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let relay = relay.clone();
+                    let completed = completed.clone();
+                    let recipient = recipient.clone();
+                    connections.spawn(async move {
+                        let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                        let mut channel = super::transport::secure_accept(stream, &identity).await.unwrap();
+                        while let Ok(super::session::Served::Handled(_)) = super::session::serve_one(&mut channel, &relay).await {
+                            if channel.peer_identity() == &recipient {
+                                let _ = completed.send(());
+                            }
+                        }
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    for participant in [&a, &b] {
+        for proof in [&silent_proof, &live_proof] {
+            participant.roster.lock().unwrap().update(
+                proof,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &participant.user_id(),
+            );
+        }
+    }
+    b.set_bridge_hub_id(Some(&silent_proof.user_id)).unwrap();
+    let worker = tokio::spawn(b.clone().run_post_office_drains());
+    tokio::time::timeout(std::time::Duration::from_secs(2), silent_ready.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let slow_started = tokio::time::Instant::now();
+    tokio::time::timeout(std::time::Duration::from_secs(2), rounds.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    if reset != RelayReceiveReset::None {
+        if reset == RelayReceiveReset::Network {
+            // Only the network event can cancel this still-active socket;
+            // deliberately avoid policy notification and generation changes.
+            b.post_office_receive_enabled
+                .store(false, std::sync::atomic::Ordering::Release);
+            b.sessions.clear();
+        }
+        let capacity = || {
+            (0..super::session_pool::MAX_DIRECTION_CONNECTIONS)
+                .map(|_| b.sessions.try_outbound())
+                .collect::<Option<Vec<_>>>()
+        };
+        assert!(
+            capacity().is_none(),
+            "an authenticated silent exchange must still own TCP capacity before reset"
+        );
+        match reset {
+            RelayReceiveReset::Network => b
+                .network_changes
+                .send_modify(|revision| *revision = revision.wrapping_add(1)),
+            RelayReceiveReset::Permission => b.set_post_office_permissions(true, false),
+            RelayReceiveReset::Master => b.set_post_office_enabled(false),
+            RelayReceiveReset::None => unreachable!(),
+        }
+        let released = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(permits) = capacity() {
+                    break permits;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("receive reset must promptly drop the active exchange and all its permits");
+        drop(released);
+        while rounds.try_recv().is_ok() {}
+        match reset {
+            RelayReceiveReset::Network => {
+                b.post_office_receive_enabled
+                    .store(true, std::sync::atomic::Ordering::Release);
+                b.network_changes
+                    .send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
+            RelayReceiveReset::Permission => b.set_post_office_permissions(true, true),
+            RelayReceiveReset::Master => b.set_post_office_enabled(true),
+            RelayReceiveReset::None => unreachable!(),
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), rounds.recv())
+            .await
+            .expect("receive reset must resume healthy office pulls")
+            .unwrap();
+    }
+    if progressing_alternative {
+        // Neither a timestamp heartbeat nor an unrelated new relay may restart
+        // the valid four-second exchange already running on the alternative.
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&live_proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+        let unrelated = &churn_offices[0];
+        b.roster
+            .lock()
+            .unwrap()
+            .update(unrelated, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    }
+    let mut delayed_churn = if progressing_alternative {
+        let recipient = b.clone();
+        let unrelated = churn_offices[1].clone();
+        Some(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            recipient.roster.lock().unwrap().update(
+                &unrelated,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &recipient.user_id(),
+            );
+        }))
+    } else {
+        None
+    };
+    // The healthy mailbox was empty when the receive worker last pulled it.
+    // Publish only now, while the unrelated authenticated relay stays silent.
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"arrived after the empty pull", None)
+        .await
+        .unwrap();
+    let destination = a.delivery.lock().unwrap().message(id).unwrap().destinations[0].clone();
+    let mut upload = a
+        .privacy_sync_dial(
+            std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), live_proof.tcp_port),
+            &live_proof.public(),
+        )
+        .await
+        .unwrap();
+    let uploaded = a
+        .opaque_relay_round(
+            &mut upload,
+            &b.identity.public(),
+            Some(destination.event.conversation_id),
+        )
+        .await
+        .unwrap();
+    assert!(
+        uploaded
+            .iter()
+            .any(|(inner, _)| *inner == destination.event.id),
+        "the synthetic DM must actually reach relay custody before measuring receive latency"
+    );
+    drop(upload);
+    let slow_id = if progressing_alternative {
+        let id = a
+            .enqueue_to_account(&b.account_id(), b"held only by the slow alternative", None)
+            .await
+            .unwrap();
+        let destination = a.delivery.lock().unwrap().message(id).unwrap().destinations[0].clone();
+        let mut channel = a
+            .privacy_sync_dial(
+                std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), silent_proof.tcp_port),
+                &silent_proof.public(),
+            )
+            .await
+            .unwrap();
+        let uploaded = a
+            .opaque_relay_round(
+                &mut channel,
+                &b.identity.public(),
+                Some(destination.event.conversation_id),
+            )
+            .await
+            .unwrap();
+        assert!(
+            uploaded
+                .iter()
+                .any(|(inner, _)| *inner == destination.event.id)
+        );
+        Some(id)
+    } else {
+        None
+    };
+    let received = tokio::time::timeout(std::time::Duration::from_secs(4), inbox.recv()).await;
+    let slow_received = if slow_id.is_some() {
+        Some(
+            tokio::time::timeout_at(
+                slow_started + std::time::Duration::from_secs(5),
+                inbox.recv(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+
+    let replacement_task = if progressing_alternative {
+        // The cadence/churn phase is complete. Join its producer before retiring
+        // only its synthetic offices so it cannot reinsert one during the
+        // independent endpoint/policy-reset phase. A fresh schedule has no learned
+        // primary for the moved endpoint; unrelated blackholes must not turn this
+        // assertion into an OS-specific connection-failure timing test.
+        if let Some(task) = delayed_churn.take() {
+            task.await.unwrap();
+        }
+        {
+            let mut roster = b.roster.lock().unwrap();
+            for office in &churn_offices {
+                roster.forget(&office.public());
+            }
+        }
+        drop(churn_listeners);
+        // Move this same authenticated office to a new endpoint while receive
+        // permission is suspended, then prove the owned worker resumes there.
+        b.set_post_office_permissions(true, false);
+        let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let replacement = Announce::new_post_office(
+            &identity,
+            "Moved healthy office",
+            listener.local_addr().unwrap().port(),
+        );
+        let task = tokio::spawn(super::postbox::run_relay_accept_loop(
+            identity,
+            listener,
+            replacement_store,
+        ));
+        for participant in [&a, &b] {
+            participant.roster.lock().unwrap().update(
+                &replacement,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &participant.user_id(),
+            );
+        }
+        let id = a
+            .enqueue_to_account(&b.account_id(), b"after endpoint and policy change", None)
+            .await
+            .unwrap();
+        let destination = a.delivery.lock().unwrap().message(id).unwrap().destinations[0].clone();
+        let mut channel = a
+            .privacy_sync_dial(
+                std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), replacement.tcp_port),
+                &replacement.public(),
+            )
+            .await
+            .unwrap();
+        let uploaded = a
+            .opaque_relay_round(
+                &mut channel,
+                &b.identity.public(),
+                Some(destination.event.conversation_id),
+            )
+            .await
+            .unwrap();
+        assert!(
+            uploaded
+                .iter()
+                .any(|(inner, _)| *inner == destination.event.id)
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(4), inbox.recv())
+                .await
+                .is_err(),
+            "suspended receive permission must prevent polling the newly populated office"
+        );
+        b.set_post_office_permissions(true, true);
+        let received = tokio::time::timeout(std::time::Duration::from_secs(4), inbox.recv())
+            .await
+            .expect("resuming receive permission must use the office's new endpoint")
+            .unwrap();
+        assert_eq!(received.message_id, Some(id));
+        assert_eq!(received.text, b"after endpoint and policy change");
+        Some(task)
+    } else {
+        None
+    };
+    worker.abort();
+    if let Some(task) = delayed_churn {
+        task.abort();
+        let _ = task.await;
+    }
+    silent_task.abort();
+    live_task.abort();
+    let _ = worker.await;
+    let _ = silent_task.await;
+    let _ = live_task.await;
+    if let Some(task) = replacement_task {
+        task.abort();
+        let _ = task.await;
+    }
+    assert!(
+        received.is_ok(),
+        "a healthy empty pull must be repeated on its own three-second cadence while another relay stalls"
+    );
+    let received = received.unwrap().unwrap();
+    assert_eq!(received.message_id, Some(id));
+    assert_eq!(received.text, b"arrived after the empty pull");
+    if let Some(id) = slow_id {
+        let received = slow_received.unwrap().expect("a valid slow alternative must finish despite healthy polls and unrelated roster churn").unwrap();
+        assert_eq!(received.message_id, Some(id));
+        assert_eq!(received.text, b"held only by the slow alternative");
+        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    }
+    let capacity: Vec<_> = (0..super::session_pool::MAX_DIRECTION_CONNECTIONS)
+        .map(|_| {
+            b.sessions
+                .try_outbound()
+                .expect("retiring the receive worker releases every active socket")
+        })
+        .collect();
+    drop(capacity);
+    assert_eq!(
+        a.delivery_status(id),
+        Some(DeliveryStatus::Awaiting),
+        "upload custody alone cannot confirm recipient delivery"
+    );
+}
+
+#[tokio::test]
 async fn failed_media_persistence_remains_pending_until_storage_recovers() {
     let source = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
@@ -7408,14 +9335,14 @@ async fn failed_media_persistence_remains_pending_until_storage_recovers() {
     std::fs::create_dir(&destination).unwrap();
     b.pull_pending_files().await;
     assert!(
-        b.pending_files.lock().unwrap().contains(&file),
+        b.files.lock().unwrap().pending_for_test(file),
         "completed chunks do not erase a failed durable media write from recovery"
     );
     assert!(!b.media.contains(file));
     std::fs::remove_dir(&destination).unwrap();
     b.pull_pending_files().await;
     assert!(b.media.contains(file));
-    assert!(!b.pending_files.lock().unwrap().contains(&file));
+    assert!(!b.files.lock().unwrap().pending_for_test(file));
     assert_eq!(b.read_media(file).unwrap(), bytes);
 }
 
@@ -7433,13 +9360,13 @@ async fn failed_media_completion_metadata_keeps_durable_bytes_pending() {
     assert!(b.media.contains(file));
     assert!(!b.has_verified_file_completion(file));
     assert!(
-        b.pending_files.lock().unwrap().contains(&file),
+        b.files.lock().unwrap().pending_for_test(file),
         "bytes alone cannot retire pending durable completion metadata"
     );
     std::fs::rename(&held, &outbox).unwrap();
     b.pull_pending_files().await;
     assert!(b.has_verified_file_completion(file));
-    assert!(!b.pending_files.lock().unwrap().contains(&file));
+    assert!(!b.files.lock().unwrap().pending_for_test(file));
     assert_eq!(b.read_media(file).unwrap(), bytes);
 }
 
@@ -7863,6 +9790,14 @@ async fn delivery_observation_tracks_exact_worker_retry_and_cancellation() {
     .await
     .unwrap();
     assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    assert_eq!(
+        sender.account_delivery_observations(&account, &[id])[0]
+            .2
+            .unwrap()
+            .reason,
+        None,
+        "a refused connection must not be relabeled as a timeout"
+    );
     worker.abort();
     let _ = worker.await;
     assert!(
@@ -8158,4 +10093,696 @@ async fn delivery_observation_cancelled_before_first_poll_releases_exact_hint() 
             .2
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn delivery_observation_worker_reports_local_route_policy_and_clears_stale_reasons() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let account = Account::generate();
+    let proof = Announce::new_with_account(&remote, &account, "Recipient", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let id = sender
+        .enqueue_to_account(&account.account_id(), b"recover locally", None)
+        .await
+        .unwrap();
+    sender.roster.lock().unwrap().forget(&remote.public());
+    for (enabled, send, expected) in [
+        (true, true, DeliveryRecoveryReason::NoKnownRoute),
+        (false, true, DeliveryRecoveryReason::PostOfficeDisabled),
+        (true, false, DeliveryRecoveryReason::PostOfficeDisabled),
+    ] {
+        sender.set_post_office_enabled(enabled);
+        sender.set_post_office_permissions(send, true);
+        let worker = tokio::spawn(sender.clone().run_delivery_loop());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if sender.account_delivery_observations(&account.account_id(), &[id])[0]
+                    .2
+                    .is_some_and(|o| o.reason == Some(expected))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("worker must publish its locally evidenced recovery reason");
+        // A direction-policy generation change must invalidate even a retained reason.
+        sender.set_post_office_permissions(false, false);
+        assert!(
+            sender.account_delivery_observations(&account.account_id(), &[id])[0]
+                .2
+                .is_none()
+        );
+        worker.abort();
+        let _ = worker.await;
+        sender.set_post_office_permissions(true, true);
+        assert!(
+            sender.account_delivery_observations(&account.account_id(), &[id])[0]
+                .2
+                .is_none()
+        );
+    }
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+}
+
+#[tokio::test]
+async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout() {
+    use std::time::Duration;
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let alice_account = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_announce = Announce::new_with_account(&alice, &alice_account, "Alice", 9);
+    let bob_announce = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(source.path(), alice, alice_account, &bob_announce);
+    let (receiver, _) = node(target.path(), bob, bob_account, &alice_announce);
+    sender.set_post_office_enabled(false);
+    let id = sender
+        .enqueue_to_account(
+            &receiver.account_id(),
+            b"wait for authenticated exchange",
+            None,
+        )
+        .await
+        .unwrap();
+    let (authenticated, ready) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut channel = receiver.privacy_accept(stream).await.unwrap();
+        // Wait for the sender's request so its authenticated exchange is active
+        // before advancing the clock. Keep the socket open without replying.
+        let _request = channel.recv().await.unwrap();
+        authenticated.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let worker = tokio::spawn(sender.clone().run_delivery_loop());
+    tokio::time::timeout(Duration::from_secs(3), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id]);
+    assert_eq!(
+        snapshot[0].2.unwrap().reason,
+        None,
+        "disabled relaying is not blamed when a direct route exists"
+    );
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(70)).await;
+    // The loop can still be awaiting its spawn_blocking store snapshot. A fixed
+    // number of yields does not give that thread a bounded chance to complete.
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id])[0]
+                .2
+                .is_some_and(|o| o.reason == Some(DeliveryRecoveryReason::AttemptTimedOut))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("worker must publish the observed exchange timeout");
+    assert_eq!(
+        sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id])[0]
+            .2
+            .unwrap()
+            .reason,
+        Some(DeliveryRecoveryReason::AttemptTimedOut)
+    );
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+}
+
+async fn external_recipient_delivery_after_sibling_archive(cached_prior_binding: bool) {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let cd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let sibling = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let account = Account::generate();
+    let shared_secret = account.secret_bytes();
+    let bob_account = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_address = bl.local_addr().unwrap();
+    let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &account, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", recipient_address.port());
+    let cp = Announce::new_with_account(
+        &sibling,
+        &account,
+        "Alice sibling",
+        cl.local_addr().unwrap().port(),
+    );
+    let prior_account = Account::generate();
+    let prior_sender =
+        Announce::new_with_account(&alice, &prior_account, "Before adoption", ap.tcp_port);
+    let (a, _) = node(ad.path(), alice, account, &bp);
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let (b, mut recipient_messages) = node(
+        bd.path(),
+        bob,
+        bob_account,
+        if cached_prior_binding {
+            &prior_sender
+        } else {
+            &ap
+        },
+    );
+    let (c, mut sibling_messages) = node(
+        cd.path(),
+        sibling,
+        Account::from_secret_bytes(shared_secret),
+        &ap,
+    );
+    if cached_prior_binding {
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    }
+    for (node, directory, own) in [
+        (&a, ad.path(), &ap),
+        (&b, bd.path(), &bp),
+        (&c, cd.path(), &cp),
+    ] {
+        node.configure_privacy(
+            directory,
+            "pw",
+            own,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    if cached_prior_binding {
+        b.cached_peer_snapshot_async().await.unwrap();
+        // Discovery now carries a valid certificate from the kept account, but
+        // this recipient has previously pinned the same sender device elsewhere.
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&ap, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    }
+    drop(bl); // The recipient is genuinely unreachable while the sibling mirrors.
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let ct = tokio::spawn(c.clone().run_accept_loop(cl));
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"external recipient must receive", None)
+        .await
+        .unwrap();
+    let sibling_copy =
+        tokio::time::timeout(std::time::Duration::from_secs(10), sibling_messages.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        sibling_copy.text.as_slice(),
+        b"external recipient must receive"
+    );
+    assert!(recipient_messages.try_recv().is_err());
+    assert_ne!(
+        a.delivery_status(id),
+        Some(DeliveryStatus::Delivered),
+        "a sibling's archive is never recipient delivery"
+    );
+    let bl = TcpListener::bind(recipient_address).await.unwrap();
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    if cached_prior_binding {
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                recipient_messages.recv()
+            )
+            .await
+            .is_err(),
+            "a changed account certificate must not silently replace a pinned device binding"
+        );
+        assert_ne!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+        // Explicitly accepting the kept account authorizes the new device
+        // membership. Preserve the original queued message and logical ID.
+        let change = b
+            .account_binding_changes(&a.account_id())
+            .into_iter()
+            .find(|change| change.device_id == a.user_id())
+            .expect("recipient can review the sender's verified account change");
+        b.accept_account_binding_change_guarded(&change, |commit| commit())
+            .await
+            .unwrap();
+        a.flush_delivery(id).await;
+    }
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        recipient_messages.recv(),
+    )
+    .await
+    .expect("the external recipient must receive independently of sibling mirroring")
+    .unwrap();
+    assert_eq!(
+        delivered.text.as_slice(),
+        b"external recipient must receive"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("only the recipient's authenticated receipt confirms delivery");
+    for task in [at, bt, ct] {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+#[tokio::test]
+async fn own_sibling_archive_cannot_confirm_or_replace_external_recipient_delivery() {
+    external_recipient_delivery_after_sibling_archive(false).await;
+}
+
+#[tokio::test]
+async fn explicit_account_acceptance_restores_adopted_sender_delivery_without_false_sibling_receipt()
+ {
+    external_recipient_delivery_after_sibling_archive(true).await;
+}
+
+#[tokio::test]
+async fn tracked_completion_and_active_fanout_skip_untracked_history_validation() {
+    use std::sync::atomic::Ordering;
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let (sender, receiver, _, _, _, file, _, _) =
+        completed_file_fixture(ad.path(), bd.path(), crate::file::FileKind::File).await;
+    let sender_checks = sender.untracked_chunk_validations.load(Ordering::Relaxed);
+    let chunks = sender.log.lock().unwrap().events(&file).unwrap().len();
+    let sender_result =
+        sender.save_file_progress(file, &ad.path().join("active-fanout.bin"), |progress| {
+            if progress.done == progress.total {
+                sender.log.lock().unwrap().fail_reads(true);
+            }
+        });
+    assert_eq!(
+        sender.untracked_chunk_validations.load(Ordering::Relaxed),
+        sender_checks,
+        "active fanout must not scan untracked chunk ancestry"
+    );
+    sender_result.expect("active fanout retains chunks without an untracked/share-policy lookup");
+    sender.log.lock().unwrap().fail_reads(false);
+    assert_eq!(
+        sender.log.lock().unwrap().events(&file).unwrap().len(),
+        chunks
+    );
+
+    let receiver_checks = receiver.untracked_chunk_validations.load(Ordering::Relaxed);
+    receiver
+        .save_file_progress(file, &bd.path().join("tracked.bin"), |progress| {
+            if progress.done == progress.total {
+                receiver.log.lock().unwrap().fail_reads(true);
+            }
+        })
+        .expect("a tracked completion needs no unrelated manifest read after verifying chunks");
+    assert_eq!(
+        receiver.untracked_chunk_validations.load(Ordering::Relaxed),
+        receiver_checks,
+        "a valid tracked completion must not scan untracked chunk ancestry"
+    );
+}
+
+#[tokio::test]
+async fn owned_read_failure_delivery_snapshot_keeps_accepted_work_without_sending() {
+    use std::time::Duration;
+    let directory = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote = DeviceIdentity::generate();
+    let account = Account::generate();
+    let proof = Announce::new_with_account(
+        &remote,
+        &account,
+        "remote",
+        listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let id = sender
+        .enqueue_to_account(&account.account_id(), b"accepted durable work", None)
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .next_destination(None)
+        .unwrap()
+        .1
+        .event_id;
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let weak = Arc::downgrade(&sender);
+    *sender.delivery_snapshot_hook.lock().unwrap() = Some(Box::new(move || {
+        weak.upgrade().unwrap().log.lock().unwrap().fail_reads(true);
+        let _ = entered.send(());
+    }));
+    let worker = tokio::spawn(sender.clone().run_delivery_loop());
+    tokio::time::timeout(Duration::from_secs(2), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), listener.accept())
+            .await
+            .is_err(),
+        "failed snapshot must not dial the destination"
+    );
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    assert_eq!(
+        sender
+            .delivery
+            .lock()
+            .unwrap()
+            .next_destination(None)
+            .unwrap()
+            .1
+            .event_id,
+        destination
+    );
+    worker.abort();
+    let _ = worker.await;
+    sender.runtime_work.close();
+    tokio::time::timeout(Duration::from_secs(1), sender.runtime_work.drain())
+        .await
+        .unwrap();
+}
+
+async fn owned_scope_sender_fixture(
+    dir: &Path,
+    pending: bool,
+) -> (Arc<Node>, EventId, ConversationId, EventId) {
+    let remote = Account::generate();
+    let first = DeviceIdentity::generate();
+    let second = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&first, &remote, "first", 9);
+    let (sender, _) = node(dir, DeviceIdentity::generate(), Account::generate(), &proof);
+    sender.roster.lock().unwrap().update(
+        &Announce::new_with_account(&second, &remote, "second", 10),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let own = sender.signed_announce("sender", 11);
+    sender
+        .configure_privacy(
+            dir,
+            "pw",
+            &own,
+            Arc::new(crate::discovery::visibility::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    if pending {
+        sender
+            .received_files
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(true)
+            .unwrap();
+    }
+    let path = dir.join("scope.txt");
+    std::fs::write(&path, b"immutable scoped file").unwrap();
+    let (id, file) = sender
+        .enqueue_file_to_account(&remote.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let target = {
+        let store = sender.delivery.lock().unwrap();
+        let message = if pending {
+            match store.pending_transactions()[0].body() {
+                super::delivery_store::DeliveryTransaction::OutgoingManifest {
+                    message, ..
+                } => message,
+                _ => panic!("expected outgoing file transaction"),
+            }
+        } else {
+            store.message(id).unwrap()
+        };
+        assert_eq!(message.destinations.len(), 2);
+        message
+            .destinations
+            .iter()
+            .find(|destination| destination.event.id != id)
+            .unwrap()
+            .event
+            .id
+    };
+    (sender, id, file, target)
+}
+
+#[tokio::test]
+async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
+    let directory = tempfile::tempdir().unwrap();
+    let (sender, target, file, _) = owned_scope_sender_fixture(directory.path(), false).await;
+    let sentinel = ConversationId::new([91; 32]);
+    let manifest = crate::file::FileManifest {
+        name: "sentinel".into(),
+        size: 0,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(&[]),
+        file_key: [7; 32],
+        file_conv: sentinel,
+        chunk_count: 1,
+    };
+    let original = crate::eventlog::Event::new(
+        &sender.identity,
+        ConversationId::new([93; 32]),
+        1,
+        vec![],
+        1,
+        0,
+        crate::eventlog::EventKind::FileManifest,
+        vec![91],
+    );
+    let row = super::received_log::ReceivedEntry {
+        event_id: original.id,
+        conversation: original.conversation_id,
+        from: sender.user_id(),
+        wall_clock: original.wall_clock,
+        plaintext: manifest.encode(),
+    };
+    sender
+        .received_files
+        .lock()
+        .unwrap()
+        .record_file_with_reception(&row, Some(&original), None)
+        .unwrap();
+    let snapshot_book = || {
+        let book = sender.files.lock().unwrap();
+        let mut files = book.file_convs();
+        files.sort_by_key(|file| *file.as_bytes());
+        files
+            .into_iter()
+            .map(|file| {
+                let mut ids = book.manifest_events(file);
+                ids.sort();
+                (
+                    file,
+                    book.manifest(file).unwrap(),
+                    ids.iter()
+                        .map(|id| (*id, book.is_emitted(id)))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let book_before = snapshot_book();
+    let pending_before = sender.files.lock().unwrap().pending_for_test(sentinel);
+    let scopes_before = sender
+        .manifest_scopes(file)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    sender.log.lock().unwrap().fail_read_for(Some(target));
+    assert!(matches!(
+        sender.reseed_live_file_book(&sender.delivery.lock().unwrap()),
+        Err(NodeError::Log(LogError::Io(_)))
+    ));
+    assert!(
+        snapshot_book() == book_before,
+        "late scope failure must not replace the live FileBook"
+    );
+    assert!(
+        sender.files.lock().unwrap().pending_for_test(sentinel) == pending_before,
+        "late scope failure must not trim pending files"
+    );
+    assert!(
+        sender
+            .manifest_scopes(file)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            == scopes_before,
+        "late scope failure must not replace privacy scopes"
+    );
+    sender.log.lock().unwrap().fail_read_for(None);
+    sender
+        .reseed_live_file_book(&sender.delivery.lock().unwrap())
+        .unwrap();
+    assert!(
+        sender
+            .files
+            .lock()
+            .unwrap()
+            .manifest(file)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        sender
+            .files
+            .lock()
+            .unwrap()
+            .manifest(sentinel)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!sender.files.lock().unwrap().pending_for_test(sentinel));
+}
+
+#[tokio::test]
+async fn owned_read_failure_manifest_recovery_uses_complete_wal_before_retirement() {
+    use super::delivery_store::{DeliveryStore, DeliveryTransaction};
+    let directory = tempfile::tempdir().unwrap();
+    let (sender, id, file, target) = owned_scope_sender_fixture(directory.path(), true).await;
+    let mut transaction: DeliveryTransaction = bincode::deserialize(
+        &bincode::serialize(&sender.delivery.lock().unwrap().pending_transactions()[0]).unwrap(),
+    )
+    .unwrap();
+    sender
+        .received_files
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
+    sender.log.lock().unwrap().fail_read_for(Some(target));
+    assert!(matches!(
+        sender.log.lock().unwrap().get(&target),
+        Err(LogError::Io(_))
+    ));
+    sender.recover_delivery(&mut sender.delivery.lock().unwrap()).expect("owned WAL events must complete scope preparation without a backing read after retirement");
+    assert!(
+        sender
+            .delivery
+            .lock()
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
+    assert!(
+        sender
+            .manifest_scopes(file)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .iter()
+            .any(|scope| scope.event == target),
+        "the additional destination scope must not be stranded after journal retirement"
+    );
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    sender.log.lock().unwrap().fail_read_for(None);
+    let DeliveryTransaction::OutgoingManifest { message, .. } = &mut transaction else {
+        panic!("expected outgoing file");
+    };
+    message
+        .destinations
+        .retain(|destination| destination.event.id != target);
+    let mut broken = DeliveryStore::open(&directory.path().join("broken-journal"), "pw").unwrap();
+    broken
+        .bind_profile(
+            &directory.path().join("events.log"),
+            "pw",
+            &sender.identity.public(),
+            &sender.account_id(),
+        )
+        .unwrap();
+    assert!(
+        matches!(broken.begin(transaction), Err(LogError::CorruptFile(_))),
+        "missing local WAL material is rejected by the existing delivery owner as local corruption"
+    );
+    assert!(broken.pending_transactions().is_empty());
+}
+
+#[tokio::test]
+async fn owned_read_failure_relay_consent_aborts_before_successful_empty_export() {
+    use super::opaque_relay::OpaqueMailboxProgress;
+    use super::session::{Served, SessionError};
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let (_, receiver, source, _, _, _, _, _) =
+        completed_file_fixture(ad.path(), bd.path(), crate::file::FileKind::File).await;
+    let relay = DeviceIdentity::generate();
+    let relay_public = relay.public();
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &receiver.identity,
+        &source.public(),
+        &relay_public,
+    )
+    .unwrap();
+    let relay_store = Arc::new(Mutex::new(crate::eventlog::EventLog::default()));
+    let remote_store = relay_store.clone();
+    let (client_io, server_io) = tokio::io::duplex(128 * 1024);
+    let server = tokio::spawn(async move {
+        let mut channel = crate::transport::SecureChannel::accept(server_io, &relay)
+            .await
+            .unwrap();
+        while matches!(
+            super::session::serve_one(&mut channel, &remote_store).await,
+            Ok(Served::Handled(_))
+        ) {}
+    });
+    let mut channel = crate::transport::SecureChannel::connect(
+        client_io,
+        &receiver.identity,
+        Some(&relay_public),
+    )
+    .await
+    .unwrap();
+    let mut progress = OpaqueMailboxProgress::new(&relay_public, &source.public(), None, mailbox);
+    receiver.log.lock().unwrap().fail_reads(true);
+    assert!(matches!(
+        receiver.file_consent_events(&source.public()),
+        Err(LogError::Io(_))
+    ));
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        receiver.advance_opaque_mailbox(&mut channel, &mut progress),
+    )
+    .await;
+    server.abort();
+    let _ = server.await;
+    assert!(
+        matches!(result, Ok(Err(SessionError::Store(LogError::Io(_))))),
+        "a failed consent read must reach the relay supervisor, not report a successful empty export"
+    );
+    assert!(progress.uploaded().is_empty());
+    assert!(relay_store.lock().unwrap().conversations().is_empty());
 }

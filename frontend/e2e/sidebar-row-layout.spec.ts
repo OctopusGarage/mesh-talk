@@ -11,6 +11,28 @@ test("short conversation names stay visible beside message times at minimum side
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
 
+  const unread = page.getByTestId("unread-review-trigger");
+  const files = page.getByTestId("sidebar-action-files");
+  const [unreadBox, filesBox] = await Promise.all([
+    unread.boundingBox(),
+    files.boundingBox(),
+  ]);
+  expect(Math.abs(unreadBox!.y - filesBox!.y)).toBeLessThanOrEqual(1);
+  expect(unreadBox!.x + unreadBox!.width).toBeLessThanOrEqual(filesBox!.x);
+  expect(unreadBox!.height).toBeGreaterThanOrEqual(44);
+  expect(filesBox!.height).toBeGreaterThanOrEqual(44);
+  await page
+    .locator(".sidebar-tools")
+    .screenshot({ path: test.info().outputPath("sidebar-tools-row.png") });
+  await unread.click();
+  await expect(
+    page.getByRole("dialog", { name: "Unread messages", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await files.click();
+  await expect(page.getByTestId("files-tray")).toBeVisible();
+  await page.keyboard.press("Escape");
+
   for (const [id, name] of [
     [BOB.account, "bob"],
     [CHANNEL.id, "team"],

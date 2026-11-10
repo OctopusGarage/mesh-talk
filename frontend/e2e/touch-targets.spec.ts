@@ -1,7 +1,38 @@
 import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
-import { test, expect } from "./tauri-mock";
+import { test as base, expect } from "./tauri-mock";
+import type { CDPSession, Page } from "@playwright/test";
 import { enterChat } from "./helpers/session";
+
+const test = base.extend<{ touchSession: CDPSession }>({
+  touchSession: async ({ page }, provide) => {
+    const session = await page.context().newCDPSession(page);
+    try {
+      await provide(session);
+    } finally {
+      await session.detach();
+    }
+  },
+});
+
+async function establishNoHoverTouch(page: Page, touchSession: CDPSession) {
+  // Context options describe the intended device, but browser state can differ
+  // after startup. Establish native input emulation after navigation and verify
+  // the same media features that activate the real responsive CSS.
+  await touchSession.send("Emulation.setTouchEmulationEnabled", {
+    enabled: true,
+    maxTouchPoints: 1,
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        hoverNone: matchMedia("(hover: none)").matches,
+        pointerCoarse: matchMedia("(pointer: coarse)").matches,
+        touchPoints: navigator.maxTouchPoints,
+      })),
+    )
+    .toEqual({ hoverNone: true, pointerCoarse: true, touchPoints: 1 });
+}
 
 // Touch-capable desktop devices can still hover; model a mobile touch device
 // for the no-hover assertions below.
@@ -11,8 +42,12 @@ test.use({
   viewport: { width: 760, height: 520 },
 });
 
-test("frequent icon controls keep a 44px touch target", async ({ page }) => {
+test("frequent icon controls keep a 44px touch target", async ({
+  page,
+  touchSession,
+}) => {
   await enterChat(page);
+  await establishNoHoverTouch(page, touchSession);
   expect(await page.evaluate(() => matchMedia("(hover: none)").matches)).toBe(
     true,
   );
@@ -73,9 +108,12 @@ test("frequent icon controls keep a 44px touch target", async ({ page }) => {
 
 test("settings switches keep a compact track inside a usable touch target", async ({
   page,
+  touchSession,
 }) => {
   await enterChat(page);
+  await establishNoHoverTouch(page, touchSession);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await selectSettingsCategory(page, "appearance");
   const wallpaper = page.getByTestId("settings-wallpaper");
   const bounds = await wallpaper.boundingBox();
@@ -93,10 +131,15 @@ test("settings switches keep a compact track inside a usable touch target", asyn
   await expect(wallpaper).toHaveAttribute("aria-checked", before ?? "false");
 });
 
-test("form inputs and selects keep 44px touch targets", async ({ page }) => {
+test("form inputs and selects keep 44px touch targets", async ({
+  page,
+  touchSession,
+}) => {
   await enterChat(page);
+  await establishNoHoverTouch(page, touchSession);
 
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   const settings = page.getByRole("dialog");
   const language = page.getByTestId("settings-language-select");
   expect(
@@ -115,18 +158,56 @@ test("form inputs and selects keep 44px touch targets", async ({ page }) => {
   await expect(name).toHaveValue("Touch test");
   await channel.getByRole("button", { name: "Cancel" }).click();
 
+  // Finish the modal's exit and deferred trigger focus restoration before
+  // opening a popover that would otherwise be dismissed by that old focus.
+  await expect(channel).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "New channel", exact: true }),
+  ).toBeFocused();
+  const overflow = page.getByTestId("sidebar-overflow");
+  await overflow.click();
+  await expect(overflow).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId("sidebar-overflow-menu")).toBeVisible();
   const linkAction = page.getByTestId("sidebar-action-link");
-  if (!(await linkAction.isVisible())) {
-    await page.getByTestId("sidebar-overflow").click();
-  }
   await linkAction.click();
   const link = page.getByTestId("link-device-dialog");
   for (const control of [
     link.getByRole("combobox", { name: "Device" }),
     link.getByRole("textbox", { name: "pairing code" }),
   ]) {
-    expect(
-      Math.round((await control.boundingBox())!.height),
-    ).toBeGreaterThanOrEqual(44);
+    // Observe the newly opened surface through the normal assertion budget.
+    await expect
+      .poll(
+        async () => {
+          const bounds = await control.boundingBox();
+          return bounds ? Math.round(bounds.height) : 0;
+        },
+        { message: `Touch target must reach 44px: ${control}` },
+      )
+      .toBeGreaterThanOrEqual(44);
   }
+});
+
+test("touch setup restores native device state and usable targets after state loss", async ({
+  page,
+  touchSession,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
+  const control = page.getByTestId("composer-more-tools");
+  await expect(control).toBeVisible();
+  await touchSession.send("Emulation.setTouchEmulationEnabled", {
+    enabled: false,
+  });
+  expect(await page.evaluate(() => navigator.maxTouchPoints)).toBe(0);
+  // Disabling touch removes this native capability, but the host may still
+  // report hover:none (including headless Linux). A small CSS target is not
+  // a portable witness of native touch loss; maxTouchPoints above is.
+
+  await establishNoHoverTouch(page, touchSession);
+  const bounds = await control.boundingBox();
+  expect(bounds?.width).toBeGreaterThanOrEqual(44);
+  expect(bounds?.height).toBeGreaterThanOrEqual(44);
+  await control.tap();
+  await expect(page.getByTestId("composer-emoji")).toBeVisible();
 });

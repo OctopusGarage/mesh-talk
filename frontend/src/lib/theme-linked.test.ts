@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 import { beforeEach, expect, it, vi } from "vitest";
 
-vi.mock("@/store/packs", () => ({ installedTheme: () => undefined }));
+const packs = vi.hoisted(() => ({
+  selected: undefined as import("./pack").ThemePack | undefined,
+}));
+vi.mock("@/store/packs", () => ({
+  installedTheme: (id: string) =>
+    packs.selected?.id === id ? packs.selected : undefined,
+}));
 
 import {
   appearanceValues,
@@ -12,6 +18,7 @@ import {
 
 beforeEach(() => {
   localStorage.clear();
+  packs.selected = undefined;
   useTheme.setState({
     theme: "dark",
     wallpaperEnabled: true,
@@ -85,4 +92,51 @@ it("filters malformed linked wallpaper IDs before storing them", () => {
   expect(appearanceValues().pack_wallpaper_ids).toBe(
     JSON.stringify({ nature: "forest-1" }),
   );
+});
+
+it("preserves a selected account theme while its assets are still loading", () => {
+  useTheme.getState().set("source.custom-theme");
+  useTheme.getState().refresh(true);
+  expect(useTheme.getState().theme).toBe("source.custom-theme");
+  expect(savedAppearanceValues().theme).toBe("source.custom-theme");
+  useTheme.getState().refresh();
+  expect(useTheme.getState().theme).toBe("dark");
+});
+it("refreshes imported and removed pack CSS without changing the linked selection", () => {
+  useTheme.getState().set("source.custom-theme");
+  packs.selected = {
+    format: 1,
+    id: "source.custom-theme",
+    kind: "theme",
+    version: "1.0.0",
+    name: "Source",
+    base: "dark",
+    colors: { primary: "120 100% 40%" },
+  };
+  const changed = vi.fn();
+  const unsubscribe = useTheme.subscribe(changed);
+  useTheme.getState().refresh(true);
+  expect(document.documentElement.style.getPropertyValue("--primary")).toBe(
+    "120 100% 40%",
+  );
+  packs.selected = undefined;
+  useTheme.getState().refresh(true);
+  expect(document.documentElement.style.getPropertyValue("--primary")).toBe("");
+  expect(useTheme.getState().theme).toBe("source.custom-theme");
+  expect(changed).not.toHaveBeenCalled();
+  unsubscribe();
+});
+
+it("applies linked appearance tombstones as field defaults", () => {
+  applyLinkedAppearance("theme", "source.custom-theme");
+  applyLinkedAppearance("wallpaper_enabled", "off");
+  applyLinkedAppearance("pack_wallpaper_ids", '{"nature":"forest-1"}');
+  applyLinkedAppearance("theme", null);
+  applyLinkedAppearance("wallpaper_enabled", null);
+  applyLinkedAppearance("pack_wallpaper_ids", null);
+  expect(appearanceValues()).toEqual({
+    theme: "dark",
+    wallpaper_enabled: "on",
+    pack_wallpaper_ids: "{}",
+  });
 });

@@ -33,7 +33,18 @@ The composer is a stable bottom dock. Attachment, media, expression and send con
 
 ## States and accessibility
 
+Incoming photos retain an opaque, bounded media frame over personalized wallpapers.
+A static photo glyph marks waiting; a 48px radial indicator shows measured chunk
+progress, with state text and total size beneath it. Generic filenames remain in
+accessible names and details. The preparing surface stays until the current image
+loads, then dissolves in 180ms (80ms with reduced motion); known cached images do
+not replay preparation. Progress transitions last 160ms and stop under reduced
+motion. Decoded images preserve their original proportions, and file availability,
+preview failures, consent and delayed message arrival keep their separate meanings.
+
 Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
+
+Group member lists show people, their presence and account role. Device counts, routing identities and per-device sharing state stay out of the list. Personal sharing options live in Group settings.
 
 People use one concise status line: Online, Online · slow connection, or Offline
 with recent local observation history. Do not add a long quality paragraph.
@@ -54,3 +65,29 @@ scroll within the footer. Successful refresh removes the notice. Evidence
 continues to expire independently of this presentation.
 
 Controls need accessible names, keyboard focus indicators and at least the existing touch target sizes. Native buttons handle Enter and Space; Escape closes Radix dialogs and menus. Brief 150–190ms motion is reserved for press feedback and floating surfaces. Ordinary message reading does not animate on entry. Reduced-motion settings remove spatial movement while preserving 80ms color and opacity feedback; progress that would otherwise be shown by a spinner has readable text. Theme previews use the actual canvas, signal and rail tokens. At narrow widths, the existing responsive conversation behavior remains intact; at short heights, dialogs scroll and tools remain reachable. Title-bar drag regions and native control insets remain clear on macOS, Windows and Linux.
+
+Message receipt and copy signals sit beside the timestamp below each bubble.
+Use small Lucide icons: a clock for awaiting receipt, a check for recipient
+confirmation, a copy icon with 1 or 2+ for member copies, and an inbox for
+post-office custody. An unknown copy observation uses a question mark beside
+the copy icon; zero confirmed member copies uses the icon alone. Keep neutral
+color and accessible names. Group copy evidence never uses delivery check marks.
+Selecting a signal expands its explanation in the message flow; hover and focus
+do not open overlays. Enter/Space toggles the disclosure, Escape collapses it
+and restores focus. Reset disclosure on message, conversation or session changes.
+Failure text, retry actions and file byte progress retain their separate meaning.
+
+
+### Interaction motion
+
+The shared JS curve is cubic-bezier(0.22, 1, 0.36, 1). Floating surfaces enter in 150–190ms and exit in 100–120ms through Radix presence. Pointer-selected tabs move a measured background in 170ms; keyboard selection updates immediately. Trigger resize observations keep the background aligned when labels change inside a fixed-size list. Only the absolute background interpolates its dimensions; neighboring controls retain their layout. Hidden or unmeasured tabs retain the ordinary selected background. Reaction press feedback affects only the emoji under a fine pointer, never synchronized counts or message layout.
+
+Measured file progress interpolates transforms over 100ms with linear timing. Its presentation fades out over 120ms when the authoritative transfer becomes inactive or delivered; byte completion alone remains confirmation pending. Media retains its existing 220ms shared-element transition, with 80ms reduced-motion feedback. Welcome content enters once per mount in a bounded 280ms sequence, then stays still. Confirmed device linking may show a brief check entrance; errors never receive a success mark. No motion delays protocol actions, invents progress, or animates historical message entry.
+
+Live-message entrance requires explicit live arrival evidence or a local pending intent with a client ID. Conversation, account and runtime scopes invalidate prior eligibility before rendering; history, search context and reading older messages suppress entrances. Eligibility survives deferred virtual row mounting and is consumed by the first committed row mount.
+
+Message entrances observe the live system motion preference directly: enabling reduced motion stops active movement and settles messages immediately, including recalled messages. Successful account linking closes the pairing form and shows an eight-second dismissible confirmation above the viewport edge. This feedback survives node/runtime replacement but is scoped to the originating desktop owner and generation.
+
+Pending composer images reserve a 160 × 80 frame before their local URL or decoded pixels are ready, keeping keyboard paste immediate and avoiding decode-driven layout shifts. Video poster caches retain original source dimensions atomically with the bounded JPEG, so the player starts with the same aspect ratio and natural-size ceiling before metadata arrives. Both sending and receiving progress use the same 100ms linear transform interpolation. Short desktop authentication uses the existing two-column layout through 740px of height so native credential guidance does not push the primary action below the first viewport.
+
+Video players and their native controls stay outside shared-element projection. Video lightboxes retain the background opacity transition and mount the player at its final geometry; image lightboxes retain their shared-element transition. Do not delay autoplay or retain idle video decoders to hide startup work. Native performance evidence must separate foreground interface frame intervals from video presentation and decoding metrics; hidden-window samples cannot establish playback smoothness.

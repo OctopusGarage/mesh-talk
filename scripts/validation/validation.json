@@ -2,6 +2,54 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "message-forwarding",
+      "paths": [
+        "crates/mesh-talk-core/src/node/forwarding.rs",
+        "crates/mesh-talk-core/src/node/forwarding/",
+        "src-tauri/src/message_forwarding.rs",
+        "frontend/src/features/chat/forwarding/",
+        "frontend/src/lib/api/messageForwarding.ts",
+        "frontend/src/lib/api/messageForwarding.test.ts",
+        "frontend/src/lib/forwardedRecord.ts",
+        "frontend/src/lib/forwardedRecord.test.ts",
+        "frontend/e2e/forwarding.spec.ts",
+        "docs/message-forwarding.md"
+      ],
+      "frontend": [
+        "src/features/chat/forwarding/selection.test.ts",
+        "src/features/chat/forwarding/ForwardedRecordPreview.test.ts",
+        "src/lib/api/messageForwarding.test.ts",
+        "src/lib/forwardedRecord.test.ts"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["node::forwarding::"]
+        }
+      ],
+      "capability": {
+        "summary": "Forward authorized canonical messages individually or as bounded encrypted chat records, preserving destination identity and retry-safe acceptance.",
+        "guide": "docs/message-forwarding.md",
+        "invariants": [
+          {
+            "name": "Source admission rejects protected, recalled and expired messages and resolves canonical order; target access and current session authority remain required at acceptance.",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          },
+          {
+            "name": "Forward batches bind stable request identities and preserve accepted item identities across partial retry and restart; attachments are independently restaged.",
+            "reference": "docs/message-forwarding.md#reliability-and-verification"
+          },
+          {
+            "name": "Merged records contain bounded versioned display snapshots and contained attachment bytes; recipients validate them without access to source conversations.",
+            "reference": "docs/message-forwarding.md#merged-record-format"
+          }
+        ]
+      },
+      "escalation": [
+        "Run frontend/e2e/forwarding.spec.ts for single/multi/merged selection, preview, recipients, cancellation and failed-only retry; run related Favorites and protected-message scenarios. Encrypted loopback account/group transfer, independent attachment readback and restart/idempotency are required for forwarding changes. Native context-menu, keyboard and save-dialog acceptance is separate from browser IPC substitutes; old-client .mtchat attachment fallback requires compatibility evidence."
+      ]
+    },
+    {
       "id": "post-office-service-installers",
       "paths": [
         "scripts/install-post-office-macos.sh",
@@ -25,6 +73,7 @@
       "paths": [
         ".github/workflows/release.yml",
         ".github/workflows/release-maintenance.yml",
+        ".github/workflows/prepare-stable.yml",
         "release-please-config.json",
         ".release-please-manifest.json",
         "CHANGELOG.md",
@@ -43,13 +92,22 @@
         "scripts/diagnostics/release-preflight.test.mjs",
         "scripts/diagnostics/release-notes.test.mjs",
         "scripts/diagnostics/release-reuse.test.mjs",
+        "scripts/diagnostics/test-fixtures/cli.mjs",
         "scripts/diagnostics/release-state.test.mjs",
         "scripts/diagnostics/release-verifier.test.mjs",
         "scripts/diagnostics/release-workflow.test.mjs",
         "scripts/diagnostics/version-contract.test.mjs",
         "scripts/diagnostics/version-automation.test.mjs",
         "site/index.html",
-        "docs/updates.md"
+        "docs/updates.md",
+        "scripts/diagnostics/release-updater.test.mjs",
+        "scripts/diagnostics/release-signing.test.mjs",
+        "scripts/diagnostics/release-sevenzip.test.mjs",
+        "scripts/release/delta.mjs",
+        "scripts/release/delta_assets.py",
+        "scripts/diagnostics/release-delta.test.mjs",
+        "src-tauri/examples/delta-artifact.rs",
+        "scripts/ci/required-checks.mjs"
       ],
       "node": [
         "scripts/diagnostics/release-assets.test.mjs",
@@ -62,17 +120,36 @@
         "scripts/diagnostics/release-verifier.test.mjs",
         "scripts/diagnostics/release-workflow.test.mjs",
         "scripts/diagnostics/version-contract.test.mjs",
-        "scripts/diagnostics/version-automation.test.mjs"
+        "scripts/diagnostics/version-automation.test.mjs",
+        "scripts/diagnostics/release-updater.test.mjs",
+        "scripts/diagnostics/release-signing.test.mjs",
+        "scripts/diagnostics/release-sevenzip.test.mjs",
+        "scripts/diagnostics/release-delta.test.mjs",
+        "scripts/diagnostics/required-checks.test.mjs"
       ],
       "escalation": [
-        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Both editions and every platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Release-maintenance changes require hosted evidence for bot-PR permissions/checks, unpublished draft-only creation, explicit release build dispatch and reviewed next-target PR creation; local mocks do not prove those settings. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
+        "Native release inspection uses the single pinned, SHA256-verified sevenzip.py tool owner across native producers and both Ubuntu acceptance jobs. Run the genuine plugin/uninstaller NSIS smoke under the existing Linux portable health gate, preserve exact known-size and whole-payload equivalence, and reject decoder BadCmd before acceptance. Bootstrap fixtures do not establish native Windows tool execution or signed six-platform artifact/draft acceptance; those require hosted release evidence. See docs/updates.md#native-release-inspection.",
+        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Manual draft/maintenance changes require hosted evidence for explicit main-only preparation, unpublished draft-only creation, exact tagged build dispatch and reviewed next-target PR creation; local mocks do not prove those settings and actual preparation/publication requires explicit release intent. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate.",
+        "Optional macOS/Windows delta publication requires SDK full-version authentication of prior canonical payloads, exact native representation equivalence, production Rust decoder round-trip, complete signed metadata savings of at least 25 percent and 1 MiB, and ZIP/standalone digest and provenance acceptance. Actual Windows complete NSIS installation/restart and transferred delta bytes require native hosted evidence; executable-only patches and fixture success do not establish acceptance. Linux remains canonical full update only."
       ],
       "capability": {
-        "summary": "Maintain one Cargo product target and reviewed release/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
+        "summary": "Maintain one Cargo product target, curated version notes and reviewed version/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
         "guide": "docs/updates.md",
         "invariants": [
           {
-            "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform/edition assets verified before visibility.",
+            "name": "macOS desktop and headless release producers discard local symbols during linking before native signing, bundling and updater/delta generation; both architectures retain runnable, verifiably signed executables.",
+            "reference": "docs/updates.md#release-binary-size"
+          },
+          {
+            "name": "Linux x64 and ARM64 release builds retain the Ubuntu 22.04 glibc baseline; compiled Cargo caches are isolated by runner identity, and actual public AppImage launch remains required upgrade acceptance evidence.",
+            "reference": "docs/updates.md#download-verification-and-installation"
+          },
+          {
+            "name": "Nightly preflight waits at most four hours for missing or pending exact-source checks; completed unsuccessful checks, scanning alerts and API errors fail immediately. Final publication remains an immediate strict source recheck.",
+            "reference": "docs/updates.md#publish-nightly-builds"
+          },
+          {
+            "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform assets verified before visibility; desktop packages omit optional packs and edition suffixes.",
             "reference": "docs/updates.md"
           },
           {
@@ -80,8 +157,32 @@
             "reference": "docs/updates.md#version-ownership-and-lifecycle"
           },
           {
-            "name": "Release preparation creates reviewed PRs and unpublished drafts only; explicit build dispatch and next-target PRs preserve the existing final Stable publication gate without direct main pushes.",
-            "reference": "docs/updates.md#automated-release-preparation"
+            "name": "Ordinary main pushes create no release proposals. Explicit main-only Stable preparation validates canonical version, curated notes, historical provenance, exact-source CI and immutable tag/draft state before mutation; next-target PRs retain the existing final publication gate without direct main pushes.",
+            "reference": "docs/updates.md#manual-release-preparation"
+          },
+          {
+            "name": "Stable notes require one nonempty exact-version CHANGELOG section; Nightly never borrows another version. Templates retain download/installation/source verification, GitHub automatic product notes are disabled, and release-state reads revalidate cached responses.",
+            "reference": "docs/updates.md#manual-release-preparation"
+          },
+          {
+            "name": "Optional free updater signing binds the full logical build version; every standalone updater role must match the checksum manifest inside its platform's signed ZIP and form a complete platform matrix, with exact-source provenance and native equivalence. Missing keys keep the manual path; partial signing configuration fails closed.",
+            "reference": "docs/updates.md#free-updater-signing-setup"
+          },
+          {
+            "name": "Manual ZIPs contain only native installers, self-contained SHA256SUMS and optional UPDATER_SHA256SUMS manifests of at most 64 KiB each, never duplicate updater payloads. Both macOS ZIP and DMG sizes must independently stay within the reviewed 24 MiB budget.",
+            "reference": "docs/updates.md#manual-package-size-budgets"
+          },
+          {
+            "name": "Release notes provide direct exact-tag desktop downloads for all six platform targets before product highlights; headless relay downloads and verification are separate collapsible sections.",
+            "reference": "docs/updates.md#public-website-downloads"
+          },
+          {
+            "name": "Native producers and acceptance share a checksum-verified pinned decoder; real plugin/uninstaller NSIS fixtures preserve known-size complete-payload acceptance and detect decoder incompatibility before publication builds.",
+            "reference": "docs/updates.md#native-release-inspection"
+          },
+          {
+            "name": "Optional macOS/Windows delta assets preserve the canonical full updater, authenticate at most two eligible installed-executable bases with the existing SDK full-version signature, round-trip exact native targets through the production decoder, and pass complete signed metadata savings, installer equivalence and standalone provenance checks before publication.",
+            "reference": "docs/updates.md#incremental-download-preparation"
           }
         ]
       }
@@ -94,22 +195,38 @@
         "scripts/validation/frontend-graph.mjs",
         "scripts/validation/validation.json",
         "scripts/validation/stage.mjs",
+        "scripts/validation/windows-process-owner.mjs",
+        "scripts/validation/windows-process-owner.ps1",
+        "scripts/validation/windows-process-owner.cs",
+        "scripts/diagnostics/windows-process-owner.test.mjs",
+        "scripts/diagnostics/fixtures/windows-native-leader.ps1",
         "scripts/validation/selectors.mjs",
+        "scripts/validation/browser.mjs",
         "Makefile",
         "AGENTS.md",
+        "CONTRIBUTING.md",
         "scripts/diagnostics/affected-plan.test.mjs",
         "scripts/diagnostics/changed-validation.test.mjs",
+        "scripts/diagnostics/test-fixtures/tool-versions.mjs",
+        "scripts/diagnostics/test-fixtures/cli.mjs",
         "scripts/diagnostics/validation-selectors.test.mjs",
         "scripts/diagnostics/validation-stage.test.mjs",
+        "scripts/diagnostics/node-test-progress.mjs",
+        "scripts/diagnostics/node-test-progress.test.mjs",
         "frontend/validation.json",
         "crates/mesh-talk-core/validation.json",
         "src-tauri/validation.json",
         "crates/mesh-talk-integrations/validation.json",
         "crates/mesh-talk-mcp/validation.json",
         "scripts/validation/checks.mjs",
+        "scripts/validation/syntax.mjs",
+        "scripts/diagnostics/validation-syntax.test.mjs",
+        "scripts/setup-hooks.sh",
+        "hooks/pre-commit",
         "scripts/validation/stage-inputs.mjs",
         "scripts/validation/latency.mjs",
         "scripts/diagnostics/validation-checks.test.mjs",
+        "scripts/diagnostics/validation-syntax.test.mjs",
         "scripts/diagnostics/validation-latency.test.mjs",
         "scripts/diagnostics/rust-contracts.test.mjs",
         "scripts/validation/selection-audit.mjs",
@@ -137,7 +254,14 @@
         "scripts/diagnostics/changed-validation.test.mjs",
         "scripts/diagnostics/validation-selectors.test.mjs",
         "scripts/diagnostics/validation-stage.test.mjs",
+        "scripts/diagnostics/node-test-progress.test.mjs",
+        "scripts/diagnostics/windows-process-owner.test.mjs",
+        "scripts/diagnostics/pr-platform.test.mjs",
+        "scripts/diagnostics/pr-preflight-output.test.mjs",
+        "scripts/diagnostics/backend-eval-report.test.mjs",
+        "scripts/diagnostics/native-build.test.mjs",
         "scripts/diagnostics/validation-checks.test.mjs",
+        "scripts/diagnostics/validation-syntax.test.mjs",
         "scripts/diagnostics/validation-latency.test.mjs",
         "scripts/diagnostics/rust-contracts.test.mjs",
         "scripts/diagnostics/selection-audit.test.mjs",
@@ -150,8 +274,31 @@
         "scripts/test-ai-eval.mjs",
         "scripts/diagnostics/patch-coverage.test.mjs"
       ],
+      "capability": {
+        "summary": "Select affected checks and retain process ownership through completion or verified retirement before releasing validation resources.",
+        "guide": "docs/testing-feedback-loop.md#completion-and-retirement-evidence",
+        "invariants": [
+          {
+            "name": "Preserve command status only after verified owned-scope retirement; persist lease retirement requirements before detached admission, and never recover unknown ownership from PID death alone. Cancellation and unverifiable cleanup cannot admit later work or create successful reusable evidence.",
+            "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
+          },
+          {
+            "name": "POSIX leader exit and output closure are independent: bound draining after owned-group retirement, fail with unverified cleanup and quarantine leases when escaped descendants retain pipes, preserve first failure and original exit status, and never clear uncertainty during later cancellation or signal unknown groups.",
+            "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
+          },
+          {
+            "name": "POSIX signal fixtures atomically publish complete PID readiness after installing handlers, accept only positive safe integer PIDs and retain owned cleanup while a deterministic real write is held before publication. Stream fragments cannot authorize PID cleanup; failed publication retires the actual created child through its owner.",
+            "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
+          },
+          {
+            "name": "Diagnostic deadlines reserve joined cleanup and evidence upload inside the existing job budget; invalid budgets cannot launch work. Persist bounded active-case lifecycle records and preserve actual command status separately from scope retirement diagnostics.",
+            "reference": "docs/ci-maintenance.md"
+          }
+        ]
+      },
       "escalation": [
-        "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI."
+        "Windows execution changes require real windows-process-owner.test.mjs execution on Windows: portable receipt-rejection controls alone do not establish native job membership or retirement. Preserve creation-time job ownership, argument/environment/byte-stream fidelity, cancellation and output/log failure cleanup, helper-death quarantine, unrelated-process isolation and declared-input cache invalidation. Qualify actual cold/cached Cargo test completion, original nonzero status and descendant retirement before subsequent real command admission. Hosted Windows Health remains required before merge. Functional CLI report fixtures await natural closure through the canonical process owner and verify descendant retirement before deleting temporary repositories. Verified forced retirement is an ownership diagnostic; preserve the actual command status and execution error separately. Their sixty-second watchdog prevents deadlock; startup latency is not report acceptance. Preserve passing/failing, empty/blocked, reused, invalidated and rejected-destination assertions, and leave explicit cancellation/deadline controls unchanged.",
+        "Cheap-only preparation must reuse the static catalog, execute no tests/builds/heavy work, reject ownership blockers and source drift, and keep pending runtime requirements explicit. Verification-only stage reuse must never execute on a miss or wait for/reap a busy lease; no-work readers must not imply admitted Windows child work. Preserve log/artifact/input/environment verification and cancellation/dead-reader recovery controls. Frontend patch prechecks read the authoritative Codecov target, reject omitted changed files and partial branch false positives, and verify current stage evidence before reading LCOV. Raw reports do not establish freshness or Rust/browser-union acceptance. Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI. Supervisor Rust thread-policy changes also require full workspace consumers and the real Cargo thread-policy fixture; preserve explicit Windows/sanitizer caller limits."
       ]
     },
     {
@@ -173,28 +320,35 @@
     {
       "id": "pr-preparation",
       "paths": [
+        "specifications/git_standards.md",
         "scripts/prepare-pr.sh",
         "scripts/create-pr.sh",
         "scripts/pr-preflight.sh",
         "scripts/pr-platform/",
+        "scripts/diagnostics/pr-main-promotion.test.mjs",
         "scripts/validation/pr-scenarios.mjs",
+        "scripts/diagnostics/create-pr.test.mjs",
         "scripts/diagnostics/prepare-pr.test.mjs",
+        "scripts/diagnostics/pr-platform.test.mjs",
         "scripts/diagnostics/pr-scenarios.test.mjs",
+        "scripts/diagnostics/pr-preflight-output.test.mjs",
         "scripts/validation/native-build.mjs",
         "scripts/diagnostics/native-build.test.mjs"
       ],
       "node": [
+        "scripts/diagnostics/pr-main-promotion.test.mjs",
         "scripts/diagnostics/prepare-pr.test.mjs",
         "scripts/diagnostics/create-pr.test.mjs",
         "scripts/diagnostics/pr-platform.test.mjs",
         "scripts/diagnostics/pr-scenarios.test.mjs",
         "scripts/diagnostics/pr-preflight-output.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs",
+        "scripts/diagnostics/health-browser-contract.test.mjs",
         "scripts/diagnostics/native-build.test.mjs",
         "scripts/diagnostics/standards-wiring.test.mjs"
       ],
       "escalation": [
-        "Fast PR creation checks source integrity; use --full-preflight for comprehensive local preparation. Required CI must pass before merge; focused diagnostics alone do not certify native or platform execution."
+        "Fast PR creation forwards explicit --owner/--reason only to the existing affected-plan checker, retaining default ownership blockers and separate platform selectors. Validate literal argument boundaries, malformed selections and checker failure before publication. Fast PR creation checks source integrity; use --full-preflight for comprehensive local preparation. Required CI must pass before merge; focused diagnostics alone do not certify native or platform execution."
       ]
     },
     {
@@ -221,45 +375,159 @@
     {
       "id": "ci-verification",
       "paths": [
+        "_typos.toml",
+        "scripts/ai-eval-smoke.sh",
         "scripts/check-health.sh",
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
         "scripts/diagnostics/merge-queue.test.mjs",
         ".github/workflows/ci.yml",
+        ".github/workflows/linux-workspace-consumer.yml",
+        "scripts/ci/linux-workspace.sh",
         ".github/workflows/check-health.yml",
         ".github/workflows/e2e-ui.yml",
+        ".github/workflows/hidden-contacts-native.yml",
+        ".github/workflows/linux-renderer-diagnostics.yml",
+        ".github/workflows/linux-tray-diagnostics.yml",
+        ".github/workflows/native-window-diagnostics.yml",
+        ".github/workflows/windows-network-diagnostics.yml",
         ".github/workflows/e2e-backend.yml",
         ".github/workflows/sanitizers.yml",
+        ".config/nextest-asan.toml",
+        "scripts/ci/ui-runner.mjs",
+        "scripts/diagnostics/ui-runner.test.mjs",
+        "scripts/ci/asan.mjs",
+        "scripts/ci/asan-cli.test.mjs",
+        "scripts/diagnostics/asan.test.mjs",
         ".github/workflows/mutants.yml",
         ".config/nextest.toml",
         "scripts/release/run-mutants.mjs",
+        "scripts/release/mutation-evidence.mjs",
+        "scripts/release/mutation-baseline.mjs",
+        "scripts/release/mutation-process-owner.py",
+        "scripts/release/mutation-process-owner.test.mjs",
+        "scripts/diagnostics/mutation-evidence.test.mjs",
         "scripts/release/run-mutants.test.mjs",
         "scripts/diagnostics/mutants-workflow.test.mjs",
         ".github/workflows/codeql.yml",
+        ".github/codeql/reviewed-findings.json",
+        "scripts/ci/codeql-results.mjs",
+        "scripts/diagnostics/codeql-results.test.mjs",
         ".github/workflows/gitleaks.yml",
+        "scripts/ci-gitleaks.sh",
+        "scripts/diagnostics/ci-gitleaks.test.mjs",
         ".github/workflows/dependency-review.yml",
         "scripts/ci/collect-ui-coverage.mjs",
         "scripts/ci/unit-coverage-artifact.mjs",
-        "scripts/diagnostics/health-workflow.test.mjs"
+        "scripts/ci/ubuntu-apt-source.mjs",
+        "scripts/ci/runner-storage.mjs",
+        "scripts/diagnostics/runner-storage.test.mjs",
+        "scripts/ci/windows-native-deps.mjs",
+        "scripts/ci/windows-native-deps.test.mjs",
+        "scripts/diagnostics/windows-native-deps.test.mjs",
+        "scripts/ci/ubuntu-apt-source.test.mjs",
+        "scripts/diagnostics/health-workflow.test.mjs",
+        "scripts/diagnostics/health-browser-contract.test.mjs",
+        ".gitleaks.toml",
+        ".github/workflows/ai-eval.yml",
+        "scripts/ci/required-checks.mjs",
+        "scripts/ci/migrate-required-checks.mjs",
+        "scripts/diagnostics/required-checks.test.mjs",
+        "scripts/evals/backend-runner.mjs",
+        "scripts/diagnostics/backend-eval-report.test.mjs",
+        "scripts/ci/timing-report.mjs",
+        "scripts/diagnostics/ci-timing-report.test.mjs",
+        "scripts/ci/backend-coverage.test.mjs",
+        "scripts/ci/workspace-coverage.sh",
+        "scripts/ci/native-host-coverage.test.mjs",
+        "scripts/diagnostics/test-fixtures/nextest.mjs",
+        "scripts/ci/linux-crash-diagnostics.mjs",
+        "scripts/ci/linux-crash-diagnostics.test.mjs",
+        ".github/workflows/windows-workspace.yml",
+        "scripts/ci/windows-coverage.mjs",
+        "scripts/diagnostics/windows-coverage.test.mjs",
+        "scripts/ci/windows-coverage-cli.test.mjs",
+        "scripts/ci/macos-remaining-cli.test.mjs",
+        "scripts/ci/linux-workspace-cli.test.mjs",
+        ".github/workflows/ui-shards.yml",
+        "scripts/diagnostics/ui-shard-orchestration.test.mjs",
+        "scripts/diagnostics/playwright-artifacts.test.mjs",
+        "scripts/ci/rust-profile.test.mjs",
+        ".github/workflows/fuzz.yml",
+        ".github/workflows/glib-0.20-watch.yml",
+        "scripts/ci/fuzz-targets.py",
+        "scripts/ci/glib-migration.py",
+        "scripts/ci/test_inventory_probes.py",
+        "scripts/diagnostics/ci-inventory.test.mjs",
+        ".github/actions/ci-scope/",
+        ".github/workflows/ci-scope.yml",
+        "scripts/ci/docs-scope.mjs",
+        ".github/workflows/dependency-acceptance.yml",
+        ".github/workflows/dependabot-auto-merge.yml",
+        "scripts/diagnostics/ci-docs-scope.test.mjs"
       ],
       "node": [
+        "scripts/diagnostics/ui-runner.test.mjs",
+        "scripts/diagnostics/asan.test.mjs",
+        "scripts/ci/asan-cli.test.mjs",
+        "scripts/ci/ubuntu-apt-source.test.mjs",
+        "scripts/diagnostics/runner-storage.test.mjs",
+        "scripts/diagnostics/windows-native-deps.test.mjs",
         "scripts/diagnostics/ci-latency.test.mjs",
+        "scripts/test-ai-eval.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
         "scripts/diagnostics/merge-queue.test.mjs",
         "scripts/diagnostics/mutants-workflow.test.mjs",
-        "scripts/diagnostics/health-workflow.test.mjs"
+        "scripts/diagnostics/mutation-evidence.test.mjs",
+        "scripts/diagnostics/health-workflow.test.mjs",
+        "scripts/diagnostics/standards-wiring.test.mjs",
+        "scripts/diagnostics/ci-gitleaks.test.mjs",
+        "scripts/diagnostics/repository-hygiene.test.mjs",
+        "scripts/diagnostics/health-browser-contract.test.mjs",
+        "scripts/diagnostics/required-checks.test.mjs",
+        "scripts/diagnostics/codeql-results.test.mjs",
+        "scripts/diagnostics/backend-eval-report.test.mjs",
+        "scripts/diagnostics/ci-timing-report.test.mjs",
+        "scripts/ci/backend-coverage.test.mjs",
+        "scripts/ci/native-host-coverage.test.mjs",
+        "scripts/ci/linux-crash-diagnostics.test.mjs",
+        "scripts/diagnostics/windows-coverage.test.mjs",
+        "scripts/ci/windows-coverage-cli.test.mjs",
+        "scripts/diagnostics/ui-shard-orchestration.test.mjs",
+        "scripts/diagnostics/chromium-evidence.test.mjs",
+        "scripts/diagnostics/playwright-artifacts.test.mjs",
+        "scripts/ci/rust-profile.test.mjs",
+        "scripts/diagnostics/ci-inventory.test.mjs",
+        "scripts/diagnostics/ci-docs-scope.test.mjs"
+      ],
+      "consumers": [
+        "release-publication"
       ],
       "escalation": [
-        "Run actionlint and affected workflow regressions; source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
+        "CodeQL upload success is not zero-unresolved-finding acceptance. Every matrix analysis must validate actual local SARIF, reject unknown or changed findings and absent/malformed/failed analyses, and match existing reviewed false positives only by exact rule, path, primary-line fingerprint, normalized flow evidence and checked-out source spans. Preserve review provenance, all languages, full PR/main analysis, uploads, query configuration and required check names. Qualify actual full SARIF, changed-flow and unknown-finding controls plus actual hosted analysis. Run typos, actionlint and affected tests. See docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding.",
+        "Run actionlint and affected workflow regressions. Heavy hosted Ubuntu Rust jobs reclaim only fixed unused image SDK directories before Cargo-cache restore and report actual free bytes; retain workspace, Cargo/Rustup, compiler and analysis tools. The shared hosted-Ubuntu guard rejects local/self-hosted/non-Ubuntu roots, and cleanup skips symlink/non-directory paths without touching their targets. Require real fixture cleanup/idempotence and preservation controls plus actual hosted space measurements. Mutation runner changes also require scripts/release/run-mutants.test.mjs and scripts/release/mutation-process-owner.test.mjs with the pinned cargo-mutants and cargo-nextest tools. Shared execution is Linux-only: qualify actual kernel subreaper normal exit, direct and nested tool cancellation, active build cancellation, unrelated-sibling preservation and missing-ack rejection before accepting the repair. Portable inline controls remain required; local non-Linux skips do not qualify native cleanup. Verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. Identical full-source standards and Git index hygiene execute once in Health Linux after frontend dependencies; documentation scope retains its independent source gate and real checker portability fixtures remain on every Health platform. Native CI alone does not certify the complete candidate; preserve current-source required Health and release check closure. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the whole-suite budget from actual workspace inventory and runner variance while retaining per-test hang detection; size the overall mutation job from the actual selected inventory and complete surviving-mutant build/test bounds, preserving its exact sample union through bounded chunks. Shared baseline reuse requires actual complete-workspace execution and same-run source/tool/config/inventory identity against immutable producer evidence; reject incompatible attempts and never fabricate tool Baseline outcomes; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration.",
+        "Direct check migration requires successful current-source app-bound replacement evidence before editing branch protection; preserve strictness and unrelated checks. The complete macOS workspace retains Apple Silicon with all default targets, doc-tests and lint/build. Host remains instrumented for native-only desktop/updater policy; the remaining workspace executes all default targets without another instrumented Core test build. Linux and Windows retain complete instrumented workspace coverage; Health and independent backend jobs use standard Intel capacity. macOS WebKit, full Chromium and extended browser matrices use macos-26-intel, including actual image labels in every artifact and collector; ARM workspace and real native app/CLI coverage retain macos-latest. macOS browser admission waits for Health/WebKit; Windows waits for Health without unrelated WebKit admission. Both bound concurrent shards. An unallocated producer is an infrastructure failure with zero execution evidence; recover the complete UI workflow on the same source so all unit/shard artifacts share one attempt. Windows uses eight independent serial native consumers from one sealed archive, with direct required checks and no extra qualification layer. The shared partition-union utility receives the caller-owned count: Windows remains eight and ASan uses eight. Both actual pinned-tool consumers and their omission/duplicate/partial-failure controls must pass after changing this shared boundary. Every selected test executes exactly once with existing watchdogs, full instrumentation, default targets and zero retries. The shared required-check owner must migrate the old four-part names only after every replacement has successful current-source app-bound evidence, preserving strictness and unrelated checks; exact-source release acceptance must require the same eight actual native checks. Actual pinned tools must exercise all eight consumers, ignored/default targets, empty offline consumers and complete disjoint inventory/execution/coverage receipts; omission, duplication, partial failure and stale identity remain rejected. Windows archive changes require official pinned-tool archive/list/receipt/coverage proof, all default Cargo targets, exhaustive disjoint partitions, source/run/compiler/config/archive identity, hermetic offline consumers and actual hosted Windows execution. Producer lint, ordinary production builds and doctests remain directly required. ASan partitions also collect every selected terminal result after a failure with zero retries; a real failing first Rust case must be followed by all remaining selected cases while the nonzero exit still prevents a receipt. Actual Windows CI consumers collect every selected terminal result after a failure, while independent matrix shards continue. Prove later selected cases execute after the first real failure and that no failed or incomplete shard produces an acceptance receipt. Successful consumers execute every selected case exactly once, with pinned process-hang watchdogs and zero retries. The non-instrumented ASan protocol fixture belongs once to the required sanitizer producer; ordinary native jobs do not repeat it. Optional-pack browser scenarios execute once in the full Linux inventory; retain their unique built-asset and syntax checks and prove scenario equivalence before deleting duplicate coverage plumbing. Incident renderer/tray/window/network comparisons are manual; the required native acceptance caller remains automatic. Product tests execute through the complete fresh-consumer partitions after archive validation, retaining every runnable recovery case without a duplicated producer subset or competing case-list owner. Linux CI owns instrumented backend scenario evidence, while macOS/Windows retain their dedicated backend jobs.",
+        "Coverage accumulation changes require scripts/ci/backend-coverage.test.mjs and scripts/ci/native-host-coverage.test.mjs with real cargo-llvm-cov, pinned cargo-nextest and matching LLVM tools. Host process isolation must retain all default targets, ignored-test policy, fail-on-empty selection, no retries and failure propagation. Linux/Windows retain full workspace instrumentation, while macOS retains native Host coverage and normal complete remaining-workspace execution. Standalone coverage commands retain immediate reporting after their complete selected execution, and explicit no-report ignored passes must preserve earlier genuine counters until their final report. Hosted Linux instead validates and uploads three genuine disjoint execution cohorts (two default reports plus the ignored report) through the archive acceptance contract below; never upload an interim report together with its later superset. Preserve every default and ignored execution; --no-report and --no-clean are mutually exclusive. The owning native CI installs the tools before this regression.",
+        "The Linux workspace archive protocol requires scripts/ci/linux-workspace-cli.test.mjs with pinned Nextest/llvm-cov and matching LLVM tools. Keep this native-environment fixture outside universal local Node selections: a local Darwin API-only fixture uses a distinct nonnative schema rejected by production CLI and cannot qualify Ubuntu runtime/Host linkage or ELF stack file:line. Native Linux execution must validate actual Ubuntu/runtime package compatibility before product reuse. Preserve the original target/llvm-cov-target and embedded CLI paths, independently derived instrumentation environments, complete default targets and ignored metadata, trusted hashes and disjoint exhaustive four-worker partitions. Extract through an owned same-filesystem stage outside artifact roots; rejection after real extraction and partial-write interruption must preserve unrelated native outputs and leave binary-free diagnostics. Record incidental image rollout metadata separately from authoritative compatibility. Protocol qualification does not activate a workflow or replace full hosted product acceptance.",
+        "Archived ignored execution stays in scripts/evals/backend-runner.mjs through the existing command/process and real libtest-output validators. Preserve all BACKEND_SUITES, the complete sealed Bridge ignored subset and exact LARGE_FOLDER_SCENARIO, original Cargo cwd/runtime/loader environment and compile-time CLI paths. Keep the original four-suite schema1 report; separate ignored receipts bind complete selections, trusted source/run/attempt/compiler/runtime/archive/manifest identity, executable hashes, successful exits, verified cleanup, genuine coverage and independently redacted stdout/stderr hashes. Cancellation must cover preparation/extraction and stop later admission. Actual scripts/ci/backend-coverage.test.mjs controls include removed producer outputs, real dynamic loader failure, default and ignored selection, partial extraction cancellation, no binary artifacts and password canaries on both channels. The added Linux-specific case runs on GitHub Linux and local Darwin mechanics only; unsupported local Linux, Windows and hosted Darwin skip that case while retaining the file's existing native checks. Declared GitHub Linux with missing environment must fail, not skip. Local mechanics do not replace hosted Linux/full-product evidence or prove all descendant retirement.",
+        "Hosted Linux keeps the checks job ID and workspace-checks-checks cache cohort as its sole main-only native/instrumented writer. Preserve all native Clippy/build/frontend syntax/doctests and actual coverage/crash fixtures; Linux default and ignored archive fixtures must qualify before producing the product archive. Two four-worker default consumers and one serial ignored consumer use the same complete instrumented archive at target/llvm-cov-target, exact producer Rust with matching LLVM, pinned prebuilt tools and actual Tauri runtime packages. No consumer Rust cache, frontend build or Cargo compilation. Independently derive coverage environment through scripts/ci/linux-workspace.sh with successful assignment before eval. Runtime ABI/package/compiler/profile equality is authoritative; image rollout metadata remains observation. Every Linux execution runner retains native crash setup/selftest and unconditional verified restoration with unique optional diagnostic transport. The strict checks (ubuntu-latest) aggregate independently verifies docs scope and requires producer, default matrix and ignored success before downloading mandatory current-attempt evidence. Reuse the shared default collector and backend-owned ignored validator, trusted job-output hashes, source/run/attempt, exact disjoint default union and four-key backend report. Validate all three genuine LCOV cohorts before the required Linux Codecov upload. Upload ignored evidence once under the historical backend-core-ubuntu-24.04-attempt compatibility artifact; its name does not define ABI. Metadata/receipts retain fourteen days; binary archive one day without recompression. Native Linux ELF stack file:line and strip-debug negative controls distinguish actual stack evidence from panic headers. Actual same-source hosted Host, default, ignored and full-DAG timing remain mandatory; local Darwin mechanics do not certify runtime linkage or a thirty-minute result.",
+        "The macos-remaining profile in scripts/ci/windows-coverage.mjs requires native Darwin qualification through node --test scripts/ci/macos-remaining-cli.test.mjs with pinned Nextest and Apple dsymutil. Keep this platform-exclusive fixture out of universal local Node selections. Verify exactly Host-excluded complete enabled default targets, two disjoint four-worker offline consumers at the identical absolute checkout/target, trusted producer hashes, exact source/compiler/config/profile/attempt identity, and strict pure collection of both actual execution receipts with explicit successful native/producer/matrix job results. Consumer evidence must omit binaries and fake LCOV. Preserve selected executable dSYM bundles through official Nextest extras and require stack frame file:line after producer outputs are removed, with a missing-bundle negative control that distinguishes the panic header. Hosted product compilation and complete same-source DAG cost remain required before claiming the migration accepted. The Windows archive CLI fixture requires pinned cargo-nextest0.9.150/cargo-llvm-cov0.8.7 and LLVM tools matching rustc. It creates only an isolated local Git fixture and runs all eight exact partitions from the archive with empty consumers; no real product full suite is replaced by this contract test.",
+        "Reusable browser shards retain four Linux, eight macOS and four Windows runners with the same execution/artifact steps. Linux admits four concurrent shards; macOS waits for Health and WebKit, Windows waits for Health independently, and each inherits the reusable four-slot per-OS admission budget. The canonical process owner computes its remaining absolute budget after setup, reserving cleanup and upload time inside the existing job timeout. Require actual successful full-shard execution plus interrupted real Playwright proof of nonzero status, joined descendants and preserved active-case/log evidence. Timeout or uncertain cleanup never qualifies acceptance; verified owned-scope termination is recorded separately from the actual command status, including normal Windows empty-job closure; diagnostic partial progress does not replace the existing strict collectors. Actual-tool fixtures own private output directories and use observable startup rather than short cold-start deadlines. Dependencies are readiness gates rather than timed delays; all per-OS inventories and same-attempt artifacts remain required. Linux coverage may depend on Linux plus Health only, but portable collection and final UI acceptance must reject every missing/failed/cancelled/skipped Linux, macOS or Windows result.",
+        "Actual Windows native Perl acceptance remains required in the serial Windows producer after its real bootstrap; portable selector/error fixtures and static inclusion/order checks do not replace that native execution. Preserve native OS/module checks and the ten-second probe watchdog. Real compiler contract fixtures sharing a native job run serially to avoid Cargo package-cache and compiler contention; retain all selected contracts and their original watchdogs. Complete frontend units execute once through Linux coverage using the same Vitest selection as ordinary units; retain explicit mocked platform branches and all real three-platform diagnostic/browser/native evidence. Workflow edits run the existing fast ci-latency policy owner through the cheap static catalog before publication; keep that owner limited to configuration assertions and runner inventory discovery, never suites, compilation or implicit installation. Ordinary CI debug-info changes require scripts/ci/rust-profile.test.mjs with the actual compiler and matching LLVM tools: preserve application stack file/line locations, debug assertions, overflow checks and source-line coverage relative to full debug information. Keep producer/consumer profile inputs consistent and sanitizer, mutation and release settings independently owned. Browser artifact changes require the actual Playwright blob round-trip: passed and failed attachments must reconstruct after raw output removal, while unsuccessful shards retain raw attachments as a fallback.",
+        "ASan changes retain the core default library inventory, instrumented std, exact dated nightly cohort, original sanitizer settings and one test per runner. The workflow environment owns the reviewed dated nightly pin; the producer installs it once with rust-src and verifies the exact installed manifest and explicit-toolchain rustc/Cargo fingerprints before restoring the existing cache cohort. Upgrade the pin through a reviewed PR with actual Linux clean/use-after-free controls on all eight runners and the full union; a local stable protocol fixture cannot qualify instrumentation or cache reuse. One source-pinned Nextest archive feeds six hash partitions excluding four exact reserved names plus two fixed reserved cohorts, keeping eight serial runners. The owner rejects missing, duplicate, renamed or ignored reserved names in the unfiltered default inventory before sealing and execution. List and run selectors must match; actual pinned CLI cases include all reserved names and prove their exact cohort assignment. Preserve identical full inventories and compiler/config fingerprints; trusted producer outputs bind archive and manifest digests, consumers verify both before extraction and compare actual inventories before running, and the collector requires producer success. Disposable extracted runtimes stay outside uploaded receipt/inventory/log evidence; actual CLI controls must prove both successful and failed consumer evidence contains no runtime binaries. The real pinned CLI fixture must remove producer outputs, execute all eight consumers without rebuilding and reject corrupted archives/manifests, changed source, missing digests and changed inventories before execution; the existing required ASan check independently validates current-source/run/attempt artifacts, the disjoint exhaustive union and every complete successful execution receipt. Missing, duplicate, stale, failed, retried or partially executed evidence rejects. Preserve original case budgets with the explicit sanitizer config rather than inheriting unrelated platform watchdogs. The generic stable CLI regression proves the metadata/execution protocol only; actual Linux clean and intentional-use-after-free controls, raw channel digests and the full core union remain mandatory instrumentation evidence. Do not replace those with boolean flags or synthetic fixture diagnostics.",
+        "Fuzz discovery must succeed and exactly match every unique manifest-owned target before any execution; empty, incomplete and failed discovery reject. The glib migration watcher requires all resolved glib branches to reach stable 0.20 or newer before claiming migration. Validate both CLI failure controls and actual workflow wiring. Caller/event-scoped verification concurrency must preserve scheduled/manual evidence while cancelling superseded candidate sources. Release-source acceptance includes ASan and mutation-runner contracts, with immediate checks before each public Stable mutation; no publication is authorized by diagnostics.",
+        "Linux/macOS Host and remaining workspace tests must both use pinned Nextest with four concurrent case processes, zero retries, complete default unit/bin/integration/test-enabled-example targets and unchanged ignored/doctest policies. Standalone coverage commands must return a failed complete Host partition’s original nonzero status before compiling or running the remaining workspace partition; a passing Host must still admit that complete partition, and both must pass before coverage reporting. Hosted macOS runs its Host-only native lane and immediate remaining-workspace archive producer independently after full scope, with two producer-dependent four-worker consumers and a strict Ubuntu collector retaining checks (macos-latest). Preserve actual native/producer/matrix success before artifact collection, trusted job-output hashes and exact Rust version, current-attempt artifact names, no consumer build/cache/frontend work, the shared workspace-checks-checks cache cohort with one main-only native macOS writer, and diagnostics without binaries. The existing ci-latency policy owner verifies this DAG, docs scope and unsuccessful-result truth table; actual hosted execution remains required. macOS runs every remaining-workspace default target without coverage instrumentation; actual executed target counts, a Core execution marker and a clean Host coverage report must prove that no second instrumented Core cohort is built. Linux/Windows retain full Core instrumentation, and macOS Host-specific coverage remains required. Keep complete terminal case collection within each selected partition and independent matrix consumers. Require the actual tool fixture to preserve accumulated coverage, reject Host, remaining-partition and simultaneous configured failures and real report-destination failures in both timing modes, prove remaining-partition admission is absent after Host failure, reject empty selections, and terminate a genuinely parked case while collecting a later case. Linux backend evidence remains mandatory on a passing job; an upstream failure before that producer runs must not add a misleading missing-artifact error. The ordinary default process-hang limit is fifteen minutes, retaining the stricter metadata sixty-second and reconnect five-minute overrides and independent mutant/ASan settings. The real parked-case fixture derives its policy from the source default, accelerates only its period and requires actual termination plus a later selected execution. Linux process-exit crash diagnostics require the actual hosted C exit-handler SIGSEGV control, exact owned executable symbolization, bounded core storage/text/runtime, atomic recovery state under controlled incomplete/rejected writes and unconditional verified restoration/cleanup. Preserve the original product test failure regardless of diagnostic success; no retry qualifies a failed source. Auxiliary diagnostic upload failures cannot gate passing tests or skip subsequent independent checks; only reviewed transport roles are optional. Local structured-result publication, cleanup and all authoritative coverage/source/partition/native/release/security artifacts remain mandatory. Exercise actual CLI result-publication failure even after a successful child. Portable name/path/capture controls do not establish kernel delivery. Retain explicit caller-owned functional/latency contracts; static workflow assertions do not certify this boundary.",
+        "Documentation-only CI requires the exact tested same-repository main-target PR merge, regular prose-only inputs and no affected validation owner or authority reference. Independent revalidation and successful selection must precede every required N/A job; preserve expanded names on Ubuntu, strict full-scope artifact collectors, unforced native Codecov empty-upload and real CodeQL. Main pushes, merge groups, schedules, manual calls, forks, modes/renames/deletions and mixed/owned inputs retain full work. Qualify actual provider App identity, all required contexts and absent product/native execution on a real docs PR; see docs/ci-maintenance.md#documentation-only-pr-scope. Release checks additionally require the latest successful same-repository exact-SHA main-push run of each owning workflow and its check suite; PR scope success, stale runs and wrong suites cannot authorize publication. Preserve failed-only rerun successes within the same successful main suite."
       ]
     },
     {
       "id": "public-help",
-      "paths": ["tools/help/", "docs/help/"],
+      "paths": ["tools/help/", "docs/help/", ".github/workflows/pages.yml"],
       "node": [
         "tools/help/corpus.test.mjs",
         "tools/help/help.test.mjs",
-        "tools/help/server.test.mjs"
+        "tools/help/server.test.mjs",
+        "tools/help/discovery.test.mjs"
       ],
       "escalation": [
         "Public help content is bundled into the frontend and published independently; review the public help build/publication and settings-navigation consumers."
@@ -271,12 +539,15 @@
         "docs/evals/README.md",
         "docs/evals/ai-eval-suite.json",
         "docs/evals/group-reception-ai-eval-suite.json",
+        "docs/evals/local-agent-access-ai-eval-suite.json",
         "docs/evals/linked-device-sync-ai-eval-suite.json",
         "docs/evals/person-presence-ai-eval-suite.json",
+        "docs/evals/protected-messages-ai-eval-suite.json",
         "docs/evals/tray-menu-ai-eval-suite.json",
         "docs/evals/validation-velocity-ai-eval-suite.json",
         "docs/evals/prompts/agent-contract-evaluator.md",
-        "scripts/test-ai-eval.mjs"
+        "scripts/test-ai-eval.mjs",
+        "docs/evals/desktop-updates-ai-eval-suite.json"
       ],
       "node": ["scripts/test-ai-eval.mjs"],
       "escalation": [
@@ -286,13 +557,38 @@
     {
       "id": "portable-browser-reporting",
       "paths": [
+        "frontend/e2e/browser-error-evidence.spec.ts",
+        "frontend/e2e/helpers/browser-error-details.ts",
+        "frontend/e2e/portable-core.spec.ts",
+        "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/e2e/media-scroll.spec.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "frontend/e2e/media-lifecycle.spec.ts",
+        "frontend/e2e/screenshot-portable.spec.ts",
+        "frontend/e2e/file-send-progress.spec.ts",
+        "frontend/e2e/directory-transfer.spec.ts",
+        "frontend/e2e/attachment-approval.spec.ts",
+        "frontend/e2e/unread-badge.spec.ts",
+        "frontend/playwright.config.ts",
+        "frontend/playwright.portable.config.ts",
         "scripts/evals/browser-report.mjs",
         "scripts/evals/portable-runner.mjs",
-        "scripts/diagnostics/browser-eval-report.test.mjs"
+        "scripts/diagnostics/browser-eval-report.test.mjs",
+        "scripts/evals/chromium-evidence.mjs",
+        "scripts/diagnostics/chromium-evidence.test.mjs",
+        "frontend/e2e/helpers/portable-evidence.ts",
+        "scripts/diagnostics/test-fixtures/trace.mjs",
+        "scripts/diagnostics/trace-evidence.test.mjs",
+        "scripts/diagnostics/playwright-artifacts.test.mjs"
       ],
-      "node": ["scripts/diagnostics/browser-eval-report.test.mjs"],
+      "node": [
+        "scripts/diagnostics/browser-eval-report.test.mjs",
+        "scripts/diagnostics/chromium-evidence.test.mjs",
+        "scripts/diagnostics/trace-evidence.test.mjs",
+        "scripts/diagnostics/playwright-artifacts.test.mjs"
+      ],
       "escalation": [
-        "Portable browser reporting requires exact scenario identities, unique trace and screenshot evidence, and zero skipped or flaky cases from the configured browser matrix. Diagnostic tests do not establish browser acceptance; see docs/testing-feedback-loop.md."
+        "Functional browser case timeouts are process-safety watchdogs for complete cold/render/interaction journeys, not per-action performance SLAs. Full Chromium uses its established Windows/coverage allowance on all platforms; portable cases retain their existing Windows allowance and the full-suite allowance elsewhere. Keep all individual assertion and explicit product/latency deadlines, zero retries, full inventories and first-failure traces. The real runner control derives both actual source watchdogs, accelerates only the deliberately parked case, retains the normal source allowance for later cases, verifies that isolation with latency beyond the accelerated bound, requires one parked timeout plus a later passing case, and joins descendants before deleting fixtures. Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact platform-specific source/run/attempt/platform identity (eight macOS shards, four Linux/Windows shards) and complete authoritative core inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Portable specs must explicitly retain successful traces under the full-suite configuration; verify changed scenarios with that configuration and evidence extraction as well as standalone portable execution, whose global trace setting can mask an omitted spec-level declaration. Dedicated WebKit and Firefox core acceptance are required on ordinary candidates; scheduled/manual extended Chromium and Firefox retain complete extended inventories. Fixture navigation must observe an actual boundary using browser-supported input rather than assume a wheel delta equals a scroll offset; retain genuine virtualized unmount, cache reuse and geometry assertions. Browser-side error evidence preserves bounded stacks and nested causes before protocol serialization, across navigation and disposal, while the unchanged strict error gate rejects uncaught/recovered errors. Validate early error/rejection, cycle/depth/string/event limits and the real-browser negative gate control. Standalone Windows portable-runner batches derive from complete inventory and remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
       ]
     },
     {
@@ -309,7 +605,9 @@
         "scripts/diagnostics/native-ipc-boundary.test.mjs",
         "scripts/evals/png-evidence.mjs",
         "scripts/diagnostics/png-evidence.test.mjs",
-        "scripts/diagnostics/test-fixtures/png.mjs"
+        "scripts/diagnostics/test-fixtures/png.mjs",
+        "scripts/diagnostics/native-sticker-acceptance.mjs",
+        "scripts/diagnostics/native-sticker-acceptance.test.mjs"
       ],
       "node": [
         "scripts/diagnostics/hidden-contacts-report.test.mjs",
@@ -317,10 +615,12 @@
         "scripts/diagnostics/native-core-scenarios.test.mjs",
         "scripts/diagnostics/native-ipc-boundary.test.mjs",
         "scripts/diagnostics/native-build.test.mjs",
-        "scripts/diagnostics/png-evidence.test.mjs"
+        "scripts/diagnostics/png-evidence.test.mjs",
+        "scripts/diagnostics/native-sticker-acceptance.test.mjs"
       ],
       "escalation": [
-        "Native harness and evidence-validation changes require fresh real desktop acceptance on the affected platforms with clean source and verified build provenance; diagnostic unit checks cannot certify native behavior."
+        "Native harness and evidence-validation changes require fresh real desktop acceptance on the affected platforms with clean source and verified build provenance; diagnostic unit checks cannot certify native behavior.",
+        "Installed sticker candidate acceptance uses node scripts/diagnostics/native-sticker-acceptance.mjs after a clean source-pinned native-build.mjs build. It uses two isolated native profiles and production ZIP import/source registration, checks independent missing/installed/replaced transfers plus repeated-send identity and retained bytes, and does not certify native older-peer or linked-device alias behavior."
       ]
     }
   ]

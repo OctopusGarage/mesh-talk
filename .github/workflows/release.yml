@@ -30,7 +30,9 @@ env:
 jobs:
   preflight:
     runs-on: ubuntu-latest
+    timeout-minutes: 250
     permissions:
+      actions: read
       contents: read
       checks: read
       security-events: read
@@ -51,11 +53,11 @@ jobs:
           RELEASE_NIGHTLY: ${{ github.event_name == 'schedule' || inputs.publish_nightly }}
           RELEASE_PUBLICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
         run: node scripts/release/preflight.mjs
-      - name: Require successful exact-source CI before Nightly compilation
+      - name: Wait for successful exact-source CI before Nightly compilation
         if: steps.inputs.outputs.nightly == 'true' && steps.inputs.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/release/check-source-checks.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+        run: node scripts/release/check-source-checks.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA" --wait
 
   build-release:
     needs: preflight
@@ -65,13 +67,19 @@ jobs:
       id-token: write
       attestations: write
     env:
+      # Drop Mach-O local symbols during linking, before Tauri signs and bundles
+      # the desktop app. The same flags cover the headless release binary.
+      CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: "-C link-arg=-Wl,-x"
+      CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: "-C link-arg=-Wl,-x"
       ARTIFACT_TAG: ${{ needs.preflight.outputs.tag }}
+      # Free updater keys are available only to the existing trusted publication sources.
+      MESH_TALK_UPDATER_PUBLIC_KEY: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && vars.MESH_TALK_UPDATER_PUBLIC_KEY || '' }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
       MESH_TALK_BUILD_TAG: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/')) && needs.preflight.outputs.tag || format('v{0}-dev', needs.preflight.outputs.version) }}
-      MESH_TALK_VARIANT: ${{ matrix.variant }}
     strategy:
       fail-fast: false
       matrix:
-        variant: [default, lite]
         target:
           - x86_64-apple-darwin
           - aarch64-apple-darwin
@@ -93,7 +101,8 @@ jobs:
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
           - os: linux
-            runner: ubuntu-latest
+            # Keep the AppImage glibc baseline aligned with Linux ARM64.
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: linux
             runner: ubuntu-22.04-arm
@@ -110,6 +119,33 @@ jobs:
         with:
           node-version: 22
 
+      - name: Prepare hosted Linux build storage
+        id: runner_storage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/runner-storage.mjs --prepare | tee "$RUNNER_TEMP/runner-storage.json"
+
+      - name: Preserve runner storage measurements
+        if: always() && steps.runner_storage.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: runner-storage-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-storage.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Setup Python for native release inspection
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned native inspection toolchain
+        if: runner.os != 'Linux'
+        shell: bash
+        run: python scripts/release/sevenzip.py install
+
       # 3️⃣ Install Rust
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -119,10 +155,10 @@ jobs:
       # 3.6️⃣ Install protoc
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: brew install protobuf zstd
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
-        run: choco install protoc
+        run: choco install protoc zstandard -y
 
       # Linux needs the Tauri GTK/WebKit stack (+ protoc) to build the AppImage/deb/rpm.
       - name: Install Tauri system dependencies (Linux)
@@ -145,7 +181,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # Native objects and build-script executables depend on the runner ABI.
+          key: ${{ matrix.target }}-${{ matrix.runner }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install zip on Windows
         if: runner.os == 'Windows'
@@ -159,76 +196,47 @@ jobs:
           npm run build
           npm run check:build-syntax
 
+      - name: Prepare optional signed updater artifacts
+        run: node scripts/release/updater.mjs prepare
+
       # 6️⃣ Build Tauri app
       - name: Build Tauri app
         run: |
           cd src-tauri
           # Local release builds use four codegen units for speed. Ship the
-          # smaller single-unit binary on every release target and edition.
-          node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} -- --config profile.release.package.mesh-talk.codegen-units=1
+          # smaller single-unit binary on every release target.
+          node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} --config ../tmp/updater-build.json -- --config profile.release.package.mesh-talk.codegen-units=1
 
       - name: Build headless post-office node
-        if: matrix.variant == 'default'
         run: cargo build --locked --release --target ${{ matrix.target }} -p mesh-talk-core --bin mesh-talk-node
 
-      - name: Verify edition assets
+      - name: Verify frontend assets
         shell: bash
-        run: node scripts/release/check-variant-assets.mjs "$MESH_TALK_VARIANT"
+        run: node scripts/release/check-variant-assets.mjs
 
       # 7️⃣ Collect artifacts
       - name: Collect build artifacts
         shell: bash
-        run: |
-          mkdir -p release
-          TAG="$ARTIFACT_TAG"
+        run: bash scripts/release/package-app.sh collect
 
-          for pattern in \
-            target/*/release/bundle/nsis/*.exe \
-            target/*/release/bundle/msi/*.msi \
-            target/*/release/bundle/dmg/*.dmg \
-            target/*/release/bundle/appimage/*.AppImage \
-            target/*/release/bundle/deb/*.deb \
-            target/*/release/bundle/rpm/*.rpm
-          do
-            for file in $pattern; do
-              [ -e "$file" ] || continue
-              BASENAME=$(basename "$file")
-              NEWNAME=$(echo "$BASENAME" | sed -E "s/_[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?/_${TAG}/")
-              cp "$file" "release/$NEWNAME"
-            done
-          done
+      - name: Collect version-bound updater artifacts
+        run: node scripts/release/updater.mjs collect ${{ matrix.target }}
 
-          ls -lh release || true
+      - name: Build native delta verification helper
+        if: runner.os != 'Linux' && env.MESH_TALK_UPDATER_PUBLIC_KEY != ''
+        run: node scripts/release/updater.mjs delta-helper
+
+      - name: Produce verified optional native delta artifacts
+        if: runner.os != 'Linux'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release/updater.mjs delta ${{ matrix.target }}
 
       # 8️⃣ Generate SHA256 checksums
       - name: Generate SHA256 checksums
         shell: bash
-        run: |
-          set -euo pipefail
-          cd release
-          shopt -s nullglob dotglob
-          files=()
-          for file in ./*; do
-            if [[ -f "$file" && ! -L "$file" && "$file" != './SHA256SUMS' ]]; then
-              files+=("$file")
-            fi
-          done
-          test "${#files[@]}" -gt 0
+        run: bash scripts/release/package-app.sh checksums
 
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${files[@]}" > SHA256SUMS
-            test -s SHA256SUMS
-            sha256sum -c SHA256SUMS
-          else
-            shasum -a 256 "${files[@]}" > SHA256SUMS
-            test -s SHA256SUMS
-            shasum -a 256 -c SHA256SUMS
-          fi
-
-          echo "SHA256SUMS created:"
-          cat SHA256SUMS
-
-      # 9️⃣ Install cosign
       - name: Install cosign
         if: matrix.target != 'aarch64-pc-windows-msvc'
         uses: sigstore/cosign-installer@v4.1.2
@@ -252,71 +260,16 @@ jobs:
       # 🔟 Package and sign artifacts
       - name: Package and sign artifacts
         shell: bash
-        run: |
-          set -euo pipefail
-          TAG="$ARTIFACT_TAG"
-          mkdir -p release_zips
-
-          OS_NAME=""
-          ARCH=""
-
-          case "${{ matrix.target }}" in
-            x86_64-apple-darwin)
-              OS_NAME="macos"
-              ARCH="x86_64"
-              ;;
-            aarch64-apple-darwin)
-              OS_NAME="macos"
-              ARCH="arm64"
-              ;;
-            x86_64-pc-windows-msvc)
-              OS_NAME="windows"
-              ARCH="x86_64"
-              ;;
-            aarch64-pc-windows-msvc)
-              OS_NAME="windows"
-              ARCH="arm64"
-              ;;
-            *-linux-gnu | *-linux-musl)
-              OS_NAME="linux"
-              ARCH="$(echo ${{ matrix.target }} | cut -d- -f1)"
-              ;;
-            *)
-              echo "Unsupported target: ${{ matrix.target }}"
-              exit 1
-              ;;
-          esac
-
-          ZIP_NAME="release_zips/mesh-talk_${TAG}_${OS_NAME}_${ARCH}.zip"
-          if [[ "$MESH_TALK_VARIANT" == lite ]]; then
-            ZIP_NAME="${ZIP_NAME%.zip}_lite.zip"
-          fi
-
-          case "$OS_NAME" in
-            macos)
-              zip -r "$ZIP_NAME" release/*.dmg release/SHA256SUMS
-              ;;
-            windows)
-              zip -r "$ZIP_NAME" release/*.exe release/*.msi release/SHA256SUMS
-              ;;
-            linux)
-              zip -r "$ZIP_NAME" release/*.AppImage release/*.deb release/*.rpm release/SHA256SUMS
-              ;;
-          esac
-
-          BUNDLE_FILE="${ZIP_NAME}.bundle"
-          cosign sign-blob --yes --bundle "$BUNDLE_FILE" "$ZIP_NAME"
-
-          echo "✅ Bundle signature generated: $BUNDLE_FILE"
-          ls -lh release_zips
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash scripts/release/package-app.sh package
 
       - name: Package and sign post-office node
-        if: matrix.variant == 'default'
         shell: bash
         run: |
           set -euo pipefail
           archive="$(bash scripts/release/package-post-office.sh '${{ matrix.target }}' "$ARTIFACT_TAG")"
-          cosign sign-blob --yes --bundle "${archive}.bundle" "$archive"
+          node scripts/release/sign-blob.mjs "$archive" "${archive}.bundle"
 
       # 🔏 SLSA build provenance: a GitHub-native, signed attestation of exactly which
       # repo/commit/workflow produced this artifact. Verified by `gh attestation verify`.
@@ -325,10 +278,18 @@ jobs:
         with:
           subject-path: "release_zips/*.zip"
 
+      - name: Attest standalone updater and optional delta provenance
+        if: env.MESH_TALK_UPDATER_PUBLIC_KEY != ''
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release_zips/mesh-talk-update*
+            release_zips/mesh-talk-patch_*
+
       # 📦 SBOM (CycloneDX): full dependency inventory for supply-chain auditing. Generated
       # once on Linux x64 (deps are platform-independent) and shipped with the release.
       - name: Generate SBOM (CycloneDX)
-        if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.variant == 'default'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         uses: anchore/sbom-action@v0
         with:
           path: .
@@ -341,7 +302,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: mesh-talk-${{ matrix.variant }}-${{ matrix.os }}-${{ matrix.target }}
+          name: mesh-talk-${{ matrix.os }}-${{ matrix.target }}
           path: release_zips/*
           if-no-files-found: error
 
@@ -373,7 +334,12 @@ jobs:
       - name: Install installer metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libimage-exiftool-perl msitools rpm 7zip squashfs-tools
+          sudo apt-get install -y libimage-exiftool-perl msitools rpm squashfs-tools
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install pinned native inspection toolchain
+        run: python scripts/release/sevenzip.py install
       - uses: sigstore/cosign-installer@v4.1.2
       - uses: actions/download-artifact@v8
         with:
@@ -402,7 +368,7 @@ jobs:
           overwrite_files: ${{ needs.preflight.outputs.nightly != 'true' }}
           tag_name: ${{ needs.preflight.outputs.tag }}
           body_path: release_notes.md
-          generate_release_notes: true
+          generate_release_notes: false
           files: workflow-assets/*
       - name: Verify actual draft release assets
         if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
@@ -488,7 +454,12 @@ jobs:
       - name: Install installer metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libimage-exiftool-perl msitools rpm 7zip squashfs-tools
+          sudo apt-get install -y libimage-exiftool-perl msitools rpm squashfs-tools
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install pinned native inspection toolchain
+        run: python scripts/release/sevenzip.py install
       - uses: sigstore/cosign-installer@v4.1.2
       - name: Reverify the actual draft against saved build evidence
         run: |
@@ -498,7 +469,7 @@ jobs:
           node scripts/release/release-state.mjs verify "$RELEASE_TAG" draft-assets
       - uses: actions/download-artifact@v8
         with:
-          pattern: mesh-talk-default-linux-*
+          pattern: mesh-talk-linux-*
           merge-multiple: true
           path: container-input
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -525,6 +496,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Recheck source immediately before container publication
+        run: node scripts/release/check-source-checks.mjs "$SOURCE_REPO" "$SOURCE_SHA"
       - name: Publish verified multi-platform post-office image
         uses: docker/build-push-action@v7
         with:
@@ -540,7 +513,9 @@ jobs:
           provenance: true
           sbom: true
       - name: Publish only the verified draft
-        run: node scripts/release/release-state.mjs publish "$RELEASE_TAG"
+        run: |
+          node scripts/release/check-source-checks.mjs "$SOURCE_REPO" "$SOURCE_SHA"
+          node scripts/release/release-state.mjs publish "$RELEASE_TAG"
       - name: Queue the reviewed next-development-target PR
         id: maintenance
         continue-on-error: true

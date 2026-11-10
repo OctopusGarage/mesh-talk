@@ -218,7 +218,7 @@ async fn pinned_private_probe_keeps_routes_without_online_presence_or_new_grants
     }
     alice.node.runtime_work.drain().await;
     let policy = alice.privacy_snapshot();
-    let conversations = alice.node.log.lock().unwrap().conversations();
+    let conversations = alice.node.log.lock().unwrap().conversations().unwrap();
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);
     alice.node.probe_private_routes().await;
     let visible = alice
@@ -227,7 +227,7 @@ async fn pinned_private_probe_keeps_routes_without_online_presence_or_new_grants
         .any(|p| p.public.user_id() == bob.user_id());
     let routable = alice.peer_public(bob.user_id()).is_some();
     let after_probe_policy = alice.privacy_snapshot();
-    let after_probe_conversations = alice.node.log.lock().unwrap().conversations();
+    let after_probe_conversations = alice.node.log.lock().unwrap().conversations().unwrap();
     bob.stop().await;
     alice.node.runtime_work.drain().await;
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);
@@ -268,6 +268,7 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
     assert!(
         alice
             .account_history(&old, 100)
+            .unwrap()
             .iter()
             .any(|e| e.text == b"before rekey")
     );
@@ -340,12 +341,14 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
     assert!(
         alice
             .account_history(&old, 100)
+            .unwrap()
             .iter()
             .all(|e| e.text != b"explicit contact after rekey")
     );
     assert!(
         alice
             .account_history(&new, 100)
+            .unwrap()
             .iter()
             .all(|e| e.text != b"before rekey")
     );
@@ -444,16 +447,20 @@ async fn private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_rout
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
-    alice
-        .probe_private_routes_with_budget(Duration::from_millis(300))
-        .await;
-    assert_eq!(
+    // Each expired round launches only its two admitted children. Queued routes
+    // retain their turn rather than being skipped by the canceled round.
+    for launched in [2, 4, 6, 8] {
         alice
-            .privacy
-            .route_probe_cursor
-            .load(std::sync::atomic::Ordering::Relaxed),
-        8
-    );
+            .probe_private_routes_with_budget(Duration::from_millis(300))
+            .await;
+        assert_eq!(
+            alice
+                .privacy
+                .route_probe_cursor
+                .load(std::sync::atomic::Ordering::Relaxed),
+            launched,
+        );
+    }
     assert!(alice.roster.lock().unwrap().get(&live_id).is_none());
     {
         let round =
@@ -474,12 +481,16 @@ async fn private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_rout
         }).await.expect("live peer did not complete pinned authentication within the production probe deadline");
         // Dropping the pending round cancels the other stalled child probes.
     }
-    assert_eq!(
-        alice
-            .privacy
-            .route_probe_cursor
-            .load(std::sync::atomic::Ordering::Relaxed),
-        16
+    let launched = alice
+        .privacy
+        .route_probe_cursor
+        .load(std::sync::atomic::Ordering::Relaxed);
+    // The live tenth route may finish and free a worker before this observer
+    // sees its roster update. Further queued work is valid up to this round's
+    // eight-device bound; expired rounds above still require exactly two starts.
+    assert!(
+        (10..=16).contains(&launched),
+        "live route must be admitted without exceeding the bounded round: {launched} starts"
     );
     assert!(
         alice.roster.lock().unwrap().get(&live_id).is_some(),
@@ -551,6 +562,7 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
             .lock()
             .unwrap()
             .event_ids(&unrelated)
+            .unwrap()
             .is_empty()
     );
     alice.set_allowed(bob.account_id(), false).await.unwrap();
@@ -559,67 +571,248 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
     assert_eq!(alice.privacy_snapshot(), snapshot);
 }
 
+// One certified discovery observation, with the original six-second budget and
+// at most two probes at the original zero/five-second cuts.
+async fn discover_certified_peer(
+    stage: &str,
+    from: &NodeRuntime,
+    (target_user, target_account, target_port): (&str, &str, u16),
+    target_trace: Option<&crate::discovery::service::RoutedDiscovery>,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    let watermark = from.participant.discovery_trace().trace_watermark();
+    let endpoint = ([127, 0, 0, 1], target_port).into();
+    let mut probes = 0;
+    let mut last_probe = Ok(());
+    let mut last_cache_error = None;
+    let mut next_probe = tokio::time::Instant::now();
+    let discovered = tokio::time::timeout_at(deadline, async {
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            if probes < 2 && tokio::time::Instant::now() >= next_probe {
+                probes += 1;
+                last_probe = from
+                    .probe_endpoint(endpoint)
+                    .await
+                    .map_err(|e| e.to_string());
+                // Keep the original zero/five-second cadence. QueryTracker
+                // retains independent (source IP, nonce) challenges for five seconds.
+                next_probe = tokio::time::Instant::now() + Duration::from_secs(5);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            let cached = from.node.cached_peer_snapshot_async().await;
+            let fresh = from
+                .participant
+                .discovery_trace()
+                .fresh_certified_probe_since(watermark, endpoint, target_user, target_account);
+            let ready = match cached {
+                Ok(peers) => {
+                    fresh
+                        && peers.iter().any(|peer| {
+                            peer.public.user_id() == target_user
+                                && peer.account_id.as_deref() == Some(target_account)
+                        })
+                }
+                Err(error) => {
+                    last_cache_error = Some(error.to_string());
+                    false
+                }
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            if ready {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    if matches!(discovered, Ok(true)) && tokio::time::Instant::now() < deadline {
+        return Ok(());
+    }
+    let roster_count = from.roster.lock().unwrap().peers().len();
+    Err(format!(
+        "{stage}: certified peer discovery timed out; source_udp={}; target_udp={target_port}; probes={probes}; last_probe={last_probe:?}; cache_error={last_cache_error:?}; roster_count={}; source_trace={:?}; target_trace={:?}",
+        from.discovery_port(),
+        roster_count,
+        from.participant.discovery_trace().trace_snapshot(),
+        target_trace.map(|trace| trace.trace_snapshot()),
+    ))
+}
+
+async fn discover(stage: &str, from: &NodeRuntime, target: &NodeRuntime) -> Result<(), String> {
+    discover_certified_peer(
+        stage,
+        from,
+        (
+            target.user_id(),
+            target.account_id(),
+            target.discovery_port(),
+        ),
+        Some(target.participant.discovery_trace()),
+    )
+    .await
+}
+
+// The successful startup path performs no await after launching producers.
+// On a current-thread host, aborting these named tasks immediately therefore
+// precedes their first poll; the per-instance counter qualifies that boundary.
+async fn start_explicit_discovery_runtime(
+    base: &Path,
+    owner: &str,
+) -> (
+    NodeRuntime,
+    tokio::sync::mpsc::UnboundedReceiver<ReceivedDm>,
+) {
+    assert_eq!(
+        tokio::runtime::Handle::current().runtime_flavor(),
+        tokio::runtime::RuntimeFlavor::CurrentThread
+    );
+    let reservation = crate::transport::net::discovery_socket(0).unwrap();
+    let (mut runtime, messages) =
+        start(base, owner, reservation.local_addr().unwrap().port()).await;
+    runtime.participant.discovery_trace().enable_trace();
+    let report = runtime
+        .participant
+        .retire_ambient_discovery_for_test()
+        .await;
+    drop(reservation);
+    if report.first_polls != 0
+        || report.removed != 3
+        || report.joined != 3
+        || !report.failures.is_empty()
+    {
+        let cleanup = runtime.stop_for_storage().await.close();
+        panic!(
+            "explicit discovery ambient retirement failed: {report:?}; runtime cleanup={cleanup:?}"
+        );
+    }
+    (runtime, messages)
+}
+
+#[tokio::test]
+async fn explicit_certified_discovery_retires_ambient_producers_before_first_poll() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _) = start_explicit_discovery_runtime(dir.path(), "explicit-source").await;
+    let (target, mut target_messages) =
+        start_explicit_discovery_runtime(dir.path(), "explicit-target").await;
+    let discovered = discover("isolated explicit certified discovery", &source, &target).await;
+    let sent = source
+        .send_to_account(
+            target.account_id(),
+            b"explicit listener and TCP remain active",
+            None,
+        )
+        .await;
+    let received = tokio::time::timeout(Duration::from_secs(6), target_messages.recv()).await;
+    let source_polls = source.participant.ambient_discovery_first_polls();
+    let target_polls = target.participant.ambient_discovery_first_polls();
+    target.stop_for_storage().await.close().unwrap();
+    source.stop_for_storage().await.close().unwrap();
+    let reservation = crate::transport::net::discovery_socket(0).unwrap();
+    let (mut ordinary, _) = start(
+        dir.path(),
+        "ordinary-ambient",
+        reservation.local_addr().unwrap().port(),
+    )
+    .await;
+    drop(reservation);
+    let ordinary_polled = tokio::time::timeout(Duration::from_secs(6), async {
+        while ordinary.participant.ambient_discovery_first_polls() != 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let ordinary_retired = ordinary
+        .participant
+        .retire_ambient_discovery_for_test()
+        .await;
+    ordinary.stop_for_storage().await.close().unwrap();
+    discovered.unwrap();
+    sent.unwrap();
+    assert_eq!(
+        received.unwrap().unwrap().text,
+        b"explicit listener and TCP remain active"
+    );
+    assert_eq!(source_polls, 0);
+    assert_eq!(target_polls, 0);
+    assert!(
+        ordinary_polled.is_ok(),
+        "ordinary ambient producers must actually be polled"
+    );
+    assert_eq!(ordinary_retired.first_polls, 3);
+    assert_eq!(ordinary_retired.removed, 3);
+    assert_eq!(ordinary_retired.joined, 3);
+    assert!(ordinary_retired.failures.is_empty(), "{ordinary_retired:?}");
+}
+
+#[tokio::test]
+async fn certified_discovery_requires_a_fresh_reply_despite_cached_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let start_reserved =
+        async |owner: &str| start_explicit_discovery_runtime(dir.path(), owner).await;
+    let (source, _) = start_reserved("fresh-source").await;
+    let (target, _) = start_reserved("fresh-target").await;
+    let warm = discover("warm real certified cache", &source, &target).await;
+    let target_user = target.user_id().to_owned();
+    let target_account = target.account_id().to_owned();
+    let target_port = target.discovery_port();
+    target.stop_for_storage().await.close().unwrap();
+    let cached = source.node.cached_peer_snapshot_async().await.unwrap();
+    let cache_present = cached.iter().any(|peer| {
+        peer.public.user_id() == target_user
+            && peer.account_id.as_deref() == Some(target_account.as_str())
+    });
+    let stopped = discover_certified_peer(
+        "stopped target",
+        &source,
+        (&target_user, &target_account, target_port),
+        None,
+    )
+    .await;
+    let (target, _) = start_reserved("fresh-target").await;
+    let same_identity = target.user_id() == target_user && target.account_id() == target_account;
+    let recovered = discover("fresh reply after restart", &source, &target).await;
+    target.stop_for_storage().await.close().unwrap();
+    source.stop_for_storage().await.close().unwrap();
+    warm.unwrap();
+    assert!(
+        cache_present,
+        "real UDP must establish the certified cached peer"
+    );
+    assert!(
+        stopped.is_err(),
+        "cached peer must not impersonate a fresh query response"
+    );
+    assert!(
+        same_identity,
+        "restart must retain the target device and account"
+    );
+    recovered.unwrap();
+}
+
 #[tokio::test]
 async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts() {
     let dir = tempfile::tempdir().unwrap();
-    let start_reserved = async |owner: &str| {
-        // Retain a compatible reservation until the runtime owns this port.
-        let reservation = crate::transport::net::discovery_socket(0).unwrap();
-        let running = start(dir.path(), owner, reservation.local_addr().unwrap().port()).await;
-        drop(reservation);
-        running
-    };
+    let start_reserved =
+        async |owner: &str| start_explicit_discovery_runtime(dir.path(), owner).await;
     let (alice, _) = start_reserved("pair-owner").await;
     let (bob, _) = start_reserved("pair-joiner").await;
     let alice_id = alice.user_id().to_owned();
     let bob_id = bob.user_id().to_owned();
     let account = alice.account_id().to_owned();
     assert_ne!(account, bob.account_id());
-    let discover = async |stage: &str, from: &NodeRuntime, target: &NodeRuntime| {
-        let endpoint = ([127, 0, 0, 1], target.discovery_port()).into();
-        let mut probes = 0;
-        let mut last_probe = Ok(());
-        let mut last_cache_error = None;
-        let mut next_probe = tokio::time::Instant::now();
-        let discovered = tokio::time::timeout(Duration::from_secs(6), async {
-            loop {
-                if tokio::time::Instant::now() >= next_probe {
-                    probes += 1;
-                    last_probe = from
-                        .probe_endpoint(endpoint)
-                        .await
-                        .map_err(|e| e.to_string());
-                    // QueryTracker has one nonce per source IP with a five-second
-                    // lifetime. Reprobing every 200ms overwrote valid challenges
-                    // before delayed replies arrived; keep this one outstanding.
-                    next_probe = tokio::time::Instant::now() + Duration::from_secs(5);
-                }
-                match from.node.cached_peer_snapshot_async().await {
-                    Ok(peers)
-                        if peers.iter().any(|p| {
-                            p.public.user_id() == target.user_id()
-                                && p.account_id.as_deref() == Some(target.account_id())
-                        }) =>
-                    {
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(error) => last_cache_error = Some(error.to_string()),
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await;
-        assert!(
-            discovered.is_ok(),
-            "{stage}: certified peer discovery timed out; source_udp={}; target_udp={}; probes={probes}; last_probe={last_probe:?}; cache_error={last_cache_error:?}; roster_count={}",
-            from.discovery_port(),
-            target.discovery_port(),
-            from.roster.lock().unwrap().peers().len()
-        );
-    };
-    discover("before pairing: owner learns joiner", &alice, &bob).await;
-    discover("before pairing: joiner learns owner", &bob, &alice).await;
+    discover("before pairing: owner learns joiner", &alice, &bob)
+        .await
+        .unwrap();
+    discover("before pairing: joiner learns owner", &bob, &alice)
+        .await
+        .unwrap();
     // Force the prior account proof to durable storage before explicit pairing.
     alice.handle().cached_peer_snapshot_async().await.unwrap();
     let code = alice.start_linking();
@@ -649,15 +842,21 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
     let (bob, _) = start_reserved("pair-joiner").await;
     assert_eq!(bob.user_id(), bob_id);
     assert_eq!(bob.account_id(), account);
-    discover("after restart: owner learns adopted joiner", &alice, &bob).await;
-    discover("after restart: adopted joiner learns owner", &bob, &alice).await;
+    discover("after restart: owner learns adopted joiner", &alice, &bob)
+        .await
+        .unwrap();
+    discover("after restart: adopted joiner learns owner", &bob, &alice)
+        .await
+        .unwrap();
     let (contact, _) = start_reserved("pair-contact").await;
     // Bob and this new contact model separate machines but share 127.0.0.1.
     // Alice's ResponseBudget admits only one query response per source IP per
     // second. Let Bob's response window expire before the contact's first query,
     // so its unchanged six-second deadline covers an eligible challenge.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    discover("after restart: contact learns owner", &contact, &alice).await;
+    discover("after restart: contact learns owner", &contact, &alice)
+        .await
+        .unwrap();
     contact
         .send_to_account(&account, b"after both restarts", None)
         .await
@@ -666,6 +865,7 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
         loop {
             if bob
                 .account_history(contact.account_id(), 10)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.text == b"after both restarts")
             {

@@ -5,6 +5,7 @@
 pub mod crypto;
 pub(crate) mod directory;
 pub mod manifest;
+pub mod sticker;
 
 pub use crypto::{
     CHUNK_SIZE, FileError, FileKey, chunk_count_for, chunk_hash, file_checksum,

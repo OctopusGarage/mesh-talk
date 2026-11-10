@@ -17,6 +17,9 @@ import {
   expectNoHorizontalOverflow,
 } from "./helpers/ui-audit";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 test("presence waits for node readiness without showing a startup failure", async ({
   page,
 }) => {
@@ -105,9 +108,15 @@ test("city avatar thumbnails load after scrolling the gallery", async ({
   await seedMarketPacks(page, ["cities"]);
   await enterChat(page);
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page
+    .getByRole("button", { name: "My group photo", exact: true })
+    .click();
   await page.getByText(/Choose from gallery/).click();
   const gallery = page.getByTestId("avatar-gallery");
+  // Cold Windows module transforms need the startup budget before image checks.
+  await expect(gallery).toBeVisible({
+    timeout: process.platform === "win32" ? 90_000 : 15_000,
+  });
   await expect(gallery.locator("img")).toHaveCount(36);
 
   await gallery.evaluate((element) => {
@@ -192,18 +201,9 @@ test("portable registration sign in and sign out", async ({ page }) => {
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("login-tab-signin")).toHaveAttribute(
-    "data-state",
-    "active",
-  );
-  await expect(
-    page.getByText("Account created — you can sign in now.", { exact: true }),
-  ).toBeVisible();
-  await expect(page.getByTestId("login-password")).toHaveValue("");
-  await expect(page.getByTestId("chat-shell")).toHaveCount(0);
-  await page.getByTestId("login-password").fill("password123");
-  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("login-form")).toBeHidden();
   await waitForChatShell(page);
+  await expect(page.getByTestId("account-protection")).toBeVisible();
   await expect(page.getByTestId("sidebar-own-name")).toHaveText("tester");
   await page.getByTestId("sidebar-overflow").click();
   await page.getByTestId("sidebar-sign-out").click();
@@ -423,7 +423,7 @@ for (const viewport of [
       await selectSettingsCategory(page, "appearance");
       await page.getByTestId("theme-light").click();
       await expect(page.locator("html")).not.toHaveClass(/dark/);
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page
         .getByTestId("settings-language-select")
         .selectOption("zh-Hans");
@@ -443,7 +443,7 @@ for (const viewport of [
       await selectSettingsCategory(page, "appearance");
       await page.getByTestId("theme-dark").click();
       await expect(page.locator("html")).toHaveClass(/dark/);
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page.getByTestId("settings-language-select").selectOption("en");
       await expect(
         page.getByText("Direct messages", { exact: true }),
@@ -518,7 +518,7 @@ if (process.env.EVAL_TIER === "extended")
           page.evaluate(() => localStorage.getItem("mesh-talk-theme")),
         )
         .toBe(theme);
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page
         .getByTestId("settings-language-select")
         .selectOption("zh-Hans");

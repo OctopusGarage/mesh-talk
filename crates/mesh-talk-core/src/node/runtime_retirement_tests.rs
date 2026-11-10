@@ -22,8 +22,227 @@ async fn retire(runtime: NodeRuntime) {
     runtime.stop().await;
 }
 
+struct RewriteRelease(Option<std::sync::mpsc::Sender<()>>);
+impl Drop for RewriteRelease {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+struct RewriteObservation {
+    initialized_early: bool,
+    blocked_workers: usize,
+    // Keep the sender valid when normal retirement finishes after observation.
+    _initialized: std::sync::mpsc::Receiver<()>,
+}
+
+struct RewriteObserver {
+    arm: Option<std::sync::mpsc::Sender<()>>,
+    retirement_started: tokio::sync::oneshot::Receiver<()>,
+    observed: tokio::sync::oneshot::Receiver<Result<RewriteObservation, &'static str>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl RewriteObserver {
+    fn new(
+        release: std::sync::mpsc::Sender<()>,
+        initialized: std::sync::mpsc::Receiver<()>,
+        work: Arc<crate::node::runtime_work::RuntimeWork>,
+        blocked: Arc<std::sync::atomic::AtomicUsize>,
+        required_blocked: usize,
+    ) -> Self {
+        Self::with_clock(
+            release,
+            initialized,
+            work,
+            blocked,
+            required_blocked,
+            std::time::Instant::now,
+            None,
+        )
+    }
+    fn with_clock(
+        release: std::sync::mpsc::Sender<()>,
+        initialized: std::sync::mpsc::Receiver<()>,
+        work: Arc<crate::node::runtime_work::RuntimeWork>,
+        blocked: Arc<std::sync::atomic::AtomicUsize>,
+        required_blocked: usize,
+        now: impl Fn() -> std::time::Instant + Send + 'static,
+        setup_waiting: Option<std::sync::mpsc::Sender<()>>,
+    ) -> Self {
+        let (arm, armed) = std::sync::mpsc::channel();
+        let (ready, retirement_started) = tokio::sync::oneshot::channel();
+        let (done, observed) = tokio::sync::oneshot::channel();
+        let worker = std::thread::spawn(move || {
+            let release = RewriteRelease(Some(release));
+            let observation = (|| {
+                // Setup and armed admission each retain their own six-second
+                // safety bound. Waiting for the actual rewrite must not consume
+                // the later retirement/blocker admission phase.
+                if let Some(setup_waiting) = setup_waiting {
+                    let _ = setup_waiting.send(());
+                }
+                armed
+                    .recv_timeout(Duration::from_secs(6))
+                    .map_err(|_| "rewrite observer was not armed within setup")?;
+                let admission_deadline = now() + Duration::from_secs(6);
+                // A controlled clock must never disable independent real-time cleanup.
+                let admission_safety_deadline = std::time::Instant::now() + Duration::from_secs(6);
+                while !work.is_closed()
+                    || blocked.load(std::sync::atomic::Ordering::SeqCst) < required_blocked
+                {
+                    if now() >= admission_deadline
+                        || std::time::Instant::now() >= admission_safety_deadline
+                    {
+                        return Err(
+                            "retirement or controlled blockers did not enter within admission",
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                ready
+                    .send(())
+                    .map_err(|_| "rewrite observer caller retired")?;
+                let initialized_early = match initialized.recv_timeout(Duration::from_millis(150)) {
+                    Ok(()) => true,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("retirement ended without reporting initialization");
+                    }
+                };
+                Ok(RewriteObservation {
+                    initialized_early,
+                    blocked_workers: blocked.load(std::sync::atomic::Ordering::SeqCst),
+                    _initialized: initialized,
+                })
+            })();
+            // Release before asking the async caller to make any progress.
+            drop(release);
+            let _ = done.send(observation);
+        });
+        Self {
+            arm: Some(arm),
+            retirement_started,
+            observed,
+            worker: Some(worker),
+        }
+    }
+    fn arm(&mut self) {
+        self.arm.take().unwrap().send(()).unwrap();
+    }
+    async fn finish(&mut self) -> RewriteObservation {
+        let result = (&mut self.observed).await;
+        self.worker.take().unwrap().join().unwrap();
+        result
+            .unwrap()
+            .expect("independent rewrite observation must qualify")
+    }
+}
+impl Drop for RewriteObserver {
+    fn drop(&mut self) {
+        // Disconnect an unarmed observer on every panic/cancellation path; its
+        // independent thread releases the writer and is always joined here.
+        self.arm.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+// This protocol control advances only the observer clock. Real channel waits
+// and the safety watchdog remain bounded independently of that controlled clock.
+#[tokio::test]
+async fn rewrite_observer_setup_clock_does_not_consume_retirement_admission() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    let (release, released) = std::sync::mpsc::channel();
+    let (_initialized, initialized) = std::sync::mpsc::channel();
+    let (prearm, prearm_ready) = std::sync::mpsc::channel();
+    let (armed, armed_probe) = std::sync::mpsc::channel();
+    let (advanced, admission_probe) = std::sync::mpsc::channel();
+    let armed = Mutex::new(Some(armed));
+    let advanced = Mutex::new(Some(advanced));
+    let elapsed = Arc::new(AtomicU64::new(0));
+    let clock_elapsed = elapsed.clone();
+    let origin = std::time::Instant::now();
+    let work = Arc::new(crate::node::runtime_work::RuntimeWork::default());
+    let mut observer = RewriteObserver::with_clock(
+        release,
+        initialized,
+        work.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        0,
+        move || {
+            // Capture the instant before acknowledging its phase. Advancing
+            // the clock after the acknowledgment cannot change this sample.
+            let seconds = clock_elapsed.load(Ordering::SeqCst);
+            let instant = origin + Duration::from_secs(seconds);
+            let notification = match seconds {
+                5 => armed.lock().unwrap().take(),
+                7 => advanced.lock().unwrap().take(),
+                _ => None,
+            };
+            if let Some(notification) = notification {
+                notification.send(()).unwrap();
+            }
+            instant
+        },
+        Some(prearm),
+    );
+    prearm_ready.recv_timeout(Duration::from_secs(6)).unwrap();
+    // Setup uses five of its six seconds. Admission then uses only two of
+    // its separate six seconds, but passes the old combined deadline at six.
+    elapsed.store(5, Ordering::SeqCst);
+    observer.arm();
+    armed_probe.recv_timeout(Duration::from_secs(6)).unwrap();
+    elapsed.store(7, Ordering::SeqCst);
+    // Keep work open until the admission deadline is actually checked. This
+    // binds the old failure to deadline exhaustion, not caller scheduling.
+    admission_probe
+        .recv_timeout(Duration::from_secs(6))
+        .unwrap();
+    work.close();
+    // Read the actual observer outcome first: the old shared clock must fail
+    // for its deadline reason, not merely a disconnected readiness channel.
+    let observation = observer.finish().await;
+    (&mut observer.retirement_started)
+        .await
+        .expect("qualified observation must acknowledge actual retirement admission");
+    assert!(!observation.initialized_early);
+    assert_eq!(observation.blocked_workers, 0);
+    released.recv_timeout(Duration::from_secs(6)).unwrap();
+}
+
+struct JoinedBlockers(Option<std::thread::JoinHandle<()>>);
+impl JoinedBlockers {
+    fn join(&mut self) {
+        if let Some(worker) = self.0.take() {
+            worker.join().unwrap();
+        }
+    }
+}
+impl Drop for JoinedBlockers {
+    fn drop(&mut self) {
+        if let Some(worker) = self.0.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
+    profile_rewrite_retirement_case(false).await;
+}
+
+// This companion qualifies only the observer's independent gate release. The
+// unforced test above remains the primary retirement/initializer timing oracle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_rewrite_observer_releases_gate_with_both_runtime_workers_blocked() {
+    profile_rewrite_retirement_case(true).await;
+}
+
+async fn profile_rewrite_retirement_case(starve_workers: bool) {
     let dir = tempfile::tempdir().unwrap();
     let runtime = start(dir.path()).await;
     let node = runtime.node.clone();
@@ -31,6 +250,11 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
     let (selected_tx, selected_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Mutex::new(release_rx);
+    let (initialized_tx, initialized_rx) = std::sync::mpsc::channel();
+    let blocked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Reverse drop order releases the gate before joining controlled children.
+    let mut blocked_executor = JoinedBlockers(None);
+    let mut observer;
     {
         let mut log = node.log.lock().unwrap();
         for seq in 1..=10 {
@@ -46,30 +270,94 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
             ))
             .unwrap();
         }
+        // Own the independent release before the hook can hold log/SQL locks.
+        observer = RewriteObserver::new(
+            release_tx,
+            initialized_rx,
+            node.runtime_work.clone(),
+            blocked.clone(),
+            if starve_workers { 2 } else { 0 },
+        );
         log.before_rewrite_rename(Box::new(move || {
-            selected_tx.send(()).unwrap();
-            release_rx.lock().unwrap().recv().unwrap();
+            let _ = selected_tx.send(());
+            let _ = release_rx.lock().unwrap().recv();
         }));
-        log.request_profile_compaction(conv);
+        log.request_profile_compaction(conv).unwrap();
     }
     tokio::time::timeout(Duration::from_secs(6), selected_rx)
         .await
         .unwrap()
         .unwrap();
-    let (initialized_tx, mut initialized_rx) = tokio::sync::oneshot::channel();
+    let blockers = if starve_workers {
+        (0..2)
+            .map(|_| (node.clone(), node.runtime_work.admit().unwrap()))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    drop(node);
+    if starve_workers {
+        let blocked = blocked.clone();
+        blocked_executor.0 = Some(std::thread::spawn(move || {
+            // These two admitted async children use an isolated executor. Its
+            // saturation qualifies gate liveness, not production stop latency.
+            let executor = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .build()
+                .unwrap();
+            executor.block_on(async move {
+                let mut tasks = Vec::new();
+                for (node, permit) in blockers {
+                    let blocked = blocked.clone();
+                    tasks.push(tokio::spawn(permit.track(async move {
+                        assert!(matches!(
+                            node.log.try_lock(),
+                            Err(std::sync::TryLockError::WouldBlock)
+                        ));
+                        blocked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let _log = node.log.lock().unwrap();
+                    })));
+                }
+                for task in tasks {
+                    task.await.unwrap();
+                }
+            });
+        }));
+    }
+    observer.arm();
+    let mut retirement = Box::pin(retire(runtime));
+    // Enter real stop admission before queueing the remainder. This first poll
+    // cannot depend on a background task being scheduled to begin retirement.
+    let first = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(retirement.as_mut(), cx))
+    })
+    .await;
+    let mut initialized_tx = Some(initialized_tx);
+    if first.is_ready() {
+        initialized_tx.take().unwrap().send(()).unwrap();
+    }
     let base = dir.path().to_path_buf();
     let replacement = tokio::spawn(async move {
-        retire(runtime).await;
-        initialized_tx.send(()).unwrap();
+        if first.is_pending() {
+            retirement.await;
+            initialized_tx.take().unwrap().send(()).unwrap();
+        }
         start(&base).await
     });
-    let initialized_early = tokio::time::timeout(Duration::from_millis(150), &mut initialized_rx)
+    (&mut observer.retirement_started)
         .await
-        .is_ok();
-    release_tx.send(()).unwrap();
+        .expect("actual retirement and controlled blockers must enter before observation");
+    let observation = observer.finish().await;
+    blocked_executor.join();
+    if starve_workers {
+        assert_eq!(
+            observation.blocked_workers, 2,
+            "both admitted runtime workers must encounter the actual held log before OS release"
+        );
+    }
     let replacement = replacement.await.unwrap();
     assert!(
-        !initialized_early,
+        !observation.initialized_early,
         "replacement initializer ran while old rewrite was paused"
     );
     let event = Event::new(
@@ -86,7 +374,16 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
     replacement.node.log.lock().unwrap().append(event).unwrap();
     retire(replacement).await;
     let reopened = start(dir.path()).await;
-    assert!(reopened.node.log.lock().unwrap().get(&event_id).is_some());
+    assert!(
+        reopened
+            .node
+            .log
+            .lock()
+            .unwrap()
+            .get(&event_id)
+            .unwrap()
+            .is_some()
+    );
     retire(reopened).await;
 }
 
@@ -198,7 +495,7 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     let alice_dir = tempfile::tempdir().unwrap();
     let bob_dir = tempfile::tempdir().unwrap();
     let mut alice = start(alice_dir.path()).await;
-    let mut bob = start(bob_dir.path()).await;
+    let bob = start(bob_dir.path()).await;
     // Isolate this explicit probe from discovery, accept/delivery, and periodic
     // probes. Join producers and admitted children without closing admission.
     for task in &alice.participant.tasks {
@@ -265,6 +562,7 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     // so a new authentication cannot mask missing pre-retirement persistence.
     let bob_port = bob.listen_tcp_port();
     bob.stop().await;
+    drop(node);
     let reopened = start(alice_dir.path()).await;
     let proof = reopened
         .node
@@ -280,20 +578,27 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     assert!(same_port);
 }
 
-#[tokio::test]
+// Exercise the full participant with the same available worker boundary as
+// desktop/headless hosts; synchronous maintenance cannot own its only reactor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_limit_releases_slots_and_retirement_closes_all_owned_connections() {
     use tokio::io::AsyncReadExt;
     let dir = tempfile::tempdir().unwrap();
     let runtime = start(dir.path()).await;
     let address = (std::net::Ipv4Addr::LOCALHOST, runtime.listen_tcp_port());
     let mut streams = Vec::new();
-    for _ in 0..crate::node::serving::MAX_CONCURRENT_CONNS {
+    for slot in 0..crate::node::serving::MAX_CONCURRENT_CONNS {
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         *runtime.node.accepted_hook.lock().unwrap() = Some(entered_tx);
         streams.push(tokio::net::TcpStream::connect(address).await.unwrap());
         tokio::time::timeout(Duration::from_secs(3), entered_rx)
             .await
-            .unwrap()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "connection slot {slot} was not admitted: {error}; capacity={:?}",
+                    runtime.node.sessions.test_capacity_snapshot()
+                )
+            })
             .unwrap();
     }
     let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
@@ -384,4 +689,358 @@ async fn retirement_waits_for_file_staging_after_adopted_command_cancellation() 
             .await
             .is_err()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_identity_precedes_blocked_durable_store_and_matches_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    NAMES_OPEN_HOOKS.lock().unwrap().insert(
+        root.path().join("accounts/owner/names.log"),
+        Box::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }),
+    );
+    let (identity_tx, mut identity_rx) = tokio::sync::oneshot::channel();
+    let base = root.path().to_path_buf();
+    let startup = tokio::spawn(async move {
+        NodeRuntime::start_configured_guarded_with_network_observed(
+            RuntimeConfig {
+                base_dir: &base,
+                account_id: "owner",
+                display_name: "Owner",
+                password: "pw",
+                discovery_port: 0,
+                post_office_enabled: false,
+                candidate_source: None,
+            },
+            RuntimeEvents {
+                on_dm: Box::new(|_| {}),
+                on_channel: Box::new(|_| {}),
+                on_file: Box::new(|_| {}),
+                on_profile: Box::new(|_| {}),
+                on_call_signal: Box::new(|_| {}),
+            },
+            RuntimeNetworkOptions::default(),
+            move |identity| {
+                identity_tx.send(identity).unwrap();
+                Ok(())
+            },
+            |launch| launch("Owner"),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(15), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let identity = identity_rx.try_recv();
+    let still_preparing = !startup.is_finished();
+    release_tx.send(()).unwrap();
+    let runtime = startup.await.unwrap().unwrap();
+    let actual_account = runtime.account_id().to_owned();
+    let actual_device = runtime.user_id().to_owned();
+    runtime.stop().await;
+    assert!(
+        still_preparing,
+        "durable preparation still blocks readiness"
+    );
+    let identity = identity.expect("authenticated identity must precede durable store readiness");
+    assert_eq!(identity.account_id, actual_account);
+    assert_eq!(identity.device_id, actual_device);
+}
+
+#[tokio::test]
+async fn startup_identity_rejection_stops_before_listener_and_durable_stores() {
+    let root = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_observed = observed.clone();
+    let result = NodeRuntime::start_configured_guarded_with_network_observed(
+        RuntimeConfig {
+            base_dir: root.path(),
+            account_id: "owner",
+            display_name: "Owner",
+            password: "pw",
+            discovery_port: 0,
+            post_office_enabled: false,
+            candidate_source: None,
+        },
+        RuntimeEvents {
+            on_dm: Box::new(|_| {}),
+            on_channel: Box::new(|_| {}),
+            on_file: Box::new(|_| {}),
+            on_profile: Box::new(|_| {}),
+            on_call_signal: Box::new(|_| {}),
+        },
+        RuntimeNetworkOptions::default(),
+        move |_| {
+            callback_observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "superseded").into())
+        },
+        |_| panic!("rejected identity cannot launch producers"),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+    for file in ["listen-port", "messages.log", "sent.log", "names.log"] {
+        assert!(!root.path().join("accounts/owner").join(file).exists());
+    }
+    // A wrong password must fail without publishing even public identifiers.
+    let result = NodeRuntime::start_configured_guarded_with_network_observed(
+        RuntimeConfig {
+            base_dir: root.path(),
+            account_id: "owner",
+            display_name: "Owner",
+            password: "wrong",
+            discovery_port: 0,
+            post_office_enabled: false,
+            candidate_source: None,
+        },
+        RuntimeEvents {
+            on_dm: Box::new(|_| {}),
+            on_channel: Box::new(|_| {}),
+            on_file: Box::new(|_| {}),
+            on_profile: Box::new(|_| {}),
+            on_call_signal: Box::new(|_| {}),
+        },
+        RuntimeNetworkOptions::default(),
+        |_| panic!("failed keystore authentication cannot publish identity"),
+        |_| panic!("failed keystore authentication cannot launch producers"),
+    )
+    .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn profile_contention_precedes_runtime_keystore_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("accounts/owner");
+    let _lease = crate::storage::profile::ProfileStorageLease::acquire(&profile).unwrap();
+    let result = NodeRuntime::start(
+        directory.path(),
+        "owner",
+        "Owner",
+        "pw",
+        0,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert!(result.is_err(), "runtime ignored an existing profile owner");
+    assert!(
+        !profile.join("identity.keystore").exists(),
+        "contender created device keys"
+    );
+    assert!(
+        !profile.join("account.keystore").exists(),
+        "contender created account keys"
+    );
+}
+
+#[tokio::test]
+async fn participant_rekey_reopens_same_device_with_exact_next_account() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = start(directory.path()).await;
+    let device = runtime.user_id().to_owned();
+    let previous = runtime.account_id().to_owned();
+    let next = runtime.rekey_account().unwrap();
+    assert_ne!(previous, next);
+    runtime.stop().await;
+    let replacement = start(directory.path()).await;
+    assert_eq!(replacement.user_id(), device);
+    assert_eq!(replacement.account_id(), next);
+    replacement.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canceled_startup_completion_waits_for_later_privacy_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("accounts/owner");
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    PRIVACY_OPEN_HOOKS.lock().unwrap().insert(
+        profile.clone(),
+        Box::new(move || {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+        }),
+    );
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let base = directory.path().to_owned();
+    let startup = tokio::spawn(async move {
+        let request = super::super::RuntimeStartup::new(
+            RuntimeConfig {
+                base_dir: &base,
+                account_id: "owner",
+                display_name: "Owner",
+                password: "pw",
+                discovery_port: 0,
+                post_office_enabled: false,
+                candidate_source: None,
+            },
+            RuntimeEvents {
+                on_dm: Box::new(|_| {}),
+                on_channel: Box::new(|_| {}),
+                on_file: Box::new(|_| {}),
+                on_profile: Box::new(|_| {}),
+                on_call_signal: Box::new(|_| {}),
+            },
+        );
+        completion_tx.send(request.completion()).ok().unwrap();
+        NodeRuntime::start_owned(request, |_| Ok(()), |launch| launch("Owner")).await
+    });
+    let completion = completion_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), started)
+        .await
+        .unwrap()
+        .unwrap();
+    startup.abort();
+    assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
+    let mut completed = tokio::spawn(completion.wait());
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut completed)
+        .await
+        .is_ok();
+    assert!(crate::storage::profile::ProfileStorageLease::acquire(&profile).is_err());
+    release.send(()).unwrap();
+    if !early {
+        tokio::time::timeout(Duration::from_secs(10), completed)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(!early, "startup completion lost the later blocking child");
+    assert!(crate::storage::profile::ProfileStorageLease::acquire(&profile).is_ok());
+}
+
+#[tokio::test]
+async fn retired_runtime_exports_without_reopening_and_closes_before_relocation() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = start(directory.path()).await;
+    let profile = directory.path().join("accounts/owner");
+    let account = runtime.account_id().to_owned();
+    let retired = runtime.stop_for_storage().await;
+    assert!(Node::open_recovery_profile(&profile, "pw").is_err());
+    let mut snapshot = Vec::new();
+    retired
+        .node()
+        .write_recovery_snapshot(&mut snapshot, 1)
+        .unwrap();
+    assert!(!snapshot.is_empty());
+    assert_eq!(retired.node().account_id(), account);
+    retired.close().unwrap();
+    let moved = directory.path().join("closed-profile");
+    std::fs::rename(&profile, &moved).unwrap();
+    let reopened = Node::open_recovery_profile(&moved, "pw").unwrap();
+    assert_eq!(reopened.account_id(), account);
+    reopened.close_profile().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn redirected_account_keystore_is_rejected_before_device_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("accounts/owner");
+    std::fs::create_dir_all(&profile).unwrap();
+    let external = directory.path().join("external-account");
+    std::fs::write(&external, b"existing private authority").unwrap();
+    std::os::unix::fs::symlink(&external, profile.join("account.keystore")).unwrap();
+    let result = NodeRuntime::start(
+        directory.path(),
+        "owner",
+        "Owner",
+        "pw",
+        0,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(!profile.join("identity.keystore").exists());
+    assert_eq!(
+        std::fs::read(external).unwrap(),
+        b"existing private authority"
+    );
+}
+
+#[tokio::test]
+async fn profile_owner_blocks_subprocess_before_any_keystore_creation() {
+    if let Some(base) = std::env::var_os("MESH_TEST_RUNTIME_CONTENDER") {
+        let result = NodeRuntime::start(
+            Path::new(&base),
+            "owner",
+            "Owner",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await;
+        assert!(result.is_err(), "subprocess ignored the profile lease");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("accounts/owner");
+    let _owner = crate::storage::profile::ProfileStorageLease::acquire(&profile).unwrap();
+    assert!(std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact","node::runtime::retirement_tests::profile_owner_blocks_subprocess_before_any_keystore_creation","--nocapture"])
+        .env("MESH_TEST_RUNTIME_CONTENDER",directory.path()).status().unwrap().success());
+    assert!(!profile.join("identity.keystore").exists());
+    assert!(!profile.join("account.keystore").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retirement_joins_actual_expiry_writer_before_profile_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = start(directory.path()).await;
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let released = Mutex::new(released);
+    *runtime.node.expiry_cleanup_hook.lock().unwrap() = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        released.lock().unwrap().recv().unwrap();
+    }));
+    tokio::time::timeout(Duration::from_secs(5), started)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut retirement = tokio::spawn(runtime.stop());
+    let early = tokio::time::timeout(Duration::from_millis(150), &mut retirement)
+        .await
+        .is_ok();
+    release.send(()).unwrap();
+    if !early {
+        tokio::time::timeout(Duration::from_secs(5), retirement)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let profile = directory.path().join("accounts/owner");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if crate::storage::profile::ProfileStorageLease::acquire(&profile).is_ok() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expiry worker did not release profile"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !early,
+        "runtime stop completed while its expiry writer was still active"
+    );
+    let reopened = start(directory.path()).await;
+    reopened.stop().await;
 }

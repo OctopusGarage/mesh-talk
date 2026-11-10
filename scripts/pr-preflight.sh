@@ -63,19 +63,30 @@ cargo fmt --all -- --check
 if printf '%s\n' "$changed_files" | rg -q '^frontend/'; then
     (
         cd frontend
-        node "$stage" frontend-format --profile shared --inputs frontend -- npx prettier --check src/
+        node "$stage" frontend-format --profile shared --inputs frontend -- npm run format:check
         node "$stage" frontend-types --profile shared --inputs frontend -- npm run typecheck
         node "$stage" frontend-lint --profile shared --inputs frontend -- npm run lint
     )
 fi
 node "$stage" diagnostics --profile shared -- node --test scripts/diagnostics/*.test.mjs
 
-if printf '%s\n' "$changed_files" | node scripts/pr-platform/rust-packages.mjs --selection-needed; then
-    # Tauri validates frontendDist even when listing its test executable.
-    (
-        cd frontend
-        node "$stage" frontend-build --profile shared --inputs frontend --resource heavy --artifact dist -- npm run build
-    )
+# The validated selected-package owner determines native frontend consumers.
+rust_build="$(printf '%s' "$scenario_plan" | node --input-type=module -e '
+import { validatePlan } from "./scripts/pr-platform/plan.mjs";
+import { selectedRustPackages } from "./scripts/pr-platform/rust-packages.mjs";
+let input=""; for await (const chunk of process.stdin) input+=chunk;
+const plan=JSON.parse(input); validatePlan(plan);
+const packages=selectedRustPackages(plan);
+console.log(packages.some(pkg=>pkg.frontendBuild) ? "host" : packages.length ? "rust" : "none");
+')"
+if [ "$rust_build" != none ]; then
+    if [ "$rust_build" = host ]; then
+        # Tauri validates frontendDist even when listing its test executable.
+        (
+            cd frontend
+            node "$stage" frontend-build --profile shared --inputs frontend --resource heavy --artifact dist -- npm run build
+        )
+    fi
     node "$stage" rust-selectors --profile shared --resource heavy --artifact target/validation/selector-inventory.json \
         -- node scripts/validation/selectors.mjs "$@"
 fi

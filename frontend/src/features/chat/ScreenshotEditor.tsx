@@ -7,6 +7,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { isLinuxDesktop } from "@/lib/platform";
+import { editorToolForKey } from "@/lib/screenshotShortcuts";
 import { expandCaptureWindow } from "./screenshot/captureWindow";
 import { ScreenshotToolbar } from "./screenshot/ScreenshotToolbar";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -367,13 +368,19 @@ export function ScreenshotEditor({
       );
       ctx.translate(-region.x, -region.y);
       marks.forEach((mark) => paintMark(ctx, mark, image));
-      const blob = await new Promise<Blob>((resolve, reject) =>
+      const png = new Promise<Blob>((resolve, reject) =>
         output.toBlob(
           (value) =>
             value ? resolve(value) : reject(new Error("PNG encoding failed")),
           "image/png",
         ),
       );
+      // Start the clipboard write during the confirmation gesture. WebKit needs
+      // user activation even though PNG encoding completes asynchronously.
+      const copied = navigator.clipboard.write([
+        new ClipboardItem({ "image/png": png }),
+      ]);
+      const [blob] = await Promise.all([png, copied]);
       await onSend(new Uint8Array(await blob.arrayBuffer()));
     } catch (error) {
       setFailure(error instanceof Error ? error.message : String(error));
@@ -385,7 +392,7 @@ export function ScreenshotEditor({
 
   useEffect(() => {
     const keyboard = (event: KeyboardEvent) => {
-      if (event.isComposing) return;
+      if (event.isComposing || event.repeat) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -400,6 +407,18 @@ export function ScreenshotEditor({
         !!event.target.closest(
           "button, input, textarea, select, a, [role=button], [contenteditable=true]",
         );
+      const shortcutTool = editorToolForKey(event);
+      if (
+        shortcutTool &&
+        !input &&
+        !busy.current &&
+        (region || shortcutTool === "select")
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        setTool(shortcutTool);
+        return;
+      }
       if (event.key === "Enter" && !interactive) {
         event.preventDefault();
         event.stopPropagation();
@@ -408,6 +427,8 @@ export function ScreenshotEditor({
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "z" &&
+        !event.shiftKey &&
+        !event.altKey &&
         !input &&
         !busy.current
       ) {
@@ -441,7 +462,7 @@ export function ScreenshotEditor({
     };
     window.addEventListener("keydown", keyboard, true);
     return () => window.removeEventListener("keydown", keyboard, true);
-  }, [confirm, onCancel]);
+  }, [confirm, onCancel, region]);
 
   const visibleRegion = region && {
     left: layout.canvasX + region.x * layout.scaleX,

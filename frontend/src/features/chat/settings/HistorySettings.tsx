@@ -14,6 +14,7 @@ import {
   BackupStatusSummary,
 } from "../DataRecoverySettings";
 import { SettingsRow, SettingsError, SELECT_CLASS } from "./primitives";
+import { HistoryStorageSummary } from "./HistoryStorageSummary";
 import { retentionTightens } from "./model";
 import type { SettingsController } from "./useSettingsController";
 export function HistorySettings({
@@ -29,6 +30,7 @@ export function HistorySettings({
   const cancelRef = useRef<HTMLButtonElement>(null);
   return (
     <>
+      {s && <HistoryStorageSummary identity={c.identity} />}
       {s && (
         <SettingsRow
           id="setting-retention"

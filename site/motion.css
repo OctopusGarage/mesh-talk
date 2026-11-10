@@ -1,0 +1,217 @@
+/* Motion explains a change of state; the default document stays visible. */
+.preview-link {
+  animation: none;
+  transform-origin: 50% 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .btn,
+  .viewer-controls button,
+  .viewer-close,
+  .menu-toggle,
+  [role="tab"] {
+    transition:
+      background-color 150ms ease-out,
+      border-color 150ms ease-out,
+      color 150ms ease-out,
+      transform 120ms ease-out;
+  }
+
+  .btn--primary:hover,
+  .btn--ghost:hover {
+    transform: none;
+  }
+
+  .btn:active,
+  .viewer-controls button:active,
+  .viewer-close:active,
+  .menu-toggle:active {
+    transform: scale(0.98);
+  }
+
+  [role="tab"]:active {
+    transform: scale(0.97);
+  }
+
+  .shot img {
+    transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .shot a:hover img {
+      transform: scale(1.012);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce), (hover: none) {
+  .shot a:hover img,
+  .btn--primary:hover,
+  .btn--ghost:hover {
+    transform: none;
+  }
+}
+
+/* The topology tells a sequence: direct LAN, optional custody, routed forwarding.
+   Mint packets are illustrative content, not connection-health indicators. */
+.network-proof {
+  padding: 20px;
+  border-radius: 18px;
+  background: linear-gradient(150deg, var(--ink-2), var(--ink));
+}
+.network-proof .network-region {
+  fill: color-mix(in srgb, var(--ink-2) 72%, var(--ink));
+  stroke: var(--line-2);
+  stroke-opacity: 0.65;
+}
+.network-proof .network-edge {
+  stroke: var(--line-2);
+  stroke-opacity: 0.72;
+}
+.network-proof .network-bridge {
+  stroke-opacity: 0.5;
+}
+.flow-guide {
+  fill: none;
+  stroke: none;
+}
+.flow-packet {
+  opacity: 0;
+  fill: var(--signal);
+  transform-box: view-box;
+  transform-origin: 0 0;
+}
+.flow-packet--tail {
+  fill: var(--signal-2);
+}
+.flow-arrival,
+.flow-custody {
+  opacity: 0;
+  fill: none;
+  stroke: var(--signal);
+  stroke-width: 1.5;
+}
+.flow-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  padding: 12px 0 0;
+}
+.flow-explanation {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.flow-controls > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.flow-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--paper);
+  font: 0.75rem var(--body);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.flow-controls button:hover {
+  background: var(--ink-3);
+  border-color: var(--line-2);
+}
+.flow-controls svg {
+  width: 16px;
+  height: 16px;
+}
+.flow-controls [data-flow-replay] span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.network-proof figcaption {
+  margin-bottom: 0;
+  line-height: 1.7;
+}
+@media (max-width: 720px) {
+  .network-proof {
+    padding: 14px;
+  }
+  .flow-controls button {
+    min-height: 44px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .network-traffic {
+    display: none;
+  }
+}
+
+/* Keep image geometry steady: swap only decoded bitmaps inside one frame. */
+.preview-link::after,
+.customization-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 1px 0 #ffffff1a;
+  pointer-events: none;
+}
+.customization-link {
+  position: relative;
+}
+.viewer-media {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/10;
+  max-height: 62dvh;
+  background: var(--ink);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.image-viewer .viewer-media img {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+}
+.viewer-media img:not([src]) {
+  visibility: hidden;
+}
+.viewer-loading {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  width: fit-content;
+  max-width: calc(100% - 24px);
+  margin: auto;
+  padding: 8px 12px;
+  border-radius: 7px;
+  background: var(--ink-2);
+  color: var(--paper);
+  font-size: 0.8rem;
+}
+.preview-status {
+  margin: 0;
+  min-height: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.preview-status:empty {
+  display: none;
+}
+.network-traffic .flow-guide {
+  stroke: var(--signal);
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0;
+}

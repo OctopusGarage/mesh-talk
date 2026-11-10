@@ -6,7 +6,7 @@ import type { CustomizationPack } from "@/lib/pack";
 export interface Sticker {
   /** Stable id sent over the wire — the codepoint string, e.g. "1f602" / "2764_fe0f". */
   id: string;
-  /** Artwork URL; empty for built-in stickers in the lite edition. */
+  /** Artwork URL; empty when the optional artwork pack is not installed. */
   url: string;
   /** The emoji char this sticker depicts — the fallback shown if a peer lacks the file. */
   emoji: string;

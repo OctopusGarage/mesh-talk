@@ -1,0 +1,2026 @@
+//! File intents retain one identity through preparation, delivery and retries.
+use super::*;
+use crate::file::FileKind;
+
+#[tokio::test]
+async fn physical_member_file_intent_is_id_bound_and_uses_the_real_manifest_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let genesis = legacy_group(&owner, &source);
+    let group = genesis.conversation_id;
+    install(&source, &genesis);
+    assert_eq!(
+        source.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+    let path = dir.path().join("member-attachment.bin");
+    let bytes = b"original explicit member attachment";
+    std::fs::write(&path, bytes).unwrap();
+    let id = source
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    let admitted = source
+        .submit_account_group_file_if(
+            &account.account_id(),
+            id,
+            group,
+            &path,
+            FileKind::File,
+            None,
+            None,
+            |_| {},
+            |commit| commit(),
+        )
+        .await
+        .expect("an ordinary account member must durably admit its explicit file intent");
+    assert!(admitted.committed_events.is_empty());
+    source.maintain_account_group_operation_effects();
+    let status = source
+        .account_group_operation_status(&account.account_id(), id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
+    let event = source
+        .log
+        .lock()
+        .unwrap()
+        .get(&status.primary_event.unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.kind, EventKind::FileManifest);
+    assert!(event.verify_integrity() && event.verify_signature());
+    assert_eq!(
+        event.author.ed25519_pub(),
+        &source.identity.public().ed25519_pub
+    );
+    let row = source
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(event.id)
+        .unwrap()
+        .unwrap();
+    let manifest = crate::node::files::validated_manifest(&row.plaintext).unwrap();
+    let file = manifest.file_conv();
+    let before = source
+        .log
+        .lock()
+        .unwrap()
+        .fingerprint_and_len(&file)
+        .unwrap();
+    let saved = dir.path().join("saved.bin");
+    source.save_file(file, &saved).unwrap();
+    assert_eq!(std::fs::read(&saved).unwrap(), bytes);
+    assert_eq!(
+        source
+            .submit_account_group_file_if(
+                &account.account_id(),
+                id,
+                group,
+                &path,
+                FileKind::File,
+                None,
+                None,
+                |_| {},
+                |commit| commit()
+            )
+            .await
+            .unwrap(),
+        status
+    );
+    assert_eq!(
+        source
+            .log
+            .lock()
+            .unwrap()
+            .fingerprint_and_len(&file)
+            .unwrap(),
+        before,
+        "an uncertain-reply retry must reuse the original staged nonce/key/conversation"
+    );
+    std::fs::write(&path, b"changed raw input").unwrap();
+    assert!(
+        source
+            .submit_account_group_file_if(
+                &account.account_id(),
+                id,
+                group,
+                &path,
+                FileKind::File,
+                None,
+                None,
+                |_| {},
+                |commit| commit()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        source
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .unwrap(),
+        status
+    );
+    assert_eq!(
+        source
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::FileManifest)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn file_asset_request_requires_original_preparation_and_exact_current_executor() {
+    use crate::node::account_documents::wire::GroupFileAssetRequest;
+    use crate::node::account_group::operations::journal::OperationReference;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let origin = node(&dir.path().join("origin"), &account);
+    let executor = node(&dir.path().join("executor"), &account);
+    let other = node(&dir.path().join("other"), &account);
+    let genesis = legacy_group(&origin, &executor);
+    let group = genesis.conversation_id;
+    install(&origin, &genesis);
+    install(&executor, &genesis);
+    for peer in [&executor, &other] {
+        link(&origin, peer);
+    }
+    configure(&origin, &dir.path().join("origin"), 9);
+    origin.roster.lock().unwrap().update(
+        &executor.signed_announce("Executor", 9),
+        "127.0.0.1".parse().unwrap(),
+        &origin.user_id(),
+    );
+    origin.cache_discovered_peers().unwrap();
+    assert!(
+        origin
+            .historical_author(&executor.identity.public().ed25519_pub)
+            .is_some()
+    );
+    let path = dir.path().join("explicit.bin");
+    std::fs::write(&path, b"explicit delegated file payload").unwrap();
+    let id = origin
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    let payload = origin
+        .prepare_account_group_file(
+            &account.account_id(),
+            id,
+            group,
+            &path,
+            FileKind::File,
+            None,
+            None,
+            |_| {},
+        )
+        .await
+        .unwrap();
+    let body = AccountGroupOperation::Send {
+        message: payload.prepared().unwrap(),
+    };
+    let reference = OperationReference::new(
+        &origin,
+        id,
+        group,
+        &body,
+        executor
+            .account_group_access(group)
+            .unwrap()
+            .sources
+            .into_iter()
+            .next()
+            .unwrap(),
+    );
+    let manifest =
+        crate::node::files::validated_manifest(&payload.descriptor.as_ref().unwrap().manifest)
+            .unwrap();
+    let request = GroupFileAssetRequest {
+        id,
+        group,
+        digest: reference.digest,
+        file_conv: *manifest.file_conv().as_bytes(),
+        start_chunk: 0,
+        result: false,
+    };
+    // A private staged artifact alone never authorizes network disclosure.
+    assert!(
+        origin
+            .group_operation_asset_payload(&request, &executor.identity.public())
+            .is_none()
+    );
+    origin
+        .install_original_file_request_for_test(reference, body)
+        .unwrap();
+    assert!(
+        origin
+            .group_operation_asset_payload(&request, &executor.identity.public())
+            .is_some(),
+        "only the exact pinned executor may fetch this original explicit artifact"
+    );
+    assert!(
+        origin
+            .group_operation_asset_payload(&request, &other.identity.public())
+            .is_none()
+    );
+    let mut changed = request.clone();
+    changed.digest[0] ^= 1;
+    assert!(
+        origin
+            .group_operation_asset_payload(&changed, &executor.identity.public())
+            .is_none()
+    );
+    let mut changed = request.clone();
+    changed.file_conv[0] ^= 1;
+    assert!(
+        origin
+            .group_operation_asset_payload(&changed, &executor.identity.public())
+            .is_none()
+    );
+    let mut changed = request.clone();
+    changed.start_chunk = u32::MAX;
+    assert!(
+        origin
+            .group_operation_asset_payload(&changed, &executor.identity.public())
+            .is_none()
+    );
+    origin
+        .cancel_account_group_operation(&account.account_id(), id)
+        .unwrap();
+    assert!(
+        origin
+            .group_operation_asset_payload(&request, &executor.identity.public())
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_file_assets_resume_over_noise_with_optional_history_off_and_survive_restart() {
+    exercise_file_asset_receive(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_file_intent_cannot_append_a_chunk_received_after_cancellation() {
+    exercise_file_asset_receive(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fetched_file_cannot_publish_ready_before_ciphertext_sync() {
+    exercise_file_asset_receive(false, true).await;
+}
+
+async fn exercise_file_asset_receive(cancel_during_receive: bool, fail_ready_sync: bool) {
+    use crate::node::account_documents::wire::DocumentRequest;
+    use crate::node::account_group::operations::journal::OperationReference;
+    use crate::node::account_sync_wire::{
+        AccountHistoryFrame, AccountSessionRequest, AccountSyncVersion, MAX_CHUNK,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let origin = node(&dir.path().join("origin"), &account);
+    let target_path = dir.path().join("target");
+    let target = node(&target_path, &account);
+    let genesis = legacy_group(&origin, &target);
+    let group = genesis.conversation_id;
+    install(&origin, &genesis);
+    install(&target, &genesis);
+    link(&origin, &target);
+    link(&target, &origin);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(&origin, &dir.path().join("origin"), address.port());
+    configure(&target, &target_path, 9);
+    for (left, right, port) in [(&origin, &target, 9), (&target, &origin, address.port())] {
+        left.roster.lock().unwrap().update(
+            &right.signed_announce("Asset fixture", port),
+            address.ip(),
+            &left.user_id(),
+        );
+        left.cache_discovered_peers().unwrap();
+        left.set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        left.set_device_sync_category(SyncCategory::Attachments, false)
+            .unwrap();
+    }
+    let bytes = vec![
+        0x53;
+        if cancel_during_receive {
+            73
+        } else {
+            crate::file::CHUNK_SIZE * 2 + 73
+        }
+    ];
+    let path = dir.path().join("explicit.bin");
+    std::fs::write(&path, &bytes).unwrap();
+    let id = origin
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    let payload = origin
+        .prepare_account_group_file(
+            &account.account_id(),
+            id,
+            group,
+            &path,
+            FileKind::File,
+            None,
+            None,
+            |_| {},
+        )
+        .await
+        .unwrap();
+    let body = AccountGroupOperation::Send {
+        message: payload.prepared().unwrap(),
+    };
+    let reference = OperationReference::new(
+        &origin,
+        id,
+        group,
+        &body,
+        target
+            .account_group_access(group)
+            .unwrap()
+            .sources
+            .into_iter()
+            .find(|source| source.device == target.identity.public())
+            .filter(|source| source.role == AccountGroupRole::Member)
+            .expect("pin the actual accepted member executor, not the same-account owner source"),
+    );
+    origin
+        .install_original_file_request_for_test(reference.clone(), body.clone())
+        .unwrap();
+    target
+        .install_original_file_request_for_test(reference.clone(), body)
+        .unwrap();
+    assert!(
+        origin
+            .account_group_file_cached_assets_ready(&reference, &payload)
+            .unwrap(),
+        "the original requester may reuse its own verified ciphertext for local saving"
+    );
+    assert!(
+        !origin
+            .account_group_file_assets_ready(&reference, &payload)
+            .unwrap(),
+        "requester content readiness does not establish executor authority"
+    );
+    let manifest =
+        crate::node::files::validated_manifest(&payload.descriptor.as_ref().unwrap().manifest)
+            .unwrap();
+    let file = manifest.file_conv();
+    assert!(
+        target
+            .fetch_account_group_file_assets(reference.clone(), payload.clone())
+            .await
+            .is_err(),
+        "an unprobed source must not receive an asset extension"
+    );
+    assert_eq!(
+        target.log.lock().unwrap().conversation_len(&file).unwrap(),
+        0
+    );
+    let held = Arc::new(tokio::sync::Semaphore::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let first = Arc::new(AtomicBool::new(true));
+    let server_node = origin.clone();
+    let server_held = held.clone();
+    let server_requests = requests.clone();
+    let server_first = first.clone();
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let node = server_node.clone(); let held = server_held.clone(); let requests = server_requests.clone(); let first = server_first.clone();
+            connections.spawn(async move {
+                let Ok(mut channel) = node.privacy_accept(stream).await else {return;};
+                while let Ok(bytes) = channel.recv().await {
+                    let Some((_, AccountHistoryFrame::SessionRequest {request_id, request: AccountSessionRequest::Documents {body}})) = AccountHistoryFrame::decode_versioned(&bytes) else {break;};
+                    let Some(request) = DocumentRequest::decode(&body) else {break;};
+                    channel.send(&AccountHistoryFrame::SessionReady {request_id}.encode_version(AccountSyncVersion::V2).unwrap()).await.unwrap();
+                    if let Some(asset) = request.operation.as_ref().and_then(|probe|probe.asset.as_ref()) {
+                        requests.lock().unwrap().push(asset.start_chunk);
+                        if first.swap(false, Ordering::AcqRel) {
+                            let payload = node.group_operation_asset_payload(asset, channel.peer_identity()).unwrap();
+                            let descriptor = payload.descriptor.as_ref().unwrap();
+                            let file = crate::node::files::validated_manifest(&descriptor.manifest).unwrap().file_conv();
+                            let ciphertext = node.log.lock().unwrap().events(&file).unwrap()[0].ciphertext.clone();
+                            channel.send(&AccountHistoryFrame::AttachmentStart {file_conv: *file.as_bytes(), name:"operation-file".into(), size:payload.logical.size, sha256:descriptor.asset_ciphertext_digest}.encode_version(AccountSyncVersion::V2).unwrap()).await.unwrap();
+                            for bytes in ciphertext.chunks(MAX_CHUNK) { channel.send(&AccountHistoryFrame::AttachmentChunk {bytes:bytes.to_vec()}.encode_version(AccountSyncVersion::V2).unwrap()).await.unwrap(); }
+                            let _ = held.acquire().await;
+                            break;
+                        }
+                        if !node.serve_account_documents(&mut channel, request).await {break;}
+                    } else {
+                        // This transport-only provider fixture advertises its
+                        // implemented File asset path over an actual authenticated
+                        // nonce exchange; no role or public grant is invented.
+                        let probe = request.operation.as_ref().unwrap();
+                        let complete = serde_json::json!({"enabled":true,"domain":"group_control","next":null,"digest":([0u8;32]),
+                            "operation":{"version":1,"nonce":probe.nonce,"supported_kinds":AccountGroupOperationKind::File.capability_bit()}});
+                        channel.send(&AccountHistoryFrame::DocumentsComplete {body:serde_json::to_vec(&complete).unwrap()}.encode_version(AccountSyncVersion::V2).unwrap()).await.unwrap();
+                    }
+                }
+            });
+        }
+    });
+    let peer = target.routing_peer(&origin.user_id()).unwrap();
+    let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::default();
+    target
+        .pull_account_documents_page(&peer, &mut cursor)
+        .await
+        .unwrap();
+    assert!(target.account_group_operation_ready_for(
+        &origin.identity.public(),
+        AccountGroupOperationKind::File
+    ));
+    if cancel_during_receive {
+        let weak = Arc::downgrade(&target);
+        let account_id = account.account_id();
+        *target.group_file_asset_recv_test_hook.lock().unwrap() = Some(Box::new(move || {
+            weak.upgrade()
+                .unwrap()
+                .cancel_account_group_operation(&account_id, id)
+                .unwrap();
+        }));
+        let result = target
+            .fetch_account_group_file_assets(reference.clone(), payload.clone())
+            .await;
+        servers.abort_all();
+        while servers.join_next().await.is_some() {}
+        assert!(
+            result.is_err(),
+            "cancelled intent must not become asset-ready"
+        );
+        assert_eq!(
+            target.log.lock().unwrap().conversation_len(&file).unwrap(),
+            0,
+            "a chunk arriving after cancellation must not be appended"
+        );
+        assert!(
+            !target
+                .account_group_file_assets_ready(&reference, &payload)
+                .unwrap()
+        );
+        return;
+    }
+    let task_node = target.clone();
+    let task_ref = reference.clone();
+    let task_payload = payload.clone();
+    let mut fetch = tokio::spawn(async move {
+        task_node
+            .fetch_account_group_file_assets(task_ref, task_payload)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while target.log.lock().unwrap().conversation_len(&file).unwrap() != 1 {
+            if fetch.is_finished() {
+                let result = (&mut fetch).await;
+                panic!(
+                    "asset fetch ended before chunk1: {result:?}; requests={:?}",
+                    requests.lock().unwrap().as_slice()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    fetch.abort();
+    let _ = fetch.await;
+    tokio::time::timeout(Duration::from_secs(2), target.runtime_work.drain())
+        .await
+        .unwrap();
+    let original_first = target.log.lock().unwrap().events(&file).unwrap()[0].id;
+    held.add_permits(1);
+    if fail_ready_sync {
+        target.log.lock().unwrap().fail_sync_for_test(true);
+    }
+    let resumed = tokio::time::timeout(
+        Duration::from_secs(5),
+        target.fetch_account_group_file_assets(reference.clone(), payload.clone()),
+    )
+    .await
+    .unwrap();
+    if fail_ready_sync {
+        servers.abort_all();
+        while servers.join_next().await.is_some() {}
+        assert!(
+            resumed.is_err(),
+            "ciphertext sync failure must prevent fetched-ready publication"
+        );
+        assert!(
+            !target
+                .account_group_file_assets_ready(&reference, &payload)
+                .unwrap()
+        );
+        return;
+    }
+    resumed.unwrap();
+    assert_eq!(*requests.lock().unwrap(), vec![0, 1]);
+    assert!(
+        target
+            .account_group_file_assets_ready(&reference, &payload)
+            .unwrap()
+    );
+    let mut opened = Vec::new();
+    {
+        let log = target.log.lock().unwrap();
+        let events = log.events(&file).unwrap();
+        assert_eq!(events[0].id, original_first);
+        for (index, event) in events.into_iter().enumerate() {
+            assert_eq!(
+                event.author.ed25519_pub(),
+                &target.identity.public().ed25519_pub
+            );
+            assert!(event.verify_integrity() && event.verify_signature());
+            opened.extend(
+                crate::file::open_chunk_for(&manifest, index as u32, &event.ciphertext).unwrap(),
+            );
+        }
+    }
+    assert_eq!(opened, bytes);
+    let identity = target.identity.secret_bytes();
+    servers.abort_all();
+    while servers.join_next().await.is_some() {}
+    drop(target);
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channels, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let reopened = Node::open_with_account(
+        DeviceIdentity::from_secret_bytes(identity.0, identity.1),
+        Account::from_secret_bytes(account.secret_bytes()),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channels,
+        files,
+        &target_path.join("events.log"),
+        &target_path.join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    assert!(
+        reopened
+            .account_group_file_assets_ready(&reference, &payload)
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .is_some_and(|status| status.phase == AccountGroupOperationPhase::AwaitingAcceptance)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reference_file_and_fresh_sibling_retry_save_the_original_bytes_without_optional_history() {
+    file_result_roundtrip(0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn matching_file_retry_preserves_a_result_adopted_during_lookup_admission() {
+    file_result_roundtrip(4).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn conflicting_file_retry_cannot_replace_a_result_adopted_during_lookup_admission() {
+    file_result_roundtrip(5).await;
+}
+
+#[derive(Default)]
+struct PreparationProgressState {
+    entered: bool,
+    completed: bool,
+    released: bool,
+}
+
+struct DeliveryDuringPreparation {
+    gate: Arc<(Mutex<PreparationProgressState>, std::sync::Condvar)>,
+    witness: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DeliveryDuringPreparation {
+    fn install(node: &Arc<Node>, observed: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        let gate = Arc::new((
+            Mutex::new(PreparationProgressState::default()),
+            std::sync::Condvar::new(),
+        ));
+        let witness = std::thread::spawn({
+            let gate = gate.clone();
+            let observed = observed.clone();
+            let weak = Arc::downgrade(node);
+            move || {
+                let mut state = gate.0.lock().unwrap();
+                while !state.entered && !state.released {
+                    state = gate.1.wait(state).unwrap();
+                }
+                if state.released {
+                    return;
+                }
+                drop(state);
+                let node = weak.upgrade().expect("the preparing fixture owns its Node");
+                {
+                    let delivery = node.delivery.lock().unwrap();
+                    let _pending = delivery.pending_transactions().len();
+                }
+                let mut state = gate.0.lock().unwrap();
+                // A late acquisition must never erase a failed bounded witness.
+                let _ = observed.compare_exchange(
+                    0,
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                state.completed = true;
+                gate.1.notify_all();
+            }
+        });
+        node.media.before_prepare_for_test(Box::new({
+            let gate = gate.clone();
+            move || {
+                let mut state = gate.0.lock().unwrap();
+                state.entered = true;
+                gate.1.notify_all();
+                // Reuse the fixture's existing progress bound. The preparing
+                // thread remains paused until a different owner finishes a real
+                // delivery-journal read, rather than sampling global contention.
+                let (state, _) = gate
+                    .1
+                    .wait_timeout_while(state, std::time::Duration::from_secs(8), |state| {
+                        !state.completed && !state.released
+                    })
+                    .unwrap();
+                if !state.completed && !state.released {
+                    let _ = observed.compare_exchange(
+                        0,
+                        2,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+            }
+        }));
+        Self {
+            gate,
+            witness: Some(witness),
+        }
+    }
+}
+
+impl Drop for DeliveryDuringPreparation {
+    fn drop(&mut self) {
+        {
+            let mut state = self.gate.0.lock().unwrap();
+            state.released = true;
+            self.gate.1.notify_all();
+        }
+        if let Err(error) = self.witness.take().unwrap().join()
+            && !std::thread::panicking()
+        {
+            std::panic::resume_unwind(error);
+        }
+    }
+}
+
+#[test]
+fn delivery_progress_probe_rejects_a_guard_owned_by_the_preparing_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = node(dir.path(), &Account::generate());
+    let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe = DeliveryDuringPreparation::install(&node, observed.clone());
+    let file = new_channel_id();
+    let delivery = node.delivery.lock().unwrap();
+    node.media
+        .store_bytes(file, "probe.bin", b"actual encrypted preparation")
+        .unwrap();
+    drop(delivery);
+    drop(probe);
+    assert_eq!(
+        observed.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a preparing owner retaining delivery must not qualify as independent progress"
+    );
+    assert_eq!(
+        node.media.read(file).unwrap(),
+        b"actual encrypted preparation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_signed_file_prefix_prepares_cache_without_holding_delivery() {
+    file_result_roundtrip(1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retired_file_copy_cannot_publish_a_prepared_managed_cache() {
+    file_result_roundtrip(2).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_signed_public_chunk_cannot_corrupt_a_same_account_file_result() {
+    file_result_roundtrip(3).await;
+}
+
+/// Static stage labels diagnose scheduling failures without printing file or intent data.
+fn file_result_timeout_stage(
+    fresh: &Node,
+    source: &Node,
+    account: &Account,
+    id: AccountGroupOperationId,
+    file: crate::eventlog::ConversationId,
+) -> &'static str {
+    if !fresh.account_group_operation_ready_for(
+        &source.identity.public(),
+        AccountGroupOperationKind::File,
+    ) {
+        return "result timeout: authenticated source File capability unavailable";
+    }
+    let Ok(Some(status)) = fresh.account_group_operation_status(&account.account_id(), id) else {
+        return "result timeout: operation status unavailable";
+    };
+    if status.phase != AccountGroupOperationPhase::Committed {
+        return "result timeout: operation has not committed";
+    }
+    let Some(progress) = fresh.file_progress(file).unwrap() else {
+        return "result timeout: committed result has no installed file card";
+    };
+    if progress.done != progress.total {
+        return "result timeout: committed card awaits complete managed bytes";
+    }
+    "result timeout: complete managed bytes did not reach the preparation observation"
+}
+
+// The executor fetches the original assets back from the requester. Forward
+// role discovery alone does not establish that reverse File protocol receipt.
+async fn wait_file_fixture_capabilities(source: &Node, origin: &Node) {
+    super::cold_account_setup(super::observe_account_fixture_condition(|| {
+        [(source, origin), (origin, source)]
+            .into_iter()
+            .all(|(node, peer)| {
+                super::has_account_group_operation_support(
+                    node,
+                    peer,
+                    Some(AccountGroupOperationKind::File),
+                )
+            })
+    }))
+    .await
+    .expect("both exact authenticated File capabilities must precede explicit file admission");
+}
+
+#[derive(Clone, Copy)]
+enum FileControlSetup {
+    Initial,
+    Fresh,
+}
+impl FileControlSetup {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Initial => "initial requester",
+            Self::Fresh => "fresh inbound-only requester",
+        }
+    }
+}
+
+async fn prepare_file_source_control(
+    target: &Arc<Node>,
+    source: &Node,
+    address: std::net::SocketAddr,
+    group: crate::eventlog::ConversationId,
+    setup: FileControlSetup,
+) {
+    eprintln!(
+        "file fixture Control setup: {} cold protocol",
+        setup.label()
+    );
+    super::cold_account_control_setup(
+        async {
+            if matches!(setup, FileControlSetup::Fresh) {
+                // This requester intentionally has no background owner until
+                // after explicit retry. Drive its already-required real Control
+                // exchange here; a passive observation would have no producer.
+                let peer = target.routing_peer(&source.user_id()).unwrap();
+                assert_eq!(peer.public, source.identity.public());
+                let mut cursor =
+                    crate::node::account_documents::sync::DocumentSyncCursor::control();
+                let mut interruptions = 0;
+                loop {
+                    let result = target.pull_account_documents_page(&peer, &mut cursor).await;
+                    let complete = super::message_action_reference::accept_reference_control_page(
+                        target,
+                        source,
+                        &peer,
+                        &cursor,
+                        result,
+                        &mut interruptions,
+                    )
+                    .await;
+                    if complete
+                        && super::has_account_group_operation_support(
+                            target,
+                            source,
+                            Some(AccountGroupOperationKind::File),
+                        )
+                    {
+                        break;
+                    }
+                    // A cold inbound-only node has no owner to drive a later
+                    // pending page. Retain this actual cursor and its deadlines.
+                    if complete {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+            }
+            super::observe_account_fixture_condition(|| {
+                super::has_account_group_operation_support(
+                    target,
+                    source,
+                    Some(AccountGroupOperationKind::File),
+                )
+            })
+            .await;
+        },
+        async {
+            eprintln!(
+                "file fixture Control setup: {} signed role page",
+                setup.label()
+            );
+            pull_group_control(target, source, address, group).await;
+        },
+    )
+    .await;
+    eprintln!("file fixture Control setup: {} complete", setup.label());
+}
+
+struct FileBootstrapHold {
+    release: Arc<tokio::sync::Semaphore>,
+    arrived: tokio::sync::oneshot::Receiver<()>,
+}
+impl Drop for FileBootstrapHold {
+    fn drop(&mut self) {
+        self.release.close();
+    }
+}
+
+fn hold_file_bootstrap(server: &Node, requester: &Node) -> FileBootstrapHold {
+    use crate::node::{
+        account_documents::wire::DocumentRequest, account_sync_wire::AccountHistoryFrame,
+    };
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (arrived, held) = tokio::sync::oneshot::channel();
+    let arrived = Arc::new(Mutex::new(Some(arrived)));
+    let exact_requester = requester.identity.public();
+    *server.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let release = release.clone();
+        move |peer, frame| {
+            let release = release.clone();
+            let arrived = arrived.clone();
+            let exact_requester = exact_requester.clone();
+            Box::pin(async move {
+                if peer == exact_requester
+                    && matches!(frame, AccountHistoryFrame::DocumentsRequest { ref body }
+                    if DocumentRequest::decode(body).is_some_and(|request| request.domain == crate::node::AccountDocumentDomain::GroupControl))
+                {
+                    let signal = arrived.lock().unwrap().take();
+                    if let Some(signal) = signal {
+                        let _ = signal.send(());
+                    }
+                    // Keep replacement requests gated too. The hook runs after
+                    // SessionReady, outside store/disclosure guards.
+                    let _ = release.acquire().await;
+                }
+            })
+        }
+    }));
+    FileBootstrapHold {
+        release,
+        arrived: held,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn file_fixture_waits_for_reverse_authenticated_file_capability_before_admission() {
+    // Mode 6 retains mode 4's matching-retry race and every original byte/result
+    // assertion, with a controlled cold reverse capability bootstrap added.
+    file_result_roundtrip(6).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn file_fixture_finishes_inbound_only_cold_protocol_before_role_page_budget() {
+    // Mode 7 keeps the fresh requester stopped through the matching retry gap.
+    // Only its first authenticated source Control response is held past 3s.
+    file_result_roundtrip(7).await;
+}
+
+#[derive(Default, Debug)]
+struct InitialFileTrace {
+    phases: std::collections::VecDeque<(u128, &'static str, Option<tokio::task::Id>, String)>,
+    workers: std::collections::VecDeque<(u128, &'static str, Option<tokio::task::Id>, String)>,
+}
+impl InitialFileTrace {
+    fn record(&mut self, clock: std::time::Instant, side: &'static str, event: String) {
+        let row = (
+            clock.elapsed().as_millis(),
+            side,
+            tokio::task::try_id(),
+            event,
+        );
+        if row.3.starts_with("operation_file_data_")
+            || row.3.starts_with("file_asset_request ")
+            || row.3.starts_with("file_attachment_")
+        {
+            if self.workers.len() == 32 {
+                self.workers.pop_front();
+            }
+            self.workers.push_back(row.clone());
+        }
+        if self.phases.len() == 128 {
+            self.phases.pop_front();
+        }
+        self.phases.push_back(row);
+    }
+}
+
+fn initial_file_snapshot(
+    origin: &Node,
+    source: &Node,
+    account: &Account,
+    group: crate::eventlog::ConversationId,
+    id: AccountGroupOperationId,
+) -> serde_json::Value {
+    use crate::node::account_group::operations::file_preparation::GroupFilePayload;
+    let origin_projection = origin.operation_projection(group);
+    let source_projection = source.operation_projection(group);
+    let original = origin_projection.as_ref().ok().and_then(|projection| {
+        projection
+            .requests
+            .iter()
+            .find(|request| request.reference.id == id)
+            .cloned()
+    });
+    let assets = original.and_then(|request| {
+        let AccountGroupOperation::Send { message } = request.body? else {
+            return None;
+        };
+        let payload = GroupFilePayload::decode(message.encoded_body())?;
+        let manifest =
+            crate::node::files::validated_manifest(&payload.descriptor.as_ref()?.manifest)?;
+        let file = manifest.file_conv();
+        let origin_chunks = origin.log.lock().unwrap().conversation_len(&file).ok();
+        let source_chunks = source.log.lock().unwrap().conversation_len(&file).ok();
+        let source_assets_ready = source
+            .account_group_file_assets_ready(&request.reference, &payload)
+            .ok();
+        Some(serde_json::json!({
+            "expected_chunks": manifest.chunk_count(),
+            "origin_chunks": origin_chunks,
+            "source_chunks": source_chunks,
+            "source_assets_ready": source_assets_ready,
+        }))
+    });
+    serde_json::json!({
+        "origin_phase": origin.retained_account_group_operation_status(&account.account_id(), id).ok().flatten().map(|status| status.phase),
+        "source_phase": source.retained_account_group_operation_status(&account.account_id(), id).ok().flatten().map(|status| status.phase),
+        "source_pending_projection": source_projection.as_ref().ok().map(|projection| projection.requests.iter().any(|request| request.reference.id == id)),
+        "source_result_projection": source_projection.as_ref().ok().and_then(|projection| projection.results.iter().find(|result| result.reference.id == id)).map(|result| &result.status.phase),
+        "projection_read_errors": [origin_projection.is_err(), source_projection.is_err()],
+        "assets": assets,
+    })
+}
+
+fn initial_file_result_timeout_stage(
+    origin: &Node,
+    source: &Node,
+    external: &Node,
+    account: &Account,
+    id: AccountGroupOperationId,
+) -> &'static str {
+    let Ok(Some(source_status)) = source.account_group_operation_status(&account.account_id(), id)
+    else {
+        return "explicit File timeout: pinned source has not imported the request";
+    };
+    if source_status.phase != AccountGroupOperationPhase::Committed {
+        return "explicit File timeout: pinned source operation has not committed";
+    }
+    if !origin
+        .account_group_operation_status(&account.account_id(), id)
+        .ok()
+        .flatten()
+        .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)
+    {
+        return "explicit File timeout: requester has not adopted the committed source result";
+    }
+    if source_status
+        .primary_event
+        .is_some_and(|event| external.log.lock().unwrap().get(&event).unwrap().is_none())
+    {
+        return "explicit File timeout: committed manifest has not reached the external member";
+    }
+    "explicit File timeout: completion predicate missed its deadline"
+}
+
+// Diagnostic snapshots use the same exact signed source key as the real result
+// importer. Errors remain unknown, never an apparent absent/processed result.
+fn trace_initial_file_result(
+    origin: &Node,
+    source: &Node,
+    account: &Account,
+    group: crate::eventlog::ConversationId,
+    id: AccountGroupOperationId,
+    last_header: Option<&crate::node::AccountDocumentMeta>,
+) {
+    use crate::node::account_group::operations::wire::OperationFrame;
+    let key = crate::node::AccountDocumentKey::GroupOperation {
+        channel: hex::encode(group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let published = source.account_document(&key);
+    let received = origin.account_document(&key);
+    let committed = |document: &crate::node::AccountDocument| {
+        OperationFrame::decode(document.payload(), &account.public().ed25519_pub).is_some_and(
+            |frame| {
+                frame.group == group
+                    && frame.proof.public() == source.identity.public()
+                    && frame.revision == document.meta.revision
+                    && frame.projection.results.iter().any(|result| {
+                        result.reference.id == id
+                            && result.status.phase == AccountGroupOperationPhase::Committed
+                    })
+            },
+        )
+    };
+    let published_doc = published.as_ref().ok().and_then(Option::as_ref);
+    let received_doc = received.as_ref().ok().and_then(Option::as_ref);
+    let source_committed_published = published_doc.map(committed);
+    let origin_committed_received = received_doc.map(committed);
+    let same_canonical_head = published_doc
+        .zip(received_doc)
+        .is_some_and(|(a, b)| a.meta == b.meta);
+    let last_header_is_current = published_doc
+        .zip(last_header)
+        .is_some_and(|(document, header)| document.meta == *header);
+    let input_processed =
+        received_doc.map(|document| origin.operation_input_consumed_for_test(&document.meta));
+    let origin_status = origin.account_group_operation_status(&account.account_id(), id);
+    let origin_phase = origin_status
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .map(|status| &status.phase);
+    let card_installed = source
+        .account_group_operation_status(&account.account_id(), id)
+        .ok()
+        .flatten()
+        .and_then(|status| status.primary_event)
+        .and_then(|event| {
+            origin
+                .received_files
+                .lock()
+                .unwrap()
+                .entry(event)
+                .ok()
+                .map(|entry| entry.is_some())
+        });
+    let document_read_errors = [published.is_err(), received.is_err()];
+    let origin_status_read_error = origin_status.is_err();
+    eprintln!(
+        "initial File adoption source_committed_published={source_committed_published:?} origin_committed_received={origin_committed_received:?} same_canonical_head={same_canonical_head} last_header_is_current={last_header_is_current} input_processed={input_processed:?} card_installed={card_installed:?} origin_phase={origin_phase:?} document_read_errors={document_read_errors:?} origin_status_read_error={origin_status_read_error}"
+    );
+}
+
+async fn file_result_roundtrip(mode: u8) {
+    use crate::node::test_support::IndependentPeerRuntime;
+    use futures_util::FutureExt;
+    use std::time::Duration;
+    let initial_clock = std::time::Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let offline_owner = node(&dir.path().join("offline-owner"), &Account::generate());
+    let source = node(&dir.path().join("source"), &account);
+    let origin = node(&dir.path().join("origin"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    // Arm before either background owner can learn the reverse capability.
+    let mut reverse_bootstrap = (mode == 6).then(|| hold_file_bootstrap(&origin, &source));
+    let genesis = Event::new(
+        &offline_owner.identity,
+        new_channel_id(),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Explicit account file".into(),
+            members: vec![
+                offline_owner.identity.public(),
+                source.identity.public(),
+                external.identity.public(),
+            ],
+            epoch: 0,
+            owner: offline_owner.user_id(),
+        }
+        .encode(),
+    );
+    let group = genesis.conversation_id;
+    install(&source, &genesis);
+    install(&external, &genesis);
+    link(&source, &origin);
+    link(&origin, &source);
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut addresses = Vec::new();
+    let mut listeners = Vec::new();
+    for (name, target) in [
+        ("source", &source),
+        ("origin", &origin),
+        ("external", &external),
+    ] {
+        target
+            .set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        target
+            .set_device_sync_category(SyncCategory::Attachments, false)
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        configure(target, &dir.path().join(name), address.port());
+        addresses.push(address);
+        listeners.push(listener);
+    }
+    for left in [&source, &origin, &external] {
+        for (right, address) in [&source, &origin, &external].into_iter().zip(&addresses) {
+            if left.user_id() != right.user_id() {
+                left.roster.lock().unwrap().update(
+                    &right.signed_announce("Explicit file fixture", address.port()),
+                    address.ip(),
+                    &left.user_id(),
+                );
+            }
+        }
+        left.cache_discovered_peers().unwrap();
+    }
+    let mut peer_runtimes = Vec::new();
+    for (target, listener) in [&source, &origin, &external].into_iter().zip(listeners) {
+        let mut runtime =
+            IndependentPeerRuntime::start_multithreaded(target.clone(), listener).await;
+        runtime.launch();
+        peer_runtimes.push(runtime);
+    }
+    let outcome = std::panic::AssertUnwindSafe(async {
+    source.publish_account_group_access(&mut None);
+    prepare_file_source_control(
+        &origin,
+        &source,
+        addresses[0],
+        group,
+        FileControlSetup::Initial,
+    )
+    .await;
+    assert_eq!(
+        origin.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+    assert!(origin.channel_members(group).is_empty());
+    if let Some(mut hold) = reverse_bootstrap.take() {
+        super::cold_account_setup(async {
+            (&mut hold.arrived)
+                .await
+                .expect("the real reverse authenticated Control exchange must reach the hold");
+            assert!(
+                super::has_account_group_operation_support(
+                    &origin,
+                    &source,
+                    Some(AccountGroupOperationKind::File)
+                ),
+                "the original forward role bootstrap is already ready"
+            );
+            assert!(
+                !super::has_account_group_operation_support(
+                    &source,
+                    &origin,
+                    Some(AccountGroupOperationKind::File)
+                ),
+                "the held reverse response must still lack its File capability receipt"
+            );
+            let setup = wait_file_fixture_capabilities(&source, &origin);
+            tokio::pin!(setup);
+            assert!(
+                futures_util::poll!(setup.as_mut()).is_pending(),
+                "forward-only role readiness must not admit an explicit file while reverse File support is held"
+            );
+            tokio::task::yield_now().await;
+            assert!(
+                futures_util::poll!(setup.as_mut()).is_pending(),
+                "a scheduling turn cannot replace the missing authenticated reverse receipt"
+            );
+            hold.release.close();
+            setup.await;
+            *origin.account_session_test_hook.lock().unwrap() = None;
+        })
+        .await
+        .expect("held reverse File bootstrap and readiness must share the existing cold setup budget");
+    } else {
+        wait_file_fixture_capabilities(&source, &origin).await;
+    }
+    let initial_trace = Arc::new(Mutex::new(InitialFileTrace::default()));
+    initial_trace
+        .lock()
+        .unwrap()
+        .record(initial_clock, "fixture", "capabilities_ready".into());
+    let mut initial_observers = Vec::new();
+    for (side, target, peer) in [("source", &source, &origin), ("origin", &origin, &source)] {
+        let previous_client = target.account_client_test_hook.lock().unwrap().clone();
+        let previous_session = target.account_session_test_hook.lock().unwrap().clone();
+        *target.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let previous = previous_client.clone();
+            let trace = initial_trace.clone();
+            let own = target.identity.public();
+            let expected = peer.identity.public();
+            move |observed, event| {
+                if (observed == own || observed == expected)
+                    && [
+                        "operation_owner phase=",
+                        "operation_publication_owner group=",
+                        "operation_local_published revision=",
+                        "operation_file_data_",
+                        "page_begin ",
+                        "page_end ",
+                        "negotiation_begin ",
+                        "negotiation_end ",
+                        "dial_privacy_gate_wait",
+                        "dial_privacy_gate_acquired",
+                        "dial_policy_admitted",
+                        "dial_authentication_admission_wait",
+                        "dial_authentication_admission_acquired_outbound_wait",
+                        "dial_outbound_acquired",
+                        "dial_tcp_connect_begin",
+                        "dial_tcp_connect_end",
+                        "dial_socket_ports=",
+                        "dial_noise_begin",
+                        "dial_noise_end ",
+                        "dial_proof_validation_begin",
+                        "dial_complete",
+                        "control_dispatch ",
+                        "control_turn_origin ",
+                        "control_timeout_wake_refresh ",
+                        "control_queue ",
+                        "control_refresh ",
+                        "control_cancel ",
+                        "control_owned_abort ",
+                        "control_owned_abort_released",
+                        "control_pair_retired",
+                        "wake_received revision=",
+                        "wake_send_begin revision=",
+                        "wake_send_ack revision=",
+                    ]
+                    .iter()
+                    .any(|prefix| event.starts_with(prefix))
+                {
+                    trace
+                        .lock()
+                        .unwrap()
+                        .record(initial_clock, side, event.clone());
+                }
+                if let Some(previous) = &previous {
+                    previous(observed, event);
+                }
+            }
+        }));
+        *target.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let previous = previous_session.clone();
+            let trace = initial_trace.clone();
+            let expected = peer.identity.public();
+            move |observed, frame| {
+                let previous = previous.clone();
+                let trace = trace.clone();
+                let expected = expected.clone();
+                Box::pin(async move {
+                    if observed == expected {
+                        use crate::node::account_sync_wire::AccountHistoryFrame;
+                        let event = match &frame {
+                            AccountHistoryFrame::DocumentsRequest { body } => {
+                                crate::node::account_documents::wire::DocumentRequest::decode(body)
+                                    .and_then(|request| {
+                                        request.operation.and_then(|operation| operation.asset)
+                                    })
+                                    .map(|asset| {
+                                        format!(
+                                            "file_asset_request result={} start_chunk={}",
+                                            asset.result, asset.start_chunk
+                                        )
+                                    })
+                            }
+                            AccountHistoryFrame::AttachmentStart { size, .. } => {
+                                Some(format!("file_attachment_start size={size}"))
+                            }
+                            AccountHistoryFrame::AttachmentChunk { bytes } => {
+                                Some(format!("file_attachment_chunk bytes={}", bytes.len()))
+                            }
+                            AccountHistoryFrame::AttachmentComplete => {
+                                Some("file_attachment_complete".into())
+                            }
+                            _ => None,
+                        };
+                        if let Some(event) = event {
+                            trace.lock().unwrap().record(initial_clock, side, event);
+                        }
+                    }
+                    if let Some(previous) = previous {
+                        previous(observed, frame).await;
+                    }
+                })
+            }
+        }));
+        initial_observers.push((target.clone(), previous_client, previous_session));
+    }
+    let public_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let public_started = std::time::Instant::now();
+    // Restore chained hooks after this initial adoption boundary, including
+    // assertion unwind; later retry/fault scenarios retain their own hooks.
+    struct RestoreTrace(Option<Box<dyn FnOnce() + Send>>);
+    impl Drop for RestoreTrace {
+        fn drop(&mut self) {
+            if let Some(restore) = self.0.take() {
+                restore();
+            }
+        }
+    }
+    let mut previous_hooks = Vec::new();
+    for (label, node, public_peer, account_peer) in [
+        (
+            "source",
+            &source,
+            Some(external.identity.public()),
+            Some(origin.identity.public()),
+        ),
+        ("external", &external, Some(source.identity.public()), None),
+        ("origin", &origin, None, Some(source.identity.public())),
+    ] {
+        let previous = node.account_client_test_hook.lock().unwrap().clone();
+        previous_hooks.push((node.clone(), previous.clone()));
+        let own = node.identity.public();
+        let trace = public_trace.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            let observed = if peer == own && phase.starts_with("operation_") {
+                // Keep only the static owner/phase vocabulary, never ids or
+                // group keys carried by the existing detailed owner hook.
+                let mut words = phase.split_ascii_whitespace();
+                let family = words.next().unwrap_or("operation");
+                let detail = words
+                    .clone()
+                    .find_map(|word| word.strip_prefix("phase="))
+                    .or_else(|| words.next().filter(|word| !word.contains('=')))
+                    .unwrap_or("observation");
+                Some(("local", format!("{family} {detail}")))
+            } else if public_peer.as_ref() == Some(&peer)
+                && (phase.starts_with("control_fanout_round_")
+                    || phase == "network_view_captured"
+                    || phase.starts_with("dial_"))
+            {
+                Some((
+                    "public",
+                    phase
+                        .split_ascii_whitespace()
+                        .next()
+                        .unwrap()
+                        .split('=')
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                ))
+            } else if account_peer.as_ref() == Some(&peer)
+                && (phase.starts_with("page_begin ")
+                    || phase.starts_with("page_end ")
+                    || phase.starts_with("document_scope_")
+                    || phase.starts_with("dial_"))
+            {
+                Some((
+                    "account",
+                    phase
+                        .split_ascii_whitespace()
+                        .next()
+                        .unwrap()
+                        .split('=')
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                ))
+            } else {
+                None
+            };
+            if let Some((route, observed)) = observed {
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 64 {
+                    trace.pop_front();
+                }
+                trace.push_back((public_started.elapsed().as_millis(), label, route, observed));
+            }
+            if let Some(previous) = &previous {
+                previous(peer, phase);
+            }
+        }));
+    }
+    #[derive(Default)]
+    struct ResultWire {
+        headers: usize,
+        completes: usize,
+        first_header_ms: Option<u128>,
+        last_header_ms: Option<u128>,
+        last_complete_ms: Option<u128>,
+        last_header: Option<crate::node::AccountDocumentMeta>,
+    }
+    let result_wire = Arc::new(Mutex::new(ResultWire::default()));
+    let previous_session = source.account_session_test_hook.lock().unwrap().clone();
+    *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let previous = previous_session.clone();
+        let observed = result_wire.clone();
+        let expected = origin.identity.public();
+        let key = crate::node::AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        move |peer, frame| {
+            use crate::node::account_sync_wire::AccountHistoryFrame;
+            if peer == expected {
+                let mut observed = observed.lock().unwrap();
+                let selected_header = match &frame {
+                    AccountHistoryFrame::DocumentHeader { body } => {
+                        serde_json::from_slice::<crate::node::AccountDocumentMeta>(body)
+                            .ok()
+                            .filter(|meta| meta.key == key)
+                    }
+                    _ => None,
+                };
+                if let Some(meta) = selected_header {
+                    observed.headers += 1;
+                    let now = public_started.elapsed().as_millis();
+                    observed.first_header_ms.get_or_insert(now);
+                    observed.last_header_ms = Some(now);
+                    observed.last_header = Some(meta);
+                } else if let AccountHistoryFrame::DocumentsComplete { body } = &frame
+                    && serde_json::from_slice::<serde_json::Value>(body)
+                        .ok()
+                        .is_some_and(|value| {
+                            value.get("domain").and_then(serde_json::Value::as_str)
+                                == Some("group_control")
+                        })
+                {
+                    observed.completes += 1;
+                    observed.last_complete_ms = Some(public_started.elapsed().as_millis());
+                }
+            }
+            let previous = previous.clone();
+            Box::pin(async move {
+                if let Some(previous) = previous {
+                    previous(peer, frame).await;
+                }
+            })
+        }
+    }));
+    let restore_trace = RestoreTrace(Some(Box::new({
+        let source = source.clone();
+        move || {
+            *source.account_session_test_hook.lock().unwrap() = previous_session;
+            for (node, previous) in previous_hooks {
+                *node.account_client_test_hook.lock().unwrap() = previous;
+            }
+            for (node, client, session) in initial_observers {
+                *node.account_client_test_hook.lock().unwrap() = client;
+                *node.account_session_test_hook.lock().unwrap() = session;
+            }
+        }
+    })));
+    let bytes = vec![0x61; crate::file::CHUNK_SIZE * 2 + 137];
+    let original_path = dir.path().join("origin").join("explicit.bin");
+    std::fs::write(&original_path, &bytes).unwrap();
+    let id = origin
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    let admitted = origin
+        .submit_account_group_file_if(
+            &account.account_id(),
+            id,
+            group,
+            &original_path,
+            FileKind::File,
+            None,
+            None,
+            |_| {},
+            |commit| commit(),
+        )
+        .await
+        .expect("reference account member must admit its explicit file intent");
+    assert_eq!(admitted.executions[0].device_id, source.user_id());
+    initial_trace
+        .lock()
+        .unwrap()
+        .record(initial_clock, "fixture", "initial_file_admitted".into());
+    let initial_started = std::time::Instant::now();
+    let initial_outcome = super::functional_account_convergence(async {
+        loop {
+            let status = origin
+                .account_group_operation_status(&account.account_id(), id)
+                .unwrap()
+                .unwrap();
+            if status.phase == AccountGroupOperationPhase::Committed
+                && status.primary_event.is_some_and(|event| {
+                    external.log.lock().unwrap().get(&event).unwrap().is_some()
+                })
+            {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    // Unwind the outer public/wire observers and the chained File observers
+    // together before later fault scenarios install their own hooks.
+    drop(restore_trace);
+    if initial_outcome.is_err() {
+        let trace = public_trace
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let (counts, last_header) = {
+            let wire = result_wire.lock().unwrap();
+            (
+                (
+                    wire.headers,
+                    wire.completes,
+                    wire.first_header_ms,
+                    wire.last_header_ms,
+                    wire.last_complete_ms,
+                ),
+                wire.last_header.clone(),
+            )
+        };
+        eprintln!(
+            "initial File transport trace={trace:?} selected_source_key_wire(headers,control_completes,first_header_ms,last_header_ms,last_complete_ms)={counts:?}"
+        );
+        trace_initial_file_result(&origin, &source, &account, group, id, last_header.as_ref());
+    }
+    let snapshot = initial_file_snapshot(&origin, &source, &account, group, id);
+    eprintln!(
+        "initial_file_result mode={mode} elapsed_ms={} snapshot={snapshot} trace={:?}",
+        initial_started.elapsed().as_millis(),
+        initial_trace.lock().unwrap()
+    );
+    let status = initial_outcome.unwrap_or_else(|_| {
+        panic!(
+            "{}; phase_snapshot={snapshot}",
+            initial_file_result_timeout_stage(&origin, &source, &external, &account, id),
+        )
+    });
+    let event_id = status.primary_event.unwrap();
+    let event = external
+        .log
+        .lock()
+        .unwrap()
+        .get(&event_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.kind, EventKind::FileManifest);
+    assert_eq!(
+        event.author.ed25519_pub(),
+        &source.identity.public().ed25519_pub
+    );
+    assert!(event.verify_integrity() && event.verify_signature());
+    let original_card = origin
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(event_id)
+        .unwrap()
+        .expect("explicit own result must install a real file card before reporting Committed");
+    assert_eq!(original_card.from, source.user_id());
+    let manifest = crate::node::files::validated_manifest(&original_card.plaintext).unwrap();
+    let file = manifest.file_conv();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while external.file_progress(file).unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the external member must receive a real file card");
+    external.decide_attachment(file, true).unwrap();
+    assert_eq!(
+        external.attachment_consent_status(file).unwrap(),
+        Some(crate::node::ReceiveDecision::Accepted)
+    );
+    assert!(
+        source
+            .file_progress(file)
+            .unwrap()
+            .is_some_and(|progress| progress.done == progress.total)
+    );
+    source.flush_channel_file(group, file).await;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while !external
+            .file_progress(file)
+            .unwrap()
+            .is_some_and(|progress| progress.done == progress.total)
+        {
+            // The native participant's separate file-pull producer drives this
+            // same consent-checked public API; the accept loop does not own it.
+            external.pull_pending_files().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the accepted external recipient must receive actual signed file chunks");
+    let external_saved = dir.path().join("external-saved.bin");
+    external.save_file(file, &external_saved).unwrap();
+    assert_eq!(std::fs::read(external_saved).unwrap(), bytes);
+    let original_cache = origin
+        .log
+        .lock()
+        .unwrap()
+        .fingerprint_and_len(&file)
+        .unwrap();
+    assert_eq!(original_cache.1, manifest.chunk_count() as usize);
+    assert!(
+        origin
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .iter()
+            .all(|chunk| chunk.author.ed25519_pub() == &origin.identity.public().ed25519_pub),
+        "the original cache must not mix copied executor chunks with creator chunks"
+    );
+    let progress = origin
+        .file_progress(file)
+        .unwrap()
+        .expect("real original card must expose progress");
+    assert_eq!(progress.done, progress.total);
+    let origin_saved = dir.path().join("origin-saved.bin");
+    origin.save_file(file, &origin_saved).unwrap();
+    assert_eq!(std::fs::read(origin_saved).unwrap(), bytes);
+    // Existing save completion may reclaim a terminal local cache. Later B
+    // hydration must neither recreate it nor append another signer's chunks.
+    let after_origin_save = origin
+        .log
+        .lock()
+        .unwrap()
+        .fingerprint_and_len(&file)
+        .unwrap();
+    assert!(origin.channel_members(group).is_empty());
+
+    // B has never seen A's operation head or staged the original artifact.
+    let fresh_path = dir.path().join("fresh");
+    let fresh = node(&fresh_path, &account);
+    for sibling in [&source, &origin] {
+        link(sibling, &fresh);
+        link(&fresh, sibling);
+    }
+    fresh
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    fresh
+        .set_device_sync_category(SyncCategory::Attachments, false)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(&fresh, &fresh_path, address.port());
+    for (peer, peer_address) in [(&source, addresses[0]), (&origin, addresses[1])] {
+        fresh.roster.lock().unwrap().update(
+            &peer.signed_announce("Existing executor", peer_address.port()),
+            peer_address.ip(),
+            &fresh.user_id(),
+        );
+        peer.roster.lock().unwrap().update(
+            &fresh.signed_announce("Fresh sibling", address.port()),
+            address.ip(),
+            &peer.user_id(),
+        );
+        peer.cache_discovered_peers().unwrap();
+    }
+    fresh.cache_discovered_peers().unwrap();
+    assert!(
+        fresh
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fresh.log.lock().unwrap().conversation_len(&file).unwrap(),
+        0
+    );
+    let prepare_observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut preparation_progress = None;
+    if mode == 1 || mode == 2 {
+        let original = source.log.lock().unwrap().events(&file).unwrap()[0].clone();
+        assert!(original.verify_integrity() && original.verify_signature());
+        fresh.log.lock().unwrap().append_durable(original).unwrap();
+        if mode == 1 {
+            preparation_progress = Some(DeliveryDuringPreparation::install(
+                &fresh,
+                prepare_observed.clone(),
+            ));
+        } else {
+            let weak = Arc::downgrade(&fresh);
+            let observed = prepare_observed.clone();
+            fresh.media.before_prepare_for_test(Box::new(move || {
+                let node = weak.upgrade().unwrap();
+                observed.store(
+                    if node.delivery.try_lock().is_ok() {
+                        1
+                    } else {
+                        2
+                    },
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                if mode == 2 {
+                    node.runtime_work.close();
+                }
+            }));
+        }
+    }
+    if mode == 3 {
+        let original = source.log.lock().unwrap().events(&file).unwrap()[0].clone();
+        assert!(original.verify_integrity() && original.verify_signature());
+        let weak = Arc::downgrade(&fresh);
+        let observed = prepare_observed.clone();
+        *fresh.group_file_asset_recv_test_hook.lock().unwrap() = Some(Box::new(move || {
+            // Simulate an authenticated public pull completing after the result
+            // worker captured an empty prefix, using the real C-signed event.
+            weak.upgrade()
+                .unwrap()
+                .log
+                .lock()
+                .unwrap()
+                .append_durable(original)
+                .unwrap();
+            observed.store(3, std::sync::atomic::Ordering::SeqCst);
+        }));
+    }
+    // Import only role/directory observations before asking for A's immutable ID.
+    // Production operation maintenance starts after the explicit local retry.
+    assert!(
+        !fresh.account_group_operation_ready_for(
+            &source.identity.public(),
+            AccountGroupOperationKind::File,
+        ),
+        "discovery and sibling certification alone cannot authorize the File protocol"
+    );
+    // Document installation wakes account work before the exchange finishes
+    // installing its authenticated capability receipt. Establish this fixture
+    // prerequisite before starting the worker, rather than racing its retry.
+    let cold_hold_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if mode == 7 {
+        let mut hold = hold_file_bootstrap(&source, &fresh);
+        let released = cold_hold_released.clone();
+        tasks.spawn(async move {
+            super::cold_account_setup(&mut hold.arrived)
+                .await
+                .expect("the fresh request must reach the real authenticated Control hold")
+                .unwrap();
+            eprintln!("file fixture Control fault: fresh authenticated response held");
+            // Deliberately exceed the unchanged signed-role page's 3s budget.
+            // The cold phase owns this first protocol receipt, not role timing.
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            released.store(true, std::sync::atomic::Ordering::SeqCst);
+            hold.release.close();
+        });
+    }
+    prepare_file_source_control(
+        &fresh,
+        &source,
+        addresses[0],
+        group,
+        FileControlSetup::Fresh,
+    )
+    .await;
+    if mode == 7 {
+        assert!(
+            cold_hold_released.load(std::sync::atomic::Ordering::SeqCst),
+            "the real fresh Control request must remain held beyond the signed-role budget before completing cold setup"
+        );
+        *source.account_session_test_hook.lock().unwrap() = None;
+    }
+    assert!(
+        fresh.account_group_operation_ready_for(
+            &source.identity.public(),
+            AccountGroupOperationKind::File,
+        ),
+        "the actual authenticated capability exchange must precede result work"
+    );
+    let mut fresh_listener = Some(listener);
+    if mode < 4 {
+        let listener = fresh_listener.take().unwrap();
+        let mut runtime = IndependentPeerRuntime::start_multithreaded(fresh.clone(), listener).await;
+        runtime.launch();
+        peer_runtimes.push(runtime);
+    }
+    let fresh_raw = fresh_path.join("explicit.bin");
+    let mut retry_bytes = bytes.clone();
+    if mode == 5 {
+        retry_bytes[0] ^= 1;
+    }
+    std::fs::write(&fresh_raw, &retry_bytes).unwrap();
+    if mode >= 4 {
+        let result = source
+            .operation_projection(group)
+            .unwrap()
+            .results
+            .into_iter()
+            .find(|result| result.reference.id == id)
+            .expect("source committed result");
+        let proof = source.own_group_proof();
+        // The importer releases delivery after card materialization, before its
+        // final journal adoption. Stop at precisely that production boundary.
+        fresh
+            .import_explicit_account_group_file_card(
+                &result.reference,
+                result.message_event.as_ref().unwrap(),
+                result.file_descriptor.as_ref().unwrap(),
+                &proof,
+            )
+            .unwrap();
+        let observed = prepare_observed.clone();
+        super::super::operations::before_lookup_commit_for_test(id, move |node| {
+            super::super::operations::finish_imported_result_for_test(node, result)
+                .expect("authenticated original result must adopt in the retry gap");
+            observed.store(4, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    let retry = fresh
+        .submit_account_group_file_if(
+            &account.account_id(),
+            id,
+            group,
+            &fresh_raw,
+            FileKind::File,
+            None,
+            None,
+            |_| {},
+            |commit| commit(),
+        )
+        .await;
+    if mode >= 4 {
+        assert_eq!(
+            prepare_observed.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "the original result must arrive after the initial retry lookup"
+        );
+    }
+    if mode == 5 {
+        assert!(
+            matches!(retry, Err(crate::node::NodeError::InvalidInput(_))),
+            "a concurrent original result must still reject different retry content"
+        );
+        let retained = fresh
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.phase, AccountGroupOperationPhase::Committed);
+        assert_eq!(retained.primary_event, Some(event_id));
+        return;
+    }
+    let retry = retry.expect("a foreign-origin matching retry must resolve the original reference");
+    if mode >= 4 {
+        assert_eq!(retry.phase, AccountGroupOperationPhase::Committed);
+        let listener = fresh_listener.take().unwrap();
+        let mut runtime = IndependentPeerRuntime::start_multithreaded(fresh.clone(), listener).await;
+        runtime.launch();
+        peer_runtimes.push(runtime);
+    }
+    assert!(retry.primary_event.is_none() || retry.primary_event == Some(event_id));
+    if mode == 2 {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while prepare_observed.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{}",
+                file_result_timeout_stage(&fresh, &source, &account, id, file)
+            )
+        });
+        tokio::time::timeout(Duration::from_secs(2), fresh.runtime_work.drain())
+            .await
+            .unwrap();
+        assert!(
+            !fresh.media.contains(file),
+            "retired preparation cannot publish managed bytes"
+        );
+        assert_eq!(
+            fresh.file_copy_complete_for_test(id),
+            Some(false),
+            "retirement cannot durably complete the result copy"
+        );
+        return;
+    }
+    let fresh_status = super::functional_account_convergence(async {
+        loop {
+            let status = fresh
+                .account_group_operation_status(&account.account_id(), id)
+                .unwrap()
+                .unwrap();
+            if status.phase == AccountGroupOperationPhase::Committed
+                && fresh
+                    .file_progress(file)
+                    .unwrap()
+                    .is_some_and(|progress| progress.done == progress.total)
+            {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "{}",
+            file_result_timeout_stage(&fresh, &source, &account, id, file)
+        )
+    });
+    assert_eq!(fresh_status.primary_event, Some(event_id));
+    assert!(
+        fresh_status
+            .executions
+            .iter()
+            .all(|execution| execution.device_id == source.user_id())
+    );
+    let saved = dir.path().join("fresh-saved.bin");
+    fresh.save_file(file, &saved).unwrap();
+    assert_eq!(std::fs::read(saved).unwrap(), bytes);
+    if mode == 3 {
+        assert_eq!(
+            prepare_observed.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the signed chunk must arrive after the result prefix snapshot"
+        );
+    }
+    if mode == 1 {
+        drop(preparation_progress.take());
+        assert_eq!(
+            prepare_observed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "bulk cache encryption and verification must not hold the delivery gate"
+        );
+        assert_eq!(
+            fresh.log.lock().unwrap().conversation_len(&file).unwrap(),
+            1,
+            "the signed source prefix must not be mixed with locally authored chunks"
+        );
+    }
+    assert!(fresh.channel_members(group).is_empty());
+    assert_eq!(
+        origin
+            .log
+            .lock()
+            .unwrap()
+            .fingerprint_and_len(&file)
+            .unwrap(),
+        after_origin_save
+    );
+    assert_eq!(
+        source
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::FileManifest)
+            .count(),
+        1
+    );
+    }).catch_unwind().await;
+    // Release fault helpers before joining the real host owners. A body panic
+    // cannot detach accepted connections or admitted file/storage work.
+    drop(reverse_bootstrap.take());
+    tasks.shutdown().await;
+    let cleanup = std::panic::AssertUnwindSafe(async {
+        for runtime in peer_runtimes {
+            runtime.stop().await;
+        }
+    })
+    .catch_unwind()
+    .await;
+    if let Err(error) = cleanup {
+        let retained = dir.keep();
+        eprintln!("file fixture retirement failed; retaining private store at {retained:?}");
+        if let Err(body) = outcome {
+            std::panic::resume_unwind(body);
+        }
+        std::panic::resume_unwind(error);
+    }
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+}

@@ -26,8 +26,10 @@ export async function prepareNativeDownloadFixture({ fixture, owner, invoke }) {
   assert.ok(owner, "native download setup requires the signed-in fixture owner");
   const directory = join(fixture, "downloads");
   await mkdir(directory, { recursive: true });
+  const expectedAccount = await invoke("account_id", {});
+  assert.match(typeof expectedAccount === "string" ? expectedAccount : "", /^[0-9a-f]{32}$/, "native download setup requires the current account");
   const settings = await invoke("get_app_settings", { owner });
-  await invoke("set_app_settings", { owner, settings: { ...settings, download_dir: directory } });
+  await invoke("set_app_settings", { owner, expectedAccount, settings: { ...settings, download_dir: directory }, patch: { download_dir: directory } });
   assert.equal((await invoke("get_app_settings", { owner })).download_dir, directory, "production settings retain the owned download directory");
   return directory;
 }
@@ -51,8 +53,18 @@ second line
 
 // CI-only OS input, never DOM keyboard events. INPUT's union includes MOUSEINPUT
 // so Marshal.SizeOf retains the native x64 40-byte layout (not keyboard-only 32).
+const nativeWindowsControlKeys = new Map([
+  ["\uE004", { vk: 9, extended: false }],
+  ["\uE007", { vk: 13, extended: false }],
+  ["\uE00C", { vk: 27, extended: false }],
+  ["\uE00E", { vk: 33, extended: true }],
+  ["\uE00F", { vk: 34, extended: true }],
+]);
 export function nativeWindowsKeyboardScript(pid, key) {
-  const vk = new Map([["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33]]).get(key);
+  const vk = nativeWindowsControlKeys.get(key)?.vk;
+  const controls = [...nativeWindowsControlKeys.values()];
+  const rejected = controls.map(control => `vk != ${control.vk}`).join(" && ");
+  const extended = controls.filter(control => control.extended).map(control => `vk == ${control.vk}`).join(" || ");
   assert.ok(Number.isSafeInteger(pid) && pid > 0 && pid <= 0xffffffff, "owned Windows PID");
   assert.ok(vk, "allowlisted native control key");
   return `$ErrorActionPreference = 'Stop';
@@ -119,9 +131,9 @@ public static class NativeKeyboard {
       "}; SetForegroundWindow=" + activated + (activationError.HasValue ? "; SetForegroundWindowError=" + activationError.Value : ""));
   }
   public static void SendOwned(uint ownedPid, ushort vk) {
-    if (vk != 9 && vk != 13 && vk != 27 && vk != 33) throw new InvalidOperationException("Unsupported control key");
+    if (${rejected}) throw new InvalidOperationException("Unsupported control key");
     const uint KEYEVENTF_KEYUP = 2;
-    uint extended = vk == 33 ? 1u : 0u;
+    uint extended = ${extended} ? 1u : 0u;
     INPUT[] inputs = new INPUT[2];
     inputs[0].type = inputs[1].type = 1;
     inputs[0].data.ki.wVk = inputs[1].data.ki.wVk = vk;
@@ -270,16 +282,17 @@ export async function revealLatestNativeMessage({ execute, until, command, now =
 }
 
 export async function revealHistoricalNativeMessage({ execute, until, command, key }, text) {
-  // Virtuoso's real scroller is keyboard-focusable. Native PageUp exercises
-  // normal browser scrolling, rather than mutating its virtual-list state.
+  // Virtuoso's real scroller is keyboard-focusable. Native paging exercises
+  // normal PageUp/PageDown scrolling until the receipt footer clears the log's
+  // clipping edges; an intersecting message body cannot certify a clipped badge.
   await until("restarted message log hydrated", () => execute("return !!document.querySelector('[role=log]');"));
   const log = await command("POST", "/element", { using: "css selector", value: '[role="log"]' });
   await command("POST", `/element/${log["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
-  try { await until("historical message visibly rendered after native PageUp", async () => {
-    const visible = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect();return !!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right;", [text]);
-    if (visible) return true;
-    assert.equal(await execute("return document.activeElement===document.querySelector('[role=log]');"), true, "native PageUp targets the focused message log");
-    await key("\uE00E");
+  try { await until("historical message receipt visibly rendered after native paging", async () => {
+    const state = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect(),badges=e?.querySelectorAll('[data-delivery]'),b=badges?.length===1?badges[0].getBoundingClientRect():null;const top=Math.max(0,l?.top),bottom=Math.min(innerHeight,l?.bottom),left=Math.max(0,l?.left),right=Math.min(innerWidth,l?.right);const visible=!!r&&!!l&&r.width>0&&r.height>0&&(badges?.length?!!b&&b.width>0&&b.height>0&&b.top>=top&&b.bottom<=bottom&&b.left>=left&&b.right<=right:r.bottom>top&&r.top<bottom&&r.right>left&&r.left<right);return {visible,down:!!l&&(b?b.top>=top&&b.bottom>bottom:r?.top>=bottom)};", [text]);
+    if (state.visible) return true;
+    assert.equal(await execute("return document.activeElement===document.querySelector('[role=log]');"), true, "native paging targets the focused message log");
+    await key(state.down ? "\uE00F" : "\uE00E");
     return false;
   }); } catch (error) {
     const state = await execute("const log=document.querySelector('[role=log]'),bubbles=Array.from(document.querySelectorAll('[data-testid=message-bubble]'));return {count:bubbles.length,tails:bubbles.slice(-3).map(e=>e.textContent.slice(-120)),scrollTop:log?.scrollTop,scrollHeight:log?.scrollHeight,clientHeight:log?.clientHeight,targetInDom:bubbles.some(e=>e.textContent.includes(arguments[0]))};", [text]);
@@ -289,7 +302,7 @@ export async function revealHistoricalNativeMessage({ execute, until, command, k
 
 export function nativeMinimumWindowRequest(defaultRect, defaultViewport) {
   const width = defaultRect.width - defaultViewport.width, height = defaultRect.height - defaultViewport.height;
-  assert.ok(Number.isFinite(width) && Number.isFinite(height) && width >= 0 && height >= 0, "native window chrome must be measured from valid outer/client dimensions");
+  assert.ok(Number.isFinite(width) && Number.isFinite(height) && width >= 0 && height >= 0, `native window chrome must be measured from valid outer/client dimensions: ${JSON.stringify({ outer: defaultRect, client: defaultViewport })}`);
   return { width: 760 + width, height: 520 + height };
 }
 
@@ -497,4 +510,15 @@ export async function restartedCoreScenarios(c, state) {
   assert.equal(await c.execute("return document.querySelector('[data-testid=theme-light]')?.getAttribute('aria-pressed')==='true' && localStorage.getItem('mesh-talk-theme')==='light' && !document.documentElement.classList.contains('dark');"), true);
   await c.passed("settings-theme-persistence", { selected: state.selectedTheme, visibleSelection: true, persistedAfterRestart: true });
   await c.key("\uE00C");
+}
+
+/** Exercise the real creation/sign-in form once, then dismiss only the optional
+ * recovery reminder so subsequent native scenarios retain their normal layout. */
+export async function enterNativeAccount(ui, username, password, register = false) {
+  if (register) await ui.click("login-tab-register");
+  await ui.fill("login-username", username);
+  await ui.fill("login-password", password);
+  await ui.click("login-submit");
+  await ui.element("chat-shell");
+  if (register) await ui.click("account-protection-later");
 }

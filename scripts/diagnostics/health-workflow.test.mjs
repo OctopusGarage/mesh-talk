@@ -15,13 +15,22 @@ test("health installs source scanners while Gitleaks owns the full-history scan"
   assert.match(workflow, /tool: cargo-deny,cargo-machete,typos-cli,shellcheck/);
   const secrets = readFileSync(new URL("../../.github/workflows/gitleaks.yml", import.meta.url), "utf8");
   assert.match(secrets, /fetch-depth: 0/);
-  assert.match(secrets, /GITLEAKS_VERSION: 8\.30\.1/);
-  assert.match(workflow, /go install github\.com\/rhysd\/actionlint\/cmd\/actionlint@v1\.7\.12/);
+  assert.match(secrets, /run: bash scripts\/ci-gitleaks\.sh/u);
+  assert.match(secrets, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
+  assert.doesNotMatch(secrets, /curl|tar -xz/u);
+  const scanner = readFileSync(new URL("../ci-gitleaks.sh", import.meta.url), "utf8");
+  assert.match(scanner, /readonly version='8\.30\.1'/u);
+  assert.match(scanner, /readonly digest='[a-f0-9]{64}'/u);
+  assert.match(scanner, /"\$scanner" git \. --config \.gitleaks\.toml --redact -v/u);
+  assert.match(workflow, /https:\/\/github\.com\/rhysd\/actionlint\/releases\/download\/v1\.7\.12\/actionlint_1\.7\.12_linux_amd64\.tar\.gz/);
+  assert.match(workflow, /8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8/);
+  assert.match(workflow, /sha256sum --check/);
+  assert.doesNotMatch(workflow, /go install|setup-go|tool: .*actionlint/);
   assert.match(readFileSync(new URL("../check-health.sh", import.meta.url), "utf8"), /for tool in cargo-deny cargo-machete typos gitleaks shellcheck actionlint/);
 });
 
 test("Windows health and diagnostic gates explicitly execute Bash", () => {
-  for (const [file, name] of [["ci.yml", "Diagnostic and release gate regressions (all platforms)"]]) {
+  for (const [file, name] of [["check-health.yml", "Diagnostic and release gate regressions (all platforms)"]]) {
     const workflow = readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8");
     const step = workflow.split(/^      - /m).find((value) => value.startsWith(`name: ${name}\n`));
     assert.ok(step, name);
@@ -32,23 +41,20 @@ test("Windows health and diagnostic gates explicitly execute Bash", () => {
 
 test("health runs for every PR and retains independent platform results", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
-  assert.match(workflow, /^  pull_request:$/m);
-  assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: true$/m);
+  assert.match(workflow, /^  workflow_call:$/m);
+  const caller = readFileSync(new URL("../../.github/workflows/e2e-ui.yml", import.meta.url), "utf8");
+  assert.match(caller, /^  pull_request:$/m);
+  assert.match(caller, /uses: \.\/\.github\/workflows\/check-health\.yml/);
+  assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \}\}$/m);
   assert.match(workflow, /^      fail-fast: false$/m);
-});
-
-test("Codecov receives the frontend and Rust coverage produced by CI", () => {
-  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const step = workflow.split(/^      - /m).find((value) => value.startsWith("name: Upload coverage to Codecov\n"));
-  assert.ok(step, "the Codecov upload step must exist");
-  assert.match(step, /files:.*frontend\/coverage\/lcov\.info/, "frontend coverage must not be carried forward from an older commit");
-  assert.match(step, /files:.*src-tauri\/lcov\.info/, "Rust coverage must remain part of the upload");
 });
 
 test("health reports cheap formatting and frontend static failures before expensive suites", () => {
   const script = readFileSync(new URL("../check-health.sh", import.meta.url), "utf8");
+  assert.ok(script.includes("cargo fmt --all -- --check"));
   assert.ok(script.indexOf("cargo fmt --all -- --check") < script.indexOf('scripts/ai-eval-smoke.sh'));
-  for (const command of ['npx prettier --check src/', 'npm run lint', 'npm run typecheck']) {
+  for (const command of ['npm run format:check', 'npm run lint', 'npm run typecheck']) {
+    assert.ok(script.includes(command), `missing static command: ${command}`);
     assert.ok(script.indexOf(command) < script.indexOf('node --test scripts/test-ai-eval.mjs'), command);
     assert.ok(script.indexOf(command) < script.indexOf('npm run build'), command);
   }
@@ -56,9 +62,10 @@ test("health reports cheap formatting and frontend static failures before expens
 
 test("affected preflight checks frontend formatting before diagnostics and compilation", () => {
   const script = readFileSync(new URL("../pr-preflight.sh", import.meta.url), "utf8");
-  assert.ok(script.includes("npx prettier --check src/"));
-  assert.ok(script.indexOf("npx prettier --check src/") < script.indexOf('node "$stage" diagnostics'));
-  assert.ok(script.indexOf("npx prettier --check src/") < script.indexOf('node "$stage" rust-selectors'));
+  const command = 'node "$stage" frontend-format --profile shared --inputs frontend -- npm run format:check';
+  assert.ok(script.includes(command));
+  assert.ok(script.indexOf(command) < script.indexOf('node "$stage" diagnostics'));
+  assert.ok(script.indexOf(command) < script.indexOf('node "$stage" rust-selectors'));
 });
 
 test("full health holds a managed checkout lease and never reuses its aggregate verdict", async t => {

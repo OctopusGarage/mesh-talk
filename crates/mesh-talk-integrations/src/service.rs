@@ -1,4 +1,5 @@
 //! Closed application API shared by trusted host adapters and local transports.
+use crate::model::StatusRequest;
 use crate::policy::{Grant, GrantRegistry, equal_hash, token_hash};
 use crate::{Destination, GrantSpec, IntegrationError, SendMessage};
 use mesh_talk_core::node::{MessageAcceptance, Node, NodeError, OutgoingMessageRequest};
@@ -68,11 +69,6 @@ pub struct IntegrationService {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StatusRequest {
-    idempotency_key: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RevokeRequest {
     grant_id: String,
 }
@@ -136,6 +132,16 @@ fn request_id(account: &str, client: &str, key: &str) -> Result<[u8; 32], Integr
     Ok(hash.finalize().into())
 }
 impl IntegrationService {
+    /// Host-local settings observation. Does not expose raw administrative audit.
+    pub fn recent_send_activity(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<crate::policy::RecentSendActivity>, IntegrationError> {
+        self.registry
+            .lock()
+            .map_err(|_| IntegrationError::new("STORAGE_FAILURE", "Grant store unavailable"))?
+            .recent_send_activity(client_id)
+    }
     pub fn new(host: Arc<dyn IntegrationHost>, grants: GrantRegistry, admin_token: &str) -> Self {
         Self {
             host,
@@ -303,7 +309,7 @@ impl IntegrationService {
                 let authority = self.authority(token, None, describe);
                 let account_id = self.host.account_id().to_owned();
                 self.host.with_node(Box::new(move |node| {
-                    let value = if describe { json!({"conversations": describe_destinations(node, &grant.destinations)}) }
+                    let value = if describe { json!({"conversations": describe_destinations(node, &grant.destinations)?}) }
                         else { json!({"principal":{"kind":"account","account_id":account_id},"client_id":grant.client_id,"destinations":grant.destinations,"can_describe":grant.describe,"expires_at_ms":grant.expires_at_ms,"max_text_bytes":crate::MAX_TEXT_BYTES,"retry_window_days":7,"content_types":["text"],"read_access":false}) };
                     authority.commit(&mut || Ok(()))?;
                     Ok(value)
@@ -353,7 +359,7 @@ impl IntegrationService {
                 let audit = method == "audit_list";
                 self.host.with_node(Box::new(move |node| {
                     if context {
-                        let mut channels = node.list_channels();
+                        let mut channels = node.list_channels()?;
                         channels.sort_by_key(|channel| *channel.id.as_bytes());
                         return Ok(json!({"account_id":node.account_id(),"device_id":node.user_id(),"channels":channels.iter().skip(page.offset).take(page.limit).map(|channel| json!({"id":hex::encode(channel.id.as_bytes()),"name":short_name(&channel.name),"pending_invite":channel.pending_invite})).collect::<Vec<_>>(),"next_offset":page.next(channels.len())}));
                     }
@@ -386,12 +392,15 @@ fn public_grant(grant: &Grant) -> Value {
 fn short_name(name: &str) -> String {
     name.chars().take(160).collect()
 }
-fn describe_destinations(node: &Node, destinations: &[Destination]) -> Vec<Value> {
-    let channels = node.list_channels();
-    destinations.iter().map(|destination| match destination {
-        Destination::Account { id } => json!({"destination":destination,"name":id}),
+fn describe_destinations(
+    node: &Node,
+    destinations: &[Destination],
+) -> Result<Vec<Value>, IntegrationError> {
+    let channels = node.list_channels()?;
+    destinations.iter().map(|destination| Ok(match destination {
+        Destination::Account { id } => json!({"destination":destination,"name":short_name(node.account_display_name(id).map_err(mesh_talk_core::node::NodeError::Log)?.as_deref().unwrap_or(id))}),
         Destination::Channel { id } => json!({"destination":destination,"name":short_name(channels.iter().find(|channel| hex::encode(channel.id.as_bytes()) == *id).map(|channel| channel.name.as_str()).unwrap_or(id))}),
-    }).collect()
+    })).collect()
 }
 
 #[cfg(test)]
@@ -439,6 +448,86 @@ mod tests {
         service.handle(admin, "grant_create", json!({"client_id":client,"destinations":[destination],"describe":describe,"expires_at_ms":now_ms()+60000})).await.unwrap()
     }
     #[tokio::test]
+    async fn conversation_names_resolve_granted_accounts_including_offline_contacts() {
+        use mesh_talk_core::{discovery::announce::Announce, identity::account::Account};
+        use std::{
+            net::{IpAddr, Ipv4Addr},
+            time::Duration,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let roster = Arc::new(Mutex::new(Roster::default()));
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            roster.clone(),
+            dm,
+            channel,
+            file,
+            &dir.path().join("events"),
+            &dir.path().join("sent"),
+            "pw",
+        )
+        .unwrap();
+        let account = Account::generate();
+        let proof =
+            Announce::new_with_account(&DeviceIdentity::generate(), &account, "Duncan", 47001);
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &node.user_id());
+        let hidden = Account::generate();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &hidden,
+            "Private contact",
+            47002,
+        );
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &node.user_id());
+        let destination = Destination::Account {
+            id: account.account_id(),
+        };
+        let admin = new_token();
+        let service = fixture(dir.path(), node, &admin);
+        let grant = issue(&service, &admin, "desktop-local-agent", &destination, true).await;
+        let token = grant["token"].as_str().unwrap();
+        for offline in [false, true] {
+            if offline {
+                roster.lock().unwrap().evict_stale(Duration::ZERO);
+            }
+            let response = service
+                .handle(token, "list_conversations", json!({}))
+                .await
+                .unwrap();
+            assert_eq!(response["conversations"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                response["conversations"][0]["destination"],
+                json!(destination)
+            );
+            assert_eq!(response["conversations"][0]["name"], "Duncan");
+            assert!(!response.to_string().contains("Private contact"));
+        }
+        let unknown_id = Account::generate().account_id();
+        let unknown = Destination::Account {
+            id: unknown_id.clone(),
+        };
+        let grant = issue(&service, &admin, "unknown-contact", &unknown, true).await;
+        let response = service
+            .handle(
+                grant["token"].as_str().unwrap(),
+                "list_conversations",
+                json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response["conversations"][0]["name"], json!(unknown_id));
+    }
+
+    #[tokio::test]
     async fn scoped_group_send_retries_and_narrowed_status_are_enforced() {
         let dir = tempfile::tempdir().unwrap();
         let node = test_node(dir.path());
@@ -479,7 +568,7 @@ mod tests {
             .unwrap();
         assert_eq!(first["message"], retry["message"]);
         assert_eq!(retry["duplicate"], true);
-        assert_eq!(node.channel_history(channel, 10).len(), 1);
+        assert_eq!(node.channel_history(channel, 10).unwrap().len(), 1);
         let mut changed = command.clone();
         changed["text"] = json!("Changed alert");
         assert_eq!(
@@ -573,6 +662,101 @@ mod tests {
             "INVALID_INPUT"
         );
     }
+    #[tokio::test]
+    async fn a_send_paused_until_after_deadline_cannot_append_a_core_event() {
+        struct PausedHost {
+            inner: HeadlessHost,
+            entered: tokio::sync::Notify,
+            resume: tokio::sync::Notify,
+        }
+        impl IntegrationHost for PausedHost {
+            fn account_id(&self) -> &str {
+                self.inner.account_id()
+            }
+            fn send<'a>(
+                &'a self,
+                request: OutgoingMessageRequest,
+                authorization: Arc<dyn CommitAuthorization>,
+            ) -> HostFuture<'a, MessageAcceptance> {
+                Box::pin(async move {
+                    self.entered.notify_one();
+                    self.resume.notified().await;
+                    self.inner.send(request, authorization).await
+                })
+            }
+            fn with_node<'a>(&'a self, operation: HostOperation<'a>) -> HostFuture<'a, Value> {
+                self.inner.with_node(operation)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let node = test_node(dir.path());
+        let channel = node.create_channel("Deadline", vec![]).await.unwrap();
+        let destination = Destination::Channel {
+            id: hex::encode(channel.as_bytes()),
+        };
+        let host = Arc::new(PausedHost {
+            inner: HeadlessHost::new(node.clone()),
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        let registry =
+            GrantRegistry::open(&dir.path().join("grants"), "pw", &node.account_id()).unwrap();
+        let admin = new_token();
+        let service = Arc::new(IntegrationService::new(host.clone(), registry, &admin));
+        let deadline = now_ms() + 1_000;
+        let issued = service.handle(&admin,"grant_create",json!({"client_id":"desktop-local-agent","destinations":[destination],"describe":false,"expires_at_ms":deadline})).await.unwrap();
+        let request_service = service.clone();
+        let pending = tokio::spawn(async move {
+            request_service.handle(issued["token"].as_str().unwrap(),"send_message",json!({"destination":destination,"text":"must never append","idempotency_key":"paused-expiry"})).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), host.entered.notified())
+            .await
+            .expect("send must reach its pre-commit pause");
+        tokio::time::sleep(std::time::Duration::from_millis(
+            deadline.saturating_sub(now_ms()) + 1,
+        ))
+        .await;
+        host.resume.notify_one();
+        assert!(pending.await.unwrap().is_err());
+        assert!(node.channel_history(channel, 10).unwrap().is_empty());
+        assert!(
+            service
+                .recent_send_activity("desktop-local-agent")
+                .unwrap()
+                .is_empty()
+        );
+        host.inner.retire().await;
+    }
+
+    #[tokio::test]
+    async fn deadline_invalidates_an_already_captured_commit_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = test_node(dir.path());
+        let admin = new_token();
+        let service = fixture(dir.path(), node, &admin);
+        let destination = Destination::Channel {
+            id: "cd".repeat(32),
+        };
+        let deadline = now_ms() + 150;
+        let issued = service.handle(&admin,"grant_create",json!({"client_id":"desktop-local-agent","destinations":[destination],"describe":false,"expires_at_ms":deadline})).await.unwrap();
+        let authority =
+            service.authority(issued["token"].as_str().unwrap(), Some(destination), false);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            deadline.saturating_sub(now_ms()) + 1,
+        ))
+        .await;
+        let mut mutated = false;
+        assert!(
+            authority
+                .commit(&mut || {
+                    mutated = true;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!mutated, "deadline must be checked at the actual commit");
+    }
+
     #[tokio::test]
     async fn revocation_invalidates_an_already_captured_commit_authority() {
         let dir = tempfile::tempdir().unwrap();

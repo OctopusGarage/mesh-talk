@@ -12,6 +12,8 @@ export interface ConversationCacheState {
   cacheOrder: string[];
   messages: Record<string, ChatMessage[]>;
   reactions: Record<string, ReactionInfo[]>;
+  /** Targets with additional summary pages or a retryable projection. Only the active owner is retained. */
+  reactionRemainder: Record<string, string[]>;
   historyRequests: Record<string, number>;
   historyLimits: Record<string, number>;
   deleted: Record<string, string[]>;
@@ -23,6 +25,7 @@ export function emptyConversationCache(): ConversationCacheState {
     cacheOrder: [],
     messages: {},
     reactions: {},
+    reactionRemainder: {},
     historyRequests: {},
     historyLimits: {},
     deleted: {},
@@ -50,19 +53,32 @@ export function boundedConversationMap<T>(
   ]);
 }
 
+export function sameSearchReference(
+  a: import("@/lib/api/chat").SearchReference,
+  b: import("@/lib/api/chat").SearchReference,
+): boolean {
+  return (
+    a.kind === b.kind && a.target === b.target && a.message_id === b.message_id
+  );
+}
+
 export const convKey = (c: Conversation) => `${c.kind}:${c.id}`;
 
 export function fromHistoryItem(h: HistoryItem): ChatMessage {
   return {
     id: h.id,
+    ...(h.file_message_aliases?.length
+      ? { fileMessageAliases: h.file_message_aliases }
+      : {}),
     fromMe: h.from_me,
     who: h.who,
-    text: h.text,
+    text: h.protection ? "" : h.text,
+    protection: h.protection,
     wallClock: h.wall_clock,
     expiresAtMs: h.expires_at_ms,
     replyTo: h.reply_to,
     recalled: h.recalled,
-    recalledText: h.recalled_text,
+    recalledText: h.protection ? null : h.recalled_text,
     sticker: h.sticker,
     file: h.file
       ? {
@@ -154,7 +170,20 @@ export function completeSendIntentState(
           : {}),
       }
     : null;
-  if (resolved) intents[clientId] = { ...intent, message: resolved };
+  if (resolved)
+    intents[clientId] = {
+      ...intent,
+      message: resolved,
+      onAccepted: resolved.id ? undefined : intent.onAccepted,
+      payload:
+        resolved.id && resolved.protection
+          ? intent.payload.kind === "text"
+            ? { ...intent.payload, text: "" }
+            : intent.payload.kind === "file"
+              ? { ...intent.payload, path: "" }
+              : intent.payload
+          : intent.payload,
+    };
   else delete intents[clientId];
   // Completion must not repopulate an evicted conversation's cache.
   const messages = { ...state.messages };

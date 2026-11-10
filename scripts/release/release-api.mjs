@@ -17,7 +17,7 @@ function filteredReleases(repo, filter) {
   // gh applies --jq to each page before printing. Never capture the full release
   // history (including every asset) in Node's bounded child-process buffer.
   const query = `if type != "array" then error("invalid release list page") else .[] | if type != "object" or (.tag_name | type) != "string" then error("invalid release list entry") else ${filter} | @json end end`;
-  const output = execFileSync("gh", ["api", "--paginate", `repos/${repo}/releases?per_page=100`, "--jq", query], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+  const output = execFileSync("gh", ["api", "--paginate", "-H", "Cache-Control: no-cache", `repos/${repo}/releases?per_page=100`, "--jq", query], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
   return output.trim() ? output.trim().split(/\r?\n/).map((line) => JSON.parse(line)) : [];
 }
 

@@ -10,8 +10,8 @@ import { buildAffectedPlan, isFrontendGlobal } from "./affected.mjs";
 import { buildFrontendGraph } from "./frontend-graph.mjs";
 import { loadContracts } from "./contracts.mjs";
 import { runStage } from "./stage.mjs";
-import { runCommand, rustTestCount } from "../pr-platform/guest.mjs";
-import { buildStaticChecks, phasePlan } from "./checks.mjs";
+import { runCommand, rustTestCount, requireCommandStdout } from "../pr-platform/guest.mjs";
+import { buildStaticChecks, pendingNodeTests, phasePlan } from "./checks.mjs";
 import { frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 import { loadRequirements, selectRequirements } from "./pr-scenarios.mjs";
 import { createFeedback, completePhase, finishFeedback, observeCommands, writeFeedback } from "./feedback.mjs";
@@ -59,6 +59,7 @@ export function parseOptions(args) {
     owners: [],
     reason: "",
     checks: false,
+    cheap: false,
     managed: false,
     browser: [],
     native: [],
@@ -66,7 +67,7 @@ export function parseOptions(args) {
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (["--run", "--json", "--checks", "--managed"].includes(arg)) {
+    if (["--run", "--json", "--checks", "--managed", "--cheap"].includes(arg)) {
       options[arg.slice(2)] = true;
       continue;
     }
@@ -81,6 +82,10 @@ export function parseOptions(args) {
   }
   if ((options.owners.length || options.browser.length || options.native.length) && !options.reason.trim())
     throw Error("Explicit owners/browser/native evidence requires --reason");
+  if (options.cheap) {
+    if (options.run || options.managed || options.report) throw Error("--cheap runs static checks directly; do not combine it with --run, --managed or --report");
+    options.checks = true;
+  }
   if (options.report && !options.run) throw Error("--report requires --run; previews are read-only");
   return options;
 }
@@ -174,15 +179,14 @@ export async function createPlan(root, options) {
 async function checked(run, program, args, options) {
   const result = await run(program, args, {
     ...options,
-    detached: false,
     timeoutMs: 2_147_483_647,
   });
-  if (result.code !== 0 || result.timedOut || result.error)
+  if (result.code !== 0 || result.timedOut || result.error || result.cancelled || result.cleanupUnverified)
     throw Object.assign(Error(`${program} failed: ${result.error || result.output?.slice(-6000) || "no output"}`), {
       kind: result.failureKind ?? (result.error && !result.timedOut ? "unavailable" : "failed"),
       reportMessage: `${program} failed (${result.timedOut ? "deadline" : `exit ${result.code ?? "unavailable"}`}); inspect the phase log.`,
     });
-  return result.output;
+  return result;
 }
 export async function prepareRust(
   selections,
@@ -191,7 +195,7 @@ export async function prepareRust(
   const prepared = [];
   for (const selection of selections) {
     const started = Date.now();
-    const output = await checked(
+    const result = await checked(
       run,
       "cargo",
       [
@@ -205,6 +209,7 @@ export async function prepareRust(
       ],
       { cwd },
     );
+    const output = requireCommandStdout(result);
     const executables = [];
     for (const line of output.split("\n")) {
       try {
@@ -226,9 +231,9 @@ export async function prepareRust(
     const executable = executables[0];
     const names = (text) =>
       [...text.matchAll(/^(.+): test\r?$/gmu)].map((match) => match[1]);
-    const listed = names(await checked(run, executable, ["--list"], { cwd }));
+    const listed = names(requireCommandStdout(await checked(run, executable, ["--list"], { cwd })));
     const ignored = new Set(
-      names(await checked(run, executable, ["--list", "--ignored"], { cwd })),
+      names(requireCommandStdout(await checked(run, executable, ["--list", "--ignored"], { cwd }))),
     );
     const runnable = listed.filter((name) => !ignored.has(name));
     for (const filter of selection.filters)
@@ -267,6 +272,13 @@ export function validateFrontendReport(report, files, directory) {
   }
   return count;
 }
+/** Reuse static/policy checks without application suites, builds or heavy work. */
+export async function executeCheapChecks(plan, options) {
+  const selected = phasePlan(plan, "static");
+  selected.checks = selected.checks.filter(check => check.kind !== "test");
+  await executePlan(selected, options);
+}
+
 export async function executePlan(
   plan,
   { cwd = process.cwd(), run = runCommand, log = console.log, resultPrefix } = {},
@@ -275,28 +287,29 @@ export async function executePlan(
     throw Error(`Validation blocked: ${plan.blockers.join("\n")}`);
   for (const [index, check] of (plan.checks ?? []).entries()) {
     log(`Static ${check.name}`);
-    const output = await checked(run, process.execPath, [
+    const result = await checked(run, process.execPath, [
       path.join(cwd, "scripts/validation/stage.mjs"), check.name,
       "--profile", "shared", ...(resultPrefix ? ["--result", `${resultPrefix}.${index}.json`] : []), ...(check.inputs ? ["--inputs", check.inputs] : []),
       ...(check.artifacts ?? []).flatMap(artifact => ["--artifact", artifact]),
       "--", ...check.command,
     ], { cwd: path.resolve(cwd, check.cwd) });
-    log(output);
+    log(result.output);
   }
   const prepared = await prepareRust(plan.rust, { cwd, run, log });
   async function execute(program, args, directory) {
     const started = Date.now();
-    const output = await checked(run, program, args, { cwd: directory });
-    log(output);
+    const result = await checked(run, program, args, { cwd: directory });
+    log(result.output);
     log(`Test execution: ${((Date.now() - started) / 1000).toFixed(1)}s`);
-    return output;
+    return result;
   }
-  for (const file of plan.node) {
-    const output = await execute(
+  for (const file of pendingNodeTests(plan)) {
+    const result = await execute(
       process.execPath,
       ["--test", "--test-reporter=tap", file],
       cwd,
     );
+    const output = requireCommandStdout(result);
     const declared = new Set(
       [...output.matchAll(/^\s*# Subtest: (.+)$/gmu)]
         .map(match => match[1])
@@ -311,8 +324,12 @@ export async function executePlan(
       throw Error(`Selected diagnostic ran zero passing Node tests: ${file}`);
   }
   for (const selection of prepared) {
-    const output = await execute(selection.executable, selection.filters, cwd);
-    if (rustTestCount(output) < selection.count)
+    // Cargo applies repository configuration (including RUST_TEST_THREADS).
+    // Executing the inventoried binary directly bypasses that environment.
+    const result = await execute("cargo", [
+      "test", "--locked", "-p", selection.package, "--lib", "--", ...selection.filters,
+    ], cwd);
+    if (rustTestCount(requireCommandStdout(result)) < selection.count)
       throw Error(
         `Expected ${selection.count} nonignored ${selection.package} tests; fewer executed`,
       );
@@ -343,6 +360,22 @@ export async function executePlan(
       log(
         `Frontend: ${count} passing test cases in ${plan.frontend.length} selected files`,
       );
+    } catch (error) {
+      // Vitest's JSON reporter writes assertion failures only to this file.
+      // Preserve their diagnostics before cleaning up the temporary report.
+      try {
+        const results = JSON.parse(await readFile(report, "utf8"));
+        const failures = (results.testResults ?? []).flatMap(suite => [
+          ...(suite.message ? [`${suite.name}: ${suite.message}`] : []),
+          ...(suite.assertionResults ?? [])
+            .filter(assertion => assertion.status === "failed")
+            .map(assertion => `${suite.name}: ${assertion.fullName}\n${(assertion.failureMessages ?? []).join("\n")}`),
+        ]);
+        if (failures.length) error.message += `\n${failures.join("\n").slice(0, 6000)}`;
+      } catch {
+        // Missing/malformed reports must not hide the original execution error.
+      }
+      throw error;
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -444,6 +477,14 @@ async function main(args) {
     }).fail(Object.assign(Error("Validation plan became blocked; preview the changed inputs."), { kind: "invalidated" }));
     if (reportFile) await terminalFeedback(reportFile, plan, options, invocationStarted);
     process.exitCode = 2;
+    return;
+  }
+  if (options.cheap) {
+    const before = await executionFingerprint(root, plan);
+    await executeCheapChecks(plan, { cwd: root, log: options.json ? console.error : console.log });
+    if (await executionFingerprint(root, await createPlan(root, options)) !== before)
+      throw Error("Validation inputs changed during cheap checks; rerun them for the current candidate");
+    console.error("Cheap static checks passed. Tests, builds, browser/native evidence and candidate acceptance remain pending.");
     return;
   }
   const expectedResource = process.env.MESH_VALIDATION_AFFECTED_CHILD;

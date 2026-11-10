@@ -16,6 +16,7 @@ vendor-operated account service is required.
 | Domain terminology and DDD conventions                  | [Canonical glossary](CONTEXT.md) · [DDD guide and reference index](docs/domain-design.md) |
 | Current capabilities and acceptance boundaries          | [Implementation status](specifications/TODO.md)                                           |
 | Development commands, agent rules and PR gates          | [Repository guidelines](AGENTS.md) · [Contributing](CONTRIBUTING.md)                      |
+| Reliable implementation, deadlocks and failure-path review | [AI coding reliability guide](docs/ai-coding-reliability.md)                             |
 | Focused tests and escalation triggers                   | [Testing feedback loop](docs/testing-feedback-loop.md)                                    |
 | Frontend interaction and visual conventions             | [Visual system](frontend/DESIGN.md)                                                       |
 | All maintained guides and evaluation inputs             | [Documentation map](docs/README.md)                                                       |

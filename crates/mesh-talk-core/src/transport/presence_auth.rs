@@ -3,6 +3,7 @@ use super::{
     MAX_PLAINTEXT, TransportError,
     auth::{AuthMessage, build_auth, verify_auth},
 };
+use crate::identity::account_transition::AccountBindingTransition;
 use crate::{
     discovery::{
         Announce,
@@ -17,7 +18,8 @@ use std::io::Cursor;
 const MAGIC: &[u8; 4] = b"MTPA";
 const VERSION: u8 = 1;
 const PRIVATE_VERSION: u8 = 2;
-const MAX_EXTENSION: usize = 4096;
+const MAX_EXTENSION: usize = 16 * 1024;
+const MAX_TRANSITIONS: usize = 8;
 const DOMAIN: &[u8] = b"mesh-talk-transport-presence-v1";
 
 /// A Noise-authenticated device and its optional, session-bound signed announcement.
@@ -28,6 +30,7 @@ pub struct VerifiedPeer {
     public: PublicIdentity,
     announcement: Option<Announce>,
     publicly_visible: bool,
+    transitions: Vec<AccountBindingTransition>,
 }
 impl VerifiedPeer {
     /// The exact Ed25519/X25519 pair authenticated by this connection.
@@ -38,6 +41,9 @@ impl VerifiedPeer {
     pub fn announcement(&self) -> Option<&Announce> {
         self.announcement.as_ref()
     }
+    pub fn account_transitions(&self) -> &[AccountBindingTransition] {
+        &self.transitions
+    }
     pub fn publicly_visible(&self) -> bool {
         self.publicly_visible
     }
@@ -47,6 +53,58 @@ impl VerifiedPeer {
 struct Extension {
     announce: Vec<u8>,
     signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TransitionExtension {
+    announce: Vec<u8>,
+    transitions: Vec<AccountBindingTransition>,
+    signature: Vec<u8>,
+}
+
+fn transition_context(
+    hash: &[u8; 32],
+    announce: &[u8],
+    transitions: &[AccountBindingTransition],
+    visible: bool,
+) -> Result<Vec<u8>, TransportError> {
+    let body = codec()
+        .serialize(&(announce, transitions, visible))
+        .map_err(|e| TransportError::Serialization(e.to_string()))?;
+    let mut bytes = b"mesh-talk-transport-account-transition-v1".to_vec();
+    bytes.extend(hash);
+    bytes.extend(body);
+    Ok(bytes)
+}
+
+fn valid_transitions(announce: &Announce, transitions: &[AccountBindingTransition]) -> bool {
+    if transitions.is_empty() || transitions.len() > MAX_TRANSITIONS {
+        return false;
+    }
+    let mut accounts = std::collections::HashSet::new();
+    let mut previous: Option<&AccountBindingTransition> = None;
+    for transition in transitions {
+        if !transition.verify() || transition.public != announce.public() {
+            return false;
+        }
+        if let Some(last) = previous {
+            let last: &AccountBindingTransition = last;
+            if transition.previous_transition != Some(last.id())
+                || transition.previous_certificate != last.current_certificate
+            {
+                return false;
+            }
+        } else {
+            accounts.insert(transition.previous_certificate.account_ed25519_pub);
+        }
+        if !accounts.insert(transition.current_certificate.account_ed25519_pub) {
+            return false;
+        }
+        previous = Some(transition);
+    }
+    transitions
+        .last()
+        .is_some_and(|last| Some(&last.current_certificate) == announce.account_cert.as_ref())
 }
 
 fn context(hash: &[u8; 32], encoded: &[u8]) -> Vec<u8> {
@@ -87,11 +145,22 @@ pub(super) fn build(
     build_with_visibility(identity, hash, presence, true)
 }
 
+#[cfg(test)]
 pub(super) fn build_with_visibility(
     identity: &DeviceIdentity,
     hash: &[u8; 32],
     presence: Option<&Announce>,
     publicly_visible: bool,
+) -> Result<Vec<u8>, TransportError> {
+    build_with_transitions(identity, hash, presence, publicly_visible, &[])
+}
+
+pub(super) fn build_with_transitions(
+    identity: &DeviceIdentity,
+    hash: &[u8; 32],
+    presence: Option<&Announce>,
+    publicly_visible: bool,
+    transitions: &[AccountBindingTransition],
 ) -> Result<Vec<u8>, TransportError> {
     validate_own(identity, presence)?;
     if !publicly_visible && presence.is_none() {
@@ -101,27 +170,41 @@ pub(super) fn build_with_visibility(
         .map_err(|e| TransportError::Serialization(e.to_string()))?;
     if let Some(announce) = presence {
         let encoded = encode(announce);
-        let mut signed = context(hash, &encoded);
-        if !publicly_visible {
-            signed.push(0);
-        }
-        let signature = identity.sign(&signed).to_vec();
-        let body = codec()
-            .serialize(&Extension {
+        let body = if transitions.is_empty() {
+            let mut signed = context(hash, &encoded);
+            if !publicly_visible {
+                signed.push(0);
+            }
+            codec().serialize(&Extension {
                 announce: encoded,
-                signature,
+                signature: identity.sign(&signed).to_vec(),
             })
-            .map_err(|e| TransportError::Serialization(e.to_string()))?;
+        } else {
+            if !valid_transitions(announce, transitions) {
+                return Err(TransportError::IdentityMismatch);
+            }
+            let signed = transition_context(hash, &encoded, transitions, publicly_visible)?;
+            codec().serialize(&TransitionExtension {
+                announce: encoded,
+                transitions: transitions.to_vec(),
+                signature: identity.sign(&signed).to_vec(),
+            })
+        }
+        .map_err(|e| TransportError::Serialization(e.to_string()))?;
         if MAGIC.len() + 1 + body.len() > MAX_EXTENSION {
             return Err(TransportError::IdentityMismatch);
         }
         bytes.extend(MAGIC);
-        bytes.push(if publicly_visible {
-            VERSION
-        } else {
-            PRIVATE_VERSION
+        bytes.push(match (transitions.is_empty(), publicly_visible) {
+            (true, true) => VERSION,
+            (true, false) => PRIVATE_VERSION,
+            (false, true) => 3,
+            (false, false) => 4,
         });
         bytes.extend(body);
+    }
+    if !transitions.is_empty() && presence.is_none() {
+        return Err(TransportError::IdentityMismatch);
     }
     Ok(bytes)
 }
@@ -144,20 +227,35 @@ pub(super) fn verify(
         .map_err(|_| TransportError::IdentityMismatch)?;
     let public = verify_auth(&legacy, hash, remote)?;
     let remaining = &bytes[cursor.position() as usize..];
-    let (announcement, publicly_visible) = if remaining.is_empty() {
-        (None, true)
+    let (announcement, publicly_visible, transitions) = if remaining.is_empty() {
+        (None, true, Vec::new())
     } else {
         if remaining.len() > MAX_EXTENSION
             || remaining.len() < MAGIC.len() + 1
             || &remaining[..MAGIC.len()] != MAGIC
-            || ![VERSION, PRIVATE_VERSION].contains(&remaining[MAGIC.len()])
+            || ![VERSION, PRIVATE_VERSION, 3, 4].contains(&remaining[MAGIC.len()])
         {
             return Err(TransportError::IdentityMismatch);
         }
-        let publicly_visible = remaining[MAGIC.len()] == VERSION;
-        let extension: Extension = codec()
-            .deserialize(&remaining[MAGIC.len() + 1..])
-            .map_err(|_| TransportError::IdentityMismatch)?;
+        let version = remaining[MAGIC.len()];
+        let publicly_visible = [VERSION, 3].contains(&version);
+        let (extension, transitions) = if version <= PRIVATE_VERSION {
+            let extension: Extension = codec()
+                .deserialize(&remaining[MAGIC.len() + 1..])
+                .map_err(|_| TransportError::IdentityMismatch)?;
+            (extension, Vec::new())
+        } else {
+            let extension: TransitionExtension = codec()
+                .deserialize(&remaining[MAGIC.len() + 1..])
+                .map_err(|_| TransportError::IdentityMismatch)?;
+            (
+                Extension {
+                    announce: extension.announce,
+                    signature: extension.signature,
+                },
+                extension.transitions,
+            )
+        };
         let announce = decode(&extension.announce).ok_or(TransportError::IdentityMismatch)?;
         if !valid(&announce, &public) {
             return Err(TransportError::IdentityMismatch);
@@ -167,19 +265,28 @@ pub(super) fn verify(
             .as_slice()
             .try_into()
             .map_err(|_| TransportError::IdentityMismatch)?;
-        let mut signed = context(hash, &extension.announce);
-        if !publicly_visible {
-            signed.push(0);
-        }
+        let signed = if version <= PRIVATE_VERSION {
+            let mut signed = context(hash, &extension.announce);
+            if !publicly_visible {
+                signed.push(0);
+            }
+            signed
+        } else {
+            if !valid_transitions(&announce, &transitions) {
+                return Err(TransportError::IdentityMismatch);
+            }
+            transition_context(hash, &extension.announce, &transitions, publicly_visible)?
+        };
         if !DeviceIdentity::verify(&public.ed25519_pub, &signed, &signature) {
             return Err(TransportError::IdentityMismatch);
         }
-        (Some(announce), publicly_visible)
+        (Some(announce), publicly_visible, transitions)
     };
     Ok(VerifiedPeer {
         public,
         announcement,
         publicly_visible,
+        transitions,
     })
 }
 
@@ -365,5 +472,54 @@ mod tests {
         let mut replay = bincode::serialize(&build_auth(&id, &[2; 32])).unwrap();
         replay.extend(&first[prefix..]);
         assert!(verify(&replay, &[2; 32], &id.public().x25519_pub).is_err());
+    }
+}
+
+#[cfg(test)]
+mod account_transition_tests {
+    use super::*;
+    use crate::identity::{account::Account, account_transition::AccountBindingTransition};
+
+    #[test]
+    fn transition_auth_binds_the_chain_visibility_and_noise_session() {
+        let device = DeviceIdentity::generate();
+        let previous = Account::generate();
+        let current = Account::generate();
+        let proof = AccountBindingTransition::create(&previous, &current, &device, None);
+        let announce = Announce::new_with_account(&device, &current, "Alice", 1234);
+        for visible in [true, false] {
+            let bytes = build_with_transitions(
+                &device,
+                &[42; 32],
+                Some(&announce),
+                visible,
+                std::slice::from_ref(&proof),
+            )
+            .unwrap();
+            let peer = verify(&bytes, &[42; 32], &device.public().x25519_pub).unwrap();
+            assert_eq!(peer.account_transitions(), std::slice::from_ref(&proof));
+            assert_eq!(peer.publicly_visible(), visible);
+            assert!(verify(&bytes, &[43; 32], &device.public().x25519_pub).is_err());
+            let mut altered = bytes.clone();
+            let end = altered.len() - 1;
+            altered[end] ^= 1;
+            assert!(verify(&altered, &[42; 32], &device.public().x25519_pub).is_err());
+        }
+        assert!(
+            build_with_transitions(
+                &device,
+                &[42; 32],
+                Some(&announce),
+                true,
+                &vec![proof.clone(); 9]
+            )
+            .is_err()
+        );
+        let other = DeviceIdentity::generate();
+        let foreign = AccountBindingTransition::create(&previous, &current, &other, None);
+        assert!(
+            build_with_transitions(&device, &[42; 32], Some(&announce), true, &[foreign]).is_err()
+        );
+        assert!(build_with_transitions(&device, &[42; 32], None, true, &[proof]).is_err());
     }
 }

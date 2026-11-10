@@ -3,6 +3,7 @@ import type {
   FileProgressEvent,
   ProfileReceivedEvent,
 } from "@/lib/types";
+import { useAccountProfiles } from "./accountProfiles";
 import { useAvatars } from "./avatars";
 import { useCalls } from "./calls";
 import { resetFileAvailability } from "./fileAvailability";
@@ -11,6 +12,7 @@ import { useTransfers } from "./transfers";
 /** Side effects owned by other stores during a chat runtime's lifecycle. */
 export function resetChatFiles() {
   useTransfers.getState().reset();
+  useAccountProfiles.getState().clear();
   resetFileAvailability();
 }
 
@@ -21,11 +23,21 @@ export function stopChatCalls() {
 export function syncChatAvatarIdentity(
   accountId: string,
   isCurrent: () => boolean,
+  boundedDelivery = false,
 ) {
+  useAccountProfiles.getState().clear();
   // Pull durable peer avatars and republish our own after a node restart.
   useAvatars.getState().setOwnId(accountId);
-  void useAvatars.getState().loadPeers(isCurrent);
-  void useAvatars.getState().reassertOwn(isCurrent);
+  if (!boundedDelivery) {
+    void useAvatars.getState().loadPeers(isCurrent);
+    void useAvatars.getState().reassertOwn(isCurrent);
+  }
+}
+
+/** Reassert old local photos only after the bounded current-value walk proved
+ * whether a signed own profile (including its clear tombstone) exists. */
+export function finishChatAvatarIdentity(isCurrent: () => boolean) {
+  void useAvatars.getState().reassertOwn(isCurrent, true);
 }
 
 export function applyChatFileProgress(event: FileProgressEvent) {
@@ -34,6 +46,7 @@ export function applyChatFileProgress(event: FileProgressEvent) {
 
 export function applyChatProfile(event: ProfileReceivedEvent) {
   useAvatars.getState().mergeReceived(event.account_id, event.avatar);
+  void useAccountProfiles.getState().invalidate(event.account_id);
 }
 
 export function applyChatCallSignal(event: CallSignalEvent) {

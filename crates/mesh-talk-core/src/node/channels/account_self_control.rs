@@ -1,0 +1,3446 @@
+//! Account invitation acceptance and exact physical/account departure preparation.
+//! The integration owner retains membership/delivery/log guards and WAL replay.
+
+use crate::{
+    discovery::Announce,
+    eventlog::{Author, ConversationId, Event, EventId, EventKind, persist::PersistentEventLog},
+    identity::device::PublicIdentity,
+    node::{
+        AccountGroupOperation, AccountGroupRole, Node, NodeError,
+        channel::ChannelMembershipProjection, channel_account_authority::AccountGrantId,
+    },
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AccountSelfControlInput {
+    Accept,
+    Leave,
+    Decline,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AccountSelfControlWitness {
+    pub(in crate::node) own: Announce,
+    pub(in crate::node) grant: AccountGrantId,
+    pub(in crate::node) parents: Vec<EventId>,
+    pub(in crate::node) recipients: Vec<PublicIdentity>,
+}
+
+impl AccountSelfControlInput {
+    pub(in crate::node) fn operation(self) -> AccountGroupOperation {
+        match self {
+            Self::Accept => AccountGroupOperation::AcceptInvitation,
+            Self::Leave => AccountGroupOperation::LeaveAccount,
+            Self::Decline => AccountGroupOperation::DeclineInvitation,
+        }
+    }
+    pub(in crate::node) fn required_role(self) -> AccountGroupRole {
+        match self {
+            Self::Accept | Self::Decline => AccountGroupRole::Invited,
+            Self::Leave => AccountGroupRole::Member,
+        }
+    }
+    pub(in crate::node) fn event_payload(self, grant: AccountGrantId) -> Vec<u8> {
+        match self {
+            Self::Accept | Self::Leave => vec![],
+            Self::Decline => {
+                crate::node::channel_account_authority::AccountDeclinePayload { version: 1, grant }
+                    .encode()
+            }
+        }
+    }
+    pub(in crate::node) fn event_kind(self) -> EventKind {
+        match self {
+            Self::Accept => EventKind::ChannelAccept,
+            Self::Leave | Self::Decline => EventKind::ChannelLeave,
+        }
+    }
+}
+pub(in crate::node) struct PreparedAccountSelfControl {
+    pub event: Event,
+    pub witness: AccountSelfControlWitness,
+    pub recipients: Vec<PublicIdentity>,
+}
+
+/// One decision owner for preparation and replay of existing modern self actions.
+/// No locks, side effects, current roster lookup or legacy authority inference.
+pub(in crate::node) fn expected_self_control(
+    group: ConversationId,
+    projection: &ChannelMembershipProjection,
+    input: AccountSelfControlInput,
+    witness: &AccountSelfControlWitness,
+) -> Result<(EventKind, Vec<PublicIdentity>), NodeError> {
+    let invalid = || NodeError::Authorization("invalid modern account self control".into());
+    let state = projection.state.as_ref().ok_or_else(invalid)?;
+    let account = witness.own.account_cert.as_ref().ok_or_else(invalid)?;
+    if state.id() != group
+        || state.is_dissolved()
+        || projection.authority.current_event().is_none()
+        || !witness.own.valid_presence()
+        || witness.own.post_office
+        || account.account_ed25519_pub != witness.grant.account_pub
+    {
+        return Err(invalid());
+    }
+    let source =
+        Node::public_account_group_source(group, projection, &witness.own.public(), &witness.own)
+            .ok_or_else(invalid)?;
+    let grant = match input {
+        AccountSelfControlInput::Accept | AccountSelfControlInput::Decline => projection
+            .authority
+            .invitation_for_device(&witness.own.public(), &witness.own),
+        AccountSelfControlInput::Leave => projection
+            .authority
+            .grant_for_device(&witness.own.public(), &witness.own),
+    }
+    .ok_or_else(invalid)?;
+    let recipients = state.members().to_vec();
+    if source.role != input.required_role()
+        || grant.id() != Some(witness.grant)
+        || recipients != witness.recipients
+        || state
+            .epoch()
+            .checked_add(if input == AccountSelfControlInput::Decline {
+                2
+            } else {
+                1
+            })
+            .is_none()
+    {
+        return Err(invalid());
+    }
+    Ok((input.event_kind(), recipients))
+}
+
+impl Node {
+    /// Direct modern entrypoints share this producer with the account facade.
+    /// The caller retains membership and host authority; distribution uses the
+    /// returned original recipients after all guards have been released.
+    pub(in crate::node) fn apply_account_self_control(
+        &self,
+        group: ConversationId,
+        input: AccountSelfControlInput,
+        own: &Announce,
+    ) -> Result<(Vec<PublicIdentity>, EventId), NodeError> {
+        let mut delivery = self.delivery.lock().expect("delivery mutex");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        let (transaction, recipients, id) = {
+            let log = self.log.lock().expect("log mutex");
+            let projection =
+                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group)?);
+            let PreparedAccountSelfControl {
+                event,
+                witness,
+                recipients,
+            } = self.prepare_account_self_control_locked(group, &log, &projection, input, own)?;
+            let id = event.id;
+            let transaction =
+                crate::node::delivery_store::DeliveryTransaction::AccountSelfControl {
+                    input,
+                    witness,
+                    events: vec![event],
+                };
+            delivery
+                .preflight_group_self_control_transaction(&transaction, &log)
+                .map_err(NodeError::Log)?;
+            log.sync().map_err(NodeError::Log)?;
+            (transaction, recipients, id)
+        };
+        delivery.begin(transaction).map_err(NodeError::Log)?;
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        drop(delivery);
+        // The async entrypoint releases membership/delivery guards before
+        // advancing bounded canonical turns and checking this exact event.
+        Ok((recipients, id))
+    }
+
+    /// Caller owns membership/delivery allocation and this immutable log view.
+    /// The returned exact event and original recipients must enter the existing
+    /// request WAL together before any public append or role publication.
+    pub(in crate::node) fn prepare_account_self_control_locked(
+        &self,
+        group: ConversationId,
+        log: &PersistentEventLog,
+        projection: &ChannelMembershipProjection,
+        input: AccountSelfControlInput,
+        own: &Announce,
+    ) -> Result<PreparedAccountSelfControl, NodeError> {
+        if own.public() != self.identity.public()
+            || own
+                .account_cert
+                .as_ref()
+                .is_none_or(|cert| cert.account_ed25519_pub != self.account.public().ed25519_pub)
+        {
+            return Err(NodeError::Authorization(
+                "self-control source identity changed".into(),
+            ));
+        }
+        let state = projection
+            .state
+            .as_ref()
+            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+        let grant = projection
+            .authority
+            .account_grant(&self.account.public().ed25519_pub)
+            .and_then(|grant| grant.id())
+            .ok_or_else(|| NodeError::Authorization("no modern account grant".into()))?;
+        let (parents, lamport) = log.prepare(&group).map_err(NodeError::Log)?;
+        let witness = AccountSelfControlWitness {
+            own: own.clone(),
+            grant,
+            parents: parents.clone(),
+            recipients: state.members().to_vec(),
+        };
+        let (kind, recipients) = expected_self_control(group, projection, input, &witness)?;
+        let seq = log
+            .next_sequence(
+                &group,
+                &Author::from_ed25519(self.identity.public().ed25519_pub),
+            )
+            .map_err(NodeError::Log)?;
+        let event = Event::new(
+            &self.identity,
+            group,
+            seq,
+            parents,
+            lamport,
+            crate::node::node::now_millis(),
+            kind,
+            input.event_payload(grant),
+        );
+        if !crate::node::session::event_fits_frame(&event) {
+            return Err(NodeError::InvalidInput(
+                "account self control exceeds supported frame".into(),
+            ));
+        }
+        Ok(PreparedAccountSelfControl {
+            event,
+            witness,
+            recipients,
+        })
+    }
+}
+
+/// A legacy departure proves only this exact physical membership lifetime.
+/// Kept separate from the released modern witness's positional WAL layout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LegacyMemberLeaveWitness {
+    pub(in crate::node) own: Announce,
+    pub(in crate::node) lifetime: crate::node::account_group::MembershipLifetime,
+    pub(in crate::node) parents: Vec<EventId>,
+    pub(in crate::node) recipients: Vec<PublicIdentity>,
+}
+
+pub(in crate::node) struct PreparedLegacyMemberLeave {
+    pub event: Event,
+    pub witness: LegacyMemberLeaveWitness,
+    pub recipients: Vec<PublicIdentity>,
+}
+
+pub(in crate::node) fn expected_legacy_member_leave(
+    group: ConversationId,
+    projection: &ChannelMembershipProjection,
+    witness: &LegacyMemberLeaveWitness,
+) -> Result<Vec<PublicIdentity>, NodeError> {
+    let invalid = || NodeError::Authorization("invalid legacy member departure".into());
+    let state = projection.state.as_ref().ok_or_else(invalid)?;
+    if state.id() != group
+        || state.is_dissolved()
+        || projection.authority.current_event().is_some()
+        || !witness.own.valid_presence()
+        || witness.own.post_office
+        || witness.own.account_cert.is_none()
+    {
+        return Err(invalid());
+    }
+    let source =
+        Node::public_account_group_source(group, projection, &witness.own.public(), &witness.own)
+            .ok_or_else(invalid)?;
+    if source.role != AccountGroupRole::Member
+        || source.lifetime != witness.lifetime
+        || source.lifetime.member != witness.own.public()
+        || source.authority.authority.is_some()
+        || state.members() != witness.recipients
+        || state.epoch().checked_add(1).is_none()
+    {
+        return Err(invalid());
+    }
+    Ok(state.members().to_vec())
+}
+
+impl Node {
+    pub(in crate::node) fn prepare_legacy_member_leave_locked(
+        &self,
+        group: ConversationId,
+        log: &PersistentEventLog,
+        projection: &ChannelMembershipProjection,
+        own: &Announce,
+    ) -> Result<PreparedLegacyMemberLeave, NodeError> {
+        if own.public() != self.identity.public()
+            || own.account_cert.as_ref().is_none_or(|certificate| {
+                certificate.account_ed25519_pub != self.account.public().ed25519_pub
+            })
+        {
+            return Err(NodeError::Authorization(
+                "legacy departure source identity changed".into(),
+            ));
+        }
+        let source = Node::public_account_group_source(group, projection, &own.public(), own)
+            .ok_or_else(|| {
+                NodeError::Authorization("legacy departure source unavailable".into())
+            })?;
+        let (parents, lamport) = log.prepare(&group).map_err(NodeError::Log)?;
+        let witness = LegacyMemberLeaveWitness {
+            own: own.clone(),
+            lifetime: source.lifetime,
+            parents: parents.clone(),
+            recipients: projection
+                .state
+                .as_ref()
+                .ok_or_else(|| NodeError::Channel("unknown channel".into()))?
+                .members()
+                .to_vec(),
+        };
+        let recipients = expected_legacy_member_leave(group, projection, &witness)?;
+        let sequence = log
+            .next_sequence(
+                &group,
+                &Author::from_ed25519(self.identity.public().ed25519_pub),
+            )
+            .map_err(NodeError::Log)?;
+        let event = Event::new(
+            &self.identity,
+            group,
+            sequence,
+            parents,
+            lamport,
+            crate::node::node::now_millis(),
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        if !crate::node::session::event_fits_frame(&event) {
+            return Err(NodeError::InvalidInput(
+                "legacy departure exceeds supported frame".into(),
+            ));
+        }
+        Ok(PreparedLegacyMemberLeave {
+            event,
+            witness,
+            recipients,
+        })
+    }
+
+    /// The caller holds membership admission; WAL acceptance precedes the leave.
+    pub(in crate::node) fn apply_legacy_member_leave(
+        &self,
+        group: ConversationId,
+        own: &Announce,
+    ) -> Result<(Vec<PublicIdentity>, EventId), NodeError> {
+        let mut delivery = self.delivery.lock().expect("delivery mutex");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        let (transaction, recipients, event_id) = {
+            let log = self.log.lock().expect("log mutex");
+            let projection =
+                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group)?);
+            let prepared =
+                self.prepare_legacy_member_leave_locked(group, &log, &projection, own)?;
+            let event_id = prepared.event.id;
+            let transaction = crate::node::delivery_store::DeliveryTransaction::LegacyMemberLeave {
+                witness: prepared.witness,
+                events: vec![prepared.event],
+            };
+            delivery
+                .preflight_legacy_member_leave_transaction(&transaction, &log)
+                .map_err(NodeError::Log)?;
+            log.sync().map_err(NodeError::Log)?;
+            (transaction, prepared.recipients, event_id)
+        };
+        delivery.begin(transaction).map_err(NodeError::Log)?;
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        drop(delivery);
+        // The async entrypoint releases membership/delivery guards before
+        // advancing bounded canonical turns and checking this exact event.
+        Ok((recipients, event_id))
+    }
+}
+
+#[cfg(test)]
+pub(in crate::node) mod tests {
+    use super::*;
+    use crate::{
+        channel::ChannelMeta,
+        eventlog::Event,
+        identity::{account::Account, device::DeviceIdentity},
+        node::{
+            channel::ChannelBook,
+            channel_account_authority::{AccountAuthorityControl, AccountGrant},
+        },
+    };
+    pub(in crate::node) struct Fixture {
+        pub group: ConversationId,
+        pub owner: DeviceIdentity,
+        pub owner_account: Account,
+        pub member: DeviceIdentity,
+        pub account: Account,
+        pub proof: Announce,
+        pub events: Vec<Event>,
+    }
+    impl Fixture {
+        pub fn projection(&self) -> ChannelMembershipProjection {
+            ChannelBook::project_membership(self.group, &self.events.iter().collect::<Vec<_>>())
+        }
+        pub fn witness(&self) -> AccountSelfControlWitness {
+            let projection = self.projection();
+            let grant = projection
+                .authority
+                .account_grant(&self.account.public().ed25519_pub)
+                .unwrap()
+                .id()
+                .unwrap();
+            AccountSelfControlWitness {
+                own: self.proof.clone(),
+                grant,
+                parents: vec![self.events.last().unwrap().id],
+                recipients: projection.state.unwrap().members().to_vec(),
+            }
+        }
+    }
+    pub(in crate::node) fn fixture(pending: bool) -> Fixture {
+        let owner = DeviceIdentity::generate();
+        let member = DeviceIdentity::generate();
+        let owner_account = Account::generate();
+        let account = Account::generate();
+        let owner_proof = Announce::new_with_account(&owner, &owner_account, "owner", 1);
+        let proof = Announce::new_with_account(&member, &account, "member", 1);
+        let group = ConversationId::new([115; 32]);
+        let meta = ChannelMeta {
+            name: "account self controls".into(),
+            members: vec![owner.public(), member.public()],
+            epoch: 0,
+            owner: owner.user_id(),
+        };
+        let genesis = Event::new(
+            &owner,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::MembershipChange,
+            if pending {
+                meta.encode_invitation()
+            } else {
+                meta.encode()
+            },
+        );
+        let control = AccountAuthorityControl {
+            version: 1,
+            previous: None,
+            issuer: owner_proof.clone(),
+            owner_account: owner_account.public().ed25519_pub,
+            grants: vec![
+                AccountGrant {
+                    incarnation: [1; 16],
+                    pending: false,
+                    original: owner_proof.clone(),
+                    membership_event: genesis.id,
+                    acceptance_event: None,
+                },
+                AccountGrant {
+                    incarnation: [2; 16],
+                    pending,
+                    original: proof.clone(),
+                    membership_event: genesis.id,
+                    acceptance_event: None,
+                },
+            ],
+            revoked: vec![],
+            legacy_bindings: vec![owner_proof, proof.clone()],
+            account_signature: vec![],
+        };
+        let authority = Event::new(
+            &owner,
+            group,
+            2,
+            vec![genesis.id],
+            2,
+            2,
+            EventKind::ChannelAccountAuthority,
+            control.signed_encode(group, &owner_account),
+        );
+        let fixture = Fixture {
+            group,
+            owner,
+            owner_account,
+            member,
+            account,
+            proof,
+            events: vec![genesis, authority.clone()],
+        };
+        assert_eq!(
+            fixture.projection().authority.current_event(),
+            Some(authority.id),
+            "a real validated modern grant is a fixture prerequisite"
+        );
+        fixture
+    }
+    #[test]
+    fn accept_requires_pending_modern_account_grant() {
+        let f = fixture(false);
+        assert!(
+            expected_self_control(
+                f.group,
+                &f.projection(),
+                AccountSelfControlInput::Accept,
+                &f.witness()
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn leave_rejects_pending_account_and_owner() {
+        let f = fixture(true);
+        assert!(
+            expected_self_control(
+                f.group,
+                &f.projection(),
+                AccountSelfControlInput::Leave,
+                &f.witness()
+            )
+            .is_err()
+        );
+        let f = fixture(false);
+        let mut witness = f.witness();
+        witness.own = Announce::new_with_account(&f.owner, &f.owner_account, "owner", 1);
+        witness.grant = f
+            .projection()
+            .authority
+            .account_grant(&f.owner_account.public().ed25519_pub)
+            .unwrap()
+            .id()
+            .unwrap();
+        assert!(
+            expected_self_control(
+                f.group,
+                &f.projection(),
+                AccountSelfControlInput::Leave,
+                &witness
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn certificate_without_registered_full_source_cannot_accept() {
+        let f = fixture(true);
+        let mut witness = f.witness();
+        witness.own =
+            Announce::new_with_account(&DeviceIdentity::generate(), &f.account, "sibling", 1);
+        assert!(
+            expected_self_control(
+                f.group,
+                &f.projection(),
+                AccountSelfControlInput::Accept,
+                &witness
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn a_different_grant_incarnation_cannot_retarget_self_control() {
+        let f = fixture(false);
+        let mut witness = f.witness();
+        witness.grant.incarnation = [9; 16];
+        assert!(
+            expected_self_control(
+                f.group,
+                &f.projection(),
+                AccountSelfControlInput::Leave,
+                &witness
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn self_control_rejects_legacy_authority_and_changed_original_recipients() {
+        let f = fixture(false);
+        let legacy = ChannelBook::project_membership(f.group, &[&f.events[0]]);
+        assert!(
+            expected_self_control(
+                f.group,
+                &legacy,
+                AccountSelfControlInput::Leave,
+                &f.witness()
+            )
+            .is_err()
+        );
+        let mut witness = f.witness();
+        witness.recipients.clear();
+        assert!(
+            expected_self_control(
+                f.group,
+                &f.projection(),
+                AccountSelfControlInput::Leave,
+                &witness
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn valid_modern_accept_and_member_leave_preserve_original_recipients() {
+        for (pending, input, kind) in [
+            (
+                true,
+                AccountSelfControlInput::Accept,
+                EventKind::ChannelAccept,
+            ),
+            (
+                false,
+                AccountSelfControlInput::Leave,
+                EventKind::ChannelLeave,
+            ),
+        ] {
+            let f = fixture(pending);
+            let witness = f.witness();
+            let (actual, recipients) =
+                expected_self_control(f.group, &f.projection(), input, &witness).unwrap();
+            assert_eq!(actual, kind);
+            assert_eq!(recipients, witness.recipients);
+            assert!(recipients.contains(&f.member.public()));
+        }
+    }
+    fn direct_node(
+        dir: &std::path::Path,
+        identity: DeviceIdentity,
+        account: Account,
+    ) -> std::sync::Arc<Node> {
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channels, _) = tokio::sync::mpsc::unbounded_channel();
+        let (files, _) = tokio::sync::mpsc::unbounded_channel();
+        Node::open_with_account(
+            identity,
+            account,
+            std::sync::Arc::new(std::sync::Mutex::new(crate::discovery::Roster::default())),
+            dm,
+            channels,
+            files,
+            &dir.join("events"),
+            &dir.join("sent"),
+            "pw",
+        )
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn direct_modern_self_control_uses_the_same_wal_and_survives_reopen() {
+        for pending in [false, true] {
+            let f = fixture(pending);
+            let group = f.group;
+            let own = f.proof.clone();
+            let (ed, x) = f.member.secret_bytes();
+            let account_secret = f.account.secret_bytes();
+            let dir = tempfile::tempdir().unwrap();
+            let node = direct_node(dir.path(), f.member, f.account);
+            for parent in f.events {
+                node.log.lock().unwrap().append_durable(parent).unwrap();
+            }
+            node.process_channel(group);
+            let input = if pending {
+                AccountSelfControlInput::Accept
+            } else {
+                AccountSelfControlInput::Leave
+            };
+            if pending {
+                node.accept_channel_invite(group).await.unwrap();
+            } else {
+                node.leave_channel(group).await.unwrap();
+            }
+            let effects = node
+                .log
+                .lock()
+                .unwrap()
+                .events(&group)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == input.event_kind())
+                .collect::<Vec<_>>();
+            assert_eq!(effects.len(), 1);
+            assert!(
+                node.delivery
+                    .lock()
+                    .unwrap()
+                    .pending_transactions()
+                    .is_empty()
+            );
+            drop(node);
+            let node = direct_node(
+                dir.path(),
+                DeviceIdentity::from_secret_bytes(ed, x),
+                Account::from_secret_bytes(account_secret),
+            );
+            assert_eq!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .events(&group)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|event| event.kind == input.event_kind())
+                    .map(|event| event.id)
+                    .collect::<Vec<_>>(),
+                vec![effects[0].id]
+            );
+            let projection = node.account_group_projection(group).unwrap();
+            assert_eq!(projection.authority.is_member(&own.public(), &own), pending);
+        }
+    }
+    #[tokio::test]
+    async fn direct_owner_leave_is_rejected_before_any_public_effect_or_wal() {
+        let f = fixture(false);
+        let group = f.group;
+        let dir = tempfile::tempdir().unwrap();
+        let node = direct_node(dir.path(), f.owner, f.owner_account);
+        for parent in f.events {
+            node.log.lock().unwrap().append_durable(parent).unwrap();
+        }
+        node.process_channel(group);
+        let result = node.leave_channel(group).await;
+        assert!(result.is_err());
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        assert!(
+            !node
+                .log
+                .lock()
+                .unwrap()
+                .events(&group)
+                .unwrap()
+                .into_iter()
+                .any(|event| event.kind == EventKind::ChannelLeave)
+        );
+    }
+    #[tokio::test]
+    async fn legacy_direct_departure_uses_exact_device_wal_with_owner_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let member = crate::identity::device::DeviceIdentity::generate();
+        let offline_owner = crate::identity::device::DeviceIdentity::generate();
+        let node = direct_node(dir.path(), member, account);
+        let group = crate::channel::new_channel_id();
+        let genesis = Event::new(
+            &offline_owner,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::MembershipChange,
+            crate::channel::ChannelMeta {
+                name: "offline legacy owner".into(),
+                members: vec![offline_owner.public(), node.identity.public()],
+                epoch: 0,
+                owner: offline_owner.public().user_id(),
+            }
+            .encode(),
+        );
+        node.log.lock().unwrap().append_durable(genesis).unwrap();
+        node.process_channel(group);
+        let impostor = crate::identity::device::DeviceIdentity::generate();
+        let other_proof = Announce::new_with_account(&impostor, &node.account, "other device", 1);
+        {
+            let log = node.log.lock().unwrap();
+            let projection = crate::node::channel::ChannelBook::project_membership(
+                group,
+                &log.events(&group).unwrap(),
+            );
+            assert!(
+                node.prepare_legacy_member_leave_locked(group, &log, &projection, &other_proof)
+                    .is_err()
+            );
+            let prepared = node
+                .prepare_legacy_member_leave_locked(
+                    group,
+                    &log,
+                    &projection,
+                    &node.own_group_proof(),
+                )
+                .unwrap();
+            assert_eq!(prepared.event.kind, EventKind::ChannelLeave);
+            assert!(prepared.event.ciphertext.is_empty());
+            assert_eq!(prepared.witness.lifetime.member, node.identity.public());
+        }
+        assert!(node.group_control_heads(group).is_empty());
+        node.leave_channel(group).await.unwrap();
+        assert_eq!(
+            node.account_group_access(group).unwrap().role,
+            AccountGroupRole::Left,
+            "signed legacy departure proves Left before any private head exists"
+        );
+        node.publish_account_group_access_for(group);
+        assert_eq!(
+            node.account_group_access(group).unwrap().role,
+            AccountGroupRole::Left
+        );
+        let events = node
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::ChannelLeave)
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].ciphertext.is_empty()
+                && events[0].verify_signature()
+                && events[0].verify_integrity()
+        );
+        assert_eq!(
+            events[0].author.ed25519_pub(),
+            &node.identity.public().ed25519_pub
+        );
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        assert!(node.leave_channel(group).await.is_err());
+        let secret = node.identity.secret_bytes();
+        let account = Account::from_secret_bytes(node.account.secret_bytes());
+        drop(node);
+        let reopened = direct_node(
+            dir.path(),
+            crate::identity::device::DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            account,
+        );
+        assert_eq!(
+            reopened.account_group_access(group).unwrap().role,
+            AccountGroupRole::Left,
+            "legacy departure provenance survives reopening the original device"
+        );
+    }
+
+    async fn assert_local_account_self_control(pending: bool) {
+        let f = fixture(pending);
+        let account_id = f.account.account_id();
+        let group = f.group;
+        let dir = tempfile::tempdir().unwrap();
+        let node = direct_node(dir.path(), f.member, f.account);
+        for parent in f.events {
+            node.log.lock().unwrap().append_durable(parent).unwrap();
+        }
+        node.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&node, group);
+        let operation = if pending {
+            AccountGroupOperation::AcceptInvitation
+        } else {
+            AccountGroupOperation::LeaveAccount
+        };
+        let kind = if pending {
+            EventKind::ChannelAccept
+        } else {
+            EventKind::ChannelLeave
+        };
+        let id = node.new_account_group_operation_id(&account_id).unwrap();
+        let admitted = node
+            .submit_account_group_operation(&account_id, id, group, operation.clone())
+            .expect(
+                "a modern account's self control must enter the original account-operation facade",
+            );
+        assert!(admitted.committed_events.is_empty());
+        node.maintain_account_group_operations().await;
+        let status = node
+            .account_group_operation_status(&account_id, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            status.phase,
+            crate::node::AccountGroupOperationPhase::Committed
+        );
+        let effects: Vec<_> = node
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == kind)
+            .collect();
+        assert_eq!(effects.len(), 1);
+        assert!(effects[0].ciphertext.is_empty());
+        assert!(effects[0].verify_integrity() && effects[0].verify_signature());
+        assert_eq!(
+            effects[0].author.ed25519_pub(),
+            &node.identity.public().ed25519_pub
+        );
+        assert_eq!(status.committed_events, vec![effects[0].id]);
+        node.await_channel_metadata(group).await.unwrap();
+        assert_eq!(
+            node.account_group_access(group).unwrap().role,
+            if pending {
+                AccountGroupRole::Member
+            } else {
+                AccountGroupRole::Left
+            }
+        );
+        assert_eq!(
+            node.submit_account_group_operation(&account_id, id, group, operation)
+                .unwrap(),
+            status
+        );
+        node.maintain_account_group_operations().await;
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .events(&group)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == kind)
+                .count(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn local_modern_accept_facade_keeps_original_empty_event_and_intent_id() {
+        assert_local_account_self_control(true).await;
+    }
+    #[tokio::test]
+    async fn local_modern_leave_facade_keeps_original_empty_event_and_intent_id() {
+        assert_local_account_self_control(false).await;
+    }
+    #[tokio::test]
+    async fn modern_self_control_reopen_finishes_original_intent_after_terminal_write_failure() {
+        for pending in [false, true] {
+            let f = fixture(pending);
+            let group = f.group;
+            let account_id = f.account.account_id();
+            let account_secret = f.account.secret_bytes();
+            let (ed, x) = f.member.secret_bytes();
+            let dir = tempfile::tempdir().unwrap();
+            let node = direct_node(dir.path(), f.member, f.account);
+            for parent in f.events {
+                node.log.lock().unwrap().append_durable(parent).unwrap();
+            }
+            node.process_channel(group);
+            crate::node::test_support::settle_group_metadata(&node, group);
+            let operation = if pending {
+                AccountGroupOperation::AcceptInvitation
+            } else {
+                AccountGroupOperation::LeaveAccount
+            };
+            let kind = if pending {
+                EventKind::ChannelAccept
+            } else {
+                EventKind::ChannelLeave
+            };
+            let id = node.new_account_group_operation_id(&account_id).unwrap();
+            node.submit_account_group_operation(&account_id, id, group, operation.clone())
+                .unwrap();
+            assert!(
+                node.interrupt_account_group_completion_for_test(group, id)
+                    .is_err()
+            );
+            let effects: Vec<_> = node
+                .log
+                .lock()
+                .unwrap()
+                .events(&group)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == kind)
+                .collect();
+            assert_eq!(
+                effects.len(),
+                1,
+                "the exact original effect is durable before terminal publication fails"
+            );
+            assert_eq!(
+                node.delivery.lock().unwrap().pending_transactions().len(),
+                1
+            );
+            node.fail_account_group_operation_journal_appends_for_test(false)
+                .unwrap();
+            drop(node);
+            let node = direct_node(
+                dir.path(),
+                DeviceIdentity::from_secret_bytes(ed, x),
+                Account::from_secret_bytes(account_secret),
+            );
+            node.maintain_account_group_operations().await;
+            let status = node
+                .account_group_operation_status(&account_id, id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                status.phase,
+                crate::node::AccountGroupOperationPhase::Committed
+            );
+            assert_eq!(status.committed_events, vec![effects[0].id]);
+            assert!(
+                node.delivery
+                    .lock()
+                    .unwrap()
+                    .pending_transactions()
+                    .is_empty()
+            );
+            assert_eq!(
+                node.submit_account_group_operation(&account_id, id, group, operation)
+                    .unwrap(),
+                status
+            );
+            node.maintain_account_group_operations().await;
+            assert_eq!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .events(&group)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|event| event.kind == kind)
+                    .map(|event| event.id)
+                    .collect::<Vec<_>>(),
+                vec![effects[0].id]
+            );
+        }
+    }
+    async fn wait_self_control_noise_diagnosed(
+        deadline: tokio::time::Instant,
+        mut ready: impl FnMut() -> bool,
+        diagnosis: impl Fn() -> String,
+    ) {
+        observe_self_control_by_deadline(deadline, async {
+            while !ready() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{}", diagnosis()));
+    }
+
+    const EXPECTED_SELF_CONTROL_HOLD: [bool; 7] = [true, false, true, true, true, true, true];
+
+    type SelfControlHeldEvidence = ([bool; 7], bool);
+    type SelfControlQualifiedReceipt = (u128, Option<SelfControlHeldEvidence>);
+
+    fn qualified_self_control_receipt(
+        committed: bool,
+        count: Option<usize>,
+        held: Option<SelfControlHeldEvidence>,
+    ) -> bool {
+        committed
+            && count == Some(1)
+            && held.is_none_or(|(flags, server_live)| {
+                flags == EXPECTED_SELF_CONTROL_HOLD && server_live
+            })
+    }
+
+    #[derive(Debug, Default)]
+    struct SelfControlMilestones {
+        private_commit_ms: Option<u128>,
+        qualified_receipt: Option<SelfControlQualifiedReceipt>,
+        public_predicates_ms: Option<u128>,
+        history_begin_ms: Option<u128>,
+        history_completed_ms: Option<u128>,
+        history_stale: u64,
+    }
+
+    #[derive(Debug, Default)]
+    struct SelfControlOperationTrace {
+        started: Option<std::time::Instant>,
+        events: Vec<(u128, &'static str, String)>,
+        omitted: usize,
+    }
+
+    impl SelfControlOperationTrace {
+        fn record(&mut self, node: &'static str, event: String) {
+            let Some(started) = self.started else {
+                return;
+            };
+            // Keep the admission prefix; the separate rolling trace retains
+            // the failure tail when a busy exchange exceeds this bound.
+            if self.events.len() < 256 {
+                self.events
+                    .push((started.elapsed().as_millis(), node, event));
+            } else {
+                self.omitted += 1;
+            }
+        }
+    }
+
+    async fn observe_self_control_by_deadline<T>(
+        deadline: tokio::time::Instant,
+        observation: impl std::future::Future<Output = T>,
+    ) -> Result<T, tokio::time::error::Elapsed> {
+        tokio::time::timeout_at(deadline, async {
+            let value = observation.await;
+            // timeout polls its inner future first. A synchronous observation
+            // completing late must not certify timely completion.
+            if tokio::time::Instant::now() > deadline {
+                std::future::pending::<()>().await;
+            }
+            value
+        })
+        .await
+    }
+
+    async fn complete_self_control_phases<T>(
+        action_deadline: tokio::time::Instant,
+        private_receipt: impl std::future::Future<Output = ()>,
+        public_tail: impl std::future::Future<Output = T>,
+    ) -> Result<T, tokio::time::error::Elapsed> {
+        observe_self_control_by_deadline(action_deadline, private_receipt).await?;
+        // Held and ordinary public projections share functional acceptance.
+        let public_deadline = tokio::time::Instant::now()
+            + crate::node::account_group::FUNCTIONAL_ACCOUNT_CONVERGENCE_BUDGET;
+        crate::node::account_group::functional_account_convergence(
+            observe_self_control_by_deadline(public_deadline, public_tail),
+        )
+        .await?
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn functional_self_control_tail_can_follow_private_receipt_beyond_action_deadline() {
+        use futures_util::FutureExt;
+        let (private_entered, private_entered_rx) = tokio::sync::oneshot::channel();
+        let (private_release, private_released) = tokio::sync::oneshot::channel();
+        let (tail_entered, tail_entered_rx) = tokio::sync::oneshot::channel();
+        let (tail_release, tail_released) = tokio::sync::oneshot::channel();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        let completion = complete_self_control_phases(
+            deadline,
+            async move {
+                private_entered.send(()).unwrap();
+                private_released.await.unwrap();
+            },
+            async move {
+                tail_entered.send(()).unwrap();
+                tail_released.await.unwrap();
+                "all public predicates observed"
+            },
+        );
+        tokio::pin!(completion);
+        let mut completed = None;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            tokio::select! {
+                entered = private_entered_rx => entered.unwrap(),
+                result = completion.as_mut() => {
+                    completed = Some(result);
+                    panic!("completion cannot precede the actual private phase entry");
+                }
+            }
+            private_release.send(()).unwrap();
+            tokio::select! {
+                entered = tail_entered_rx => entered.unwrap(),
+                result = completion.as_mut() => {
+                    completed = Some(result);
+                    panic!("completion cannot precede the actual public phase entry");
+                }
+            }
+            tokio::time::advance(std::time::Duration::from_secs(9)).await;
+            completed = completion.as_mut().now_or_never();
+            assert!(
+                completed.is_none(),
+                "a completed private receipt must leave the functional public tail live beyond the action deadline"
+            );
+        })
+        .catch_unwind()
+        .await;
+        // Release and drive the original pinned owner even when the causal
+        // assertion fails; never poll a future whose result was already taken.
+        let _ = tail_release.send(());
+        let result = match completed {
+            Some(result) => result,
+            None => completion.await,
+        };
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        assert_eq!(result.unwrap(), "all public predicates observed");
+    }
+
+    async fn assert_self_control_phase_expiry(
+        private_release_before_poll: Option<bool>,
+        release_tail_before_poll: bool,
+    ) {
+        use futures_util::FutureExt;
+        let (private_entered, private_entered_rx) = tokio::sync::oneshot::channel();
+        let (private_release, private_released) = tokio::sync::oneshot::channel();
+        let (tail_entered, mut tail_entered_rx) = tokio::sync::oneshot::channel();
+        let (tail_release, tail_released) = tokio::sync::oneshot::channel();
+        let mut private_release = Some(private_release);
+        let mut tail_release = Some(tail_release);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        let completion = complete_self_control_phases(
+            deadline,
+            async move {
+                private_entered.send(()).unwrap();
+                let _ = private_released.await;
+            },
+            async move {
+                let _ = tail_entered.send(());
+                let _ = tail_released.await;
+            },
+        );
+        tokio::pin!(completion);
+        let mut completed = None;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            tokio::select! {
+                entered = private_entered_rx => entered.unwrap(),
+                result = completion.as_mut() => {
+                    completed = Some(result);
+                    panic!("completion cannot precede actual private entry");
+                }
+            }
+            if let Some(release_before_poll) = private_release_before_poll {
+                tokio::time::advance(std::time::Duration::from_secs(if release_before_poll { 9 } else { 8 })).await;
+                if release_before_poll {
+                    private_release.take().unwrap().send(()).unwrap();
+                }
+                completed = completion.as_mut().now_or_never();
+                assert!(
+                    matches!(completed.as_ref(), Some(Err(_))),
+                    "a held or late-observed private receipt must fail at the original action deadline"
+                );
+                assert!(matches!(tail_entered_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)),
+                    "late private evidence cannot enter the public phase");
+            } else {
+                tokio::time::advance(std::time::Duration::from_secs(3)).await;
+                private_release.take().unwrap().send(()).unwrap();
+                tokio::select! {
+                    entered = &mut tail_entered_rx => entered.unwrap(),
+                    result = completion.as_mut() => {
+                        completed = Some(result);
+                        panic!("completion cannot precede actual public entry");
+                    }
+                }
+                tokio::time::advance(std::time::Duration::from_secs(29)).await;
+                completed = completion.as_mut().now_or_never();
+                assert!(completed.is_none(), "the functional budget starts after the qualified private receipt");
+                tokio::time::advance(std::time::Duration::from_secs(if release_tail_before_poll { 2 } else { 1 })).await;
+                if release_tail_before_poll {
+                    tail_release.take().unwrap().send(()).unwrap();
+                }
+                completed = completion.as_mut().now_or_never();
+                assert!(matches!(completed.as_ref(), Some(Err(_))),
+                    "the functional-convergence deadline must reject missing or late public completion");
+            }
+        })
+        .catch_unwind()
+        .await;
+        drop(private_release);
+        if let Some(release) = tail_release {
+            let _ = release.send(());
+        }
+        let result = match completed {
+            Some(result) => result,
+            None => completion.await,
+        };
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn self_control_private_receipt_rejects_held_and_late_observation_at_original_deadline() {
+        for release_before_poll in [false, true] {
+            assert_self_control_phase_expiry(Some(release_before_poll), false).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_self_control_public_tail_rejects_missing_and_late_functional_completion() {
+        for release_tail_before_poll in [false, true] {
+            assert_self_control_phase_expiry(None, release_tail_before_poll).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn functional_self_control_public_tail_requires_completion_by_convergence_deadline() {
+        assert_self_control_phase_expiry(None, false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cold_self_control_setup_shares_one_absolute_deadline_and_rejects_late_ready() {
+        use futures_util::FutureExt;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        observe_self_control_by_deadline(
+            deadline,
+            tokio::time::sleep(std::time::Duration::from_secs(20)),
+        )
+        .await
+        .unwrap();
+        let second = std::panic::AssertUnwindSafe(wait_self_control_noise_diagnosed(
+            deadline,
+            || false,
+            || "controlled missing second cold prerequisite".to_owned(),
+        ))
+        .catch_unwind();
+        tokio::pin!(second);
+        assert!(second.as_mut().now_or_never().is_none());
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        assert!(
+            matches!(second.as_mut().now_or_never(), Some(Err(_))),
+            "the next stage cannot reset the paid cold budget"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(
+            std::panic::AssertUnwindSafe(wait_self_control_noise_diagnosed(
+                deadline,
+                || true,
+                || "controlled late ready prerequisite".to_owned()
+            ))
+            .catch_unwind()
+            .await
+            .is_err(),
+            "an immediately ready observation made after the absolute cutoff must fail"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn self_control_causal_receipt_rejects_each_bad_flag_dead_server_and_early_release() {
+        use futures_util::FutureExt;
+        let mut cases = Vec::new();
+        for index in 0..EXPECTED_SELF_CONTROL_HOLD.len() {
+            let mut flags = EXPECTED_SELF_CONTROL_HOLD;
+            flags[index] = !flags[index];
+            cases.push((flags, true));
+        }
+        cases.push((EXPECTED_SELF_CONTROL_HOLD, false));
+        for held in cases {
+            assert!(!qualified_self_control_receipt(true, Some(1), Some(held)));
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+            let public_entered = std::sync::atomic::AtomicBool::new(false);
+            let completion = complete_self_control_phases(
+                deadline,
+                async {
+                    while !qualified_self_control_receipt(true, Some(1), Some(held)) {
+                        tokio::task::yield_now().await;
+                    }
+                },
+                async {
+                    public_entered.store(true, std::sync::atomic::Ordering::Release);
+                },
+            );
+            tokio::pin!(completion);
+            assert!(completion.as_mut().now_or_never().is_none());
+            tokio::time::advance(std::time::Duration::from_secs(8)).await;
+            assert!(matches!(completion.as_mut().now_or_never(), Some(Err(_))));
+            assert!(
+                !public_entered.load(std::sync::atomic::Ordering::Acquire),
+                "public convergence cannot launder unqualified causal proof"
+            );
+        }
+        assert!(!qualified_self_control_receipt(
+            false,
+            Some(1),
+            Some((EXPECTED_SELF_CONTROL_HOLD, true))
+        ));
+        assert!(!qualified_self_control_receipt(
+            true,
+            Some(0),
+            Some((EXPECTED_SELF_CONTROL_HOLD, true))
+        ));
+        assert!(!qualified_self_control_receipt(
+            true,
+            Some(2),
+            Some((EXPECTED_SELF_CONTROL_HOLD, true))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn self_control_causal_receipt_rejects_qualification_first_observed_after_action_cutoff()
+    {
+        use futures_util::FutureExt;
+        let qualified = std::sync::atomic::AtomicBool::new(false);
+        let public_entered = std::sync::atomic::AtomicBool::new(false);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        let completion = complete_self_control_phases(
+            deadline,
+            async {
+                while !qualified.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+                assert!(qualified_self_control_receipt(
+                    true,
+                    Some(1),
+                    Some((EXPECTED_SELF_CONTROL_HOLD, true))
+                ));
+            },
+            async {
+                public_entered.store(true, std::sync::atomic::Ordering::Release);
+            },
+        );
+        tokio::pin!(completion);
+        assert!(completion.as_mut().now_or_never().is_none());
+        tokio::time::advance(std::time::Duration::from_secs(9)).await;
+        qualified.store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(completion.as_mut().now_or_never(), Some(Err(_))));
+        assert!(!public_entered.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_self_control_qualified_receipt_allows_functional_public_tail_with_original_server_live()
+     {
+        let server = std::sync::Arc::new(());
+        let server_witness = std::sync::Arc::downgrade(&server);
+        let gate = tokio::sync::Semaphore::new(0);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        let result = complete_self_control_phases(
+            deadline,
+            async {
+                assert!(qualified_self_control_receipt(
+                    true,
+                    Some(1),
+                    Some((
+                        EXPECTED_SELF_CONTROL_HOLD,
+                        server_witness.upgrade().is_some() && !gate.is_closed()
+                    ))
+                ));
+            },
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(9)).await;
+                assert!(server_witness.upgrade().is_some() && !gate.is_closed());
+                "actual public phase completed"
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "actual public phase completed");
+        assert!(tokio::time::Instant::now() > deadline);
+        assert!(server_witness.upgrade().is_some() && !gate.is_closed());
+        gate.close();
+        drop(server);
+        assert!(server_witness.upgrade().is_none());
+    }
+
+    type SelfControlPredicate = (bool, Option<usize>, Option<bool>, [Option<bool>; 2]);
+    type SelfControlPhaseTrace =
+        std::sync::Mutex<std::collections::VecDeque<(u128, &'static str, String)>>;
+
+    struct SelfControlFailureDiagnostics<'a> {
+        owner: &'a Node,
+        executor: &'a Node,
+        account_id: &'a str,
+        id: crate::node::AccountGroupOperationId,
+        group: ConversationId,
+        input: AccountSelfControlInput,
+    }
+
+    impl SelfControlFailureDiagnostics<'_> {
+        fn report(
+            &self,
+            nodes: &[(&str, std::sync::Arc<Node>)],
+            last_predicate: Option<SelfControlPredicate>,
+            phase: &str,
+            trace: &SelfControlPhaseTrace,
+            operation_trace: &std::sync::Mutex<SelfControlOperationTrace>,
+            external_trace: &SelfControlPhaseTrace,
+        ) -> String {
+            // Retain the actual deadline state before any fallible diagnostic
+            // projection. Pending diagnostics must not replace this failure.
+            let failure_trace = trace
+                .lock()
+                .map(|trace| trace.iter().cloned().collect::<Vec<_>>())
+                .map_err(|_| "trace mutex poisoned");
+            let operation_trace = operation_trace
+                .lock()
+                .map(|trace| format!("{trace:?}"))
+                .map_err(|_| "operation trace mutex poisoned");
+            let external_trace = external_trace
+                .lock()
+                .map(|trace| trace.iter().cloned().collect::<Vec<_>>())
+                .map_err(|_| "external trace mutex poisoned");
+            let original = format!(
+                "self control phase deadline expired: phase={phase} predicates={last_predicate:?} operation_prefix={operation_trace:?} trace={failure_trace:?} external_trace={external_trace:?}"
+            );
+            eprintln!("{original}");
+            let group = self.group;
+            let id = self.id;
+            let input = self.input;
+            let pending = input != AccountSelfControlInput::Leave;
+            let event_kind = input.event_kind();
+            let full_source = self.executor.identity.public();
+            let contains_effects = |node: &Node, events: &[EventId]| -> Result<bool, String> {
+                let log = node
+                    .log
+                    .lock()
+                    .map_err(|_| "event log mutex poisoned".to_owned())?;
+                let mut present = !events.is_empty();
+                for event in events {
+                    present &= log
+                        .get(event)
+                        .map_err(|error| format!("{error:?}"))?
+                        .is_some();
+                }
+                Ok(present)
+            };
+            let diagnostics: Vec<_> = nodes.iter().map(|(label, node)| {
+                let status = node.account_group_operation_status(self.account_id, id);
+                let status_error = status.as_ref().err();
+                let observed = status.as_ref().ok().and_then(Option::as_ref);
+                let phase = observed.map(|status| &status.phase);
+                let committed_count = observed.map(|status| status.committed_events.len());
+                let effects_local = observed.map(|status| contains_effects(node, &status.committed_events));
+                let effects_external = observed.map(|status| contains_effects(self.owner, &status.committed_events));
+                let effects = node.log.lock().map_err(|_| "event log mutex poisoned".to_owned())
+                    .and_then(|log| log.events(&group).map(|events| events.into_iter()
+                        .filter(|event| event.kind == event_kind).count()).map_err(|error| format!("{error:?}")));
+                let role = node.account_group_access(group).map(|access| access.role);
+                let source_role = node.account_group_projection(group)
+                    .map(|projection| Node::public_account_group_source(group, &projection, &full_source, &self.executor.own_group_proof()).map(|source| source.role));
+                let sync: Vec<_> = node.device_sync_status().into_iter().map(|status|
+                    (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
+                format!("node={label} phase={phase:?} status_error={status_error:?} role={role:?} source_role={source_role:?} effects={effects:?} committed_count={committed_count:?} effects_local={effects_local:?} effects_external={effects_external:?} executor={} runtime_closed={} fanout_sequence={:?} sync={sync:?}", node.user_id() == self.executor.user_id(), node.runtime_work.is_closed(), node.account_group_fanout_sequence(group))
+            }).collect();
+            let exact_owner_route = self
+                .executor
+                .routing_peer(&self.owner.user_id())
+                .is_some_and(|route| route.public == self.owner.identity.public());
+            let selected_owner = self
+                .executor
+                .channel_members(group)
+                .contains(&self.owner.identity.public());
+            let departure_retry = self
+                .executor
+                .channels
+                .lock()
+                .map(|channels| {
+                    channels
+                        .pending_departures(&self.executor.user_id())
+                        .iter()
+                        .any(|(channel, _)| *channel == group)
+                })
+                .map_err(|_| "channel book mutex poisoned");
+            let source_capacity = self.executor.sessions.test_capacity_snapshot();
+            let owner_capacity = self.owner.sessions.test_capacity_snapshot();
+            format!(
+                "{original}; self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} exact_owner_route={exact_owner_route} selected_owner={selected_owner} departure_retry={departure_retry:?} capacities(source,owner)=({source_capacity:?},{owner_capacity:?})"
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn self_control_timeout_diagnostics_preserve_real_pending_and_committed_evidence() {
+        for pending in [false, true] {
+            let f = fixture(pending);
+            let group = f.group;
+            let account_id = f.account.account_id();
+            let directory = tempfile::tempdir().unwrap();
+            let executor = direct_node(&directory.path().join("executor"), f.member, f.account);
+            for event in f.events {
+                executor.log.lock().unwrap().append_durable(event).unwrap();
+            }
+            executor.process_channel(group);
+            crate::node::test_support::settle_group_metadata(&executor, group);
+            let input = if pending {
+                AccountSelfControlInput::Accept
+            } else {
+                AccountSelfControlInput::Leave
+            };
+            let id = executor
+                .new_account_group_operation_id(&account_id)
+                .unwrap();
+            executor
+                .submit_account_group_operation(&account_id, id, group, input.operation())
+                .unwrap();
+            executor.maintain_account_group_operations().await;
+            let status = executor
+                .account_group_operation_status(&account_id, id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                status.phase,
+                crate::node::AccountGroupOperationPhase::Committed
+            );
+            assert_eq!(status.committed_events.len(), 1);
+            executor.await_channel_metadata(group).await.unwrap();
+            let owner = direct_node(&directory.path().join("owner"), f.owner, f.owner_account);
+            // Use the actual signed controls and committed effect. Their durable
+            // presence does not manufacture a prepared canonical projection.
+            for event in executor.log.lock().unwrap().events(&group).unwrap() {
+                assert!(event.verify_integrity() && event.verify_signature());
+                owner.log.lock().unwrap().append_durable(event).unwrap();
+            }
+            let pending_projection = owner.account_group_projection(group);
+            assert!(matches!(
+                pending_projection,
+                Err(crate::eventlog::LogError::StaleCursor)
+            ));
+            let external_present = status
+                .committed_events
+                .iter()
+                .all(|event| owner.log.lock().unwrap().get(event).unwrap().is_some());
+            assert!(external_present);
+            let expected_role = if pending {
+                AccountGroupRole::Member
+            } else {
+                AccountGroupRole::Left
+            };
+            let ready_role = executor.account_group_access(group).unwrap().role == expected_role;
+            let pending_role = match owner.account_group_access(group) {
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                _ => panic!("the imported owner must remain genuinely Pending"),
+            };
+            let predicate = (
+                status.phase == crate::node::AccountGroupOperationPhase::Committed,
+                Some(status.committed_events.len()),
+                Some(external_present),
+                [Some(ready_role), Some(pending_role)],
+            );
+            let mut operation_trace = SelfControlOperationTrace {
+                started: Some(std::time::Instant::now()),
+                ..SelfControlOperationTrace::default()
+            };
+            operation_trace.record("reference", "admission_started".to_owned());
+            operation_trace.record("reference", format!("convergence_predicates={predicate:?}"));
+            let operation_trace = std::sync::Mutex::new(operation_trace);
+            let trace = std::sync::Mutex::new(std::collections::VecDeque::from([(
+                0,
+                "ready",
+                format!("executor_phase={:?}", status.phase),
+            )]));
+            let effect_marker = format!("committed_effect={:?}", status.committed_events[0]);
+            let external_trace = std::sync::Mutex::new(std::collections::VecDeque::from([(
+                0,
+                "owner",
+                effect_marker.clone(),
+            )]));
+            let original_prefix = format!(
+                "self control phase deadline expired: phase=public_convergence predicates=Some({predicate:?})"
+            );
+            let diagnostics = SelfControlFailureDiagnostics {
+                owner: &owner,
+                executor: &executor,
+                account_id: &account_id,
+                id,
+                group,
+                input,
+            }
+            .report(
+                &[("ready", executor.clone()), ("pending", owner.clone())],
+                Some(predicate),
+                "public_convergence",
+                &trace,
+                &operation_trace,
+                &external_trace,
+            );
+            assert!(diagnostics.starts_with(&original_prefix));
+            assert!(diagnostics.contains("admission_started"));
+            assert!(diagnostics.contains("convergence_predicates="));
+            let observations_begin = diagnostics.find("nodes=").unwrap();
+            for marker in [
+                "admission_started",
+                "executor_phase=Committed",
+                &effect_marker,
+            ] {
+                assert!(diagnostics.find(marker).unwrap() < observations_begin);
+            }
+            assert!(diagnostics.contains("node=ready phase=Some(Committed)"));
+            assert!(diagnostics.contains("committed_count=Some(1)"));
+            assert!(diagnostics.contains("effects=Ok(1)"));
+            assert!(diagnostics.contains("effects_local=Some(Ok(true))"));
+            assert!(diagnostics.contains("effects_external=Some(Ok(true))"));
+            assert!(diagnostics.contains("node=pending phase=None"));
+            assert!(diagnostics.contains("source_role=Err(StaleCursor)"));
+            assert!(diagnostics.contains(if pending {
+                "role=Ok(Member)"
+            } else {
+                "role=Ok(Left)"
+            }));
+            let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = trace.lock().unwrap();
+                panic!("controlled local diagnostic trace poison");
+            }));
+            assert!(poisoned.is_err());
+            let poisoned_report = SelfControlFailureDiagnostics {
+                owner: &owner,
+                executor: &executor,
+                account_id: &account_id,
+                id,
+                group,
+                input,
+            }
+            .report(
+                &[("ready", executor.clone()), ("pending", owner.clone())],
+                Some(predicate),
+                "public_convergence",
+                &trace,
+                &operation_trace,
+                &external_trace,
+            );
+            assert!(poisoned_report.starts_with(&original_prefix));
+            assert!(poisoned_report.contains("trace=Err(\"trace mutex poisoned\")"));
+            assert!(poisoned_report.contains("admission_started"));
+            assert!(poisoned_report.contains(&effect_marker));
+            assert!(poisoned_report.contains("source_role=Err(StaleCursor)"));
+            for node in [&executor, &owner] {
+                node.runtime_work.close();
+                node.runtime_work.drain().await;
+            }
+        }
+    }
+
+    struct SelfControlHoldRelease(std::sync::Arc<tokio::sync::Semaphore>);
+
+    impl Drop for SelfControlHoldRelease {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+
+    struct SelfControlRequestHold {
+        pages: std::sync::Mutex<crate::node::account_group::ControlTestPages>,
+        original: std::sync::Mutex<Option<(tokio::task::Id, std::sync::Weak<()>)>>,
+        server: std::sync::Mutex<Option<std::sync::Weak<()>>>,
+        release: std::sync::Arc<tokio::sync::Semaphore>,
+        armed: std::sync::atomic::AtomicBool,
+        admitted: std::sync::atomic::AtomicBool,
+        published: std::sync::atomic::AtomicBool,
+        first_wake_revision: std::sync::atomic::AtomicU64,
+        wake_received: std::sync::atomic::AtomicBool,
+        cancelled: std::sync::atomic::AtomicBool,
+        replacement_seen: std::sync::atomic::AtomicBool,
+        operation_header_seen: std::sync::atomic::AtomicBool,
+    }
+
+    impl SelfControlRequestHold {
+        fn new() -> Self {
+            Self {
+                pages: Default::default(),
+                original: Default::default(),
+                server: Default::default(),
+                release: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+                armed: Default::default(),
+                admitted: Default::default(),
+                published: Default::default(),
+                first_wake_revision: Default::default(),
+                wake_received: Default::default(),
+                cancelled: Default::default(),
+                replacement_seen: Default::default(),
+                operation_header_seen: Default::default(),
+            }
+        }
+
+        fn observe_executor(&self, event: &str) {
+            use std::sync::atomic::Ordering;
+            self.pages.lock().unwrap().observe(event);
+            if self
+                .original
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(task, _)| {
+                    event == format!("control_cancel task={task:?} reason=same_source")
+                })
+            {
+                self.cancelled.store(true, Ordering::Release);
+            }
+            if let Some(revision) = event
+                .strip_prefix("wake_received revision=")
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                let first = self.first_wake_revision.load(Ordering::Acquire);
+                if first > 0 && revision >= first {
+                    self.wake_received.store(true, Ordering::Release);
+                }
+            }
+        }
+
+        async fn hold_original(
+            &self,
+            request: &crate::node::account_documents::wire::DocumentRequest,
+        ) {
+            use std::sync::atomic::Ordering;
+            if !self.armed.load(Ordering::Acquire) {
+                return;
+            }
+            let candidate = {
+                let pages = self.pages.lock().unwrap();
+                pages.live_request(request).and_then(|page| {
+                    let lifetime = pages.lifetime(page.task)?;
+                    Some((page, lifetime))
+                })
+            };
+            let Some((page, lifetime)) = candidate else {
+                return;
+            };
+            {
+                let mut original = self.original.lock().unwrap();
+                if let Some((task, _)) = original.as_ref() {
+                    if page.task != *task && self.admitted.load(Ordering::Acquire) {
+                        self.replacement_seen.store(true, Ordering::Release);
+                    }
+                    return;
+                }
+                if !page.dispatch().is_some_and(|dispatch| {
+                    !dispatch.paired && !dispatch.protected && dispatch.natural_origin()
+                }) {
+                    return;
+                }
+                *original = Some((page.task, lifetime));
+            }
+            let server = std::sync::Arc::new(());
+            *self.server.lock().unwrap() = Some(std::sync::Arc::downgrade(&server));
+            let _ = self.release.acquire().await;
+            drop(server);
+        }
+
+        fn server_live(&self) -> bool {
+            self.server
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|owner| owner.upgrade().is_some())
+        }
+
+        fn flags(&self) -> [bool; 7] {
+            use std::sync::atomic::Ordering;
+            let original = self.original.lock().unwrap();
+            [
+                original.is_some(),
+                original
+                    .as_ref()
+                    .is_some_and(|(_, lifetime)| lifetime.upgrade().is_some()),
+                self.cancelled.load(Ordering::Acquire),
+                self.wake_received.load(Ordering::Acquire),
+                self.replacement_seen.load(Ordering::Acquire),
+                self.operation_header_seen.load(Ordering::Acquire),
+                !self.release.is_closed(),
+            ]
+        }
+    }
+
+    async fn reference_self_control_over_noise(input: AccountSelfControlInput, hold_request: bool) {
+        let pending = input != AccountSelfControlInput::Leave;
+        let accepted_after = input == AccountSelfControlInput::Accept;
+        use crate::node::{
+            AccountDevice, AccountDocumentDomain, AccountGroupOperationPhase, SyncCategory,
+        };
+        let f = fixture(pending);
+        let dir = tempfile::tempdir().unwrap();
+        let group = f.group;
+        let grant = f.witness().grant;
+        let shared = Account::from_secret_bytes(f.account.secret_bytes());
+        let source = direct_node(&dir.path().join("source"), f.member, f.account);
+        let owner = direct_node(&dir.path().join("owner"), f.owner, f.owner_account);
+        let reference_identity = DeviceIdentity::generate();
+        let reference_secrets = reference_identity.secret_bytes();
+        let reference = direct_node(
+            &dir.path().join("reference"),
+            reference_identity,
+            Account::from_secret_bytes(shared.secret_bytes()),
+        );
+        // Ordinary public membership recovery may inherit this account's grant
+        // and turn the reference into a local executor before admission. Keep
+        // that independent owner gated through the remote-operation proof.
+        let membership_hold =
+            SelfControlHoldRelease(std::sync::Arc::new(tokio::sync::Semaphore::new(0)));
+        let membership_release = membership_hold.0.clone();
+        *reference
+            .account_channel_maintenance_test_hook
+            .lock()
+            .unwrap() = Some(std::sync::Arc::new(move |channel| {
+            // Keep public inheritance gated without suspending the worker
+            // that must project the reference's newly received signed controls.
+            channel != group || membership_release.is_closed()
+        }));
+        let extra = (!pending).then(|| {
+            direct_node(
+                &dir.path().join("extra"),
+                DeviceIdentity::generate(),
+                Account::from_secret_bytes(shared.secret_bytes()),
+            )
+        });
+        let mut events = f.events;
+        if let Some(extra) = &extra {
+            let authority = events.last().unwrap().id;
+            let inheritance = crate::node::channel_account_bootstrap::DeviceControl::Inherit {
+                authority,
+                grant,
+                device: extra.own_group_proof(),
+                account_signature: shared
+                    .sign(
+                        &crate::node::channel_account_bootstrap::inheritance_account_message(
+                            group,
+                            authority,
+                            grant,
+                            &extra.identity.public(),
+                        ),
+                    )
+                    .to_vec(),
+            };
+            events.push(Event::new(
+                &extra.identity,
+                group,
+                1,
+                vec![authority],
+                3,
+                3,
+                EventKind::ChannelDeviceInheritance,
+                inheritance.encode(),
+            ));
+        }
+        for node in std::iter::once(&source)
+            .chain(std::iter::once(&owner))
+            .chain(extra.iter())
+        {
+            for event in &events {
+                node.log
+                    .lock()
+                    .unwrap()
+                    .append_durable(event.clone())
+                    .unwrap();
+            }
+            node.process_channel(group);
+        }
+        assert!(
+            reference.channel_members(group).is_empty(),
+            "the requester begins with no manufactured public membership"
+        );
+        let mut nodes = vec![
+            ("source", source.clone()),
+            ("reference", reference.clone()),
+            ("owner", owner.clone()),
+        ];
+        if let Some(extra) = &extra {
+            nodes.push(("extra", extra.clone()));
+        }
+        let trace = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let trace_started = std::time::Instant::now();
+        let trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let operation_trace =
+            std::sync::Arc::new(std::sync::Mutex::new(SelfControlOperationTrace::default()));
+        let external_trace =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let request_hold = hold_request.then(|| std::sync::Arc::new(SelfControlRequestHold::new()));
+        // The hooks and held server future retain the observer. A separate
+        // owner must release its response even if the caller panics first.
+        let _request_hold_release = request_hold
+            .as_ref()
+            .map(|hold| SelfControlHoldRelease(hold.release.clone()));
+        let selected_trace_peer = std::sync::Arc::new(std::sync::Mutex::new(
+            None::<crate::identity::device::PublicIdentity>,
+        ));
+        let settled_scopes = std::sync::Arc::new(std::sync::Mutex::new([[false; 2]; 2]));
+        let peer_labels: std::collections::HashMap<_, _> = nodes
+            .iter()
+            .map(|(label, node)| (node.identity.public().user_id(), *label))
+            .collect();
+        for &(label, ref node) in &nodes {
+            let client_trace = trace.clone();
+            let client_labels = peer_labels.clone();
+            let client_omitted = trace_omitted.clone();
+            let client_operation_trace = operation_trace.clone();
+            let client_external_trace = external_trace.clone();
+            let owner_public = owner.identity.public();
+            let client_request_hold = request_hold.clone();
+            let weak = std::sync::Arc::downgrade(node);
+            let client_selected_trace_peer = selected_trace_peer.clone();
+            let own_public = node.identity.public();
+            let reference_public = reference.identity.public();
+            let completed_scopes = settled_scopes.clone();
+            let queue_samples = std::sync::Mutex::new(std::collections::HashMap::new());
+            *node.account_client_test_hook.lock().unwrap() =
+                Some(std::sync::Arc::new(move |peer, event| {
+                    if let Some(hold) = client_request_hold.as_ref() {
+                        use std::sync::atomic::Ordering;
+                        let online = client_selected_trace_peer.lock().unwrap().clone();
+                        if online.as_ref() == Some(&own_public) && peer == reference_public {
+                            hold.observe_executor(&event);
+                        }
+                        if own_public == reference_public && hold.admitted.load(Ordering::Acquire) {
+                            if event.starts_with("operation_local_published ") {
+                                hold.published.store(true, Ordering::Release);
+                            }
+                            if online.as_ref() == Some(&peer)
+                                && hold.published.load(Ordering::Acquire)
+                                && let Some(revision) = event
+                                    .strip_prefix("wake_send_begin revision=")
+                                    .and_then(|value| value.parse::<u64>().ok())
+                            {
+                                let _ = hold.first_wake_revision.compare_exchange(
+                                    0,
+                                    revision,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                );
+                            }
+                        }
+                    }
+                    // Request bytes, intent identifiers and nonce fragments
+                    // are not needed to diagnose scheduling or authentication.
+                    if event.starts_with("control_request_body=") {
+                        return;
+                    }
+                    let event = if event.starts_with("control_task ") {
+                        std::iter::once("control_task")
+                            .chain(event.split_ascii_whitespace().filter(|field| {
+                                ["paired=", "protected=", "resumed=", "replacement=", "hint="]
+                                    .iter()
+                                    .any(|prefix| field.starts_with(prefix))
+                            }))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    } else if event.starts_with("control_cancel ") {
+                        format!(
+                            "control_cancel {}",
+                            event
+                                .split_ascii_whitespace()
+                                .find(|field| field.starts_with("reason="))
+                                .unwrap_or("reason=unknown")
+                        )
+                    } else {
+                        event
+                    };
+                    let selected_pair = client_selected_trace_peer
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|online| {
+                            (own_public == reference_public && &peer == online)
+                                || (&own_public == online && peer == reference_public)
+                        });
+                    if selected_pair {
+                        let scope = match event.as_str() {
+                            "document_scope_settled scope=Control" => Some(0),
+                            "document_scope_settled scope=Directory" => Some(1),
+                            _ => None,
+                        };
+                        if let Some(scope) = scope {
+                            let direction = usize::from(own_public != reference_public);
+                            completed_scopes.lock().unwrap()[direction][scope] = true;
+                        }
+                    }
+                    let external_pair = client_selected_trace_peer
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|online| {
+                            (&own_public == online && peer == owner_public)
+                                || (own_public == owner_public && &peer == online)
+                        });
+                    let external_phase = (external_pair
+                        && ["dial_", "session_", "control_fanout_"]
+                            .iter()
+                            .any(|prefix| event.starts_with(prefix)))
+                        || (own_public == owner_public && event.starts_with("responder_"));
+                    if external_phase {
+                        let started = client_operation_trace.lock().unwrap().started;
+                        if let Some(started) = started {
+                            let mut tail = client_external_trace.lock().unwrap();
+                            if tail.len() == 64 {
+                                tail.pop_front();
+                            }
+                            tail.push_back((started.elapsed().as_millis(), label, event.clone()));
+                        }
+                    }
+                    if event.starts_with("control_queue") || event.starts_with("control_refresh") {
+                        if !selected_pair {
+                            return;
+                        }
+                        let state = event
+                            .split_ascii_whitespace()
+                            .map(|part| {
+                                if part.starts_with("retry_ms=") && part != "retry_ms=0" {
+                                    "retry_ms=pending"
+                                } else {
+                                    part
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let key = (
+                            peer.user_id(),
+                            event.split_ascii_whitespace().next().unwrap().to_owned(),
+                        );
+                        let mut samples = queue_samples.lock().unwrap();
+                        if samples.get(&key) == Some(&state) {
+                            return;
+                        }
+                        samples.insert(key, state);
+                    }
+                    let selected_responder = client_selected_trace_peer
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|online| {
+                            &own_public == online || own_public == reference_public
+                        });
+                    if selected_pair
+                        || (selected_responder && event.starts_with("operation_local_published"))
+                    {
+                        client_operation_trace
+                            .lock()
+                            .unwrap()
+                            .record(label, event.clone());
+                    }
+                    if (selected_responder && event.starts_with("responder_"))
+                        || event.starts_with("document_scope_settled")
+                        || event.starts_with("operation_local_published")
+                        || event.starts_with("wake_")
+                        || (selected_pair
+                            && (event.starts_with("dial_") || event.starts_with("session_")))
+                        || event.starts_with("control_")
+                        || event.starts_with("negotiation_begin domain=Some(GroupControl)")
+                        || event.starts_with("negotiation_end domain=Some(GroupControl)")
+                        || event.starts_with("page_end")
+                    {
+                        let peer_label = client_labels
+                            .get(&peer.user_id())
+                            .copied()
+                            .unwrap_or("unknown");
+                        let busy = weak
+                            .upgrade()
+                            .map(|node| node.account_sync_commit.try_lock().is_err());
+                        let mut trace = client_trace.lock().unwrap();
+                        if trace.len() >= 128 {
+                            trace.pop_front();
+                            client_omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        trace.push_back((
+                            trace_started.elapsed().as_millis(),
+                            label,
+                            format!(
+                                "client peer={peer_label} {event} sampled_sync_commit_busy={busy:?}"
+                            ),
+                        ));
+                    }
+                }));
+            let trace = trace.clone();
+            let omitted = trace_omitted.clone();
+            let peer_labels = peer_labels.clone();
+            let operation_trace = operation_trace.clone();
+            let request_hold = request_hold.clone();
+            let selected_trace_peer = selected_trace_peer.clone();
+            let own_public = node.identity.public();
+            let reference_public = reference.identity.public();
+            *node.account_session_test_hook.lock().unwrap() = Some(std::sync::Arc::new(
+                move |peer, frame| {
+                    let trace = trace.clone();
+                    let omitted = omitted.clone();
+                    let operation_trace = operation_trace.clone();
+                    let request_hold = request_hold.clone();
+                    let requester_node = own_public == reference_public;
+                    let reference_id = reference_public.user_id();
+                    let selected_pair =
+                        selected_trace_peer
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .is_some_and(|online| {
+                                (own_public == reference_public && &peer == online)
+                                    || (&own_public == online && peer == reference_public)
+                            });
+                    let peer_label = peer_labels
+                        .get(&peer.user_id())
+                        .copied()
+                        .unwrap_or("unknown");
+                    Box::pin(async move {
+                        use crate::node::account_sync_wire::AccountHistoryFrame;
+                        if requester_node
+                            && selected_pair
+                            && let Some(hold) = request_hold.as_ref()
+                        {
+                            match &frame {
+                                AccountHistoryFrame::DocumentsRequest { body } => {
+                                    if let Some(request) = crate::node::account_documents::wire::DocumentRequest::decode(body)
+                                        .filter(|request| request.domain == AccountDocumentDomain::GroupControl)
+                                    {
+                                        hold.hold_original(&request).await;
+                                    }
+                                }
+                                AccountHistoryFrame::DocumentHeader { body }
+                                    if serde_json::from_slice::<crate::node::AccountDocumentMeta>(body).is_ok_and(|meta| {
+                                        matches!(meta.key, crate::node::AccountDocumentKey::GroupOperation { channel, source_device }
+                                            if channel == hex::encode(group.as_bytes()) && source_device == reference_id)
+                                    }) => {
+                                    hold.operation_header_seen.store(true, std::sync::atomic::Ordering::Release);
+                                }
+                                _ => {}
+                            }
+                        }
+                        let key_kind = |key: &crate::node::AccountDocumentKey| match key {
+                            crate::node::AccountDocumentKey::GroupOperation { .. } => "operation",
+                            crate::node::AccountDocumentKey::GroupControl { .. } => "control",
+                            crate::node::AccountDocumentKey::GroupInventory { .. } => "inventory",
+                            _ => "other",
+                        };
+                        let event = match frame {
+                            AccountHistoryFrame::DocumentsRequest { body } => {
+                                crate::node::account_documents::wire::DocumentRequest::decode(&body)
+                                    .map(|request| {
+                                        format!(
+                                            "request from={peer_label} v={} domain={:?} after={} zero={} probe={}",
+                                            request.version,
+                                            request.domain,
+                                            request.after.as_ref().map_or("none", key_kind),
+                                            request.known_digest == [0; 32],
+                                            request.operation.is_some(),
+                                        )
+                                    })
+                            }
+                            AccountHistoryFrame::DocumentHeader { body } => {
+                                serde_json::from_slice::<crate::node::AccountDocumentMeta>(&body)
+                                    .ok()
+                                    .map(|meta| {
+                                        format!(
+                                            "header to={peer_label} kind={} revision={}",
+                                            key_kind(&meta.key),
+                                            meta.revision
+                                        )
+                                    })
+                            }
+                            AccountHistoryFrame::DocumentsComplete { body } => {
+                                serde_json::from_slice::<serde_json::Value>(&body).ok()
+                                    .filter(|complete| complete["domain"] == "group_control")
+                                    .map(|complete| {
+                                        format!("complete_before_send to={peer_label} operation={} next={} kinds={:?}",
+                                            !complete["operation"].is_null(), !complete["next"].is_null(),
+                                            complete["operation"]["supported_kinds"].as_u64())
+                                    })
+                            }
+                            _ => None,
+                        };
+                        if let Some(event) = event {
+                            if selected_pair {
+                                operation_trace.lock().unwrap().record(label, event.clone());
+                            }
+                            let mut trace = trace.lock().unwrap();
+                            if trace.len() >= 128 {
+                                trace.pop_front();
+                                omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            trace.push_back((trace_started.elapsed().as_millis(), label, event));
+                        }
+                    })
+                },
+            ));
+        }
+        let siblings: Vec<_> = nodes
+            .iter()
+            .filter(|(_, node)| node.account_id() == shared.account_id())
+            .map(|(_, node)| node.clone())
+            .collect();
+        for left in &siblings {
+            for right in &siblings {
+                if left.user_id() != right.user_id() {
+                    left.account_devices
+                        .lock()
+                        .unwrap()
+                        .insert(AccountDevice {
+                            public: right.identity.public(),
+                            certificate: shared.certify(&right.identity.public().ed25519_pub),
+                        })
+                        .unwrap();
+                }
+            }
+        }
+        let mut listeners = Vec::new();
+        let mut addresses = Vec::new();
+        for (name, node) in &nodes {
+            node.set_device_sync_category(SyncCategory::History, false)
+                .unwrap();
+            // This regression isolates mandatory account membership/control
+            // reconciliation from optional public-profile archive traffic.
+            node.set_device_sync_category(SyncCategory::Profile, false)
+                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            node.configure_privacy(
+                &dir.path().join(name),
+                "pw",
+                &node.signed_announce("Self control fixture", address.port()),
+                std::sync::Arc::new(crate::discovery::DiscoveryVisibility::default()),
+            )
+            .unwrap();
+            listeners.push(listener);
+            addresses.push(address);
+        }
+        for (_, left) in &nodes {
+            for ((_, right), address) in nodes.iter().zip(&addresses) {
+                if left.user_id() != right.user_id()
+                    && left.user_id() != reference.user_id()
+                    && right.user_id() != reference.user_id()
+                {
+                    left.roster.lock().unwrap().update(
+                        &right.signed_announce("Self control peer", address.port()),
+                        address.ip(),
+                        &left.user_id(),
+                    );
+                }
+            }
+        }
+        source.publish_account_group_access_for(group);
+        if let Some(extra) = &extra {
+            extra.publish_account_group_access_for(group);
+        }
+        let mut handles = Vec::new();
+        let mut reference_listener = None;
+        for (index, ((_, node), listener)) in nodes.iter().zip(listeners).enumerate() {
+            if index == 1 {
+                reference_listener = Some(listener);
+                handles.push(None);
+            } else {
+                handles.push(Some(tokio::spawn(node.clone().run_accept_loop(listener))));
+            }
+        }
+        let (online, offline_index) = match &extra {
+            Some(extra) if extra.user_id() < source.user_id() => (extra.clone(), Some(0)),
+            Some(_) => (source.clone(), Some(3)),
+            None => (source.clone(), None),
+        };
+        *selected_trace_peer.lock().unwrap() = Some(online.identity.public());
+        let offline = offline_index.map(|index| nodes[index].1.clone());
+        let offline_public = offline.as_ref().map(|node| node.identity.public());
+        let readiness_started = std::time::Instant::now();
+        let readiness_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let archive_source = if pending { &owner } else { &source };
+        let archive = observe_self_control_by_deadline(
+            readiness_deadline,
+            Box::pin(async {
+                archive_source
+                    .send_channel_message(group, b"unrelated retained archive")
+                    .await
+                    .unwrap();
+                archive_source
+                    .history(group, 100)
+                    .unwrap()
+                    .into_iter()
+                    .find(|row| row.text == b"unrelated retained archive")
+                    .unwrap()
+                    .id
+            }),
+        )
+        .await
+        .expect("real archive preparation must complete within the shared cold setup deadline");
+        if !pending {
+            let archive_states = std::cell::RefCell::new(vec!["unobserved"; nodes.len()]);
+            wait_self_control_noise_diagnosed(readiness_deadline, || {
+                for (index, (_, node)) in nodes.iter().enumerate().filter(|(_, (_, node))| node.user_id() != reference.user_id()) {
+                    let state = match node.history(group, 100) {
+                        Ok(rows) => if rows.iter().any(|row| row.id == archive) { "present" } else { "missing" },
+                        Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => "pending",
+                        Err(error) => panic!("archive marker history failed: {error}"),
+                    };
+                    archive_states.borrow_mut()[index] = state;
+                    if state != "present" { return false; }
+                }
+                true
+            }, || format!("archive marker must be physically retained before enrollment: elapsed_ms={} nodes={:?}", readiness_started.elapsed().as_millis(), nodes.iter().map(|(label, _)| *label).zip(archive_states.borrow().iter().copied()).collect::<Vec<_>>())).await;
+        }
+        // One absolute cold owner includes real archive preparation, signed old
+        // membership, final topology readiness and the exact initial read hold.
+        if let Some(public) = offline_public.as_ref() {
+            wait_self_control_noise_diagnosed(
+                readiness_deadline,
+                || online.group_control_heads(group).iter().any(|head| {
+                    head.proof.public() == *public
+                        && head.valid(&shared.public().ed25519_pub)
+                        && head.access.observation.role == AccountGroupRole::Member
+                }),
+                || format!(
+                    "the live sibling must retain the offline author's authenticated Member head over Noise before requester enrollment: elapsed_ms={} online={} retained_heads={}",
+                    readiness_started.elapsed().as_millis(), online.user_id(),
+                    online.group_control_heads(group).len()
+                ),
+            ).await;
+        }
+        if let Some(index) = offline_index {
+            let offline = offline.as_ref().unwrap();
+            offline.runtime_work.close();
+            let handle = handles[index].take().unwrap();
+            handle.abort();
+            let _ = handle.await;
+            offline.sessions.clear();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                offline.runtime_work.drain(),
+            )
+            .await
+            .unwrap();
+            // This scenario retains authenticated stale membership provenance,
+            // not a live discovery advertisement for the retired participant.
+            // Withdraw only its route after retirement; signed heads and the
+            // certified account directory must survive the simulated outage.
+            let offline_public = offline.identity.public();
+            for (_, node) in &nodes {
+                if node.user_id() != offline.user_id() {
+                    node.roster.lock().unwrap().forget(&offline_public);
+                }
+            }
+        }
+        for (_, left) in &nodes {
+            for ((_, right), address) in nodes.iter().zip(&addresses) {
+                if left.user_id() != right.user_id()
+                    && offline_public.as_ref().is_none_or(|public| {
+                        left.identity.public() != *public && right.identity.public() != *public
+                    })
+                {
+                    left.roster.lock().unwrap().update(
+                        &right.signed_announce("Self control peer", address.port()),
+                        address.ip(),
+                        &left.user_id(),
+                    );
+                }
+            }
+        }
+        *settled_scopes.lock().unwrap() = [[false; 2]; 2];
+        handles[1] = Some(tokio::spawn(
+            reference
+                .clone()
+                .run_accept_loop(reference_listener.take().unwrap()),
+        ));
+        let kind = input.operation().kind();
+        // Require actual completed mandatory scopes from the final topology,
+        // independently of unrelated optional-lane aggregate progress.
+        let documents_ready = |node: &Node, peer: &Node, direction: usize| {
+            let public = peer.identity.public();
+            let exact_protocol = node
+                .account_group_versions
+                .lock()
+                .unwrap()
+                .get(&peer.user_id())
+                .is_some_and(|support| support.public == public);
+            let exact_route = node
+                .routing_peer(&peer.user_id())
+                .is_some_and(|route| route.public == public);
+            let settled = settled_scopes.lock().unwrap()[direction];
+            exact_protocol && exact_route && settled.into_iter().all(|complete| complete)
+        };
+        let readiness = || {
+            let role_ready = match reference.account_group_access(group) {
+                Ok(access) => {
+                    access.role
+                        == if pending {
+                            AccountGroupRole::Invited
+                        } else {
+                            AccountGroupRole::Member
+                        }
+                }
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                Err(error) => panic!("reference readiness failed: {error}"),
+            };
+            let capability_ready = reference
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .get(&online.user_id())
+                .is_some_and(|support| {
+                    support.public == online.identity.public()
+                        && support.kinds & kind.capability_bit() != 0
+                });
+            let reverse_ready = online
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .get(&reference.user_id())
+                .is_some_and(|support| support.public == reference.identity.public());
+            let old_head_ready = offline_public.as_ref().is_none_or(|public| {
+                [&reference, &online].iter().all(|node| {
+                    node.group_control_heads(group).iter().any(|head| {
+                        head.proof.public() == *public
+                            && head.access.observation.role == AccountGroupRole::Member
+                    })
+                })
+            });
+            [
+                role_ready,
+                capability_ready,
+                reverse_ready,
+                old_head_ready,
+                documents_ready(&reference, &online, 0),
+                documents_ready(&online, &reference, 1),
+            ]
+        };
+        let online_label = nodes
+            .iter()
+            .find(|(_, node)| node.user_id() == online.user_id())
+            .unwrap()
+            .0;
+        let mut observed_caps = None;
+        // All readiness proofs must come from the final topology; the admitted
+        // action retains its independent, unchanged 8s deadline.
+        wait_self_control_noise_diagnosed(readiness_deadline, || {
+            let forward = reference.group_operation_versions.lock().unwrap().get(&online.user_id())
+                .map(|support| (support.public == online.identity.public(), support.kinds));
+            let reverse = online.group_operation_versions.lock().unwrap().get(&reference.user_id())
+                .map(|support| (support.public == reference.identity.public(), support.kinds));
+            let caps = [forward, reverse];
+            if observed_caps != Some(caps) {
+                observed_caps = Some(caps);
+                let mut trace = trace.lock().unwrap();
+                if trace.len() >= 128 {
+                    trace.pop_front();
+                    trace_omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                trace.push_back((trace_started.elapsed().as_millis(), "reference",
+                    format!("sampled_caps online={online_label} forward_reverse={caps:?}")));
+            }
+            readiness().into_iter().all(|ready| ready)
+        }, || {
+            let forward = reference.group_operation_versions.lock().unwrap().get(&online.user_id()).map(|support| (
+                support.public == online.identity.public(), support.kinds & kind.capability_bit() != 0,
+            ));
+            let reverse = online.group_operation_versions.lock().unwrap().get(&reference.user_id())
+                .map(|support| support.public == reference.identity.public());
+            let old_heads = offline_public.as_ref().map(|public| [&reference, &online].map(|node| {
+                node.group_control_heads(group).iter().any(|head| head.proof.public() == *public
+                    && head.access.observation.role == AccountGroupRole::Member)
+            }));
+            format!("real private role/capability and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_forward_reverse_old_mandatory_scopes_forward_reverse={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; settled_control_directory_forward_reverse={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}",
+                readiness_started.elapsed().as_millis(), readiness(), forward, reverse, old_heads,
+                *settled_scopes.lock().unwrap(),
+                [reference.certified_sibling(&online.identity.public()), online.certified_sibling(&reference.identity.public())],
+                [reference.routing_peer(&online.user_id()).is_some_and(|peer| peer.public == online.identity.public()),
+                 online.routing_peer(&reference.user_id()).is_some_and(|peer| peer.public == reference.identity.public())],
+                trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+                trace.lock().unwrap().iter().cloned().collect::<Vec<_>>())
+        }).await;
+        eprintln!(
+            "self control readiness completed chosen_online={online_label} readiness_elapsed_ms={} ready_role_forward_reverse_old_mandatory_scopes_forward_reverse={:?} trace_omitted={} bounded_trace={:?}",
+            readiness_started.elapsed().as_millis(),
+            readiness(),
+            trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            trace.lock().unwrap().iter().cloned().collect::<Vec<_>>()
+        );
+        if let Some(offline) = offline.as_ref() {
+            let offline_public = offline.identity.public();
+            for node in [&reference, &online] {
+                assert!(
+                    node.linked_devices().iter().any(|device| {
+                        device.public == offline_public
+                            && device.certificate.verify()
+                            && device.certificate.account_id() == shared.account_id()
+                    }),
+                    "route withdrawal must preserve the offline source's certified identity"
+                );
+                assert!(
+                    node.group_control_heads(group).iter().any(|head| {
+                        head.proof.public() == offline_public
+                            && head.valid(&shared.public().ed25519_pub)
+                            && head.access.observation.role == AccountGroupRole::Member
+                    }),
+                    "route withdrawal must retain the authentic stale Member head"
+                );
+            }
+        }
+        // Capture the source precondition before admission can commit a new
+        // membership event and invalidate its published projection.
+        let canonical = std::cell::RefCell::new(None);
+        wait_self_control_noise_diagnosed(
+            readiness_deadline,
+            || match online.account_group_projection(group) {
+                Ok(projection) => {
+                    *canonical.borrow_mut() = Some(
+                        Node::public_account_group_source(
+                            group,
+                            &projection,
+                            &online.identity.public(),
+                            &online.own_group_proof(),
+                        )
+                        .expect("ready selected source must have canonical membership"),
+                    );
+                    true
+                }
+                Err(crate::eventlog::LogError::StaleCursor) => false,
+                Err(error) => panic!("selected source projection failed: {error}"),
+            },
+            || "selected source projection must be published before operation admission".into(),
+        )
+        .await;
+        assert_eq!(
+            canonical.into_inner().unwrap().role,
+            if pending {
+                AccountGroupRole::Invited
+            } else {
+                AccountGroupRole::Member
+            }
+        );
+        let fanout_trace = trace.clone();
+        let fanout_operation_trace = operation_trace.clone();
+        *online.control_fanout_start_test_hook.lock().unwrap() = Some(Box::new(move || {
+            fanout_operation_trace
+                .lock()
+                .unwrap()
+                .record(online_label, "fanout_started".to_owned());
+            fanout_trace.lock().unwrap().push_back((
+                trace_started.elapsed().as_millis(),
+                online_label,
+                "fanout_started".to_owned(),
+            ));
+        }));
+        let operation = input.operation();
+        let id = reference
+            .new_account_group_operation_id(&shared.account_id())
+            .unwrap();
+        if let Some(hold) = request_hold.as_ref() {
+            hold.armed.store(true, std::sync::atomic::Ordering::Release);
+            online.account_sync_notify.notify_one();
+            wait_self_control_noise_diagnosed(
+                readiness_deadline,
+                || hold.original.lock().unwrap().is_some() && hold.server_live(),
+                || format!("the exact executor must own a live unpaired read from the requester before admission; hold_flags={:?}", hold.flags()),
+            ).await;
+        }
+        trace.lock().unwrap().push_back((
+            trace_started.elapsed().as_millis(),
+            "reference",
+            "admission_started".to_owned(),
+        ));
+        {
+            let mut operation_trace = operation_trace.lock().unwrap();
+            operation_trace.started = Some(std::time::Instant::now());
+            operation_trace.record("reference", "admission_started".to_owned());
+        }
+        let admission_started = std::time::Instant::now();
+        let operation_budget = std::time::Duration::from_secs(8);
+        let admitted = loop {
+            let result = reference.submit_account_group_operation_if(
+                &shared.account_id(), id, group, operation.clone(), |commit| {
+                    if let Some(hold) = request_hold.as_ref() {
+                        let original = hold.original.lock().unwrap().clone().unwrap();
+                        assert!(
+                            original.1.upgrade().is_some() && hold.pages.lock().unwrap().is_active(original.0),
+                            "the original executor read must remain live at the exact operation admission"
+                        );
+                    }
+                    let result = commit();
+                    if result.is_ok() && let Some(hold) = request_hold.as_ref() {
+                        hold.admitted.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    result
+                },
+            );
+            match result {
+                Ok(admitted) => break admitted,
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                    assert!(
+                        reference
+                            .account_group_operation_status(&shared.account_id(), id)
+                            .unwrap()
+                            .is_none(),
+                        "Pending must precede durable operation admission"
+                    );
+                    assert!(
+                        admission_started.elapsed() < operation_budget,
+                        "selected metadata must become ready within the original operation deadline"
+                    );
+                    // The synchronous API retains no intent on Pending. Retry
+                    // the same identity after yielding to its existing worker;
+                    // every authorization still observes the original held read.
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("self-control admission failed: {error}"),
+            }
+        };
+        operation_trace
+            .lock()
+            .unwrap()
+            .record("reference", "admission_returned".to_owned());
+        trace.lock().unwrap().push_back((
+            trace_started.elapsed().as_millis(),
+            "reference",
+            "admission_returned".to_owned(),
+        ));
+        assert_eq!(admitted.executions.len(), 1);
+        let (executor_label, executor) = nodes
+            .iter()
+            .find(|(_, node)| node.user_id() == admitted.executions[0].device_id)
+            .map(|(label, node)| (*label, node.clone()))
+            .unwrap();
+        assert!(
+            executor.identity.public() == online.identity.public()
+                && executor.identity.public() != reference.identity.public(),
+            "the reference operation must pin the exact selected remote source"
+        );
+        assert_eq!(executor.account_id(), shared.account_id());
+        assert!(
+            !executor.runtime_work.is_closed(),
+            "an available canonical source must be pinned"
+        );
+        let full_source = executor.identity.public();
+        let event_kind = input.event_kind();
+        let action_deadline = admission_started + operation_budget;
+        let mut last_private_predicate = None;
+        let mut private_committed_at = None;
+        let milestones = std::sync::Mutex::new(SelfControlMilestones::default());
+        let private_receipt = async {
+            loop {
+                let status = reference
+                    .account_group_operation_status(&shared.account_id(), id)
+                    .unwrap();
+                let predicate = (
+                    status.as_ref().is_some_and(|status| {
+                        status.phase == AccountGroupOperationPhase::Committed
+                    }),
+                    status.as_ref().map(|status| status.committed_events.len()),
+                    None,
+                    [None, None],
+                );
+                if last_private_predicate != Some(predicate) {
+                    operation_trace.lock().unwrap().record(
+                        "reference",
+                        format!("private_receipt_predicates={predicate:?}"),
+                    );
+                    last_private_predicate = Some(predicate);
+                }
+                if predicate.0 && predicate.1 == Some(1) {
+                    let observed = std::time::Instant::now();
+                    if private_committed_at.is_none() {
+                        private_committed_at = Some(observed);
+                        milestones.lock().unwrap().private_commit_ms =
+                            Some(admission_started.elapsed().as_millis());
+                        operation_trace
+                            .lock()
+                            .unwrap()
+                            .record("reference", "private_committed".to_owned());
+                    }
+                    let held = request_hold
+                        .as_ref()
+                        .map(|hold| (hold.flags(), hold.server_live()));
+                    let qualified_at = std::time::Instant::now();
+                    if qualified_self_control_receipt(predicate.0, predicate.1, held)
+                        && qualified_at <= action_deadline
+                    {
+                        milestones.lock().unwrap().qualified_receipt = Some((
+                            qualified_at.duration_since(admission_started).as_millis(),
+                            held,
+                        ));
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        let mut last_predicate = None;
+        let public_tail = async {
+            operation_trace
+                .lock()
+                .unwrap()
+                .record("reference", "public_convergence_started".to_owned());
+            let mut previous_phase = None;
+            loop {
+                let phase = executor
+                    .account_group_operation_status(&shared.account_id(), id)
+                    .unwrap()
+                    .map(|status| status.phase);
+                if phase != previous_phase {
+                    operation_trace
+                        .lock()
+                        .unwrap()
+                        .record(executor_label, format!("executor_phase={phase:?}"));
+                    trace.lock().unwrap().push_back((
+                        trace_started.elapsed().as_millis(),
+                        executor_label,
+                        format!(
+                            "executor_phase={phase:?} since_admission_ms={}",
+                            admission_started.elapsed().as_millis()
+                        ),
+                    ));
+                    previous_phase = phase;
+                }
+                let mut requester_committed = false;
+                let mut committed_count = None;
+                let mut external_present = None;
+                let mut role_ready = [None, None];
+                let ready = reference
+                    .account_group_operation_status(&shared.account_id(), id)
+                    .unwrap()
+                    .is_some_and(|status| {
+                        requester_committed = status.phase == AccountGroupOperationPhase::Committed;
+                        committed_count = Some(status.committed_events.len());
+                        requester_committed && status.committed_events.len() == 1 && {
+                            let present = status.committed_events.iter().all(|event| {
+                                owner.log.lock().unwrap().get(event).unwrap().is_some()
+                            });
+                            external_present = Some(present);
+                            present
+                        }
+                    })
+                    && [&reference, &executor]
+                        .into_iter()
+                        .enumerate()
+                        .all(|(index, node)| {
+                            let matches = match node.account_group_access(group) {
+                                Ok(access) => {
+                                    access.role
+                                        == if accepted_after {
+                                            AccountGroupRole::Member
+                                        } else {
+                                            AccountGroupRole::Left
+                                        }
+                                }
+                                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                                    false
+                                }
+                                Err(error) => {
+                                    panic!("self-control role observation failed: {error}")
+                                }
+                            };
+                            role_ready[index] = Some(matches);
+                            matches
+                        });
+                let predicate = (
+                    requester_committed,
+                    committed_count,
+                    external_present,
+                    role_ready,
+                );
+                if last_predicate != Some(predicate) {
+                    operation_trace.lock().unwrap().record("reference", format!(
+                        "convergence_predicates requester_committed={} committed_count={:?} external_present={:?} roles_reference_executor={:?}",
+                        predicate.0, predicate.1, predicate.2, predicate.3));
+                    last_predicate = Some(predicate);
+                }
+                if ready {
+                    {
+                        let mut phases = milestones.lock().unwrap();
+                        phases
+                            .public_predicates_ms
+                            .get_or_insert(admission_started.elapsed().as_millis());
+                        phases
+                            .history_begin_ms
+                            .get_or_insert(admission_started.elapsed().as_millis());
+                    }
+                    // Capture the first ready history only after the exact
+                    // committed effect and both roles are visible. Keep this
+                    // observation inside the functional convergence deadline and
+                    // before releasing the held response or running postchecks.
+                    let history = loop {
+                        match reference.history(group, 100) {
+                            Ok(history) => break history,
+                            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                                milestones.lock().unwrap().history_stale += 1;
+                            }
+                            Err(_) => {
+                                panic!("reference history failed outside bounded preparation")
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    };
+                    milestones.lock().unwrap().history_completed_ms =
+                        Some(admission_started.elapsed().as_millis());
+                    operation_trace
+                        .lock()
+                        .unwrap()
+                        .record("reference", "converged".to_owned());
+                    trace.lock().unwrap().push_back((
+                        trace_started.elapsed().as_millis(),
+                        "reference",
+                        format!(
+                            "converged since_admission_ms={}",
+                            admission_started.elapsed().as_millis()
+                        ),
+                    ));
+                    break history;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        let convergence = complete_self_control_phases(
+            tokio::time::Instant::from_std(action_deadline),
+            private_receipt,
+            public_tail,
+        )
+        .await;
+        let last_predicate = last_predicate.or(last_private_predicate);
+        let failed_phase = if private_committed_at.is_none_or(|observed| observed > action_deadline)
+        {
+            "private_receipt"
+        } else if milestones.lock().unwrap().qualified_receipt.is_none() {
+            "causal_qualification"
+        } else {
+            "public_convergence"
+        };
+        let held_request_flags = request_hold.as_ref().map(|hold| hold.flags());
+        eprintln!(
+            "self control immutable phase milestones={:?}",
+            milestones.lock().unwrap()
+        );
+        if convergence.is_err() {
+            let listeners_finished: Vec<_> = handles
+                .iter()
+                .map(|handle| handle.as_ref().map(|handle| handle.is_finished()))
+                .collect();
+            let diagnostics = SelfControlFailureDiagnostics {
+                owner: &owner,
+                executor: &executor,
+                account_id: &shared.account_id(),
+                id,
+                group,
+                input,
+            }
+            .report(
+                &nodes,
+                last_predicate,
+                failed_phase,
+                &trace,
+                &operation_trace,
+                &external_trace,
+            );
+            if let Some(hold) = request_hold.as_ref() {
+                hold.release.close();
+            }
+            panic!(
+                "{diagnostics}; held_request_flags={held_request_flags:?} listeners_finished={listeners_finished:?}"
+            );
+        }
+        let history = convergence.unwrap();
+        if let Some(hold) = request_hold.as_ref() {
+            assert!(
+                hold.server_live() && !hold.release.is_closed(),
+                "the original authenticated server response must remain held through functional public convergence"
+            );
+            assert_eq!(hold.flags(), EXPECTED_SELF_CONTROL_HOLD);
+            hold.release.close();
+        }
+        eprintln!(
+            "self control operation prefix: {:?}",
+            operation_trace.lock().unwrap()
+        );
+        if let Some(flags) = held_request_flags {
+            assert_eq!(
+                flags, EXPECTED_SELF_CONTROL_HOLD,
+                "a request publication Wake must retire the exact old child and deliver the operation through a distinct live read while its original response stays held"
+            );
+        }
+        eprintln!(
+            "self control Noise timing: input={input:?} trace={:?}",
+            trace
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, _, event)| {
+                    event.starts_with("executor_phase=") || event.starts_with("converged ")
+                })
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "self control final observer chosen_online={online_label} omitted={} bounded_trace={:?}",
+            trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            trace.lock().unwrap().iter().cloned().collect::<Vec<_>>()
+        );
+        let status = reference
+            .account_group_operation_status(&shared.account_id(), id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            status.primary_event, None,
+            "public controls have no primary message event"
+        );
+        assert_eq!(status.committed_events.len(), 1);
+        let event = owner
+            .log
+            .lock()
+            .unwrap()
+            .get(&status.committed_events[0])
+            .unwrap()
+            .unwrap()
+            .clone();
+        assert_eq!(event.kind, event_kind);
+        assert!(
+            event.ciphertext == input.event_payload(grant)
+                && event.verify_integrity()
+                && event.verify_signature()
+        );
+        if input == AccountSelfControlInput::Decline {
+            owner.await_channel_metadata(group).await.unwrap();
+            assert!(
+                owner
+                    .log
+                    .lock()
+                    .unwrap()
+                    .events(&group)
+                    .unwrap()
+                    .iter()
+                    .all(|event| event.kind != EventKind::ChannelAccept),
+                "explicit decline must never manufacture acceptance before removing the invitation"
+            );
+            assert!(
+                owner
+                    .account_group_projection(group)
+                    .unwrap()
+                    .authority
+                    .account_grant(&shared.public().ed25519_pub)
+                    .is_none()
+            );
+        }
+        assert_eq!(event.author.ed25519_pub(), &full_source.ed25519_pub);
+        assert_eq!(status.committed_events, vec![event.id]);
+        if !accepted_after {
+            for node in [&reference, &executor] {
+                let authored_messages = || {
+                    node.log
+                        .lock()
+                        .unwrap()
+                        .events(&group)
+                        .unwrap()
+                        .into_iter()
+                        .filter(|event| {
+                            event.kind == EventKind::Message
+                                && event.author.ed25519_pub() == &node.identity.public().ed25519_pub
+                        })
+                        .map(|event| event.id)
+                        .collect::<Vec<_>>()
+                };
+                let before = authored_messages();
+                assert!(
+                    node.enqueue_channel_message_reply_expiring_if(
+                        group,
+                        b"forbidden after account departure",
+                        None,
+                        None,
+                        |commit| commit(),
+                    )
+                    .is_err(),
+                    "a Left account must reject direct public enqueue before allocation"
+                );
+                assert!(
+                    node.send_channel_message(group, b"forbidden after account departure")
+                        .await
+                        .is_err(),
+                    "a Left account must reject direct public send even with a stale local public view"
+                );
+                assert_eq!(
+                    authored_messages(),
+                    before,
+                    "rejected direct SDK calls must not allocate a public message effect"
+                );
+            }
+        }
+        // The exact accepted effect is already retained above. Complete only
+        // this owner's selected metadata before checking its derived authority.
+        owner.await_channel_metadata(group).await.unwrap();
+        assert_eq!(
+            owner
+                .account_group_projection(group)
+                .unwrap()
+                .authority
+                .is_member(&full_source, &executor.own_group_proof()),
+            accepted_after
+        );
+        assert_eq!(
+            reference
+                .submit_account_group_operation(&shared.account_id(), id, group, operation.clone())
+                .unwrap(),
+            status
+        );
+        assert!(
+            !history.iter().any(|row| row.id == archive),
+            "explicit self control must not grant optional archive history"
+        );
+        for (_, node) in &nodes {
+            node.runtime_work.close();
+        }
+        for handle in handles.into_iter().flatten() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        drop(membership_hold);
+        for (_, node) in &nodes {
+            node.sessions.clear();
+            tokio::time::timeout(std::time::Duration::from_secs(5), node.runtime_work.drain())
+                .await
+                .unwrap();
+        }
+        drop((
+            siblings, executor, offline, online, nodes, source, owner, reference, extra,
+        ));
+        let reference = direct_node(
+            &dir.path().join("reference"),
+            DeviceIdentity::from_secret_bytes(reference_secrets.0, reference_secrets.1),
+            Account::from_secret_bytes(shared.secret_bytes()),
+        );
+        // Reopening retains a lazy local projection. Prepare only this selected
+        // group before asserting the role recovered from its original controls.
+        reference.await_channel_metadata(group).await.unwrap();
+        assert_eq!(
+            reference.account_group_access(group).unwrap().role,
+            if accepted_after {
+                AccountGroupRole::Member
+            } else {
+                AccountGroupRole::Left
+            }
+        );
+        assert_eq!(
+            reference
+                .submit_account_group_operation(&shared.account_id(), id, group, operation)
+                .unwrap(),
+            status
+        );
+        if let Some(public) = offline_public {
+            assert!(
+                reference
+                    .group_control_heads(group)
+                    .iter()
+                    .any(|head| head.proof.public() == public
+                        && head.access.observation.role == AccountGroupRole::Member),
+                "the authentic old private Member head must remain present across reopen"
+            );
+            assert_eq!(
+                reference.account_group_access(group).unwrap().role,
+                AccountGroupRole::Left,
+                "retained older Member provenance cannot resurrect a revoked account grant"
+            );
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reference_modern_accept_uses_noise_and_keeps_optional_archive_off() {
+        reference_self_control_over_noise(AccountSelfControlInput::Accept, false).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reference_modern_leave_keeps_left_over_old_member_head_and_reopen() {
+        reference_self_control_over_noise(AccountSelfControlInput::Leave, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reference_modern_decline_uses_noise_and_keeps_left_without_acceptance_or_archive() {
+        reference_self_control_over_noise(AccountSelfControlInput::Decline, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reference_modern_leave_request_overtakes_the_executors_held_requester_read() {
+        reference_self_control_over_noise(AccountSelfControlInput::Leave, true).await;
+    }
+
+    fn decline_payload(grant: AccountGrantId) -> Vec<u8> {
+        crate::node::channel_account_authority::AccountDeclinePayload { version: 1, grant }.encode()
+    }
+
+    fn decline_event(f: &Fixture, grant: AccountGrantId) -> Event {
+        Event::new(
+            &f.member,
+            f.group,
+            1,
+            vec![f.events.last().unwrap().id],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            decline_payload(grant),
+        )
+    }
+
+    #[test]
+    fn explicit_decline_exact_pending_incarnation_removes_invitation_without_accept_or_keys() {
+        let mut f = fixture(true);
+        let grant = f.witness().grant;
+        let decline = decline_event(&f, grant);
+        assert!(decline.verify_integrity() && decline.verify_signature());
+        assert!(!decline.ciphertext.is_empty());
+        f.events.push(decline);
+        let projection = f.projection();
+        assert!(
+            projection
+                .authority
+                .account_grant(&f.account.public().ed25519_pub)
+                .is_none(),
+            "an explicit valid decline must revoke exactly its pending invitation incarnation"
+        );
+        assert!(
+            !projection
+                .state
+                .unwrap()
+                .members()
+                .contains(&f.member.public())
+        );
+        assert!(
+            f.events.iter().all(|event| !matches!(
+                event.kind,
+                EventKind::ChannelAccept | EventKind::KeyRotation
+            )),
+            "decline must never synthesize acceptance or release content keys"
+        );
+    }
+
+    fn concurrent_decline_preserves_key_epoch_barrier(decline_first: bool) {
+        use crate::node::channel_account_bootstrap::{DeviceControl, inheritance_account_message};
+        let mut f = fixture(true);
+        let grant = f.witness().grant;
+        let authority = f.events.last().unwrap().id;
+        let sibling = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&sibling, &f.account, "pending sibling", 1);
+        let inherit = DeviceControl::Inherit {
+            authority,
+            grant,
+            device: proof,
+            account_signature: f
+                .account
+                .sign(&inheritance_account_message(
+                    f.group,
+                    authority,
+                    grant,
+                    &sibling.public(),
+                ))
+                .to_vec(),
+        };
+        let inheritance = Event::new(
+            &sibling,
+            f.group,
+            1,
+            vec![authority],
+            3,
+            3,
+            EventKind::ChannelDeviceInheritance,
+            inherit.encode(),
+        );
+        f.events.push(inheritance.clone());
+        assert!(
+            f.projection()
+                .authority
+                .invitation_for_device(
+                    &sibling.public(),
+                    &Announce::new_with_account(&sibling, &f.account, "pending sibling", 1)
+                )
+                .is_some(),
+            "the second actor must have a real validated invitation inheritance"
+        );
+        // Both actors own independent valid per-device chains and see the same
+        // pending grant. Equal Lamport + signed IDs select both canonical orders.
+        let (accept, decline) = (0..128)
+            .find_map(|trial| {
+                let accept = Event::new(
+                    &f.member,
+                    f.group,
+                    1,
+                    vec![inheritance.id],
+                    4,
+                    10 + trial * 2,
+                    EventKind::ChannelAccept,
+                    vec![],
+                );
+                let decline = Event::new(
+                    &sibling,
+                    f.group,
+                    2,
+                    vec![inheritance.id],
+                    4,
+                    11 + trial * 2,
+                    EventKind::ChannelLeave,
+                    decline_payload(grant),
+                );
+                ((decline.id < accept.id) == decline_first).then_some((accept, decline))
+            })
+            .expect("independent signed IDs must provide the selected canonical order");
+        f.events.push(accept.clone());
+        let accepted = f.projection();
+        assert!(accepted.authority.is_member(&f.member.public(), &f.proof));
+        let epoch_that_may_have_released_keys = accepted.state.unwrap().epoch();
+        f.events.push(decline.clone());
+        let order =
+            crate::node::timeline::ordered_ids(&f.events.iter().collect::<Vec<_>>(), &[], true);
+        assert_eq!(
+            order.iter().position(|id| *id == decline.id).unwrap()
+                < order.iter().position(|id| *id == accept.id).unwrap(),
+            decline_first
+        );
+        let projection = f.projection();
+        let final_epoch = projection.state.as_ref().unwrap().epoch();
+        assert!(
+            final_epoch > epoch_that_may_have_released_keys,
+            "concurrent decline must cross the epoch that a partial Accept view may already have exposed; accept epoch={epoch_that_may_have_released_keys}, final epoch={final_epoch}, decline_first={decline_first}"
+        );
+        assert!(
+            projection
+                .authority
+                .account_grant(&f.account.public().ed25519_pub)
+                .is_none(),
+            "neither canonical order may resurrect the declined invitation"
+        );
+        assert!(
+            !projection
+                .state
+                .unwrap()
+                .recipient_members()
+                .contains(&f.member.public())
+        );
+    }
+
+    #[test]
+    fn concurrent_decline_before_accept_cannot_reuse_a_partial_accept_key_epoch() {
+        concurrent_decline_preserves_key_epoch_barrier(true);
+    }
+
+    #[test]
+    fn concurrent_accept_before_decline_cannot_reuse_a_partial_accept_key_epoch() {
+        concurrent_decline_preserves_key_epoch_barrier(false);
+    }
+
+    #[test]
+    fn explicit_decline_payload_is_versioned_and_old_empty_actions_stay_distinct() {
+        use crate::node::channel_account_authority::AccountDeclinePayload;
+        let f = fixture(true);
+        let grant = f.witness().grant;
+        let payload = decline_payload(grant);
+        assert_eq!(
+            AccountDeclinePayload::decode(&payload).unwrap().grant,
+            grant
+        );
+        assert!(AccountDeclinePayload::decode(&[]).is_none());
+        assert!(AccountDeclinePayload::decode(&[payload.clone(), vec![0]].concat()).is_none());
+        assert!(
+            AccountDeclinePayload::decode(&AccountDeclinePayload { version: 2, grant }.encode())
+                .is_none()
+        );
+        let empty = Event::new(
+            &f.member,
+            f.group,
+            1,
+            vec![f.events.last().unwrap().id],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let mut events = f.events.clone();
+        events.push(empty);
+        let projection =
+            ChannelBook::project_membership(f.group, &events.iter().collect::<Vec<_>>());
+        assert!(
+            projection
+                .authority
+                .invitation_for_device(&f.member.public(), &f.proof)
+                .is_some(),
+            "old empty accepted-member leave remains invalid for a pending invitation"
+        );
+    }
+
+    #[test]
+    fn decline_rejects_observed_acceptance_wrong_incarnation_actor_and_malformed_payload() {
+        for case in 0..6 {
+            let mut f = fixture(true);
+            let grant = f.witness().grant;
+            let mut event = decline_event(&f, grant);
+            match case {
+                0 => {
+                    let accept = Event::new(
+                        &f.member,
+                        f.group,
+                        1,
+                        vec![f.events.last().unwrap().id],
+                        3,
+                        3,
+                        EventKind::ChannelAccept,
+                        vec![],
+                    );
+                    event = Event::new(
+                        &f.member,
+                        f.group,
+                        2,
+                        vec![accept.id],
+                        4,
+                        4,
+                        EventKind::ChannelLeave,
+                        decline_payload(grant),
+                    );
+                    f.events.push(accept);
+                }
+                1 => {
+                    event = decline_event(
+                        &f,
+                        AccountGrantId {
+                            incarnation: [99; 16],
+                            ..grant
+                        },
+                    )
+                }
+                2 => {
+                    event = decline_event(
+                        &f,
+                        AccountGrantId {
+                            account_pub: Account::generate().public().ed25519_pub,
+                            ..grant
+                        },
+                    )
+                }
+                3 => {
+                    event = Event::new(
+                        &DeviceIdentity::generate(),
+                        f.group,
+                        1,
+                        event.parents.clone(),
+                        3,
+                        3,
+                        EventKind::ChannelLeave,
+                        event.ciphertext.clone(),
+                    )
+                }
+                4 => {
+                    event = Event::new(
+                        &f.member,
+                        f.group,
+                        1,
+                        event.parents.clone(),
+                        3,
+                        3,
+                        EventKind::ChannelLeave,
+                        [event.ciphertext.clone(), vec![0]].concat(),
+                    )
+                }
+                _ => {
+                    event = Event::new(
+                        &f.member,
+                        ConversationId::new([99; 32]),
+                        1,
+                        event.parents.clone(),
+                        3,
+                        3,
+                        EventKind::ChannelLeave,
+                        event.ciphertext.clone(),
+                    )
+                }
+            }
+            f.events.push(event);
+            let projection = f.projection();
+            assert!(
+                projection
+                    .authority
+                    .account_grant(&f.account.public().ed25519_pub)
+                    .is_some(),
+                "invalid decline case {case} must not revoke any current grant"
+            );
+        }
+    }
+
+    #[test]
+    fn decline_preparation_requires_exact_registered_full_device_binding() {
+        let f = fixture(true);
+        let mut witness = f.witness();
+        let alternate = DeviceIdentity::from_secret_bytes(
+            f.member.secret_bytes().0,
+            DeviceIdentity::generate().secret_bytes().1,
+        );
+        witness.own = Announce::new_with_account(&alternate, &f.account, "wrong X identity", 1);
+        assert!(
+            expected_self_control(
+                f.group,
+                &f.projection(),
+                AccountSelfControlInput::Decline,
+                &witness
+            )
+            .is_err()
+        );
+        let mut witness = f.witness();
+        witness.grant.incarnation = [88; 16];
+        assert!(
+            expected_self_control(
+                f.group,
+                &f.projection(),
+                AccountSelfControlInput::Decline,
+                &witness
+            )
+            .is_err()
+        );
+    }
+}

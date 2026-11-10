@@ -2,14 +2,9 @@ name: Native window diagnostics
 
 on:
   workflow_dispatch:
-  # Bootstrap on dev without publishing the diagnostic workflow to main.
-  push:
-    branches: [dev]
-    paths:
-      - .github/workflows/native-window-diagnostics.yml
-      - scripts/diagnostics/window-controls.mjs
-      - scripts/diagnostics/assert-window-capabilities.mjs
-      - src-tauri/capabilities/default.json
+
+# Incident-specific comparison rigs are opt-in; ordinary native acceptance is
+# owned by hidden-contacts-native.yml and its required backend caller.
 
 permissions:
   contents: read

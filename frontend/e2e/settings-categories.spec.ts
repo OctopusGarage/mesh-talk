@@ -36,7 +36,7 @@ for (const viewport of [
   { width: 1440, height: 1000 },
   { width: 760, height: 520 },
 ]) {
-  test(`seven settings categories expose one page at ${viewport.width}x${viewport.height}`, async ({
+  test(`all settings categories expose one page at ${viewport.width}x${viewport.height}`, async ({
     page,
   }) => {
     await page.setViewportSize(viewport);
@@ -50,11 +50,13 @@ for (const viewport of [
       await selectSettingsCategory(page, category);
       const panel = page.getByTestId(`settings-page-${category}`);
       const controlByCategory = {
-        general: "#setting-language",
+        general: "#setting-launch-at-login",
+        shortcuts: "#setting-screenshot-capture",
         appearance: '[data-testid="theme-picker"]',
         notifications: "#setting-notifications",
         connection: "#setting-post-office",
         privacy: "#setting-privacy-level",
+        integrations: "#setting-local-agent-access",
         files: '[data-testid="global-attachment-receive"]',
         history: '[data-testid="settings-retention-select"]',
       };
@@ -323,7 +325,7 @@ test("backup status read failure is distinguished from no backup and can be retr
   await expect(status.getByRole("status")).toBeVisible();
 });
 
-test("backup key preparation failure keeps export disabled and a new key retries", async ({
+test("backup setup read failure keeps export disabled and retry preserves the key", async ({
   page,
 }) => {
   await enterChat(page);
@@ -332,7 +334,7 @@ test("backup key preparation failure keeps export disabled and a new key retries
   await page.evaluate(() =>
     (
       window as unknown as { __mockFailNext: (command: string) => void }
-    ).__mockFailNext("prepare_backup_key"),
+    ).__mockFailNext("backup_setup"),
   );
   await page
     .getByRole("button", { name: "Create encrypted backup", exact: true })
@@ -340,9 +342,7 @@ test("backup key preparation failure keeps export disabled and a new key retries
   await expect(page.getByRole("alert")).toContainText("network unreachable");
   await expect(page.getByTestId("recovery-export")).toBeDisabled();
   await expect(page.getByTestId("recovery-export-key")).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "Generate another key", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(page.getByTestId("recovery-export-key")).toBeVisible();
   await expect(page.getByTestId("recovery-export")).toBeDisabled();
 });
@@ -363,7 +363,7 @@ for (const viewport of [
         await openSidebarMenuAction(page, "sidebar-nav-settings");
         await selectSettingsCategory(page, "appearance");
         await page.getByTestId(`theme-${theme}`).click();
-        await selectSettingsCategory(page, "general");
+        await selectSettingsCategory(page, "appearance");
         await page
           .getByTestId("settings-language-select")
           .selectOption(language);
@@ -398,4 +398,59 @@ for (const viewport of [
       });
     }
   }
+}
+
+for (const viewport of [
+  { width: 1280, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  test(`settings task ownership and Agent navigation at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await enterChat(page);
+    await openSidebarMenuAction(page, "sidebar-nav-settings");
+    const dialog = page.getByTestId("settings-dialog");
+    await expect(dialog.getByRole("navigation").getByRole("group")).toHaveCount(
+      3,
+    );
+    await expect(
+      page
+        .getByTestId("settings-page-general")
+        .locator("#setting-launch-at-login"),
+    ).toBeVisible();
+    await expect(dialog.locator("#setting-language")).toHaveCount(0);
+    await expect(dialog.locator("#setting-screenshot-capture")).toHaveCount(0);
+    await selectSettingsCategory(page, "appearance");
+    await expect(dialog.locator("#setting-language")).toBeVisible();
+    await selectSettingsCategory(page, "shortcuts");
+    const capture = dialog.locator("#setting-screenshot-capture");
+    await capture.click();
+    await expect(capture).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await expect(capture).toHaveAttribute("aria-pressed", "false");
+    await dialog.screenshot({
+      path: testInfo.outputPath(`shortcuts-${viewport.width}.png`),
+      animations: "disabled",
+    });
+    await selectSettingsCategory(page, "privacy");
+    await dialog.getByRole("button", { name: "Manage agent access" }).click();
+    await expect(page.getByTestId("settings-nav-integrations")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    await expect(dialog.locator("#setting-local-agent-access")).toBeVisible();
+    // No conversations are granted in this fixture, so the unavailable switch
+    // cannot take focus. The destination region is the accessible fallback.
+    await expect(dialog.locator("#settings-category-panel")).toBeFocused();
+    await selectSettingsCategory(page, "general");
+    await dialog.screenshot({
+      path: testInfo.outputPath(`organized-settings-${viewport.width}.png`),
+      animations: "disabled",
+    });
+    const bounds = (await dialog.boundingBox())!;
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width);
+  });
 }

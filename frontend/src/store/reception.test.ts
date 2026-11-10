@@ -4,6 +4,7 @@ import {
   viewIdentities,
   reconcileHistory,
   emptyReception,
+  mergeReception,
 } from "./reception";
 import {
   loadReceptionLedger,
@@ -19,6 +20,32 @@ beforeEach(() => {
   });
 });
 afterEach(() => vi.unstubAllGlobals());
+it("retains unchanged conversation projections while receiving elsewhere", () => {
+  const before = receiveIdentity(emptyReception(), "channel:quiet", {
+    event_id: "unread",
+  });
+  const after = receiveIdentity(before, "channel:busy", { event_id: "new" });
+  expect(after.ledger["channel:quiet"]).toBe(before.ledger["channel:quiet"]);
+  expect(after.unreadIds["channel:quiet"]).toBe(
+    before.unreadIds["channel:quiet"],
+  );
+  expect(after.lateUnreadIds["channel:quiet"]).toBe(
+    before.lateUnreadIds["channel:quiet"],
+  );
+});
+it("drops malformed optional aliases while retaining the canonical receipt", () => {
+  const state = emptyReception({
+    "channel:a": {
+      message: {
+        seen: false,
+        late: false,
+        messageAliases: null as unknown as string[],
+      },
+    },
+  });
+  expect(state.unreadIds["channel:a"]).toEqual(["message"]);
+  expect(state.ledger["channel:a"].message.messageAliases).toBeUndefined();
+});
 it("deduplicates identities without treating focused conversations as viewed", () => {
   let s = receiveIdentity(emptyReception(), "channel:a", {
     event_id: "one",
@@ -315,4 +342,306 @@ it("moves merged boot identities beyond the retained budget into persistent over
     restored.unreadIds["channel:a"].length +
       restored.overflowUnread["channel:a"],
   ).toBe(2048);
+});
+
+it("persists unread mention evidence until that exact message is viewed", () => {
+  const key = "channel:a";
+  let state = reconcileHistory(
+    emptyReception(),
+    key,
+    [
+      { id: "mention", fromMe: false, mentioned: true },
+      { id: "ordinary", fromMe: false },
+      { id: "own", fromMe: true, mentioned: true },
+    ],
+    true,
+  );
+  expect(state.ledger[key].mention.mentioned).toBe(true);
+  expect(state.ledger[key].own.mentioned).not.toBe(true);
+  saveReceptionLedger("host", "account", state.ledger);
+  state = emptyReception(loadReceptionLedger("host", "account"));
+  expect(state.ledger[key].mention.mentioned).toBe(true);
+  expect(loadReceptionLedger("other", "account")).toEqual({});
+  state = viewIdentities(state, key, ["ordinary"]);
+  expect(state.ledger[key].mention).toMatchObject({
+    mentioned: true,
+    seen: false,
+  });
+  state = viewIdentities(state, key, ["mention"]);
+  state = receiveIdentity(state, key, { event_id: "mention" }, true);
+  expect(state.ledger[key].mention.seen).toBe(true);
+});
+
+it("enriches existing unseen history receipts without reviving read mentions", () => {
+  const key = "channel:a";
+  let state = receiveIdentity(emptyReception(), key, { event_id: "mention" });
+  state = reconcileHistory(
+    state,
+    key,
+    [{ id: "mention", fromMe: false, mentioned: true }],
+    false,
+  );
+  expect(state.ledger[key].mention).toMatchObject({
+    mentioned: true,
+    seen: false,
+  });
+  state = viewIdentities(state, key, ["mention"]);
+  state = reconcileHistory(
+    state,
+    key,
+    [{ id: "mention", fromMe: false, mentioned: true }],
+    true,
+  );
+  expect(state.unreadIds[key]).toEqual([]);
+});
+
+it.each([false, true])(
+  "classifies a duplicate with late mention text without changing read state (own=%s)",
+  (own) => {
+    const key = "channel:a";
+    const event = { event_id: "late-text", own_device: own };
+    let state = receiveIdentity(emptyReception(), key, event);
+    state = receiveIdentity(state, key, event, true);
+    expect(state.ledger[key]["late-text"].mentioned === true).toBe(!own);
+    expect(state.unreadIds[key]).toEqual(own ? [] : ["late-text"]);
+    state = receiveIdentity(state, key, event);
+    expect(state.ledger[key]["late-text"].mentioned === true).toBe(!own);
+    state = viewIdentities(state, key, ["late-text"]);
+    state = receiveIdentity(state, key, event, true);
+    expect(state.ledger[key]["late-text"].seen).toBe(true);
+    expect(state.unreadIds[key]).toEqual([]);
+  },
+);
+import { applyAccountSeen } from "./reception";
+
+it("retains exact linked seen identities before future history and ledger eviction", () => {
+  let state = applyAccountSeen(emptyReception(), "account:peer", ["future-id"]);
+  state = viewIdentities(
+    state,
+    "account:peer",
+    Array.from({ length: 1100 }, (_, index) => `other-${index}`),
+  );
+  expect(state.ledger["account:peer"]["future-id"]).toBeUndefined();
+  state = receiveIdentity(state, "account:peer", {
+    event_id: "future-id",
+    arrival_kind: "catch_up",
+  });
+  expect(state.ledger["account:peer"]["future-id"].seen).toBe(true);
+  expect(state.unreadIds["account:peer"]).not.toContain("future-id");
+  const history = reconcileHistory(
+    state,
+    "account:peer",
+    [{ id: "history-future", fromMe: false }],
+    true,
+  );
+  const known = applyAccountSeen(history, "account:peer", ["history-future"]);
+  expect(known.unreadIds["account:peer"]).not.toContain("history-future");
+});
+
+it("collapses only authenticated file aliases and remembers old callbacks across scoped reloads", () => {
+  const key = "account:peer";
+  let state = receiveIdentity(emptyReception(), key, {
+    event_id: "device-a",
+    received_at: 20,
+  });
+  state = receiveIdentity(
+    state,
+    key,
+    { event_id: "device-b", received_at: 10, arrival_kind: "catch_up" },
+    true,
+  );
+  const rows = [
+    {
+      id: "canonical",
+      fromMe: false,
+      fileMessageAliases: ["canonical", "device-a", "device-b"],
+    },
+  ];
+  state = reconcileHistory(state, key, rows, false);
+  expect(state.unreadIds[key]).toEqual(["canonical"]);
+  expect(state.ledger[key].canonical).toMatchObject({
+    seen: false,
+    late: true,
+    receivedAt: 10,
+    mentioned: true,
+  });
+  expect(state.ledger[key]["device-a"]).toBeUndefined();
+  saveReceptionLedger("owner", "account", state.ledger);
+  state = emptyReception(loadReceptionLedger("owner", "account"));
+  state = receiveIdentity(state, key, { event_id: "device-a" });
+  expect(state.unreadIds[key]).toEqual(["canonical"]);
+  expect(loadReceptionLedger("other", "account")).toEqual({});
+  state = receiveIdentity(state, "account:other", { event_id: "device-a" });
+  expect(state.unreadIds["account:other"]).toEqual(["device-a"]);
+  state = reconcileHistory(
+    state,
+    key,
+    [
+      {
+        id: "intentional-second",
+        fromMe: false,
+        fileMessageAliases: ["intentional-second"],
+      },
+    ],
+    true,
+  );
+  expect(state.unreadIds[key]).toEqual(["canonical", "intentional-second"]);
+});
+it("preserves real viewed or account-read alias evidence when a canonical binding arrives", () => {
+  for (const read of [viewIdentities, applyAccountSeen]) {
+    let state = receiveIdentity(emptyReception(), "account:peer", {
+      event_id: "alias",
+    });
+    state = read(state, "account:peer", ["alias"]);
+    state = reconcileHistory(
+      state,
+      "account:peer",
+      [
+        {
+          id: "canonical",
+          fromMe: false,
+          fileMessageAliases: ["alias", "canonical"],
+        },
+      ],
+      true,
+    );
+    expect(state.unreadIds["account:peer"]).toEqual([]);
+    state = receiveIdentity(state, "account:peer", { event_id: "alias" });
+    expect(state.unreadIds["account:peer"]).toEqual([]);
+  }
+});
+it("resolves alias reads after binding and bounds optional alias metadata", () => {
+  const state = reconcileHistory(
+    emptyReception(),
+    "account:peer",
+    [{ id: "canonical", fromMe: false, fileMessageAliases: ["alias"] }],
+    true,
+  );
+  expect(
+    viewIdentities(state, "account:peer", ["alias"]).unreadIds["account:peer"],
+  ).toEqual([]);
+  expect(
+    applyAccountSeen(state, "account:peer", ["alias"]).unreadIds[
+      "account:peer"
+    ],
+  ).toEqual([]);
+  const ledger = Object.fromEntries(
+    Array.from({ length: 1024 }, (_, i) => [
+      `id-${i}`,
+      {
+        seen: false,
+        late: true,
+        messageAliases: Array.from(
+          { length: 64 },
+          (_, j) => `${i}-${j}-` + "a".repeat(190),
+        ),
+      },
+    ]),
+  );
+  saveReceptionLedger("owner", "account", { "account:peer": ledger });
+  expect(
+    Object.keys(loadReceptionLedger("owner", "account")["account:peer"]),
+  ).toHaveLength(1024);
+});
+
+it("merges saved canonical bindings with early startup aliases without adding unread", () => {
+  const key = "account:peer";
+  const saved = reconcileHistory(
+    emptyReception(),
+    key,
+    [{ id: "canonical", fromMe: false, fileMessageAliases: ["alias"] }],
+    true,
+  );
+  const pending = receiveIdentity(emptyReception(), key, { event_id: "alias" });
+  const merged = mergeReception(
+    { ...saved, unread: { [key]: 1 } },
+    { ...pending, unread: { [key]: 1 } },
+  );
+  expect(merged.unreadIds[key]).toEqual(["canonical"]);
+  expect(merged.unread[key]).toBe(1);
+});
+it("ignores malformed stored aliases while preserving canonical unread state", () => {
+  localStorage.setItem(
+    "mesh-talk-reception-v2:owner:account",
+    JSON.stringify({
+      "account:peer": {
+        canonical: {
+          seen: false,
+          late: false,
+          messageAliases: [
+            null,
+            4,
+            "",
+            "\u0000",
+            "canonical",
+            "valid",
+            "valid",
+          ],
+        },
+      },
+    }),
+  );
+  const ledger = loadReceptionLedger("owner", "account");
+  expect(ledger["account:peer"].canonical.messageAliases).toEqual(["valid"]);
+  expect(emptyReception(ledger).unreadIds["account:peer"]).toEqual([
+    "canonical",
+  ]);
+});
+
+it("suppresses confirmed removals without claiming they were viewed or resurrecting on replay", async () => {
+  const { suppressIdentities } = await import("./reception");
+  let state = receiveIdentity(emptyReception(), "account:a", {
+    event_id: "gone",
+  });
+  state = suppressIdentities(state, "account:a", ["gone"]);
+  expect(state.unreadIds["account:a"]).toEqual([]);
+  expect(state.ledger["account:a"].gone).toMatchObject({
+    seen: false,
+    suppressed: true,
+  });
+  state = reconcileHistory(
+    state,
+    "account:a",
+    [{ id: "gone", fromMe: false }],
+    true,
+  );
+  expect(state.unreadIds["account:a"]).toEqual([]);
+  saveReceptionLedger("host", "account", state.ledger);
+  expect(
+    emptyReception(loadReceptionLedger("host", "account")).unreadIds[
+      "account:a"
+    ],
+  ).toEqual([]);
+});
+
+it("expires retained unread evidence after cache eviction without clearing other messages", async () => {
+  const { expireReception } = await import("./reception");
+  const state = reconcileHistory(
+    emptyReception(),
+    "channel:a",
+    [
+      { id: "expired", fromMe: false, expiresAtMs: 100 },
+      { id: "future", fromMe: false, expiresAtMs: 200 },
+      { id: "ordinary", fromMe: false },
+    ],
+    true,
+  );
+  const next = expireReception(state, 150);
+  expect(next.unreadIds["channel:a"]).toEqual(["future", "ordinary"]);
+  expect(next.ledger["channel:a"].expired.seen).toBe(false);
+  expect(expireReception(next, 150)).toBe(next);
+});
+
+it("does not create overflow unread from suppressed entries when bounding the ledger", async () => {
+  const { suppressIdentities } = await import("./reception");
+  const state = suppressIdentities(
+    receiveIdentity(emptyReception(), "channel:a", { event_id: "gone" }),
+    "channel:a",
+    ["gone"],
+  );
+  const ledger = { ...state.ledger };
+  for (let i = 0; i < 70; i++)
+    ledger[`channel:${i}`] = { row: { seen: true, late: false } };
+  const next = emptyReception(ledger);
+  expect(next.overflowUnread["channel:a"] ?? 0).toBe(0);
 });

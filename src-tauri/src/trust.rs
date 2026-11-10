@@ -315,25 +315,6 @@ fn read_trust(path: &Path) -> Result<TrustFile, CommandError> {
     }
 }
 
-pub(crate) fn verified_account_ids_at(path: &Path) -> Vec<String> {
-    config_store::read_account::<TrustFile>(path)
-        .contacts
-        .into_iter()
-        .filter_map(|(account, record)| {
-            let pin = record
-                .verified_fingerprint
-                .as_ref()
-                .unwrap_or(&record.first_seen_fingerprint);
-            let unchanged = record
-                .last_observed_fingerprint
-                .as_ref()
-                .unwrap_or(&record.first_seen_fingerprint)
-                == pin;
-            (record.verified && unchanged).then_some(account)
-        })
-        .collect()
-}
-
 /// Mark a contact verified. The user is asserting they compared the safety number
 /// out-of-band; we update only the current verification pin, so
 /// verifying after a legitimate fingerprint change clears the warning.

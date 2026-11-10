@@ -1,17 +1,26 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, realpathSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-test("separate browser stages isolate server ports, results and HTML reports", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "mesh-preflight-output-"));
+// Keep the real local runner closure together as its existing owners evolve.
+function browserFixture(prefix) {
+  const root = mkdtempSync(path.join(tmpdir(), prefix));
   try {
-    for (const directory of ["scripts/validation", "scripts/pr-platform", "frontend/node_modules/playwright"])
-      mkdirSync(path.join(root, directory), { recursive: true });
-    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs", "pr-platform/rust-packages.mjs"])
-      copyFileSync(new URL(`../${filename}`, import.meta.url), path.join(root, "scripts", filename));
+    for (const directory of ["validation", "pr-platform"])
+      cpSync(new URL(`../${directory}/`, import.meta.url), path.join(root, "scripts", directory), { recursive: true });
+    mkdirSync(path.join(root, "frontend/node_modules/playwright"), { recursive: true });
+    // Intentional timeout controls own a local supervisor, even when the test
+    // suite itself runs inside affected validation. Never abort that caller.
+    return { root, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } };
+  } catch (error) { rmSync(root, { recursive: true, force: true }); throw error; }
+}
+
+test("separate browser stages isolate server ports, results and HTML reports", () => {
+  const { root, env } = browserFixture("mesh-preflight-output-");
+  try {
     const trace = path.join(root, "trace.jsonl");
     writeFileSync(path.join(root, "frontend/node_modules/playwright/cli.js"), `
       const fs = require('node:fs');
@@ -20,7 +29,7 @@ test("separate browser stages isolate server ports, results and HTML reports", (
     `);
     for (let run = 0; run < 2; run++) {
       const result = spawnSync(process.execPath, [path.join(root, "scripts/validation/browser.mjs"), "full", "e2e/settings-recovery.spec.ts"], {
-        cwd: path.join(root, "frontend"), env: { ...process.env, PREFLIGHT_TRACE: trace }, encoding: "utf8", timeout: 15_000,
+        cwd: path.join(root, "frontend"), env: { ...env, PREFLIGHT_TRACE: trace }, encoding: "utf8", timeout: 15_000,
       });
       assert.equal(result.status, 0, result.stdout + result.stderr);
     }
@@ -48,18 +57,50 @@ test("separate browser stages isolate server ports, results and HTML reports", (
 
 // A process timeout must remain distinct from a UI assertion failure.
 test("browser wrapper exposes timeout diagnostics and never writes success evidence", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "mesh-browser-timeout-"));
+  const { root, env } = browserFixture("mesh-browser-timeout-");
   try {
-    for (const directory of ["scripts/validation", "scripts/pr-platform", "frontend/node_modules/playwright"])
-      mkdirSync(path.join(root, directory), { recursive: true });
-    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs", "pr-platform/rust-packages.mjs"])
-      copyFileSync(new URL(`../${filename}`, import.meta.url), path.join(root, "scripts", filename));
     writeFileSync(path.join(root, "frontend/node_modules/playwright/cli.js"), "setTimeout(() => {}, 3000);\n");
     const result = spawnSync(process.execPath, [path.join(root, "scripts/validation/browser.mjs"), "full"], {
-      cwd: path.join(root, "frontend"), env: { ...process.env, MESH_BROWSER_TIMEOUT_SECONDS: "1" }, encoding: "utf8", timeout: 10_000,
+      cwd: path.join(root, "frontend"), env: { ...env, MESH_BROWSER_TIMEOUT_SECONDS: "1" }, encoding: "utf8", timeout: 10_000,
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr + result.stdout, /execution budget.*1 second/i);
     assert.equal(existsSync(path.join(root, "target/validation/browser-full.json")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("local selector admission builds frontend only for selected Host consumers", { skip: process.platform === "win32" }, async () => {
+  const { buildPlan, parseFlags } = await import("../pr-platform/plan.mjs");
+  const controller = readFileSync(new URL("../pr-preflight.sh", import.meta.url), "utf8");
+  const start = controller.indexOf("# The validated selected-package owner");
+  const end = controller.indexOf('\nif printf', start);
+  assert.ok(start > 0 && end > start);
+  const commands = controller.slice(start, end);
+  const root = mkdtempSync(path.join(tmpdir(), "mesh-selector-admission-"));
+  try {
+    const trace = path.join(root, "trace.jsonl");
+    const stage = path.join(root, "stage.mjs");
+    writeFileSync(stage, 'import {appendFileSync} from "node:fs";appendFileSync(process.env.TRACE,JSON.stringify(process.argv.slice(2))+"\\n");');
+    for (const [flags, expected] of [
+      [["--core-filter", "core_case"], ["rust-selectors"]],
+      [["--integration-filter", "integration_case"], ["rust-selectors"]],
+      [["--mcp-filter", "mcp_case"], ["rust-selectors"]],
+      [["--host-filter", "host_case"], ["frontend-build", "rust-selectors"]],
+      [["--core-filter", "core_case", "--host-filter", "host_case"], ["frontend-build", "rust-selectors"]],
+    ]) {
+      const plan = { ...buildPlan(parseFlags(flags), []), sourceSha: "a".repeat(40) };
+      rmSync(trace, { force: true });
+      const result = spawnSync("bash", ["-eu", "-c", commands], { cwd: new URL("../../", import.meta.url), env: { ...process.env, scenario_plan: JSON.stringify(plan), stage, TRACE: trace }, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      const calls = readFileSync(trace, "utf8").trim().split("\n").map(JSON.parse);
+      assert.deepEqual(calls.map(args => args[0]), expected, flags.join(" "));
+      assert.ok(calls.at(-1).includes("scripts/validation/selectors.mjs"), "all selected packages retain real selector validation");
+    }
+    for (const invalid of ["{bad JSON", JSON.stringify({ ...buildPlan(parseFlags(["--host-filter", "host_case"]), []), sourceSha: "a".repeat(40), hostFilters: ["--unknown-selector"] })]) {
+      rmSync(trace, { force: true });
+      const result = spawnSync("bash", ["-eu", "-c", commands], { cwd: new URL("../../", import.meta.url), env: { ...process.env, scenario_plan: invalid, stage, TRACE: trace }, encoding: "utf8" });
+      assert.notEqual(result.status, 0);
+      assert.equal(existsSync(trace), false, "invalid selections must reject before frontend or Rust execution");
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

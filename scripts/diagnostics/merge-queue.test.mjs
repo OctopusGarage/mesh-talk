@@ -4,7 +4,7 @@ import test from "node:test";
 
 const read = name => readFileSync(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), "utf8");
 
-for (const name of ["ci", "check-health", "e2e-backend", "e2e-ui", "sanitizers", "codeql", "gitleaks", "dependency-review", "mutants"]) {
+for (const name of ["ci", "e2e-backend", "e2e-ui", "sanitizers", "codeql", "gitleaks", "dependency-review", "mutants"]) {
   test(`${name} reports required checks for merge candidates`, () => {
     const workflow = read(name);
     assert.match(workflow, /^  merge_group:\n    types: \[checks_requested\]/m);
@@ -28,3 +28,32 @@ test("dependency review compares merge-group base and head without requiring a P
   assert.match(workflow, /comment-summary-in-pr: \$\{\{ github.event_name == 'pull_request' && 'on-failure' \|\| 'never' \}\}/);
   assert.doesNotMatch(workflow, /warn-only: true|if:.*pull_request/);
 });
+
+// Health inherits the caller's exact source/event/run, avoiding a second coverage producer.
+test("Health checks are called by the merge-candidate UI orchestrator", () => {
+  assert.match(read("check-health"), /^  workflow_call:$/m);
+  assert.match(read("e2e-ui"), /uses: \.\/\.github\/workflows\/check-health\.yml/);
+});
+
+for (const name of ["ci", "check-health", "e2e-backend", "e2e-ui", "sanitizers", "codeql", "gitleaks", "mutants"]) {
+  test(`${name} preserves every push while cancelling superseded PRs`, () => {
+    const workflow = read(name);
+    assert.match(workflow, /group: .*github.event_name == 'push' && github.run_id/);
+    assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \}\}/);
+  });
+}
+
+for (const [workflow, names] of [["sanitizers", ["asan"]], ["mutants", ["mutation-gate"]], ["e2e-ui", ["coverage", "portable-evidence", "ui-gate"]]]) {
+  test(`${workflow} collectors reject upstream failure without blocking cancelled runs`, () => {
+    const source = read(workflow);
+    for (const name of names) {
+      const job = source.split(`  ${name}:\n`)[1]?.split(/^  [a-z][\w-]*:\n/m)[0];
+      assert.ok(job, `${workflow}/${name}`);
+      const expression = job.match(/^    if: \$\{\{ (.+) \}\}$/m)?.[1];
+      assert.equal(expression, "!cancelled()", `${workflow}/${name} must remain eligible after upstream failure`);
+      const eligible = Function("cancelled", `return (${expression})`);
+      assert.equal(eligible(() => false), true);
+      assert.equal(eligible(() => true), false);
+    }
+  });
+}

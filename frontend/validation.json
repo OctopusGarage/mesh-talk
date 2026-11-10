@@ -2,15 +2,563 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-memory-guardrails",
+      "paths": [
+        "frontend/e2e/memory.spec.ts",
+        "frontend/e2e/helpers/conversation-churn.ts"
+      ],
+      "frontend": [
+        "src/features/chat/ConversationView.test.ts",
+        "src/features/chat/useConversationViewport.test.ts",
+        "src/store/conversationHistory.test.ts"
+      ],
+      "capability": {
+        "summary": "Keep virtualized message DOM bounded across loaded history and repeated real conversation activation.",
+        "guide": "docs/ci-maintenance.md",
+        "invariants": [
+          {
+            "name": "Seeded history, complete churn rounds, exact visible destinations, the original watchdog and rendered-bubble bound survive fixture optimization; an extra-bubble negative control still fails.",
+            "reference": "docs/ai-coding-reliability.md#r10-evidence-that-exercises-the-failure"
+          }
+        ]
+      },
+      "escalation": [
+        "Run the held-frame success/timeout/cleanup/recovery control, expiry before and after DOM sampling, and the extra-bubble negative control. Run e2e/memory.spec.ts with the complete pointer round, repeated browser-side DOM button journey and final pointer navigation. Preserve every visible destination, readiness deadline, churn count and bubble bound. DOM activation does not certify trusted-input latency; browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
+      ]
+    },
+    {
+      "id": "frontend-async-consumer-evidence",
+      "paths": [
+        "frontend/src/App.tsx",
+        "frontend/src/App.test.ts",
+        "frontend/src/lib/initialPresentation.ts",
+        "frontend/src/features/chat/favorites/FavoritesDialog.tsx",
+        "frontend/src/features/chat/favorites/FavoritesDialog.test.ts",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/e2e/message-favorites.spec.ts",
+        "frontend/e2e/conversation-wallpaper.spec.ts",
+        "frontend/e2e/automatic-delivery.spec.ts"
+      ],
+      "frontend": [
+        "src/App.test.ts",
+        "src/lib/initialPresentation.test.ts",
+        "src/features/chat/favorites/FavoritesDialog.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts"
+      ],
+      "capability": {
+        "summary": "Pair browser integration evidence with exact-task component proof of retired async consumers.",
+        "guide": "docs/testing-feedback-loop.md#completion-and-retirement-evidence",
+        "invariants": [
+          {
+            "name": "Retired Favorites navigation, App presentation and ConversationView picker tasks settle before authoritative no-effect assertions; browser state samples alone do not prove consumer completion.",
+            "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
+          }
+        ]
+      },
+      "escalation": [
+        "Require the paired App, FavoritesDialog and ConversationView attachment component tests whenever these browser capabilities are selected. Keep browser interaction, fresh-operation destination, native-bridge, visual and strict error assertions. Browser artifacts alone do not prove retired-task completion. Validate delayed-consumer holds and guard-bypass negative controls without adding sleeps, retries or a global idle/test-window API."
+      ]
+    },
+    {
+      "id": "frontend-dialog-focus",
+      "paths": [
+        "frontend/src/components/ui/dialog.tsx",
+        "frontend/src/components/ui/dialog.test.ts",
+        "frontend/src/components/ui/context-menu.tsx",
+        "frontend/src/components/ui/context-menu.test.ts",
+        "frontend/src/components/ui/focus-restoration.ts",
+        "frontend/e2e/context-menu-focus.spec.ts",
+        "frontend/e2e/helpers/ui-audit.ts",
+        "frontend/e2e/helpers/sidebar-actions.ts",
+        "frontend/e2e/minimum-window.spec.ts"
+      ],
+      "frontend": [
+        "src/components/ui/dialog.test.ts",
+        "src/components/ui/context-menu.test.ts"
+      ],
+      "capability": {
+        "summary": "Preserve active focus ownership and visible keyboard indication across shared dialogs, menus and subsequent user interactions.",
+        "guide": "docs/module-boundaries.md#dialog-focus-ownership",
+        "invariants": [
+          {
+            "name": "Default dialog close restoration preserves a newer connected focus owner outside the closing content; ordinary and nested trigger restoration, consumer handlers and neutral document/focus-guard behavior remain intact.",
+            "reference": "docs/module-boundaries.md#dialog-focus-ownership"
+          }
+        ]
+      },
+      "escalation": [
+        "Use real Radix focus lifecycle tests for ordinary, nested, custom and newer-owner cases. A controlled real-browser deferred-close callback must leave a newly opened utility menu focused and open; the old owner must fail this regression. Exercise minimum-window navigation and consumers with custom focus restoration. Sidebar helpers must observe expanded/open menu state and use real scoped clicks. Preserve existing animations, focus traps, API callbacks, timeout budgets and native keyboard acceptance. Run e2e/context-menu-focus.spec.ts and e2e/ui-audit-message-log.spec.ts with real keyboard navigation and activation in light/dark themes. Inspect resolved outline style, width and theme-token color after bounded CSS transitions; class presence alone is not focus evidence. Focus audit helpers retain their existing Escape cleanup by default; explicitly preserve a menu when the next assertion activates it."
+      ]
+    },
+    {
+      "id": "frontend-production-runtime",
+      "paths": [
+        "frontend/vite.config.ts",
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        "scripts/diagnostics/react-singleton.test.mjs"
+      ],
+      "node": [
+        "scripts/diagnostics/react-singleton.test.mjs"
+      ],
+      "capability": {
+        "summary": "Keep the production React renderer and hooks bound to one runtime across dependency layouts.",
+        "guide": "docs/testing-feedback-loop.md#production-frontend-startup",
+        "invariants": [
+          {
+            "name": "Production builds deduplicate React and React DOM even when dependency caches contain duplicate package trees.",
+            "reference": "docs/testing-feedback-loop.md#production-frontend-startup"
+          }
+        ]
+      },
+      "escalation": [
+        "Run the built production frontend in Chromium and WebKit, and verify the native startup screen without a display-error boundary. A development server or process-only installation check cannot certify production startup."
+      ]
+    },
+    {
+      "id": "frontend-account-group-inventory",
+      "paths": [
+        "frontend/src/lib/types.ts",
+        "frontend/src/features/chat/sidebar/conversationList.ts",
+        "frontend/src/features/chat/sidebar/conversationList.test.ts",
+        "frontend/src/features/chat/ConversationHeaders.tsx",
+        "frontend/src/features/chat/ConversationHeaders.test.ts",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/MembersDialog.test.ts",
+        "frontend/src/features/chat/channelPermissions.ts",
+        "frontend/src/features/chat/channelPermissions.test.ts",
+        "frontend/src/features/chat/GroupControlStatus.tsx",
+        "frontend/src/features/chat/GroupControlStatus.test.ts",
+        "frontend/src/features/chat/useGroupControlOperation.ts",
+        "frontend/src/features/chat/useGroupControlOperation.test.ts",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/e2e/group-sync.spec.ts",
+        "frontend/src/features/chat/Sidebar.tsx",
+        "frontend/src/features/chat/Sidebar.test.ts",
+        "frontend/src/features/chat/ConversationStates.tsx",
+        "frontend/src/features/chat/ConversationView.test.ts",
+        "frontend/e2e/member-account-projection.spec.ts",
+        "frontend/e2e/member-list-large.spec.ts",
+        "frontend/e2e/peer-picker-large.spec.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/api.test.ts",
+        "frontend/src/store/accountGroupOperations.ts",
+        "frontend/src/store/accountGroupOperations.test.ts",
+        "frontend/src/store/outgoingIntent/groupOperations.ts",
+        "frontend/src/store/outgoingIntent/groupOperations.test.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/MessageBubble.test.ts",
+        "frontend/src/features/chat/CreateChannelDialog.tsx",
+        "frontend/src/features/chat/CreateChannelDialog.test.ts",
+        "frontend/e2e/create-channel-recovery.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/sidebar/conversationList.test.ts",
+        "src/features/chat/Sidebar.test.ts",
+        "src/features/chat/ConversationHeaders.test.ts",
+        "src/features/chat/ConversationHeadersSession.test.ts",
+        "src/features/chat/MembersDialog.test.ts",
+        "src/components/GroupAvatar.test.ts",
+        "src/features/chat/channelPermissions.test.ts",
+        "src/features/chat/GroupControlStatus.test.ts",
+        "src/features/chat/useGroupControlOperation.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts",
+        "src/store/channelRefresh.test.ts",
+        "src/features/chat/ConversationView.test.ts",
+        "src/lib/api.test.ts",
+        "src/store/accountGroupOperations.test.ts",
+        "src/store/outgoingIntent/groupOperations.test.ts",
+        "src/store/outgoingIntent.test.ts",
+        "src/store/chat.test.ts",
+        "src/features/chat/MessageBubble.test.ts",
+        "src/features/chat/CreateChannelDialog.test.ts"
+      ],
+      "capability": {
+        "summary": "Render shared legacy group references distinctly from restored backups and transition to verified local state without duplicate rows.",
+        "guide": "docs/help/topics/channels.md#groups-across-your-devices",
+        "invariants": [
+          {
+            "name": "Different group IDs remain separate even when names differ only in letter case; verified account roles govern account actions on shared references while unknown membership remains unavailable.",
+            "reference": "docs/help/topics/channels.md#groups-across-your-devices"
+          },
+          {
+            "name": "Bounded member snapshots disclose incompleteness and never invent owner or self permissions; missing native fields preserve older hosts. Reference state retires pending member actions and attachment intake, including asynchronous staging.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          },
+          {
+            "name": "Previous-account modern membership stays in a collapsed local-history section, outside the current account directory; stale invitation flags cannot enable actions or mislabel the archive as a current-account departure.",
+            "reference": "docs/help/topics/channels.md#groups-across-your-devices"
+          },
+          {
+            "name": "Typed operation IPC retains explicit local owner, expected account and caller-generated operation ID, preserving pending lifecycle outcomes separately from committed public event IDs.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Existing outgoing state retains bounded body-free account operation tickets, preserves original IDs across uncertain retries, protects active/message-linked records from pruning, and suppresses stale responses and reactive session retirement; pending admission is distinct from committed public effects.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Channel message, File, reaction and recall requests reuse durable account operation IDs and pending tickets; committed effects alone refresh history and File settlement requires canonical metadata. File intake follows verified account participation rather than physical source availability. Cancellation retries retain the same operation ID through admission and refresh. Certified native account ownership governs sibling reaction toggles and chip actions, with the existing identifier fallback only when the ownership field is absent.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "New group selection lists each foreign account once, uses its canonical display identity, and excludes the creator account; desktop creation authenticates account grants before distribution.",
+            "reference": "docs/help/topics/channels.md#start-a-channel"
+          },
+          {
+            "name": "Operation mint reads are bounded; a ten-second presentation deadline observes the exact retained ticket without cancelling or resubmitting a native mutation. Late committed, rejected and definite pre-admission outcomes apply only to the current session; late non-admission retains transferred outgoing payload for explicit retry.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "escalation": [
+        "Run targeted group-sync reference-to-real browser scenarios, readonly/member completeness and applicable unchanged visual regression; mock IPC alone does not prove physical convergence.",
+        "Run member-account-projection, member-list-large and peer-picker-large browser scenarios at desktop and smaller native window sizes for bounded rows, keyboard access, long names, history scope and unavailable invitation controls."
+      ]
+    },
+    {
+      "id": "frontend-shared-channel-custody",
+      "paths": [
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/features/chat/deliveryFooter.test.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/outgoingIntent.test.ts",
+        "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/src/features/chat/MessageStatus.tsx"
+      ],
+      "frontend": [
+        "src/features/chat/deliveryFooter.test.ts",
+        "src/store/outgoingIntent.test.ts",
+        "src/store/chat.test.ts",
+        "src/features/chat/DeliveryDetails.test.ts"
+      ],
+      "capability": {
+        "summary": "Render unknown, zero, external-member and post-office copy observations distinctly across linked devices.",
+        "guide": "docs/help/topics/channels.md#understand-message-copy-status",
+        "invariants": [
+          {
+            "name": "Absent status never becomes a zero or positive claim; omitted rows retire stale counts only within the requested message/runtime scope.",
+            "reference": "docs/help/topics/channels.md#understand-message-copy-status"
+          },
+          {
+            "name": "Copy signals use distinct icons and explicit inline details, never delivery/read check marks or hover overlays.",
+            "reference": "docs/help/topics/channels.md#understand-message-copy-status"
+          }
+        ]
+      },
+      "escalation": [
+        "Run targeted channel copy-status and acceptance browser scenarios plus applicable visual regression; mocked IPC does not certify account-document receipt exchange."
+      ]
+    },
+    {
+      "id": "frontend-account-documents",
+      "paths": [
+        "frontend/src/lib/api/accountDocuments.ts",
+        "frontend/src/lib/linkedAvatarOverrides.ts",
+        "frontend/src/lib/linkedAvatarOverrides.test.ts",
+        "frontend/src/lib/linkedReadReceipts.ts",
+        "frontend/src/lib/linkedReadReceipts.test.ts",
+        "frontend/src/lib/linkedCustomizationPacks.ts",
+        "frontend/src/lib/linkedCustomizationPacks.test.ts",
+        "frontend/src/lib/packArchive.ts",
+        "frontend/src/lib/packArchive.test.ts",
+        "frontend/src/store/packs.test.ts",
+        "frontend/src/components/identity/AvatarEditMenu.tsx",
+        "frontend/src/components/identity/AvatarEditMenu.test.ts",
+        "frontend/src/store/avatars.ts",
+        "frontend/src/store/avatars.test.ts"
+      ],
+      "frontend": [
+        "src/lib/linkedAvatarOverrides.test.ts",
+        "src/lib/linkedReadReceipts.test.ts",
+        "src/lib/linkedCustomizationPacks.test.ts",
+        "src/lib/packArchive.test.ts",
+        "src/store/packs.test.ts",
+        "src/store/avatars.test.ts",
+        "src/lib/theme-linked.test.ts",
+        "src/components/identity/AvatarEditMenu.test.ts"
+      ],
+      "capability": {
+        "summary": "Project private linked-account documents and validated customization assets without stale-owner publication or remote echo.",
+        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
+        "invariants": [
+          {
+            "name": "Certified same-account authority, bounded versioned records and deletion tombstones preserve convergence without exposing private records to other group members",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Avatar and receipt reads have bounded observation waits; a stalled receipt write retains mutation serialization while remote receipt polling continues independently, and retired owners cannot publish late snapshots.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "escalation": [
+        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence."
+      ]
+    },
+    {
+      "id": "frontend-startup-appearance",
+      "paths": [
+        "frontend/src/store/packs.ts",
+        "frontend/src/store/packs.test.ts",
+        "frontend/src/lib/linkedAppearance.ts",
+        "frontend/src/lib/linkedAppearance.test.ts",
+        "frontend/src/lib/linkedCustomizationPacks.ts",
+        "frontend/src/lib/linkedCustomizationPacks.test.ts",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/e2e/theme-picker.spec.ts",
+        "frontend/e2e/helpers/packs.ts",
+        "frontend/e2e/helpers/session.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/e2e/ui-visual-regression.spec.ts",
+        "frontend/src/App.tsx",
+        "frontend/src/index.css",
+        "frontend/src/lib/initialPresentation.ts",
+        "frontend/src/lib/initialPresentation.test.ts",
+        "frontend/src/lib/api/window.ts",
+        "frontend/e2e/conversation-wallpaper.spec.ts"
+      ],
+      "frontend": [
+        "src/store/packs.test.ts",
+        "src/lib/linkedAppearance.test.ts",
+        "src/lib/linkedCustomizationPacks.test.ts",
+        "src/lib/theme-linked.test.ts",
+        "src/store/chat.test.ts",
+        "src/lib/initialPresentation.test.ts",
+        "src/store/auth.test.ts"
+      ],
+      "capability": {
+        "summary": "Restore selected private appearance from a verified account scope before unrelated gallery loading and retain it through transient runtime readiness changes.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#account-scoped-startup-appearance",
+        "invariants": [
+          {
+            "name": "Selected-theme hydration uses verified owner/account scope; logout, replacement and stale async cache reads cannot retain private wallpaper CSS. Startup observation never grants runtime readiness. The startup browser scenario retains held gallery, readiness and real logout/relogin evidence; it cannot model account replacement by mutating a derived chat field while the authoritative identity fixture remains unchanged. Existing scoped pack and linked appearance controls retain replacement and stale-read acceptance.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#account-scoped-startup-appearance"
+          },
+          {
+            "name": "Authenticated appearance starts before lazy chat; initial native acknowledgement waits for the matching selected-theme preparation, decoded selected image and committed safe surface. Unrelated gallery enumeration cannot block a prepared theme; locked or retired account assets cannot paint.",
+            "reference": "docs/ARCHITECTURE.md#initial-native-presentation"
+          }
+        ]
+      },
+      "escalation": [
+        "Run cold and warm startup with the real chat module, identity, library and image decode independently delayed; verify signed-out, locked and replaced accounts plus unchanged visuals. Packaged native first-visible-frame evidence is required separately from browser mocks."
+      ]
+    },
+    {
+      "id": "frontend-conversation-drafts",
+      "paths": [
+        "frontend/src/store/drafts.ts",
+        "frontend/src/store/drafts.test.ts",
+        "frontend/src/lib/api/drafts.ts",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/e2e/conversation-drafts.spec.ts"
+      ],
+      "frontend": [
+        "src/store/drafts.test.ts",
+        "src/features/chat/ConversationView.test.ts",
+        "src/features/chat/ComposerAdmission.test.ts"
+      ],
+      "capability": {
+        "summary": "Preserve versioned account-scoped draft text and protection choices with idle batching, conflict-aware patches and concealed inactive previews.",
+        "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
+        "invariants": [
+          {
+            "name": "Ten-second idle saves send only dirty conversation patches; retired sessions and stale versions cannot overwrite a newer account draft",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Protected text and policy restore atomically; accepted sends clear only their originating revision and rejected sends preserve their sole draft retry owner",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "escalation": [
+        "Verify switching, clearing, Unicode restoration and inactive previews in browser scenarios. Browser reload with mocked IPC does not certify native quit/restart persistence."
+      ]
+    },
+    {
+      "id": "frontend-message-favorites",
+      "paths": [
+        "frontend/src/features/chat/favorites/",
+        "frontend/src/store/messageFavorites.ts",
+        "frontend/src/store/messageFavorites.test.ts",
+        "frontend/src/lib/api/messageFavorites.ts",
+        "frontend/src/lib/api/messageFavorites.test.ts",
+        "frontend/e2e/message-favorites.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/favorites/selection.test.ts",
+        "src/features/chat/favorites/FavoriteEditor.test.ts",
+        "src/store/messageFavorites.test.ts",
+        "src/lib/api/messageFavorites.test.ts",
+        "src/lib/attachmentSave.test.ts",
+        "src/features/chat/ConversationView.test.ts",
+        "src/features/chat/Sidebar.test.ts",
+        "src/features/chat/favorites/MessageCollection.test.ts"
+      ],
+      "capability": {
+        "summary": "Collect ordered messages as independent favorites with editable searchable group descriptions and individual notes.",
+        "guide": "docs/favorites.md",
+        "invariants": [
+          {
+            "name": "Favorites are distinct from self-chat and contact pins; notes never modify original message content",
+            "reference": "docs/favorites.md#collection-and-metadata"
+          },
+          {
+            "name": "Selections, editor drafts and asynchronous collection results cannot cross conversation or owner/runtime lifetimes",
+            "reference": "docs/favorites.md#ownership-and-acceptance"
+          },
+          {
+            "name": "Favorite list reads have bounded observation waits, including refresh after a successful mutation; an unavailable projection cannot conceal or duplicate durable collection acceptance.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "escalation": [
+        "Run frontend/e2e/message-favorites.spec.ts for grouped/single collection, searchable notes, edit/remove, duplicate lookup, exact original navigation, keyboard and narrow layouts; include relevant visual-regression scenarios for the sidebar change. Browser mocks do not establish native IPC authority or physical linked-device synchronization."
+      ]
+    },
+    {
+      "id": "frontend-screenshot-submission",
+      "paths": [
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerScreenshot.test.ts",
+        "frontend/e2e/screenshot-portable.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/ComposerScreenshot.test.ts"
+      ],
+      "capability": {
+        "summary": "Copy the confirmed edited screenshot to the clipboard, stage the same PNG, and send explicitly even after native capture loses input focus.",
+        "guide": "docs/help/topics/screenshots.md",
+        "invariants": [
+          {
+            "name": "Confirmation copies the final PNG before staging; cancellation leaves the clipboard unchanged and copy failures retain the editor for retry",
+            "reference": "docs/help/topics/screenshots.md"
+          },
+          {
+            "name": "Background Enter sends only staged screenshots and preserves IME confirmation, Shift+Enter, focused controls and modal ownership",
+            "reference": "docs/help/topics/screenshots.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run screenshot browser scenarios in Chromium and WebKit; mocked focus loss does not establish native fullscreen restoration behavior. Verify pasting a confirmed cropped/annotated PNG into another native app on supported desktop platforms."
+      ]
+    },
+    {
+      "id": "frontend-local-agent-access",
+      "paths": [
+        "frontend/src/features/chat/settings/LocalAgentSettings.tsx",
+        "frontend/src/features/chat/settings/AgentConversationPicker.tsx",
+        "frontend/src/features/chat/settings/LocalAgentSettings.test.ts",
+        "frontend/src/lib/api/localAgentAccess.ts",
+        "frontend/src/lib/api/localAgentAccess.test.ts",
+        "frontend/e2e/local-agent-access.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/settings/LocalAgentSettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/lib/api/localAgentAccess.test.ts",
+        "src/lib/contactVisibility.test.ts",
+        "src/store/contactPolicy.test.ts",
+        "src/lib/settingsTranslations.test.ts",
+        "src/features/chat/settings/SecuritySettings.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Expose acknowledged scope, explicit temporary/continuous duration, read-only expiry and safe recent activity for desktop local automation.",
+        "guide": "docs/settings.md#local-agent-access",
+        "invariants": [
+          {
+            "name": "Only explicitly selected conversations are granted and no bearer token is exposed in the UI or copied prompt. New account scopes reuse current-owner contact visibility; existing grants remain revocable.",
+            "reference": "docs/settings.md#local-agent-access"
+          },
+          {
+            "name": "Closed/replaced views cannot publish stale results and auxiliary file failures reload canonical readiness.",
+            "reference": "docs/settings.md#local-agent-access"
+          },
+          {
+            "name": "Agent access owns local agent setup and save feedback; conversation selection stays collapsed by default with a selected count, searchable bounded results and selected-only review; filtering preserves grants and the 16-conversation limit.",
+            "reference": "docs/settings.md#local-agent-access"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/local-agent-access.spec.ts, affected settings-categories and visual-regression browser scenarios. Mocked browsers do not prove native file permissions or lock/logout enforcement."
+      ]
+    },
+    {
+      "id": "frontend-search",
+      "paths": [
+        "frontend/src/features/chat/SearchDialog.tsx",
+        "frontend/src/features/chat/SearchDialog.test.ts",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/useConversationViewport.ts",
+        "frontend/src/features/chat/useConversationViewport.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/contactVisibility.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/e2e/chat.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/SearchDialog.test.ts",
+        "src/features/chat/ConversationView.test.ts",
+        "src/features/chat/useConversationViewport.test.ts",
+        "src/lib/api.test.ts",
+        "src/lib/contactVisibility.test.ts",
+        "src/store/conversationHistory.test.ts"
+      ],
+      "consumers": [
+        "frontend-chat",
+        "frontend-history",
+        "frontend-local-agent-access"
+      ],
+      "capability": {
+        "summary": "Navigate recent search results by exact owner-scoped namespace and message identity with separate read-only context and explicit coverage.",
+        "guide": "docs/ARCHITECTURE.md#recent-search-references",
+        "invariants": [
+          {
+            "name": "Duplicate text and timestamps never substitute for an exact selected message ID; unresolved or unavailable references never fall back to approximate matching",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Context presentation cannot replace canonical history, advance unread coverage or cross owner/runtime lifetimes",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          }
+        ]
+      },
+      "escalation": [
+        "Run search browser scenarios for identical duplicate results, older exact context, unavailable targets, hidden contacts and failed retry. Visible context and delivery changes also require relevant narrow-window and visual-regression scenarios; browser mocks do not certify native IPC authorization."
+      ]
+    },
+    {
       "id": "frontend-delivery-details",
       "paths": [
+        "frontend/e2e/automatic-delivery.spec.ts",
         "frontend/src/features/chat/DeliveryDetails.tsx",
         "frontend/src/features/chat/DeliveryDetails.test.ts",
+        "frontend/src/features/chat/DeliveryRecoveryProvider.tsx",
+        "frontend/src/features/chat/deliveryRecovery.ts",
         "frontend/src/features/chat/DeliveryFooter.tsx",
         "frontend/src/features/chat/deliveryFooter.test.ts",
         "frontend/src/store/conversationModel.ts",
         "frontend/src/store/conversationState.ts",
-        "frontend/src/store/outgoingIntent.ts"
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/features/chat/MessageStatus.tsx"
       ],
       "frontend": [
         "src/features/chat/DeliveryDetails.test.ts",
@@ -23,11 +571,15 @@
         "guide": "docs/help/topics/delivery.md#inspect-delivery-details",
         "invariants": [
           {
-            "name": "Missing or aged scheduling details do not establish recipient presence, failure, custody or delivery",
+            "name": "Missing or aged scheduling details do not establish recipient presence, failure, custody or delivery. Independent text, sticker and file-card browser scenarios require Awaiting before one explicit authoritative mock projection; the file scenario retains disclosure, keyboard and offer-receipt assertions without combining three send journeys inside one functional case budget.",
             "reference": "docs/network-design-reference.md#runtime-delivery-observations"
           },
           {
             "name": "Delivered messages and retired owners cannot retain an awaiting disclosure",
+            "reference": "docs/help/topics/delivery.md#inspect-delivery-details"
+          },
+          {
+            "name": "Recovery dialogs outlive row virtualization and receipt confirmation, close on owner/runtime/conversation retirement and restore focus only within their original active scope",
             "reference": "docs/help/topics/delivery.md#inspect-delivery-details"
           }
         ]
@@ -67,19 +619,54 @@
       "id": "frontend-history",
       "paths": [
         "frontend/src/store/conversationHistory.ts",
-        "frontend/src/store/conversationHistory.test.ts"
+        "frontend/src/store/conversationHistory.test.ts",
+        "frontend/src/store/conversationReactions.ts",
+        "frontend/src/store/conversationReactions.test.ts",
+        "frontend/src/features/chat/ReactionSummaryDialog.tsx",
+        "frontend/e2e/reaction-summaries.spec.ts",
+        "frontend/e2e/ui-audit-message-log.spec.ts"
       ],
-      "frontend": ["src/store/conversationHistory.test.ts"],
-      "consumers": ["frontend-chat"]
+      "frontend": [
+        "src/store/conversationHistory.test.ts",
+        "src/lib/readDeadline.test.ts",
+        "src/store/conversationReactions.test.ts",
+        "src/store/chat.test.ts",
+        "src/features/chat/MessageBubble.test.ts"
+      ],
+      "consumers": [
+        "frontend-chat"
+      ],
+      "capability": {
+        "summary": "Select and reconcile owner-scoped history while coalescing automatic invalidations into bounded native read bundles.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "One running automatic bundle and one pending invalidation wait for all original native reads; explicit archive expansion preserves its baseline policy",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Selected reaction queries share one physical native read, retain a bounded summary prefix, and preserve history/read progress while projections are pending.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
     },
     {
       "id": "frontend-outgoing",
       "paths": [
         "frontend/src/store/outgoingIntent.ts",
-        "frontend/src/store/outgoingIntent.test.ts"
+        "frontend/src/store/outgoingIntent.test.ts",
+        "frontend/e2e/file-send-progress.spec.ts"
       ],
-      "frontend": ["src/store/outgoingIntent.test.ts"],
-      "consumers": ["frontend-chat"],
+      "frontend": [
+        "src/store/outgoingIntent.test.ts"
+      ],
+      "escalation": [
+        "File approval/progress changes require e2e/file-send-progress.spec.ts, including file-offer receipt before approval and byte completion."
+      ],
+      "consumers": [
+        "frontend-chat"
+      ],
       "capability": {
         "summary": "Own optimistic outgoing intents and project backend acceptance within the current frontend owner lifetime.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
@@ -95,6 +682,14 @@
           {
             "name": "Retired frontend owners cannot publish send completion",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "File offer receipt does not stop approval and byte-progress refresh",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Channel durable IDs settle acceptance independently of fanout and custody",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       }
@@ -105,8 +700,13 @@
         "frontend/src/store/conversationState.ts",
         "frontend/src/store/conversationModel.ts"
       ],
-      "consumers": ["frontend-history", "frontend-outgoing"],
-      "frontend": ["src/store/reception.test.ts"]
+      "consumers": [
+        "frontend-history",
+        "frontend-outgoing"
+      ],
+      "frontend": [
+        "src/store/reception.test.ts"
+      ]
     },
     {
       "id": "frontend-chat",
@@ -114,9 +714,22 @@
         "frontend/src/store/chat.ts",
         "frontend/src/store/chat.test.ts",
         "frontend/src/store/chatRuntimeEffects.ts",
-        "frontend/src/store/rosterRefresh.ts"
+        "frontend/src/store/rosterRefresh.ts",
+        "frontend/e2e/connection-recovery.spec.ts"
       ],
-      "frontend": ["src/store/chat.test.ts"],
+      "frontend": [
+        "src/store/chat.test.ts"
+      ],
+      "capability": {
+        "summary": "Bound identity startup waits and recover automatically after transient identity failures while retaining owner and runtime authority.",
+        "guide": "docs/module-boundaries.md#coordinated-state-owners",
+        "invariants": [
+          {
+            "name": "The thirty-second identity boot window includes native read waits; failure retains bounded background recovery without crossing owner/run lifetimes",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
       "escalation": [
         "Changed visible interaction or native IPC behavior requires relevant browser/native scenarios; unit reachability does not prove runtime wiring."
       ]
@@ -127,20 +740,57 @@
         "frontend/src/store/ownership.ts",
         "frontend/src/store/ownership.test.ts"
       ],
-      "frontend": ["src/store/ownership.test.ts"],
-      "consumers": ["frontend-history", "frontend-outgoing"]
+      "frontend": [
+        "src/store/ownership.test.ts"
+      ],
+      "consumers": [
+        "frontend-history",
+        "frontend-outgoing"
+      ]
     },
     {
       "id": "frontend-channel-actions",
       "paths": [
         "frontend/src/store/channelActions.ts",
-        "frontend/src/store/channelActions.test.ts"
+        "frontend/src/store/channelActions.test.ts",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/GroupPreferences.tsx",
+        "frontend/src/features/chat/MembersDialog.test.ts",
+        "frontend/src/features/chat/channelMemberProjection.ts",
+        "frontend/e2e/member-account-projection.spec.ts",
+        "frontend/e2e/dissolve-channel.spec.ts",
+        "frontend/src/features/chat/channelPermissions.ts",
+        "frontend/src/features/chat/channelPermissions.test.ts",
+        "frontend/src/features/chat/Sidebar.tsx",
+        "frontend/src/features/chat/Sidebar.test.ts",
+        "frontend/src/lib/types.ts"
       ],
-      "frontend": ["src/store/channelActions.test.ts"],
-      "consumers": ["frontend-chat"],
+      "frontend": [
+        "src/store/channelActions.test.ts",
+        "src/features/chat/MembersDialog.test.ts",
+        "src/features/chat/channelPermissions.test.ts",
+        "src/features/chat/Sidebar.test.ts"
+      ],
+      "consumers": [
+        "frontend-chat"
+      ],
       "escalation": [
         "Protocol membership and native admission remain authoritative; changing those requires their focused Rust and loopback evidence."
-      ]
+      ],
+      "capability": {
+        "summary": "Project one person per certified channel account and use native account authority for management controls.",
+        "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
+        "invariants": [
+          {
+            "name": "Native can_manage authorizes certified owner-account devices and explicit denial wins over legacy device ownership; roster/profile identity never grants authority. Absent authority fields retain exact device-owner compatibility. Owner badges use authoritative owner_account_id; account removal is atomic.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Committed group operations remain successful when optional roster or member hydration times out; bounded reads cannot undo or resubmit a durable mutation.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      }
     },
     {
       "id": "frontend-bootstrap",
@@ -149,7 +799,8 @@
         "frontend/src/main.tsx",
         "frontend/src/index.css",
         "frontend/src/vite-env.d.ts",
-        "frontend/src/components/ErrorBoundary.tsx"
+        "frontend/src/components/ErrorBoundary.tsx",
+        "frontend/e2e/login-layout.spec.ts"
       ],
       "frontend": [
         "src/store/auth.test.ts",
@@ -165,37 +816,87 @@
       "paths": [
         "frontend/src/features/auth/LoginScreen.tsx",
         "frontend/src/features/auth/RestoreBackup.tsx",
-        "frontend/src/components/ui/label.tsx"
+        "frontend/src/components/ui/label.tsx",
+        "frontend/src/features/auth/LoginScreen.test.ts",
+        "frontend/src/features/chat/AccountProtectionNotice.tsx",
+        "frontend/src/features/auth/DeviceEnrollmentDialog.tsx",
+        "frontend/src/features/auth/DeviceEnrollmentDialog.test.ts",
+        "frontend/src/lib/api/auth.ts",
+        "frontend/src/store/auth.ts",
+        "frontend/e2e/device-enrollment.spec.ts"
       ],
-      "frontend": ["src/store/auth.test.ts"],
+      "frontend": [
+        "src/store/auth.test.ts",
+        "src/features/auth/LoginScreen.test.ts",
+        "src/features/auth/DeviceEnrollmentDialog.test.ts",
+        "src/lib/api.test.ts"
+      ],
       "escalation": [
-        "Auth forms and their label primitive use conservative auth-store unit fallback only; required browser login/recovery scenarios verify interaction. Archive crypto, persistence and OS dialog behavior still require their core/native owners."
-      ]
+        "Run login-recovery browser scenarios for create-and-enter, partial entry failure, password visibility, saved-login retry and optional backup; include minimum-window, macOS guidance and visual evidence. Actual OS Keychain prompts and restart resume require native evidence.",
+        "Run e2e/device-enrollment.spec.ts for signed-out linking and narrow-window cancellation. Real discovery, certified source identity, encrypted credential transfer, publication and OS credential persistence require native cross-device evidence."
+      ],
+      "capability": {
+        "summary": "Create or unlock a local account, or enroll this device directly from an authenticated source without creating an unrelated temporary account.",
+        "guide": "docs/help/topics/first-run.md#keep-access-to-your-account",
+        "invariants": [
+          {
+            "name": "Created accounts retry entry without duplicate registration; retired sessions cannot publish saved-login results",
+            "reference": "docs/help/topics/first-run.md#keep-access-to-your-account"
+          },
+          {
+            "name": "Credential failure never blocks entry or claims saved login; backup remains optional",
+            "reference": "docs/help/topics/first-run.md#keep-access-to-your-account"
+          },
+          {
+            "name": "Signed-out enrollment requires a verified source and explicit shared-login/profile consent; cancellation retires provisional work and only a current native success publishes the authenticated session",
+            "reference": "docs/help/topics/link-devices.md"
+          }
+        ]
+      }
     },
     {
       "id": "frontend-chat-shell",
-      "paths": ["frontend/src/features/chat/ChatApp.tsx"],
+      "paths": [
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/e2e/touch-targets.spec.ts"
+      ],
       "frontend": [
         "src/store/chat.test.ts",
         "src/store/presence.test.ts",
         "src/lib/automaticDownloads.test.ts"
       ],
       "escalation": [
-        "Chat composition uses conservative state/helper unit fallback only; required browser lifecycle scenarios and affected native session evidence are separate obligations."
+        "Chat composition uses conservative state/helper unit fallback only; required browser lifecycle scenarios and affected native session evidence are separate obligations.",
+        "Touch scenarios establish native browser input emulation and verify actual hover, pointer and touch state before measuring 44px controls; controlled state loss must restore real CSS and tap behavior under R10, not a JavaScript matchMedia substitute."
       ]
     },
     {
       "id": "frontend-window-controls",
-      "paths": ["frontend/src/components/WindowControls.tsx"],
-      "frontend": ["src/lib/platform.test.ts"],
+      "paths": [
+        "frontend/src/components/WindowControls.tsx"
+      ],
+      "frontend": [
+        "src/lib/platform.test.ts"
+      ],
       "escalation": [
         "Platform predicate unit tests do not execute OS window actions; required browser window-control scenarios and real affected native platform evidence remain necessary."
       ]
     },
     {
       "id": "frontend-pack-acceptance",
-      "paths": ["frontend/e2e/packs.spec.ts"],
-      "frontend": ["src/lib/pack.test.ts", "src/lib/stickerPacks.test.ts"],
+      "paths": [
+        "frontend/e2e/packs.spec.ts",
+        "frontend/e2e/packs-empty.spec.ts",
+        "frontend/e2e/stickers.spec.ts",
+        "frontend/e2e/theme-picker.spec.ts",
+        "frontend/e2e/avatar-gallery.spec.ts",
+        "frontend/e2e/avatar-gallery-loading.spec.ts",
+        "frontend/e2e/theme-contrast.spec.ts"
+      ],
+      "frontend": [
+        "src/lib/pack.test.ts",
+        "src/lib/stickerPacks.test.ts"
+      ],
       "escalation": [
         "Pack browser scenario changes require their complete browser spec; unit tests alone do not prove installation or restart persistence."
       ]
@@ -241,8 +942,13 @@
     },
     {
       "id": "frontend-browser-fixture",
-      "paths": ["frontend/e2e/tauri-mock.ts"],
-      "frontend": ["src/lib/events.test.ts", "src/store/chat.test.ts"],
+      "paths": [
+        "frontend/e2e/tauri-mock.ts"
+      ],
+      "frontend": [
+        "src/lib/events.test.ts",
+        "src/store/chat.test.ts"
+      ],
       "escalation": [
         "Shared mocked IPC changes require affected browser scenarios; mocks do not prove native transport or persistent cleanup."
       ]
@@ -257,14 +963,14 @@
         "src/store/chat.test.ts",
         "src/store/outgoingIntent.test.ts",
         "src/features/chat/ComposerAdmission.test.ts",
-        "src/features/chat/conversationDrafts.test.ts"
+        "src/store/drafts.test.ts"
       ],
       "capability": {
-        "summary": "Move submitted text from the composer into one owner-scoped outgoing intent immediately, retaining draft text only when local admission refuses.",
+        "summary": "Give each text submission one retry owner: ordinary text transfers immediately to its outgoing intent; protected text retains its captured composer draft until durable acceptance and removes a rejected temporary intent.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
-            "name": "Submitted content is owned by its outgoing bubble, independently of backend acceptance and recipient confirmation",
+            "name": "Each submission has one retry owner; acceptance and recipient confirmation remain separate",
             "reference": "CONTEXT.md#acceptance-and-delivery"
           },
           {
@@ -276,7 +982,9 @@
     },
     {
       "id": "frontend-dm-reception-acceptance",
-      "paths": ["frontend/e2e/unread-badge.spec.ts"],
+      "paths": [
+        "frontend/e2e/unread-badge.spec.ts"
+      ],
       "frontend": [
         "src/store/chat.test.ts",
         "src/store/reception.test.ts",
@@ -328,49 +1036,13 @@
             "reference": "docs/network-design-reference.md#person-presence-contract"
           },
           {
-            "name": "Member discovery sources retain overlapping local UDP multicast and distinct named introducing post offices only while their own evidence is fresh; discovery is not a delivery path or location.",
+            "name": "Member discovery sources retain local UDP multicast and select the closest identified visible office per device using fresh bounded origin distances; unknown legacy distances do not establish an origin, and source expiry triggers fallback without implying a delivery path or location.",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]
       },
       "escalation": [
         "Changed presence IPC and visible status require browser presence/recovery and native lifecycle evidence."
-      ]
-    },
-    {
-      "id": "frontend-trust-cards",
-      "paths": [
-        "frontend/src/features/chat/TrustCardPanel.tsx",
-        "frontend/src/lib/api/trustCards.ts",
-        "frontend/src/lib/trustCard.ts",
-        "frontend/src/lib/trustCard.test.ts",
-        "frontend/e2e/trust-cards.spec.ts",
-        "frontend/src/features/chat/TrustCardPanel.test.ts",
-        "frontend/src/locales/en.json",
-        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
-      ],
-      "frontend": [
-        "src/lib/trustCard.test.ts",
-        "src/features/chat/VerifyContactDialog.test.ts",
-        "src/features/chat/TrustCardPanel.test.ts"
-      ],
-      "consumers": ["frontend-chat"],
-      "capability": {
-        "summary": "Present signed public profiles and explicit proofs separately from device-local verification and observation history.",
-        "guide": "docs/ARCHITECTURE.md",
-        "invariants": [
-          {
-            "name": "Signed statements do not automatically verify people or export local trust",
-            "reference": "docs/ARCHITECTURE.md"
-          },
-          {
-            "name": "Creation dates remain unknown until explicitly declared",
-            "reference": "docs/ARCHITECTURE.md"
-          }
-        ]
-      },
-      "escalation": [
-        "Run e2e/trust-cards.spec.ts for publish/import/export/proof controls. Native signatures, persistence and transport require owning Rust evidence."
       ]
     },
     {
@@ -385,7 +1057,9 @@
         "src/store/chat.test.ts",
         "src/lib/events.test.ts"
       ],
-      "consumers": ["frontend-chat"],
+      "consumers": [
+        "frontend-chat"
+      ],
       "capability": {
         "summary": "Coalesce scoped group invalidations and keep group details consistent with bounded fallback queries.",
         "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
@@ -430,7 +1104,11 @@
         "frontend/e2e/automatic-delivery.spec.ts",
         "frontend/src/lib/api.test.ts",
         "frontend/src/features/chat/LinkDeviceDialog.tsx",
-        "frontend/src/features/chat/LinkDeviceDialog.test.ts"
+        "frontend/src/features/chat/LinkDeviceDialog.test.ts",
+        "frontend/e2e/audit-fixes.spec.ts",
+        "frontend/src/lib/i18n.ts",
+        "frontend/src/store/privacy.ts",
+        "frontend/src/store/privacy.test.ts"
       ],
       "frontend": [
         "src/lib/readDeadline.test.ts",
@@ -444,17 +1122,23 @@
         "src/features/chat/useSerialPoll.test.ts",
         "src/features/chat/PersonalDevices.test.ts",
         "src/lib/api.test.ts",
-        "src/features/chat/LinkDeviceDialog.test.ts"
+        "src/features/chat/LinkDeviceDialog.test.ts",
+        "src/store/privacy.test.ts"
       ],
       "consumers": [
         "frontend-chat",
         "frontend-outgoing",
-        "frontend-channel-refresh"
+        "frontend-channel-refresh",
+        "frontend-local-agent-access"
       ],
       "capability": {
         "summary": "Consume scoped push invalidations with bounded read recovery, fair snapshot publication and batched preference convergence.",
         "guide": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery",
         "invariants": [
+          {
+            "name": "Device linking makes account replacement explicit, invalidates stale consent, prepares source preferences before complete-sync enrollment, excludes mailbox-only peers and preserves scoped recovery",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
           {
             "name": "Read timeouts preserve native admission bounds; stale owners cannot apply snapshots and missed pushes reconcile through fallback.",
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
@@ -462,6 +1146,14 @@
           {
             "name": "Preference projection uses the same revision and author ordering as the core; imported complete contact records publish after bounded batch persistence.",
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Account login availability and applied revision are observed independently of history progress; retired account/session polls cannot report sign-in as applied",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Contact and privacy policy reads release presentation loading after a bounded wait, preserve explicit error recovery and reject late snapshots from expired reads or retired sessions without timing out mutation ownership.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
@@ -474,6 +1166,8 @@
       "paths": [
         "frontend/src/store/updates.ts",
         "frontend/src/store/updates.test.ts",
+        "frontend/src/store/updateRestart.ts",
+        "frontend/src/store/updateRestart.test.ts",
         "frontend/src/features/chat/UpdatePanel.tsx",
         "frontend/src/features/chat/UpdatePanel.test.ts",
         "frontend/src/lib/api/diagnostics.ts",
@@ -483,13 +1177,19 @@
       ],
       "frontend": [
         "src/store/updates.test.ts",
+        "src/store/updateRestart.test.ts",
         "src/features/chat/UpdatePanel.test.ts",
-        "src/lib/api/diagnostics.test.ts"
+        "src/lib/api/diagnostics.test.ts",
+        "src/features/chat/diagnostics/useDiagnosticsController.test.ts"
       ],
       "capability": {
-        "summary": "Persist a device-local explicit update channel and discard prior candidates on channel changes, preserving native release and edition authority.",
+        "summary": "Coordinate explicit signed updates, safe restart preparation and manual fallback while preserving native release, platform and channel authority.",
         "guide": "docs/updates.md",
         "invariants": [
+          {
+            "name": "Only host-eligible signed updates install automatically; cancellation prevents installation, pending drafts are flushed, active work defers restart, and native failures retain a retryable prepared update with manual fallback.",
+            "reference": "docs/updates.md#one-click-installation"
+          },
           {
             "name": "About displays the host logical build identity; channel changes never implicitly check, download or downgrade, and in-flight work prevents selection changes",
             "reference": "docs/updates.md"
@@ -497,22 +1197,1443 @@
         ]
       },
       "escalation": [
-        "Run the update-flow browser spec for persisted selection, candidate invalidation, lite identity forwarding and manual installation. Signed native downloads require native owner evidence."
+        "Run the update-flow browser spec for persisted selection, candidate invalidation, canonical desktop package forwarding and manual installation. Signed native downloads require native owner evidence."
       ]
+    },
+    {
+      "id": "frontend-notification-permission",
+      "paths": [
+        "frontend/src/lib/notify.ts",
+        "frontend/src/lib/notify.test.ts",
+        "frontend/src/lib/api/notifications.ts",
+        "frontend/src/features/chat/NotificationPermissionHelp.tsx",
+        "frontend/src/features/chat/NotificationPermissionHelp.test.ts",
+        "frontend/src/features/chat/NotificationPermissionNotice.tsx",
+        "frontend/src/features/chat/useNotificationPermissionReminder.ts",
+        "frontend/e2e/notification-permission.spec.ts",
+        "frontend/src/features/chat/settings/NotificationSettings.test.ts",
+        "frontend/src/features/chat/useNotificationPermissionReminder.test.ts"
+      ],
+      "frontend": [
+        "src/lib/notify.test.ts",
+        "src/features/chat/NotificationPermissionHelp.test.ts",
+        "src/store/settings.test.ts",
+        "src/features/chat/settings/NotificationSettings.test.ts",
+        "src/features/chat/useNotificationPermissionReminder.test.ts"
+      ],
+      "capability": {
+        "summary": "Explain OS notification authorization separately from saved preferences and offer nonblocking, dismissible messaging guidance.",
+        "guide": "docs/settings.md#system-notification-permission",
+        "invariants": [
+          {
+            "name": "Message submission never awaits permission; dismissal survives conversation navigation for the current login generation",
+            "reference": "docs/settings.md#system-notification-permission"
+          },
+          {
+            "name": "Passive observations never request permission and originating-view retirement prevents delayed prompting",
+            "reference": "docs/settings.md#system-notification-permission"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/notification-permission.spec.ts and affected settings/visual browser scenarios. Native authorization prompts and OS navigation require packaged-app macOS/Windows evidence."
+      ]
+    },
+    {
+      "id": "frontend-google-drive-backup",
+      "paths": [
+        "frontend/e2e/settings-categories.spec.ts",
+        "frontend/src/features/recovery/",
+        "frontend/src/lib/api/googleDrive.ts",
+        "frontend/src/features/chat/DataRecoverySettings.tsx",
+        "frontend/src/features/auth/RestoreBackup.tsx",
+        "frontend/e2e/google-drive-backup.spec.ts",
+        "frontend/src/lib/api/recovery.ts",
+        "frontend/e2e/recovery.spec.ts",
+        "frontend/src/features/auth/RestoreBackup.test.ts",
+        "frontend/src/lib/api/recovery.test.ts"
+      ],
+      "frontend": [
+        "src/features/recovery/GoogleDriveConnection.test.ts",
+        "src/features/chat/settingsRecoveryFlows.test.ts",
+        "src/features/auth/RestoreBackup.test.ts",
+        "src/lib/api/recovery.test.ts"
+      ],
+      "capability": {
+        "summary": "Connect Google Drive and save a recovery key once, then manually back up with native retained setup and restore through a single download-and-verify action.",
+        "guide": "docs/backup-recovery.md#google-drive-backup-and-restore",
+        "invariants": [
+          {
+            "name": "Initial Google authorization and every backup require user actions; later views silently resume remembered grants, while retiring a view cancels only its operation connection and ignores late results.",
+            "reference": "docs/backup-recovery.md#google-drive-security-and-boundaries"
+          },
+          {
+            "name": "Recovery keys are acknowledged once, hidden on later visits and reused natively; failed setup cannot create an unrecoverable backup.",
+            "reference": "docs/backup-recovery.md#create-a-backup"
+          },
+          {
+            "name": "Cloud restoration uses the existing verified archive preview and explicit new-profile commit.",
+            "reference": "docs/backup-recovery.md#google-drive-backup-and-restore"
+          },
+          {
+            "name": "Verified previews distinguish Favorites and independently retained files from ordinary history and show missing Favorite bytes",
+            "reference": "docs/favorites.md#backup-and-recovery"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/google-drive-backup.spec.ts and e2e/recovery.spec.ts. Native configured OAuth, offline/revocation and cross-installation restoration require packaged desktop evidence."
+      ]
+    },
+    {
+      "id": "frontend-channel-join-history",
+      "paths": [
+        "frontend/src/features/chat/ChannelHistorySettings.tsx",
+        "frontend/src/features/chat/ChannelHistorySettings.test.ts",
+        "frontend/e2e/channel-history.spec.ts",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/GroupPreferences.tsx",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/src/features/chat/channelPermissions.ts",
+        "frontend/src/features/chat/channelPermissions.test.ts"
+      ],
+      "frontend": [
+        "src/features/chat/ChannelHistorySettings.test.ts",
+        "src/features/chat/MembersDialog.test.ts",
+        "src/lib/api.test.ts",
+        "src/features/chat/channelPermissions.test.ts"
+      ],
+      "capability": {
+        "summary": "Expose the owner-controlled recent history window for new channel members.",
+        "guide": "docs/help/topics/channels.md",
+        "invariants": [
+          {
+            "name": "Only a native-authorized accepted owner-account device may change policy; explicit denial wins over legacy owner-device equality, and stale channel/session results never replace current settings",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run channel membership browser and native IPC scenarios for owner-only settings, channel switching and desktop session retirement; mocked IPC does not certify native authorization."
+      ]
+    },
+    {
+      "id": "frontend-channel-mentions",
+      "paths": [
+        "frontend/e2e/unread-badge.spec.ts",
+        "frontend/src/lib/mentions.tsx",
+        "frontend/src/lib/mentions.test.ts",
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/reception.test.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.test.ts"
+      ],
+      "frontend": [
+        "src/lib/mentions.test.ts",
+        "src/store/reception.test.ts",
+        "src/store/conversationHistory.test.ts",
+        "src/store/chat.test.ts",
+        "src/features/chat/sidebar/ConversationRow.test.ts"
+      ],
+      "capability": {
+        "summary": "Keep unread channel mentions distinguishable from ordinary unread messages in the sidebar.",
+        "guide": "docs/module-boundaries.md",
+        "invariants": [
+          {
+            "name": "Mention alerts follow exact read identities across ordinary arrivals, navigation and owner-scoped persistence; own messages do not trigger alerts",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Mention alerts follow exact read identities across ordinary arrivals, navigation and owner-scoped persistence; own and protected messages do not trigger alerts",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Channel mention browser assertions await the current virtual message list's actual presentation under the existing whole-test watchdog; retained real animation frames cannot produce premature readiness, and message visibility and mention-clear assertions remain intact",
+            "reference": "docs/testing-feedback-loop.md#browser-integration-evidence"
+          }
+        ]
+      },
+      "escalation": [
+        "Check mention-prefix visibility and preview truncation in light/dark sidebar layouts; browser acceptance includes e2e/unread-badge.spec.ts and e2e/ui-visual-regression.spec.ts.",
+        "Check mention-prefix visibility and preview truncation in light/dark sidebar layouts; browser acceptance includes e2e/ui-visual-regression.spec.ts."
+      ]
+    },
+    {
+      "id": "frontend-protected-messages",
+      "paths": [
+        "frontend/src/features/chat/ProtectedMessage.tsx",
+        "frontend/src/features/chat/protectedReveal.ts",
+        "frontend/src/features/chat/protectedReveal.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerAdmission.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/protectedMessages.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/api.test.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/e2e/protected-messages.spec.ts",
+        "frontend/e2e/tauri-mock.ts",
+        "frontend/src/store/drafts.ts",
+        "frontend/src/store/drafts.test.ts",
+        "frontend/src/features/chat/protectedImage.ts",
+        "frontend/src/features/chat/protectedImage.test.ts",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/src/lib/automaticDownloads.ts",
+        "frontend/src/lib/automaticDownloads.test.ts",
+        "frontend/src/lib/mediaTypes.ts",
+        "frontend/src/features/chat/mediaFile.tsx"
+      ],
+      "frontend": [
+        "src/features/chat/protectedReveal.test.ts",
+        "src/store/protectedMessages.test.ts",
+        "src/features/chat/ComposerAdmission.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/outgoingIntent.test.ts",
+        "src/lib/api.test.ts",
+        "src/store/drafts.test.ts",
+        "src/features/chat/protectedImage.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts",
+        "src/lib/automaticDownloads.test.ts"
+      ],
+      "consumers": [
+        "frontend-chat",
+        "frontend-history"
+      ],
+      "capability": {
+        "summary": "Protected text and raster images use owner-scoped reveal, local temporary plaintext and revocable image URLs, fresh verification and concealed shared projections.",
+        "guide": "docs/privacy-controls.md#protected-messages",
+        "invariants": [
+          {
+            "name": "Protected content never enters ordinary history, sidebar, reply quotes, accepted intents or accessible summaries; each reveal expires after thirty visible seconds and closes on lifetime or foreground changes",
+            "reference": "docs/privacy-controls.md#protected-messages"
+          }
+        ]
+      },
+      "escalation": [
+        "Run frontend/e2e/protected-messages.spec.ts and e2e/ui-visual-regression.spec.ts for affected conversation layouts. Verify real macOS system authentication and Windows/Linux password verification, including prompt focus restoration, app lock and conversation switching. Mocked browser evidence does not establish native authentication behavior."
+      ]
+    },
+    {
+      "id": "frontend-account-profile",
+      "paths": [
+        "frontend/src/locales/en.json",
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png",
+        "frontend/src/features/chat/AccountProfilePanel.tsx",
+        "frontend/src/features/chat/AccountProfilePanel.test.ts",
+        "frontend/src/lib/api/accountProfile.ts",
+        "frontend/src/lib/accountProfile.test.ts",
+        "frontend/src/store/accountProfiles.ts",
+        "frontend/src/store/accountProfiles.test.ts",
+        "frontend/e2e/account-profiles.spec.ts",
+        "frontend/src/features/chat/ConversationHeadersSession.test.ts",
+        "frontend/src/features/chat/AccountBindingRecovery.tsx",
+        "frontend/src/features/chat/AccountBindingRecovery.test.ts",
+        "frontend/src/lib/api/privacy.ts",
+        "frontend/e2e/account-binding-recovery.spec.ts",
+        "frontend/e2e/account-binding-recovery.spec.ts-snapshots/"
+      ],
+      "frontend": [
+        "src/lib/accountProfile.test.ts",
+        "src/features/chat/VerifyContactDialog.test.ts",
+        "src/features/chat/AccountProfilePanel.test.ts",
+        "src/store/accountProfiles.test.ts",
+        "src/features/chat/ConversationHeaders.test.ts",
+        "src/features/chat/ConversationHeadersSession.test.ts",
+        "src/features/chat/AccountBindingRecovery.test.ts",
+        "src/features/chat/MemberProfileDialog.test.ts"
+      ],
+      "consumers": [
+        "frontend-chat"
+      ],
+      "capability": {
+        "summary": "Edit one ordinary profile and show the same About text in conversation headers and contact details with session-bound refresh.",
+        "guide": "docs/peer-trust.md",
+        "invariants": [
+          {
+            "name": "Creation dates are read-only metadata; legacy unknown dates stay unknown",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Retired asynchronous reads cannot populate a replacement account or contact; accepted profile changes refresh visible biographies",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Account-change diagnostics are read-only until explicit exact-device old/new binding acceptance; stale contact or runtime lifetimes cannot publish recovery results and manual verification remains separate",
+            "reference": "docs/peer-trust.md#recover-a-device-that-changed-accounts"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/account-profiles.spec.ts for ordinary profile editing, read-only dates, removed proof controls and header/detail biography consistency. Native identity, persistence and transport require owning Rust evidence."
+      ]
+    },
+    {
+      "id": "public-site-experience",
+      "paths": [
+        "site/index.html",
+        "site/landing.css",
+        "site/site.js",
+        "site/theme.css",
+        "tools/help/build.mjs",
+        "tools/help/style.css",
+        "frontend/e2e/site-audit.spec.ts",
+        "frontend/e2e/help-website.spec.ts",
+        "site/downloads.js",
+        "frontend/e2e/site-downloads.spec.ts",
+        "frontend/e2e/helpers/public-site.ts",
+        "tools/help/site.mjs",
+        "tools/help/navigation.mjs",
+        "site/404.html",
+        "frontend/playwright.site.config.ts",
+        "site/i18n.js",
+        "site/locales/",
+        "site/motion.js",
+        "site/motion.css",
+        "site/screenshots/",
+        "docs/screenshots/",
+        "frontend/e2e/site-capture.spec.ts",
+        "frontend/e2e/site-language.spec.ts",
+        "frontend/e2e/site-motion.spec.ts",
+        "tools/help/public-language.test.mjs",
+        "site/network-flow.js",
+        "site/faq-motion.js",
+        "site/faq-motion.css",
+        "frontend/e2e/site-network-flow.spec.ts",
+        "frontend/e2e/site-faq-motion.spec.ts",
+        "tools/help/build-site.mjs",
+        "tools/help/discovery.mjs",
+        "tools/help/discovery.test.mjs",
+        "frontend/e2e/site-discovery.spec.ts",
+        "docs/help/topics/about-mesh-talk.md"
+      ],
+      "escalation": [
+        "Verify the landing page and generated current/versioned readers at desktop and mobile widths, with keyboard navigation, reduced motion, JavaScript disabled and both reader color schemes. Preserve GitHub Pages project paths and truthful network, privacy, recovery and release guidance."
+      ],
+      "capability": {
+        "summary": "Present the public product tour and searchable versioned user guide with accessible progressive interactions.",
+        "guide": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling",
+        "invariants": [
+          {
+            "name": "The static site and current/versioned help share the public theme and self-hosted font; content, download destinations and guide navigation remain usable without JavaScript.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "Product previews and platform controls support keyboard selection, screenshot viewers restore focus, and motion respects reduced-motion preferences.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "Direct downloads use current published Stable metadata and exact desktop asset URLs; browser OS detection never silently substitutes an uncertain architecture. Download help does not claim transfer or signature verification completed.",
+            "reference": "docs/updates.md#public-website-downloads"
+          },
+          {
+            "name": "User-selected platform/architecture control the primary download; session preferences, modal focus, gallery navigation, FAQ fragments and help search history remain coherent across supported browser engines.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "The public language owner ships complete same-key locale resources; URL choice overrides saved/browser preferences. Article English fallback is explicit, commands and resource destinations remain unchanged, and failed or stale loads cannot partially translate the current page. Settlement observes the latest owned language change without replaying it or treating completion as success.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "The core messaging preview precedes optional Marketplace examples; motion is bounded, interruptible and immediately cancelled by reduced-motion preference changes without delaying native interactions.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "Topology packets illustrate direct LAN and optional routed custody, never live delivery evidence. User pause, viewport exit, tab hiding and reduced-motion changes stop traffic work. Image selection commits only decoded current requests; FAQ transitions remain interruptible and preserve native semantics.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "Product screenshots originate from native 2x browser captures; responsive candidates preserve mobile efficiency, decoded theme changes retain resolution selection, and enlarged views link to full-resolution originals.",
+            "reference": "docs/screenshots/README.md"
+          },
+          {
+            "name": "Public discovery exports reuse the manual; current and snapshot canonical URLs preserve source scope, sitemaps cover current HTML, and structured data makes no unverified Stable-release claim.",
+            "reference": "docs/help-system.md#public-discovery-and-factual-accuracy"
+          }
+        ]
+      },
+      "node": [
+        "tools/help/help.test.mjs",
+        "tools/help/corpus.test.mjs",
+        "tools/help/public-language.test.mjs",
+        "tools/help/discovery.test.mjs"
+      ]
+    },
+    {
+      "id": "frontend-localization",
+      "paths": [
+        "frontend/src/lib/i18n.ts",
+        "frontend/vite.config.ts",
+        "frontend/src/lib/i18n.test.ts",
+        "frontend/src/lib/format.ts",
+        "frontend/src/lib/format.test.ts",
+        "frontend/src/lib/localeParity.test.ts",
+        "frontend/src/locales/",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/lib/presenceLabels.test.ts",
+        "frontend/e2e/language-settings.spec.ts",
+        "frontend/e2e/login-recovery.spec.ts",
+        "frontend/e2e/ui-audit-shell.spec.ts",
+        "docs/help/topics/language.md"
+      ],
+      "frontend": [
+        "src/lib/i18n.test.ts",
+        "src/lib/format.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/lib/settingsTranslations.test.ts",
+        "src/lib/privacyTranslations.test.ts",
+        "src/lib/presenceLabels.test.ts",
+        "src/features/auth/LoginScreen.test.ts"
+      ],
+      "capability": {
+        "summary": "Select and persist one of eight complete interface languages across desktop UI, including Portuguese and Korean.",
+        "guide": "docs/help/topics/language.md",
+        "invariants": [
+          {
+            "name": "Every registered interface language has matching English keys, nonempty strings and unchanged interpolation variables; native language labels stay selectable without redesigning settings.",
+            "reference": "docs/help/topics/language.md"
+          },
+          {
+            "name": "Saved desktop choice wins over supported system/browser languages; regional Portuguese maps to pt-BR and regional Korean to ko. Immediate switching updates document language even if preference storage is unavailable; conversation dates and elapsed-time labels follow the selected language. Public language preference remains separate; automatic website language detection does not persist a fixed preference, explicit choices do, native language names carry their language tags, and English-authored articles disclose their fallback.",
+            "reference": "docs/help/topics/language.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Verify switching, reload persistence, short-window creation and sidebar/settings layout in Portuguese and Korean. Browser mocks cover interface behavior, not native operating-system menus or translated article content."
+      ]
+    },
+    {
+      "id": "frontend-group-file-network-cost",
+      "paths": [
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/GroupPreferences.tsx",
+        "frontend/src/features/chat/MembersDialog.test.ts",
+        "frontend/e2e/group-network-cost.spec.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/types.ts"
+      ],
+      "frontend": [
+        "src/features/chat/MembersDialog.test.ts",
+        "src/store/channelRefresh.test.ts"
+      ],
+      "capability": {
+        "summary": "Distinguish temporary local file-sharing protection from durable group sharing intent and offer an owner-bound temporary override.",
+        "guide": "docs/help/topics/channels.md#network-data-protection",
+        "invariants": [
+          {
+            "name": "Metered/unknown status is local-device-only, preserves the saved sharing toggle, and failed exceptions do not claim permission.",
+            "reference": "docs/help/topics/channels.md#network-data-protection"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise group switching, network-cost invalidations and temporary override in a native app; mocked member rendering does not establish OS detection or transfer protection."
+      ]
+    },
+    {
+      "id": "frontend-sticker-media",
+      "paths": [
+        "frontend/src/lib/stickerMedia.ts",
+        "frontend/src/lib/stickerMedia.test.ts",
+        "frontend/src/lib/directoryAttachment.ts",
+        "frontend/src/lib/directoryAttachment.test.ts",
+        "frontend/src/features/chat/FilesTray.tsx",
+        "frontend/src/features/chat/ConversationHistoryDialog.tsx",
+        "frontend/src/features/chat/favorites/FavoriteAttachment.tsx",
+        "frontend/src/features/chat/MediaSticker.tsx",
+        "frontend/src/features/chat/MediaSticker.test.ts",
+        "frontend/src/features/chat/mediaFile.tsx",
+        "frontend/src/features/chat/mediaFileRead.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/e2e/stickers.spec.ts",
+        "frontend/e2e/tauri-mock.ts",
+        "frontend/src/lib/installedStickerSources.ts",
+        "frontend/src/lib/installedStickerSources.test.ts",
+        "frontend/src/lib/linkedCustomizationPacks.ts",
+        "frontend/src/lib/linkedCustomizationPacks.test.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/reception.test.ts",
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationHistory.test.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/src/lib/messagePresentation.ts",
+        "frontend/src/lib/messagePresentation.test.ts",
+        "frontend/src/lib/conversationHistory.ts",
+        "frontend/src/lib/conversationHistory.test.ts",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/features/chat/DeliveryDetails.tsx",
+        "frontend/src/features/chat/DeliveryDetails.test.ts",
+        "frontend/src/features/chat/favorites/FavoriteEditor.tsx",
+        "frontend/src/features/chat/favorites/FavoritesDialog.tsx",
+        "frontend/src/features/chat/favorites/FavoriteMessageText.tsx",
+        "frontend/src/lib/attachmentSave.ts",
+        "frontend/src/lib/attachmentSave.test.ts"
+      ],
+      "frontend": [
+        "src/lib/stickerMedia.test.ts",
+        "src/lib/directoryAttachment.test.ts",
+        "src/features/chat/MediaSticker.test.ts",
+        "src/features/chat/mediaFileRead.test.ts",
+        "src/features/chat/mediaFile.test.ts",
+        "src/lib/stickerPacks.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/outgoingIntent.test.ts",
+        "src/lib/installedStickerSources.test.ts",
+        "src/lib/linkedCustomizationPacks.test.ts",
+        "src/store/reception.test.ts",
+        "src/store/conversationHistory.test.ts",
+        "src/lib/unreadStorage.test.ts",
+        "src/lib/messagePresentation.test.ts",
+        "src/lib/conversationHistory.test.ts",
+        "src/features/chat/sidebar/ConversationRow.test.ts",
+        "src/features/chat/DeliveryDetails.test.ts",
+        "src/features/chat/ConversationHistoryDialog.test.ts",
+        "src/features/chat/favorites/FavoriteEditor.test.ts",
+        "src/lib/attachmentSave.test.ts"
+      ],
+      "capability": {
+        "summary": "Send selected sticker artwork as bounded ordinary media while preserving legacy sticker identities and account-owned file retry.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
+        "invariants": [
+          {
+            "name": "A canonical bounded filename carries presentation identity; the authenticated manifest binds image bytes. Installed exact-byte snapshots are registered only with the current owner/account runtime and never install incoming packs.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Selected artwork is snapshotted before asynchronous staging; stale account work cannot dispatch, retained file intents retry the same bytes, and retention removes visible blob URLs.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Authenticated file-message aliases coalesce late live/history copies into one unread identity, preserve any actual read, survive bounded persistence and never merge independent sends by content.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Sent v2 semantic labels survive pack removal and retry; compact surfaces share one summary with localized legacy fallback and protected/recalled/expired content takes priority.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/stickers.spec.ts for semantic previews, replies/history search, receive without installed packs, pack-removal preservation and light/dark short-window layout. Use existing protected-message/media and native file-delivery acceptance where those boundaries change. Unit and mocked browser tests do not prove native transfer, notification appearance or linked-device/backup compatibility."
+      ]
+    },
+    {
+      "id": "frontend-sensitive-operations",
+      "paths": [
+        "frontend/src/lib/api/sensitiveInvoke.ts",
+        "frontend/src/lib/api/sensitiveInvoke.test.ts",
+        "frontend/src/features/auth/SensitiveVerificationDialog.tsx",
+        "frontend/src/features/auth/SensitiveVerificationDialog.test.ts",
+        "frontend/src/features/chat/settings/SecuritySettings.tsx",
+        "frontend/src/features/chat/settings/SecuritySettings.test.ts",
+        "frontend/src/features/chat/LinkDeviceDialog.tsx",
+        "frontend/src/features/chat/LinkDeviceDialog.test.ts",
+        "frontend/src/lib/api/settings.ts",
+        "frontend/src/lib/api/recovery.ts",
+        "frontend/src/lib/api/googleDrive.ts",
+        "frontend/src/lib/api/localAgentAccess.ts",
+        "frontend/src/lib/api/auth.ts"
+      ],
+      "frontend": [
+        "src/lib/api/sensitiveInvoke.test.ts",
+        "src/features/auth/SensitiveVerificationDialog.test.ts",
+        "src/features/chat/settings/SecuritySettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/settings/LocalAgentSettings.test.ts",
+        "src/features/chat/LinkDeviceDialog.test.ts",
+        "src/lib/api.test.ts",
+        "src/lib/api/localAgentAccess.test.ts",
+        "src/lib/settingsTranslations.test.ts",
+        "src/lib/privacyTranslations.test.ts",
+        "src/store/auth.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Show acknowledged privacy and agent state and authorize only the exact pending sensitive operation through backend-requested identity verification.",
+        "guide": "docs/privacy-controls.md#verify-sensitive-operations",
+        "invariants": [
+          {
+            "name": "Cancellation and retired prompt/session lifetimes never resubmit credentials; ordinary changes do not prompt and verification is never cached.",
+            "reference": "docs/privacy-controls.md#verify-sensitive-operations"
+          },
+          {
+            "name": "Device-linking authentication precedes sync expansion and source code display waits for snapshot preparation.",
+            "reference": "docs/privacy-controls.md#verify-sensitive-operations"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise nested Settings/Backup/password dialogs, Escape/focus restoration and pending-operation cancellation in browser; real macOS device-owner and Windows/Linux password verification require native evidence."
+      ]
+    },
+    {
+      "id": "frontend-private-device-hostnames",
+      "paths": [
+        "frontend/src/features/chat/PersonalDevices.tsx",
+        "frontend/src/features/chat/PersonalDevices.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/e2e/personal-messages.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/PersonalDevices.test.ts"
+      ],
+      "escalation": [
+        "Check hostname wrapping and local-device labeling in the device popover on native linked devices; browser mocks do not prove private transport."
+      ],
+      "capability": {
+        "summary": "Display OS hostnames only within the same account through encrypted certified-sibling device synchronization.",
+        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
+        "invariants": [
+          {
+            "name": "Hostnames never enter public discovery or peer profiles; unrelated Noise peers and stale native owner/account admissions cannot read them.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Bounded source-device metadata persists encrypted, supports offline display, rejects generic writes and preserves legacy synchronization through an independent cooldown.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          }
+        ]
+      }
+    },
+    {
+      "id": "frontend-discovery-origin",
+      "paths": [
+        "frontend/src/features/chat/memberProfileDetails.ts",
+        "frontend/src/features/chat/MemberProfileDialog.tsx",
+        "frontend/src/store/presence.ts",
+        "frontend/src/features/chat/settings/NetworkSettings.tsx",
+        "frontend/e2e/person-presence.spec.ts",
+        "frontend/e2e/settings-recovery.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/memberProfileDetails.test.ts",
+        "src/features/chat/MemberProfileDialog.test.ts",
+        "src/store/presence.test.ts",
+        "src/features/chat/settings/NetworkSettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts"
+      ],
+      "capability": {
+        "summary": "Expose only verified, independently expiring registration origins and keep participant-controlled disclosure off by default.",
+        "guide": "docs/network-design-reference.md#optional-registration-origin-disclosure",
+        "invariants": [
+          {
+            "name": "Original office and immediate introducer remain distinct; IPC silence cannot renew origin disclosure",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Sharing belongs to the active participant and stale owners or missing legacy settings cannot enable it",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          }
+        ]
+      },
+      "escalation": [
+        "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment."
+      ]
+    },
+    {
+      "id": "frontend-settings-shell",
+      "paths": [
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/settings-dialog-dark-820x620.png",
+        "frontend/e2e/touch-targets.spec.ts",
+        "frontend/e2e/unrestricted-messages.spec.ts",
+        "frontend/e2e/window-controls.spec.ts",
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/features/chat/settings/model.ts",
+        "frontend/src/features/chat/settings/model.test.ts",
+        "frontend/src/lib/settingsTranslations.test.ts",
+        "frontend/e2e/helpers/settings.ts",
+        "frontend/e2e/settings-categories.spec.ts",
+        "frontend/src/features/chat/settings/HistoryStorageSummary.tsx",
+        "frontend/src/features/chat/settings/HistoryStorageSummary.test.ts",
+        "frontend/e2e/history-storage.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/settings/HistoryStorageSummary.test.ts",
+        "src/features/chat/settings/model.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/settingsDialogSession.test.ts",
+        "src/lib/settingsTranslations.test.ts"
+      ],
+      "capability": {
+        "summary": "Navigate task-based settings with one mounted category and category-owned save feedback.",
+        "guide": "docs/settings.md",
+        "invariants": [
+          {
+            "name": "One settings model owns grouped navigation, category order and control routes. Language lives in Appearance & language, screenshot edits/save feedback live in Shortcuts, and Agent privacy links reach Agent access.",
+            "reference": "docs/settings.md#categories"
+          },
+          {
+            "name": "App behavior contains startup/window preferences; Agent access owns local permissions and setup. Only the active category is mounted and all locales provide its navigation label.",
+            "reference": "docs/settings.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run affected settings-categories and local-agent-access browser scenarios at desktop and narrow widths in light and dark themes."
+      ]
+    },
+    {
+      "id": "frontend-screenshot-shortcuts",
+      "paths": [
+        "frontend/src/lib/screenshotShortcuts.ts",
+        "frontend/src/lib/screenshotShortcuts.test.ts",
+        "frontend/src/lib/api/screenshotShortcuts.ts",
+        "frontend/src/features/chat/screenshot/shortcutRouter.ts",
+        "frontend/src/features/chat/screenshot/shortcutRouter.test.ts",
+        "frontend/src/features/chat/screenshot/useScreenshotShortcuts.ts",
+        "frontend/src/features/chat/screenshot/useScreenshotShortcuts.test.ts",
+        "frontend/src/features/chat/settings/ScreenshotShortcutSettings.tsx",
+        "frontend/src/features/chat/settings/ScreenshotShortcutSettings.test.ts",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/features/chat/settings/useSettingsController.ts",
+        "frontend/src/features/chat/settings/useSettingsController.test.ts",
+        "frontend/src/store/settings.ts",
+        "frontend/src/store/settings.test.ts",
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/screenshot/ScreenshotToolbar.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/e2e/screenshot-shortcuts.spec.ts",
+        "frontend/e2e/ui-audit-composer.spec.ts",
+        "frontend/e2e/ui-audit-composer.spec.ts-snapshots/composer-screenshot-dark-760x620.png",
+        "frontend/e2e/tauri-mock.ts",
+        "docs/settings.md",
+        "docs/help/topics/screenshots.md"
+      ],
+      "frontend": [
+        "src/lib/screenshotShortcuts.test.ts",
+        "src/store/settings.test.ts",
+        "src/features/chat/screenshot/shortcutRouter.test.ts",
+        "src/features/chat/screenshot/useScreenshotShortcuts.test.ts",
+        "src/features/chat/settings/ScreenshotShortcutSettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/ScreenshotEditor.test.ts",
+        "src/features/chat/ComposerScreenshot.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts"
+      ],
+      "capability": {
+        "summary": "Customize device-local screenshot bindings with default application scope, opt-in native global activation and truthful floating-control hints.",
+        "guide": "docs/settings.md#screenshot-shortcuts",
+        "invariants": [
+          {
+            "name": "Native registration is transactional and scoped to the unlocked session; retired cleanup cannot release a newer registration.",
+            "reference": "docs/settings.md#screenshot-shortcuts"
+          },
+          {
+            "name": "Local and global input share conversation-owned capture; editor and modal input never accidentally launch or send a screenshot.",
+            "reference": "docs/help/topics/screenshots.md#keyboard-shortcuts"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/screenshot-shortcuts.spec.ts and relevant screenshot browser scenarios; verify actual OS key delivery, occupied shortcuts, tray/background wakeup, lock/logout and window restoration in packaged apps. Linux global activation requires native X11. Browser events do not certify native behavior."
+      ]
+    },
+    {
+      "id": "frontend-personal-chat-deletion",
+      "paths": [
+        "frontend/src/features/chat/DeleteChatDialog.tsx",
+        "frontend/src/features/chat/DeleteContactDialog.tsx",
+        "frontend/src/features/chat/DeleteContactDialog.test.ts",
+        "frontend/src/features/chat/HiddenContactsDialog.tsx",
+        "frontend/src/store/channelActions.ts",
+        "frontend/src/store/channelActions.test.ts",
+        "frontend/src/store/drafts.ts",
+        "frontend/src/store/drafts.test.ts",
+        "frontend/src/lib/api/contacts.ts",
+        "frontend/e2e/delete-contacts.spec.ts",
+        "frontend/e2e/channel-lifecycle.spec.ts",
+        "docs/help/topics/history.md",
+        "frontend/src/store/channelRefresh.ts",
+        "frontend/src/store/channelRefresh.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/src/features/chat/HiddenContactsDialog.test.ts",
+        "frontend/src/store/contactPolicy.ts",
+        "frontend/src/store/contactPolicy.test.ts",
+        "frontend/src/store/accountGroupOperations.ts",
+        "frontend/src/store/accountGroupOperations.test.ts",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/MembersDialog.test.ts",
+        "frontend/e2e/dissolve-channel.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/DeleteContactDialog.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/channelActions.test.ts",
+        "src/store/drafts.test.ts",
+        "src/lib/api.test.ts",
+        "src/store/channelRefresh.test.ts",
+        "src/features/chat/HiddenContactsDialog.test.ts",
+        "src/store/contactPolicy.test.ts",
+        "src/store/accountGroupOperations.test.ts",
+        "src/features/chat/MembersDialog.test.ts"
+      ],
+      "capability": {
+        "summary": "Remove personal chats and optional history across linked devices without changing other accounts\u2019 membership or copies.",
+        "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
+        "invariants": [
+          {
+            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account\u2019s data.",
+            "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
+          },
+          {
+            "name": "Contact removal supports online contacts, keeps history by default in the dialog and does not act as blocking.",
+            "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
+          },
+          {
+            "name": "Imported personal history floors invalidate owner-scoped history and draft reads before archive refill; stale roster and group responses cannot restore deleted rows.",
+            "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
+          }
+        ]
+      }
+    },
+    {
+      "id": "frontend-call-media",
+      "paths": [
+        "frontend/src/features/chat/WebRtcTestDialog.tsx",
+        "frontend/src/features/chat/WebRtcTestDialog.test.ts",
+        "frontend/src/lib/mediaDeviceCheck.ts",
+        "frontend/src/lib/mediaDeviceCheck.test.ts",
+        "frontend/src/features/chat/settings/MediaDeviceCheck.tsx",
+        "frontend/src/features/chat/settings/MediaDeviceCheck.test.ts",
+        "frontend/e2e/media-device-check.spec.ts",
+        "frontend/src/store/calls.ts",
+        "frontend/src/store/calls.test.ts",
+        "frontend/src/features/chat/CallDialog.tsx",
+        "frontend/src/features/chat/CallConnectionNotice.tsx",
+        "frontend/src/features/chat/CallDialog.test.ts",
+        "frontend/e2e/call-dialog-harness.tsx",
+        "frontend/e2e/helpers/call-media-harness.ts",
+        "frontend/e2e/call-media.spec.ts",
+        "frontend/e2e/call-readiness.spec.ts",
+        "frontend/e2e/call-media-physical.spec.ts",
+        "docs/help/topics/calls.md"
+      ],
+      "frontend": [
+        "src/store/calls.test.ts",
+        "src/features/chat/CallDialog.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/lib/mediaDeviceCheck.test.ts",
+        "src/features/chat/settings/MediaDeviceCheck.test.ts",
+        "src/store/settings.test.ts"
+      ],
+      "capability": {
+        "summary": "Play remote voice and video through the shipped call dialog, preserve audio-only fallback, and release playback and capture on termination.",
+        "guide": "docs/help/topics/calls.md#media-playback-and-cleanup",
+        "invariants": [
+          {
+            "name": "Local device checks live inside enabled call settings, acquire microphone/camera independently only on explicit action, release resources across view/session/call retirement, and use advancing media statistics for advanced local-only diagnostics.",
+            "reference": "docs/help/topics/calls.md#check-microphone-and-camera"
+          },
+          {
+            "name": "A connected remote audio stream has an unmuted playback element even without video; replacement and unmount pause and detach the old stream.",
+            "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"
+          },
+          {
+            "name": "Media connection failure terminates the call as failed and releases local capture and peer connections; browser acceptance uses the production playback UI.",
+            "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"
+          },
+          {
+            "name": "Non-trickle signaling requires actual completed ICE gathering with a local candidate. The existing call deadline bounds outgoing preparation; retirement aborts the exact peer's pending wait and removes its listeners without affecting a replacement call. Browser acceptance observes that call's connected or terminal transition and retains real media assertions.",
+            "reference": "docs/network-design-reference.md#f-calls-live-signaling-and-separate-media"
+          },
+          {
+            "name": "Calls with only explicitly unavailable direct routes explain the limitation before capture; legacy unknown and routed candidates remain attemptable, and session-bound retries resolve current routes. Cross-LAN calls still require live direct authenticated signaling and an independent host-candidate media route; mailboxes provide neither signaling fallback nor TURN.",
+            "reference": "docs/network-design-reference.md#f-calls-live-signaling-and-separate-media"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/call-media.spec.ts for real browser voice/video/fallback playback and hangup cleanup. Synthetic capture and substituted signaling do not establish native permissions, speaker audibility or physical cross-LAN acceptance.",
+        "Use opt-in call-media-physical.spec.ts with prepared SDK fixtures and exact LAN addresses (MESH_TALK_MEDIA_TOPOLOGY=lan) for two-machine voice/video acceptance, or Tailscale addresses for routed media evidence; check physical microphone, camera, acoustic playback and hangup in each claimed native WebView separately."
+      ]
+    },
+    {
+      "id": "frontend-group-metadata",
+      "paths": [
+        "frontend/src/features/chat/ChannelMetadataSettings.tsx",
+        "frontend/src/features/chat/ChannelMetadataSettings.test.ts",
+        "frontend/src/features/chat/ChannelAnnouncement.tsx",
+        "frontend/src/lib/groupAnnouncements.ts",
+        "frontend/src/lib/groupAnnouncements.test.ts",
+        "frontend/src/components/GroupAvatar.tsx",
+        "frontend/src/components/GroupAvatar.test.ts",
+        "frontend/src/components/identity/AvatarEditMenu.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/e2e/group-metadata.spec.ts",
+        "frontend/src/features/chat/useGroupAnnouncement.ts"
+      ],
+      "capability": {
+        "summary": "Publish owner-authorized encrypted group photos and announcements while preserving private overrides and independently versioned current state.",
+        "guide": "docs/help/topics/channels.md#group-announcements",
+        "invariants": [
+          {
+            "name": "Personal group photos take priority; clearing restores shared content. Only current owner authority can publish, and stale sessions or revisions cannot overwrite newer state.",
+            "reference": "docs/module-boundaries.md#shared-group-photos-and-announcements"
+          },
+          {
+            "name": "Publication cards and private dismissal never fabricate message unread counts, recipient delivery or public read receipts.",
+            "reference": "CONTEXT.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run group-metadata, channel-history and group avatar browser scenarios plus applicable visual regression. Native IPC and encrypted loopback/restart/capability evidence are required; browser mocks do not certify physical peer synchronization."
+      ],
+      "frontend": [
+        "src/features/chat/ChannelMetadataSettings.test.ts",
+        "src/lib/groupAnnouncements.test.ts",
+        "src/components/GroupAvatar.test.ts",
+        "src/components/identity/AvatarEditMenu.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/store/channelRefresh.test.ts",
+        "src/features/chat/favorites/selection.test.ts"
+      ]
+    },
+    {
+      "id": "frontend-inline-media",
+      "paths": [
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/mediaFile.tsx",
+        "frontend/src/features/chat/mediaObjectUrlCache.ts",
+        "frontend/src/features/chat/mediaObjectUrlCache.test.ts",
+        "frontend/src/features/chat/mediaFileRead.test.ts",
+        "frontend/src/features/chat/useConversationViewport.ts",
+        "frontend/src/features/chat/useConversationViewport.test.ts",
+        "frontend/e2e/media-scroll.spec.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "frontend/e2e/media-lifecycle.spec.ts",
+        "frontend/e2e/media-hook-harness.tsx",
+        "frontend/src/features/chat/MediaPreview.test.ts",
+        "frontend/src/features/chat/ReceiveProgress.tsx",
+        "frontend/src/features/chat/ReceiveProgress.test.ts",
+        "frontend/e2e/image-receiving.spec.ts",
+        "frontend/src/features/chat/ComposerImagePreview.tsx",
+        "frontend/e2e/composer-preview-layout.spec.ts",
+        "frontend/e2e/video-player-layout.spec.ts",
+        "frontend/e2e/fixtures/video-metadata.json"
+      ],
+      "frontend": [
+        "src/features/chat/MediaPreview.test.ts",
+        "src/features/chat/mediaObjectUrlCache.test.ts",
+        "src/features/chat/mediaFileRead.test.ts",
+        "src/features/chat/mediaFile.test.ts",
+        "src/features/chat/useConversationViewport.test.ts",
+        "src/features/chat/protectedImage.test.ts",
+        "src/features/chat/ReceiveProgress.test.ts"
+      ],
+      "capability": {
+        "summary": "Fit decoded images to their original proportions within bounded thumbnails, reuse known geometry on virtualized remounts within bounded session ownership, and support bounded full-size image zoom and pan.",
+        "guide": "docs/module-boundaries.md#inline-media-presentation",
+        "invariants": [
+          {
+            "name": "Ordinary image previews support anchored bounded zoom and pan without dismissing on drag; reset/reopen restores window fit, and native text-copy policy remains enforced.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
+          {
+            "name": "Receiving and unsupported previews keep a responsive placeholder; decoded images fit their original ratio without upscaling, and user scroll intent prevents stale anchor restoration.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
+          {
+            "name": "Ordinary media reuse shares admitted reads and URLs, bounds idle Blob bytes and entries, expires idle URLs, and revokes on owner/runtime retirement; protected reveals remain ephemeral.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
+          {
+            "name": "Image receipt keeps an opaque, bounded frame with measured radial progress and phase-only announcements; preparation lasts until the current source loads, cached remounts skip it, and stale callbacks or a previous source failure cannot affect a replacement.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          }
+        ]
+      },
+      "escalation": [
+        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior. Geometry polls must retain unavailable measurements as pending, capture positive baselines and reuse coherent visible image/frame samples. A transient unavailable measurement must recover and permanent absence must fail without weakening exact geometry, cache reuse or assertion budgets.",
+        "Verify pending image frame dimensions before/after decoding and video source dimensions before/after player metadata, including cached remount, portrait and oversized sources. Confirm actual WKWebView geometry and frame timing separately. Video players and native controls must remain outside shared-element transforms from the first frame; keep opacity feedback, autoplay, Escape, focus restoration and rapid reopening. Separate fresh-process startup from repeat opens, record visibility and media presentation counters, and exclude hidden-window samples from performance comparisons."
+      ]
+    },
+    {
+      "id": "frontend-image-live-text",
+      "paths": [
+        "frontend/src/lib/imageClipboard.ts",
+        "frontend/src/lib/imageClipboard.test.ts",
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MediaPreview.test.ts",
+        "frontend/src/lib/sensitiveClipboard.ts",
+        "frontend/src/lib/sensitiveClipboard.test.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "docs/help/topics/send-files.md"
+      ],
+      "frontend": [
+        "src/lib/imageClipboard.test.ts",
+        "src/features/chat/MediaPreview.test.ts",
+        "src/lib/sensitiveClipboard.test.ts",
+        "src/features/chat/mediaFileRead.test.ts",
+        "src/features/chat/protectedImage.test.ts"
+      ],
+      "capability": {
+        "summary": "Select and copy text directly in ordinary enlarged macOS chat images through WebKit Live Text and the existing clipboard policy.",
+        "guide": "docs/help/topics/send-files.md#copy-text-from-an-image",
+        "invariants": [
+          {
+            "name": "Ordinary image previews use controlled copy/save/reveal actions and capability-gated file sharing, suppress browser defaults, and preserve Mac text selection. Image/text copy requires current-session admission and honors confirmation/clear policy; protected images remain excluded.",
+            "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
+          },
+          {
+            "name": "An image selection drag ending on the backdrop does not close the preview; explicit backdrop clicks, Close and Escape remain available.",
+            "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
+          },
+          {
+            "name": "Only the ordinary enlarged Mac image opts into native selection and context menus; recognized text copy uses current-session admission and the existing confirmation/clear policy. Protected images remain excluded.",
+            "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/media-recovery.spec.ts in Chromium and WebKit. Preserve the real gesture-triggered clipboard write and verify its completed PNG dimensions in both engines; request automated clipboard-read/write permissions and read back system clipboard pixels only in Chromium.",
+        "Run e2e/media-recovery.spec.ts and e2e/protected-messages.spec.ts. Verify real macOS WKWebView blob-image recognition, drag selection and Command-C/context-menu copy with copy confirmation and clipboard clearing. Browser mocks prove wiring, not native recognition or system menu behavior. Test supported OS/languages and image sizes without globally enabling selection on protected content."
+      ]
+    },
+    {
+      "id": "frontend-reply-preview",
+      "paths": [
+        "frontend/src/features/chat/ReplyPreview.tsx",
+        "frontend/src/features/chat/ReplyPreview.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/e2e/reply-preview.spec.ts",
+        "frontend/src/features/chat/replyNavigation.ts",
+        "frontend/src/features/chat/replyNavigation.test.ts",
+        "frontend/e2e/helpers/message-highlight.ts"
+      ],
+      "frontend": [
+        "src/features/chat/ReplyPreview.test.ts",
+        "src/features/chat/useConversationViewport.test.ts",
+        "src/lib/messagePresentation.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/features/chat/replyNavigation.test.ts"
+      ],
+      "capability": {
+        "summary": "Photo quotes show original authors and thumbnails below replies, share safe previews with the composer and open exact source context beyond loaded history.",
+        "guide": "docs/help/topics/history.md#follow-a-reply",
+        "invariants": [
+          {
+            "name": "Protected, recalled, expired, pending and oversized photo quotes never fetch plaintext preview bytes; ordinary photos reuse owner-scoped availability and object URLs.",
+            "reference": "docs/help/topics/history.md#follow-a-reply"
+          },
+          {
+            "name": "Clicking or keyboard-activating a quote centers and highlights its exact source through the existing virtualized viewport.",
+            "reference": "docs/help/topics/history.md#follow-a-reply"
+          },
+          {
+            "name": "Older-source navigation validates the exact conversation and message identity, owner/runtime lifetime and latest request; unavailable sources do not open substitute content.",
+            "reference": "docs/help/topics/history.md#follow-a-reply"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/reply-preview.spec.ts and the reply-to scenario in e2e/chat.spec.ts to verify thumbnails, keyboard navigation and exact-source scrolling."
+      ]
+    },
+    {
+      "id": "frontend-unread-recovery",
+      "paths": [
+        "frontend/e2e/group-reception.spec.ts",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-1280x800.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-760x620.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-oled-760x620-win32.png",
+        "frontend/e2e/sidebar-row-layout.spec.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/reception.test.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationHistory.test.ts",
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/lib/unreadStorage.test.ts",
+        "frontend/src/lib/badgeSync.ts",
+        "frontend/src/lib/badgeSync.test.ts",
+        "frontend/src/store/unreadBadge.ts",
+        "frontend/src/store/unreadBadge.test.ts",
+        "frontend/src/features/chat/UnreadMessages.tsx",
+        "frontend/src/features/chat/unreadSources.ts",
+        "frontend/src/features/chat/unreadSources.test.ts",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/src/features/chat/Sidebar.tsx",
+        "frontend/e2e/unread-badge.spec.ts",
+        "docs/group-conversation-reception.md",
+        "frontend/e2e/ui-visual-regression.spec.ts",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-1280x800.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-1280x800-linux.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-1280x800-win32.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-760x520.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-760x520-linux.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-760x520-win32.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-1280x800.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-1280x800-linux.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-1280x800-win32.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520-linux.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520-win32.png",
+        "docs/help/topics/history.md"
+      ],
+      "frontend": [
+        "src/store/reception.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/conversationHistory.test.ts",
+        "src/store/unreadBadge.test.ts",
+        "src/lib/badgeSync.test.ts",
+        "src/lib/unreadStorage.test.ts",
+        "src/lib/linkedReadReceipts.test.ts",
+        "src/features/chat/unreadSources.test.ts",
+        "src/features/chat/Sidebar.test.ts",
+        "src/features/chat/sidebar/ConversationRow.test.ts",
+        "src/features/chat/ReceptionStatus.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Every application unread count has a review and explicit clear path; confirmed local suppression reconciles exact unread without claiming viewed content; badge writes retry within the current owner lifetime.",
+        "guide": "docs/group-conversation-reception.md#unread-review-and-badge-recovery",
+        "invariants": [
+          {
+            "name": "Explicit source/global actions cover hidden, missing and unknown senders, preserve later arrivals and persist counters; incomplete history never proves deletion. Browser recovery-batch navigation uses distinct partial/terminal deliveries, live traffic and a duplicate signal; dedicated large-history navigation and deterministic announcement batching/deduplication controls retain their coverage.",
+            "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
+          },
+          {
+            "name": "Confirmed local suppression and known expiry are separate from seen receipts, survive bounded cache eviction and do not manufacture cross-device read evidence.",
+            "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
+          },
+          {
+            "name": "The badge writer coalesces current counts, retries with bounded backoff and native admission, and retires with its exact desktop/account/runtime lifetime.",
+            "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
+          },
+          {
+            "name": "Receipt persistence coalesces within a fixed 100 ms window and flushes before restoration and owner retirement; unchanged conversations retain immutable projections and existing unread/alias bounds.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Initial group history uses exact row identity/text and visible geometry within the caller's original remaining deadline. Run absent/hidden, expired caller and post-sample expiry controls plus queued recovery with frames held; check observer/frame cleanup. Keep all subsequent live/read, anchor, focus and navigation assertions; browser readiness does not identify the cause of hosted rendering latency.",
+        "Run frontend/e2e/ui-audit-shell.spec.ts and frontend/e2e/sidebar-row-layout.spec.ts for compact tool labels, full accessible names and side-by-side geometry. Run frontend/e2e/unread-badge.spec.ts and relevant e2e/ui-visual-regression.spec.ts cases for unread review, keyboard focus, narrow/short windows and light/dark layouts. Browser mocks verify IPC requests, not physical Dock/tray appearance; real packaged macOS/Linux badge repaint and logout evidence remain separate native acceptance. Windows count badges retain their documented unsupported behavior."
+      ]
+    },
+    {
+      "id": "frontend-file-receive-progress",
+      "paths": [
+        "frontend/src/features/chat/ReceiveProgress.tsx",
+        "frontend/src/features/chat/ReceiveProgress.test.ts"
+      ],
+      "frontend": [
+        "src/features/chat/ReceiveProgress.test.ts"
+      ],
+      "capability": {
+        "summary": "Distinguish waiting for the first file chunk from active chunk reception without changing determinate progress counts.",
+        "guide": "docs/help/topics/channels.md#file-delivery",
+        "invariants": [
+          {
+            "name": "A known zero chunk count remains accessible as zero percent and uses waiting language; receiving language starts after a positive chunk count. Image presentation omits visible zero, announces phases separately from percentage updates, and treats readiness or complete counts as preparing until the preview can display.",
+            "reference": "docs/help/topics/channels.md#file-delivery"
+          },
+          {
+            "name": "Image progress uses existing theme tokens and reduced-motion preferences, exposes no unsupported transfer actions, and preserves ordinary file progress and consent semantics.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          }
+        ]
+      }
+    },
+    {
+      "id": "frontend-camera-capture",
+      "paths": [
+        "frontend/src/features/chat/CameraCaptureDialog.tsx",
+        "frontend/src/features/chat/CameraCaptureDialog.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/e2e/camera-capture.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/CameraCaptureDialog.test.ts",
+        "src/features/chat/ComposerScreenshot.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Capture a local photo, review or retake it, and stage it for explicit conversation-owned submission.",
+        "guide": "docs/help/topics/send-files.md#take-a-photo",
+        "invariants": [
+          {
+            "name": "Camera tracks and preview URLs are released; late permission and encoding results cannot export after cancellation.",
+            "reference": "docs/help/topics/send-files.md#take-a-photo"
+          },
+          {
+            "name": "Confirmed photos join the existing attachment queue and cannot cross conversation or auth lifetimes.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/camera-capture.spec.ts and inspect wide and compact dialog captures. Verify real camera permission, device switching, track release and lock/logout in packaged desktop apps; browser mocks cannot certify OS permission behavior."
+      ]
+    },
+    {
+      "id": "frontend-message-forwarding",
+      "paths": [
+        "frontend/src/features/chat/forwarding/",
+        "frontend/src/lib/api/messageForwarding.ts",
+        "frontend/src/lib/api/messageForwarding.test.ts",
+        "frontend/e2e/forwarding.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/forwarding/ForwardDialog.test.ts",
+        "src/features/chat/forwarding/selection.test.ts",
+        "src/features/chat/forwarding/ForwardedRecordPreview.test.ts",
+        "src/lib/api/messageForwarding.test.ts",
+        "src/features/chat/channelPermissions.test.ts",
+        "src/features/chat/useSerialPoll.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Review exact forwarding sources and account-authorized destinations, preserve stable partial batch identities, and observe pending group admission within the current runtime.",
+        "guide": "docs/message-forwarding.md",
+        "invariants": [
+          {
+            "name": "Reference-only member and owner accounts remain eligible independently of local signer availability; unknown, retired and invited accounts do not become writable targets.",
+            "reference": "docs/message-forwarding.md#interaction"
+          },
+          {
+            "name": "Pending is distinct from failure and public message acceptance. Observation uses existing batch identities without source inspection or new admission, and retired runtimes cannot publish completion.",
+            "reference": "docs/message-forwarding.md#reliability-and-verification"
+          },
+          {
+            "name": "Partial retries retain the original request and accepted item identities; protected, recalled and expired sources remain subject to canonical core admission.",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          },
+          {
+            "name": "Source inspection reads have bounded observation waits and stale previews cannot enable forwarding. Existing batch status remains visible while its original invocation is unresolved, with busy mutation ownership preserved to prevent duplicate retry.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "escalation": [
+        "Run frontend/e2e/forwarding.spec.ts for selection, exact target confirmation, partial retries, pending review and draft preservation. Native account-group admission and encrypted loopback evidence remain required; browser IPC substitutes do not certify linked-device execution."
+      ]
+    },
+    {
+      "id": "frontend-bounded-reception",
+      "paths": [
+        "frontend/src/lib/api/contacts.ts",
+        "frontend/src/store/avatars.ts",
+        "frontend/src/store/avatars.test.ts",
+        "frontend/src/store/receptionDelivery.ts",
+        "frontend/src/store/receptionDelivery.test.ts",
+        "frontend/src/lib/receptionSnapshot.ts",
+        "frontend/src/lib/receptionSnapshot.test.ts",
+        "frontend/src/lib/api/reception.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/lib/events.ts"
+      ],
+      "frontend": [
+        "src/store/avatars.test.ts",
+        "src/store/receptionDelivery.test.ts",
+        "src/lib/receptionSnapshot.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/reception.test.ts"
+      ],
+      "capability": {
+        "summary": "Consume durable reception work through one scoped demand page and atomically persist existing unread state before acknowledgement.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "A stalled renderer retains one pull and one dirty wake; exact runtime/account/device scope rejects replaced replies.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Cursor and unread/mention/batch state persist atomically before ACK; quota failures retry without replaying applied effects.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise actual Tauri IPC with a stalled renderer, renderer reload, app lock and runtime/account replacement; mocked IPC does not certify the native queue boundary."
+      ]
+    },
+    {
+      "id": "frontend-interaction-motion",
+      "paths": [
+        "frontend/src/components/ui/tabs.tsx",
+        "frontend/src/components/ui/tabs.test.ts",
+        "frontend/src/index.css",
+        "frontend/src/features/chat/TransferBar.tsx",
+        "frontend/src/features/chat/LinkDeviceDialog.tsx",
+        "frontend/DESIGN.md",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/useMessageArrivalMotion.ts",
+        "frontend/src/features/chat/useMessageArrivalMotion.test.ts",
+        "frontend/e2e/history-motion.spec.ts"
+      ],
+      "frontend": [
+        "src/components/ui/tabs.test.ts",
+        "src/features/chat/TransferBar.test.ts",
+        "src/features/chat/LinkDeviceDialog.test.ts",
+        "src/features/chat/useMessageArrivalMotion.test.ts"
+      ],
+      "escalation": [
+        "Verify rapid surface reversal, pointer-to-keyboard tabs, reduced motion, and media return to an offscreen thumbnail in the native WebView. Presentation must not invent progress or delivery confirmation.",
+        "Run e2e/history-motion.spec.ts and verify initial history, conversation switching, deferred live rows, and virtualized revisit in the native WebView."
+      ],
+      "capability": {
+        "summary": "Keep presentation motion brief, input-aware and grounded in authoritative transfer and device-link state.",
+        "guide": "frontend/DESIGN.md#interaction-motion",
+        "invariants": [
+          {
+            "name": "Keyboard tab selection remains immediate; reduced motion removes spatial movement and progress never implies delivery.",
+            "reference": "frontend/DESIGN.md#interaction-motion"
+          }
+        ]
+      }
     }
   ],
   "prScenarios": [
     {
+      "id": "frontend-memory-guardrail-acceptance",
+      "paths": ["frontend/e2e/memory.spec.ts", "frontend/e2e/helpers/conversation-churn.ts"],
+      "browser": [
+        "e2e/memory.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-group-reception-acceptance",
+      "paths": [
+        "frontend/e2e/group-reception.spec.ts"
+      ],
+      "browser": [
+        "e2e/group-reception.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-dialog-focus-acceptance",
+      "paths": [
+        "frontend/src/components/ui/dialog.tsx",
+        "frontend/src/components/ui/dialog.test.ts",
+        "frontend/e2e/helpers/sidebar-actions.ts",
+        "frontend/e2e/minimum-window.spec.ts"
+      ],
+      "browser": [
+        "e2e/minimum-window.spec.ts",
+        "e2e/ui-audit-dialogs.spec.ts",
+        "e2e/automatic-delivery.spec.ts",
+        "e2e/privacy.spec.ts",
+        "e2e/tray-navigation.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "group-file-network-cost-acceptance",
+      "paths": [
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/GroupPreferences.tsx",
+        "frontend/e2e/group-network-cost.spec.ts"
+      ],
+      "browser": [
+        "e2e/group-network-cost.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "frontend-screenshot-submission-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerScreenshot.test.ts",
+        "frontend/e2e/screenshot-portable.spec.ts"
+      ],
+      "browser": [
+        "e2e/screenshot-portable.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-local-agent-acceptance",
+      "paths": [
+        "frontend/src/features/chat/settings/LocalAgentSettings.tsx",
+        "frontend/src/lib/api/localAgentAccess.ts",
+        "frontend/e2e/local-agent-access.spec.ts",
+        "src-tauri/src/integrations/"
+      ],
+      "browser": [
+        "e2e/local-agent-access.spec.ts",
+        "e2e/settings-categories.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "frontend-exact-search-acceptance",
+      "paths": [
+        "frontend/src/features/chat/SearchDialog.tsx",
+        "frontend/src/features/chat/useConversationViewport.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/lib/api/chat.ts",
+        "src-tauri/src/owner_commands/search.rs",
+        "crates/mesh-talk-core/src/node/search.rs",
+        "crates/mesh-talk-core/src/node/queries.rs"
+      ],
+      "browser": [
+        "e2e/chat.spec.ts",
+        "e2e/hidden-contacts.spec.ts"
+      ]
+    },
+    {
       "id": "frontend-delivery-details-acceptance",
       "paths": [
         "frontend/src/features/chat/DeliveryDetails.tsx",
+        "frontend/src/features/chat/DeliveryRecoveryProvider.tsx",
+        "frontend/src/features/chat/deliveryRecovery.ts",
         "frontend/src/features/chat/DeliveryFooter.tsx",
         "frontend/src/store/conversationModel.ts",
         "frontend/src/store/conversationState.ts",
         "frontend/src/store/outgoingIntent.ts",
-        "frontend/e2e/automatic-delivery.spec.ts"
+        "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/src/features/chat/MessageStatus.tsx"
       ],
-      "browser": ["e2e/automatic-delivery.spec.ts"]
+      "browser": [
+        "e2e/automatic-delivery.spec.ts"
+      ]
     },
     {
       "id": "frontend-presence-acceptance",
@@ -523,7 +2644,9 @@
         "frontend/src/features/chat/ChatApp.tsx",
         "frontend/e2e/person-presence.spec.ts"
       ],
-      "browser": ["e2e/person-presence.spec.ts"]
+      "browser": [
+        "e2e/person-presence.spec.ts"
+      ]
     },
     {
       "id": "frontend-saved-devices",
@@ -532,7 +2655,9 @@
         "frontend/src/features/chat/PersonalDevices.test.ts",
         "frontend/src/features/chat/ConversationHeaders.tsx"
       ],
-      "browser": ["e2e/personal-messages.spec.ts"]
+      "browser": [
+        "e2e/personal-messages.spec.ts"
+      ]
     },
     {
       "id": "frontend-visual",
@@ -542,9 +2667,14 @@
         "frontend/src/components/",
         "frontend/src/features/chat/",
         "frontend/src/lib/theme.ts",
-        "frontend/src/store/theme.ts"
+        "frontend/src/store/theme.ts",
+        "frontend/e2e/context-menu-focus.spec.ts",
+        "frontend/e2e/helpers/ui-audit.ts"
       ],
-      "browser": ["e2e/ui-visual-regression.spec.ts"]
+      "browser": [
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/context-menu-focus.spec.ts"
+      ]
     },
     {
       "id": "frontend-bootstrap-acceptance",
@@ -555,45 +2685,141 @@
         "frontend/src/vite-env.d.ts",
         "frontend/src/components/ErrorBoundary.tsx"
       ],
-      "browser": ["e2e/chat.spec.ts", "e2e/ui-visual-regression.spec.ts"]
+      "browser": [
+        "e2e/chat.spec.ts",
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/login-layout.spec.ts"
+      ]
     },
     {
       "id": "frontend-auth-screens-acceptance",
       "paths": [
         "frontend/src/features/auth/LoginScreen.tsx",
         "frontend/src/features/auth/RestoreBackup.tsx",
-        "frontend/src/components/ui/label.tsx"
+        "frontend/src/components/ui/label.tsx",
+        "frontend/src/features/auth/DeviceEnrollmentDialog.tsx",
+        "frontend/src/features/auth/DeviceEnrollmentDialog.test.ts",
+        "frontend/src/lib/api/auth.ts",
+        "frontend/e2e/login-layout.spec.ts"
       ],
-      "browser": ["e2e/chat.spec.ts", "e2e/recovery.spec.ts"]
+      "browser": [
+        "e2e/chat.spec.ts",
+        "e2e/recovery.spec.ts",
+        "e2e/device-enrollment.spec.ts",
+        "e2e/login-layout.spec.ts"
+      ]
     },
     {
       "id": "frontend-chat-shell-acceptance",
-      "paths": ["frontend/src/features/chat/ChatApp.tsx"],
-      "browser": ["e2e/chat.spec.ts", "e2e/message-lifecycle.spec.ts"]
+      "paths": [
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/e2e/touch-targets.spec.ts"
+      ],
+      "browser": [
+        "e2e/chat.spec.ts",
+        "e2e/message-lifecycle.spec.ts",
+        "e2e/touch-targets.spec.ts"
+      ]
     },
     {
       "id": "frontend-window-controls-acceptance",
-      "paths": ["frontend/src/components/WindowControls.tsx"],
-      "browser": ["e2e/window-controls.spec.ts"]
+      "paths": [
+        "frontend/src/components/WindowControls.tsx"
+      ],
+      "browser": [
+        "e2e/window-controls.spec.ts"
+      ]
     },
     {
       "id": "frontend-pack-acceptance",
-      "paths": ["frontend/e2e/packs.spec.ts"],
-      "browser": ["e2e/packs.spec.ts"]
+      "paths": [
+        "frontend/e2e/packs.spec.ts"
+      ],
+      "browser": [
+        "e2e/packs.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-packs-empty-acceptance",
+      "paths": [
+        "frontend/e2e/packs-empty.spec.ts"
+      ],
+      "browser": [
+        "e2e/packs-empty.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-stickers-acceptance",
+      "paths": [
+        "frontend/e2e/stickers.spec.ts"
+      ],
+      "browser": [
+        "e2e/stickers.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-theme-picker-acceptance",
+      "paths": [
+        "frontend/e2e/theme-picker.spec.ts",
+        "frontend/e2e/helpers/packs.ts",
+        "frontend/e2e/helpers/session.ts",
+        "frontend/src/store/packs.ts",
+        "frontend/src/lib/linkedAppearance.ts"
+      ],
+      "browser": [
+        "e2e/theme-picker.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-avatar-gallery-acceptance",
+      "paths": [
+        "frontend/e2e/avatar-gallery.spec.ts"
+      ],
+      "browser": [
+        "e2e/avatar-gallery.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-avatar-gallery-loading-acceptance",
+      "paths": [
+        "frontend/e2e/avatar-gallery-loading.spec.ts"
+      ],
+      "browser": [
+        "e2e/avatar-gallery-loading.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-theme-contrast-acceptance",
+      "paths": [
+        "frontend/e2e/theme-contrast.spec.ts"
+      ],
+      "browser": [
+        "e2e/theme-contrast.spec.ts"
+      ]
     },
     {
       "id": "frontend-composer-acceptance",
-      "paths": ["frontend/e2e/ui-audit-composer.spec.ts"],
-      "browser": ["e2e/ui-audit-composer.spec.ts"]
+      "paths": [
+        "frontend/e2e/ui-audit-composer.spec.ts"
+      ],
+      "browser": [
+        "e2e/ui-audit-composer.spec.ts"
+      ]
     },
     {
       "id": "frontend-composer-input-acceptance",
       "paths": [
         "frontend/src/features/chat/Composer.tsx",
         "frontend/src/features/chat/ComposerAdmission.test.ts",
-        "frontend/e2e/composer-layout.spec.ts"
+        "frontend/e2e/composer-layout.spec.ts",
+        "frontend/src/features/chat/ComposerImagePreview.tsx",
+        "frontend/e2e/composer-preview-layout.spec.ts"
       ],
-      "browser": ["e2e/composer-layout.spec.ts"]
+      "browser": [
+        "e2e/composer-layout.spec.ts",
+        "e2e/composer-preview-layout.spec.ts"
+      ]
     },
     {
       "id": "frontend-message-expiry-acceptance",
@@ -607,7 +2833,9 @@
         "frontend/e2e/message-expiry.spec.ts",
         "frontend/e2e/tauri-mock.ts"
       ],
-      "browser": ["e2e/message-expiry.spec.ts"]
+      "browser": [
+        "e2e/message-expiry.spec.ts"
+      ]
     },
     {
       "id": "frontend-text-submission-acceptance",
@@ -615,7 +2843,9 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/automatic-delivery.spec.ts"
       ],
-      "browser": ["e2e/automatic-delivery.spec.ts"]
+      "browser": [
+        "e2e/automatic-delivery.spec.ts"
+      ]
     },
     {
       "id": "frontend-dm-unread-acceptance",
@@ -628,7 +2858,20 @@
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs"
       ],
-      "browser": ["e2e/unread-badge.spec.ts"]
+      "browser": [
+        "e2e/unread-badge.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-identity-recovery-acceptance",
+      "paths": [
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/e2e/connection-recovery.spec.ts"
+      ],
+      "browser": [
+        "e2e/connection-recovery.spec.ts"
+      ]
     },
     {
       "id": "frontend-presence-recovery-acceptance",
@@ -646,21 +2889,9 @@
         "e2e/person-presence.spec.ts",
         "e2e/connection-recovery.spec.ts"
       ],
-      "native": ["host"]
-    },
-    {
-      "id": "frontend-trust-cards-acceptance",
-      "paths": [
-        "frontend/src/features/chat/TrustCardPanel.tsx",
-        "frontend/src/lib/api/trustCards.ts",
-        "frontend/src/lib/trustCard.ts",
-        "frontend/src/lib/trustCard.test.ts",
-        "frontend/e2e/trust-cards.spec.ts",
-        "frontend/src/features/chat/ProfileDialog.tsx",
-        "frontend/src/features/chat/VerifyContactDialog.tsx",
-        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
-      ],
-      "browser": ["e2e/trust-cards.spec.ts", "e2e/ui-audit-dialogs.spec.ts"]
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "group-sync",
@@ -670,7 +2901,10 @@
         "frontend/src/lib/events.ts",
         "frontend/e2e/group-sync.spec.ts"
       ],
-      "browser": ["e2e/group-sync.spec.ts", "e2e/channel-lifecycle.spec.ts"]
+      "browser": [
+        "e2e/group-sync.spec.ts",
+        "e2e/channel-lifecycle.spec.ts"
+      ]
     },
     {
       "id": "frontend-state-push",
@@ -714,6 +2948,8 @@
       "paths": [
         "frontend/src/store/updates.ts",
         "frontend/src/store/updates.test.ts",
+        "frontend/src/store/updateRestart.ts",
+        "frontend/src/store/updateRestart.test.ts",
         "frontend/src/features/chat/UpdatePanel.tsx",
         "frontend/src/features/chat/UpdatePanel.test.ts",
         "frontend/src/lib/api/diagnostics.ts",
@@ -722,7 +2958,390 @@
         "frontend/e2e/update-flow.spec.ts",
         "frontend/src/lib/types.ts"
       ],
-      "browser": ["e2e/update-flow.spec.ts"]
+      "browser": [
+        "e2e/update-flow.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-notification-permission-acceptance",
+      "paths": [
+        "frontend/src/lib/notify.ts",
+        "frontend/src/lib/notify.test.ts",
+        "frontend/src/lib/api/notifications.ts",
+        "frontend/src/features/chat/NotificationPermissionHelp.tsx",
+        "frontend/src/features/chat/NotificationPermissionHelp.test.ts",
+        "frontend/src/features/chat/NotificationPermissionNotice.tsx",
+        "frontend/src/features/chat/useNotificationPermissionReminder.ts",
+        "frontend/e2e/notification-permission.spec.ts"
+      ],
+      "browser": [
+        "e2e/notification-permission.spec.ts",
+        "e2e/settings-categories.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-google-drive-acceptance",
+      "paths": [
+        "frontend/e2e/settings-categories.spec.ts",
+        "frontend/src/features/recovery/",
+        "frontend/src/lib/api/googleDrive.ts",
+        "frontend/src/features/chat/DataRecoverySettings.tsx",
+        "frontend/src/features/auth/RestoreBackup.tsx",
+        "frontend/e2e/google-drive-backup.spec.ts"
+      ],
+      "browser": [
+        "e2e/google-drive-backup.spec.ts",
+        "e2e/recovery.spec.ts",
+        "e2e/settings-categories.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-channel-join-history-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ChannelHistorySettings.tsx",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/e2e/channel-history.spec.ts"
+      ],
+      "browser": [
+        "e2e/channel-history.spec.ts"
+      ]
+    },
+    {
+      "id": "protected-message-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ProtectedMessage.tsx",
+        "frontend/src/features/chat/protectedReveal.ts",
+        "frontend/src/features/chat/protectedReveal.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerAdmission.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/protectedMessages.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/api.test.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/e2e/protected-messages.spec.ts",
+        "frontend/e2e/tauri-mock.ts",
+        "frontend/src/store/drafts.ts",
+        "frontend/src/store/drafts.test.ts",
+        "frontend/src/features/chat/protectedImage.ts",
+        "frontend/src/features/chat/protectedImage.test.ts",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/src/lib/automaticDownloads.ts",
+        "frontend/src/lib/automaticDownloads.test.ts",
+        "frontend/src/lib/mediaTypes.ts",
+        "frontend/src/features/chat/mediaFile.tsx"
+      ],
+      "browser": [
+        "e2e/protected-messages.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "frontend-account-profile-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ProfileDialog.tsx",
+        "frontend/src/features/chat/VerifyContactDialog.tsx",
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png",
+        "frontend/src/features/chat/AccountProfilePanel.tsx",
+        "frontend/src/features/chat/AccountProfilePanel.test.ts",
+        "frontend/src/lib/api/accountProfile.ts",
+        "frontend/src/lib/accountProfile.test.ts",
+        "frontend/src/store/accountProfiles.ts",
+        "frontend/src/store/accountProfiles.test.ts",
+        "frontend/e2e/account-profiles.spec.ts",
+        "frontend/src/features/chat/ConversationHeaders.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MemberProfileDialog.tsx"
+      ],
+      "browser": [
+        "e2e/account-profiles.spec.ts",
+        "e2e/ui-audit-dialogs.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
+      ]
+    },
+    {
+      "id": "channel-account-members",
+      "paths": [
+        "frontend/src/store/channelActions.ts",
+        "frontend/src/store/channelActions.test.ts",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/MembersDialog.test.ts",
+        "frontend/src/features/chat/channelMemberProjection.ts",
+        "frontend/e2e/member-account-projection.spec.ts",
+        "frontend/src/store/channelActions.ts",
+        "frontend/src/features/chat/channelPermissions.ts",
+        "frontend/src/features/chat/Sidebar.tsx",
+        "frontend/src/lib/types.ts"
+      ],
+      "browser": [
+        "e2e/member-account-projection.spec.ts",
+        "e2e/channel-lifecycle.spec.ts"
+      ]
+    },
+    {
+      "id": "account-binding-recovery",
+      "paths": [
+        "frontend/src/features/chat/AccountBindingRecovery.tsx",
+        "frontend/src/features/chat/AccountBindingRecovery.test.ts",
+        "frontend/src/features/chat/VerifyContactDialog.tsx",
+        "frontend/src/features/chat/MemberProfileDialog.tsx",
+        "frontend/src/lib/api/privacy.ts",
+        "frontend/e2e/account-binding-recovery.spec.ts",
+        "frontend/e2e/account-binding-recovery.spec.ts-snapshots/"
+      ],
+      "browser": [
+        "e2e/account-binding-recovery.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "public-site-experience",
+      "paths": [
+        "site/index.html",
+        "site/landing.css",
+        "site/site.js",
+        "site/theme.css",
+        "tools/help/build.mjs",
+        "tools/help/style.css",
+        "frontend/e2e/site-audit.spec.ts",
+        "frontend/e2e/help-website.spec.ts",
+        "site/downloads.js",
+        "frontend/e2e/site-downloads.spec.ts",
+        "frontend/e2e/helpers/public-site.ts",
+        "tools/help/site.mjs",
+        "tools/help/navigation.mjs",
+        "site/404.html",
+        "frontend/playwright.site.config.ts",
+        "site/i18n.js",
+        "site/locales/",
+        "site/motion.js",
+        "site/motion.css",
+        "site/screenshots/",
+        "docs/screenshots/",
+        "frontend/e2e/site-capture.spec.ts",
+        "frontend/e2e/site-language.spec.ts",
+        "frontend/e2e/site-motion.spec.ts",
+        "tools/help/public-language.test.mjs",
+        "site/network-flow.js",
+        "site/faq-motion.js",
+        "site/faq-motion.css",
+        "frontend/e2e/site-network-flow.spec.ts",
+        "frontend/e2e/site-faq-motion.spec.ts",
+        "tools/help/build-site.mjs",
+        "tools/help/discovery.mjs",
+        "tools/help/discovery.test.mjs",
+        "frontend/e2e/site-discovery.spec.ts",
+        "docs/help/topics/about-mesh-talk.md"
+      ],
+      "browser": [
+        "e2e/site-audit.spec.ts",
+        "e2e/help-website.spec.ts",
+        "e2e/site-downloads.spec.ts",
+        "e2e/site-language.spec.ts",
+        "e2e/site-motion.spec.ts",
+        "e2e/site-network-flow.spec.ts",
+        "e2e/site-faq-motion.spec.ts",
+        "e2e/site-discovery.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-localization",
+      "paths": [
+        "frontend/src/lib/i18n.ts",
+        "frontend/vite.config.ts",
+        "frontend/src/lib/format.ts",
+        "frontend/src/lib/format.test.ts",
+        "frontend/src/lib/i18n.test.ts",
+        "frontend/src/lib/localeParity.test.ts",
+        "frontend/src/locales/",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/lib/presenceLabels.test.ts",
+        "frontend/e2e/language-settings.spec.ts",
+        "frontend/e2e/login-recovery.spec.ts",
+        "frontend/e2e/ui-audit-shell.spec.ts",
+        "docs/help/topics/language.md"
+      ],
+      "browser": [
+        "e2e/language-settings.spec.ts",
+        "e2e/login-recovery.spec.ts",
+        "e2e/ui-audit-shell.spec.ts",
+        "e2e/person-presence.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-personal-chat-deletion-acceptance",
+      "paths": [
+        "frontend/src/features/chat/DeleteChatDialog.tsx",
+        "frontend/src/features/chat/DeleteContactDialog.tsx",
+        "frontend/src/features/chat/HiddenContactsDialog.tsx",
+        "frontend/src/store/channelActions.ts",
+        "frontend/e2e/delete-contacts.spec.ts",
+        "frontend/e2e/channel-lifecycle.spec.ts",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/e2e/dissolve-channel.spec.ts"
+      ],
+      "browser": [
+        "e2e/delete-contacts.spec.ts",
+        "e2e/channel-lifecycle.spec.ts",
+        "e2e/dissolve-channel.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-call-media-acceptance",
+      "paths": [
+        "frontend/src/store/calls.ts",
+        "frontend/src/store/calls.test.ts",
+        "frontend/src/features/chat/CallDialog.tsx",
+        "frontend/src/features/chat/CallConnectionNotice.tsx",
+        "frontend/src/features/chat/CallDialog.test.ts",
+        "frontend/e2e/call-dialog-harness.tsx",
+        "frontend/e2e/helpers/call-media-harness.ts",
+        "frontend/e2e/call-media.spec.ts",
+        "frontend/e2e/call-readiness.spec.ts",
+        "frontend/e2e/call-media-physical.spec.ts",
+        "docs/help/topics/calls.md"
+      ],
+      "browser": [
+        "e2e/call-media.spec.ts",
+        "e2e/call-readiness.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-inline-media-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/mediaFile.tsx",
+        "frontend/src/features/chat/mediaObjectUrlCache.ts",
+        "frontend/src/features/chat/useConversationViewport.ts",
+        "frontend/e2e/media-scroll.spec.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "frontend/e2e/media-lifecycle.spec.ts",
+        "frontend/e2e/media-hook-harness.tsx",
+        "frontend/src/features/chat/ReceiveProgress.tsx",
+        "frontend/src/features/chat/ReceiveProgress.test.ts",
+        "frontend/e2e/image-receiving.spec.ts",
+        "frontend/e2e/video-player-layout.spec.ts",
+        "frontend/e2e/fixtures/video-metadata.json"
+      ],
+      "browser": [
+        "e2e/media-scroll.spec.ts",
+        "e2e/media-recovery.spec.ts",
+        "e2e/media-lifecycle.spec.ts",
+        "e2e/chat.spec.ts",
+        "e2e/protected-messages.spec.ts",
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/image-receiving.spec.ts",
+        "e2e/file-receive-controls.spec.ts",
+        "e2e/video-player-layout.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "frontend-image-live-text-acceptance",
+      "paths": [
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MediaPreview.test.ts",
+        "frontend/src/lib/sensitiveClipboard.ts",
+        "frontend/src/lib/sensitiveClipboard.test.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "docs/help/topics/send-files.md"
+      ],
+      "browser": [
+        "e2e/media-recovery.spec.ts",
+        "e2e/protected-messages.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "frontend-reply-preview-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ReplyPreview.tsx",
+        "frontend/src/features/chat/ReplyPreview.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/e2e/reply-preview.spec.ts",
+        "frontend/src/features/chat/replyNavigation.ts",
+        "frontend/src/features/chat/replyNavigation.test.ts",
+        "frontend/e2e/helpers/message-highlight.ts"
+      ],
+      "browser": [
+        "e2e/reply-preview.spec.ts",
+        "e2e/chat.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-camera-capture-acceptance",
+      "paths": [
+        "frontend/src/features/chat/CameraCaptureDialog.tsx",
+        "frontend/src/features/chat/CameraCaptureDialog.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/e2e/camera-capture.spec.ts"
+      ],
+      "browser": [
+        "e2e/camera-capture.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "frontend-message-forwarding-acceptance",
+      "paths": [
+        "frontend/src/features/chat/forwarding/",
+        "frontend/src/lib/api/messageForwarding.ts",
+        "frontend/e2e/forwarding.spec.ts"
+      ],
+      "browser": [
+        "e2e/forwarding.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "frontend-selected-reactions-acceptance",
+      "paths": [
+        "frontend/src/store/conversationReactions.ts",
+        "frontend/src/features/chat/ReactionSummaryDialog.tsx",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/e2e/reaction-summaries.spec.ts",
+        "frontend/e2e/ui-audit-message-log.spec.ts",
+        "src-tauri/src/owner_commands/reactions.rs"
+      ],
+      "browser": [
+        "e2e/reaction-summaries.spec.ts",
+        "e2e/ui-audit-message-log.spec.ts",
+        "e2e/chat.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     }
   ]
 }

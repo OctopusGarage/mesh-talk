@@ -24,17 +24,30 @@ import {
 import { useChat } from "@/store/chat";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { visiblePeers } from "@/lib/contactVisibility";
+import { channelInviteAccounts } from "./channelMemberProjection";
+import { peerAccountKey } from "@/lib/rosterProjection";
+import { displayIdentity } from "@/lib/displayIdentity";
 import { VirtualRosterList } from "./VirtualRosterList";
 
 export function CreateChannelDialog() {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const rawPeers = useChat((s) => s.peers);
+  const myAccountId = useChat((s) => s.myAccountId);
+  const accounts = useChat((s) => s.accounts);
+  const favorites = useChat((s) => s.favorites);
   const contacts = useContactPolicy((s) => s.contacts);
   const loaded = useContactPolicy((s) => s.loaded);
   const peers = useMemo(
-    () => (loaded ? visiblePeers(rawPeers, contacts) : []),
-    [rawPeers, contacts, loaded],
+    () =>
+      loaded
+        ? channelInviteAccounts(
+            visiblePeers(rawPeers, contacts).filter(
+              (peer) => peer.account_id && peer.account_id !== myAccountId,
+            ),
+          )
+        : [],
+    [rawPeers, contacts, loaded, myAccountId],
   );
   const animatePeers = motionOK && peers.length <= MAX_STAGGER_ITEMS;
   const createChannel = useChat((s) => s.createChannel);
@@ -46,10 +59,12 @@ export function CreateChannelDialog() {
   const [createError, setCreateError] = useState<string | null>(null);
 
   const toggle = (id: string) => setSelected((s) => ({ ...s, [id]: !s[id] }));
-  const selectedCount = peers.filter((p) => selected[p.user_id]).length;
+  const selectedCount = peers.filter((p) => selected[peerAccountKey(p)]).length;
 
   const submit = async () => {
-    const ids = peers.filter((p) => selected[p.user_id]).map((p) => p.user_id);
+    const ids = peers
+      .filter((p) => selected[peerAccountKey(p)])
+      .map(peerAccountKey);
     if (!name.trim() || ids.length === 0) return;
     setCreateError(null);
     setBusy(true);
@@ -127,14 +142,22 @@ export function CreateChannelDialog() {
                 items={peers}
                 maxHeight={224}
                 className="space-y-0.5 overflow-y-auto rounded-lg border p-1"
-                itemKey={(p) => p.user_id}
+                itemKey={peerAccountKey}
                 renderItem={(p) => {
-                  const on = !!selected[p.user_id];
+                  const key = peerAccountKey(p);
+                  const on = !!selected[key];
+                  const identity = displayIdentity({
+                    accountId: p.account_id,
+                    deviceId: p.user_id,
+                    accounts,
+                    peers: rawPeers,
+                    favorites,
+                  });
                   return (
                     <motion.button
-                      key={p.user_id}
+                      key={key}
                       variants={fadeSlideUp}
-                      onClick={() => toggle(p.user_id)}
+                      onClick={() => toggle(key)}
                       aria-pressed={on}
                       disabled={busy}
                       className={cn(
@@ -144,9 +167,9 @@ export function CreateChannelDialog() {
                     >
                       <div className="min-w-0 flex-1">
                         <IdentityCrest
-                          id={p.user_id}
+                          id={key}
                           avatarId={p.account_id ?? undefined}
-                          name={p.name || t("common.unnamed")}
+                          name={identity.name}
                           variant="compact"
                         />
                       </div>

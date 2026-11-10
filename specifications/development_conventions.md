@@ -42,6 +42,17 @@ review before renaming.
 4. **Result Types**: Use `Result` for functions that can fail
 5. **Error Chaining**: Use error chaining for better debugging
 
+## Sensitive diagnostics
+
+- Keep logs and test failure output free of whole access, operation, forwarding,
+  custody and message values. Public DTOs can still carry private metadata.
+- Prefer static assertion messages or explicitly selected non-sensitive counts and
+  booleans. `assert_eq!` and `assert_ne!` print both operands on failure; use a
+  boolean comparison when the operands contain sensitive data.
+- Match URL origins through parsed hostnames and exact allowed URI forms, never
+  hostname substring checks. Cover lookalike hosts, credentials, paths and queries
+  in regression tests. Keep the CodeQL sensitive-logging and URL checks enabled.
+
 ## Testing Standards
 
 - Put focused Rust unit tests next to the behavior they cover and frontend

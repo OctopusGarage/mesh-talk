@@ -1,5 +1,7 @@
 pub mod account;
 pub mod account_keystore;
+pub mod account_login;
+pub mod account_transition;
 pub mod auth;
 pub mod device;
 pub mod errors;

@@ -4,12 +4,16 @@ import { useSettings } from "@/store/settings";
 export async function copySensitiveText(
   value: string,
   confirmMessage: string,
+  // A native copy event must write its DataTransfer synchronously; the async
+  // Clipboard API can lack user-gesture permission for system-menu commands.
+  writeText: (text: string) => void | Promise<void> = (text) =>
+    navigator.clipboard.writeText(text),
 ): Promise<boolean> {
   const policy = useSettings.getState().privacy;
   if (policy.confirm_sensitive_copy && !window.confirm(confirmMessage)) {
     return false;
   }
-  await navigator.clipboard.writeText(value);
+  await writeText(value);
   if (policy.clipboard_clear_seconds > 0) {
     window.setTimeout(() => {
       void clearIfUnchanged(value);
