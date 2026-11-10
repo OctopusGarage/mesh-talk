@@ -55,23 +55,80 @@ test("instrumented backend execution preserves the exact ignored scenario select
   assert.throws(() => backendCargoArgs("unknown", true), /Unknown backend/);
 });
 
-for (const mode of ["output cap", "timeout"]) test(`backend ${mode} retires ignored-stdio workers before the next suite`, { skip: process.platform === "win32", timeout: 15000 }, async t => {
+test("backend timeout preserves the absolute deadline without a startup SLA", { skip: process.platform === "win32", timeout: 15000 }, async () => {
   const { runCargo } = await import("../evals/backend-runner.mjs");
-  assert.equal(typeof runCargo, "function");
-  const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+  const result = await runCargo("two_node_cli", { command: [process.execPath, "-e", "setInterval(()=>{},1000)"], timeoutMs: 1500, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  assert.equal(result.timedOut, true, JSON.stringify(result));
+  assert.equal(result.cancelled, false, JSON.stringify(result));
+  assert.match(result.failure, /timeout/i);
+  assert.equal(result.cleanupUnverified, false, JSON.stringify(result));
+});
+
+// Readiness comes from the real leaf's IPC acknowledgment, never a process-start
+// duration. A completed owner without the marker fails with its actual result.
+async function backendReadyMarker(marker, pending, signal) {
+  const { watch } = await import("node:fs");
+  const { readFile } = await import("node:fs/promises");
+  const { dirname } = await import("node:path");
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const finish = (error, pid) => {
+      if (finished) return;
+      finished = true;
+      observer.close(); signal.removeEventListener("abort", abort);
+      if (error) reject(error); else resolve(pid);
+    };
+    const check = async result => {
+      try {
+        const pid = Number(await readFile(marker, "utf8"));
+        assert.ok(Number.isSafeInteger(pid) && pid > 1, "readiness must publish the complete leaf PID");
+        finish(null, pid);
+      } catch (error) {
+        if (error.code !== "ENOENT") finish(error);
+        else if (result) finish(Error(`backend exited before IPC readiness: ${JSON.stringify(result)}`));
+      }
+    };
+    const abort = () => finish(signal.reason);
+    const observer = watch(dirname(marker), () => { void check(); });
+    observer.on("error", error => finish(error));
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort(); else void check();
+    pending.then(result => check(result), error => finish(error));
+  });
+}
+
+for (const mode of ["output cap", "cancellation"]) test(`backend ${mode} retires ignored-stdio workers before the next suite`, { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { runCargo } = await import("../evals/backend-runner.mjs");
+  const { mkdtemp, readFile, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { spawnSync } = await import("node:child_process");
   const directory = await mkdtemp(join(tmpdir(), "mesh-backend-tree-"));
-  const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n"); let pid;
-  t.after(async () => { if (pid) try { process.kill(pid, "SIGKILL"); } catch {} await rm(directory, { recursive: true, force: true }); });
-  const leaf = "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));process.send('ready');setInterval(()=>{},1000)";
-  const leader = "process.on('SIGTERM',()=>process.exit(0));const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>process.stdout.write('x'.repeat(2048)));setInterval(()=>{},1000)";
-  const result = await runCargo("two_node_cli", { command: [process.execPath, "-e", leader, leaf, marker], maxOutputBytes: mode === "output cap" ? 1024 : 4096, timeoutMs: 1500, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
-  pid = Number(await readFile(marker, "utf8"));
-  assert.match(result.failure, mode === "output cap" ? /output.*limit/i : /timeout/i);
+  const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n");
+  const started = join(directory, "started"), release = join(directory, "release");
+  const controller = new AbortController();
+  const signal = AbortSignal.any([controller.signal, t.signal]);
+  const leaf = "process.on('SIGTERM',()=>{});process.on('message',()=>process.send('ready'));process.send('started');setInterval(()=>{},1000)";
+  const leader = "process.on('SIGTERM',()=>process.exit(0));const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{stdio:['ignore','ignore','ignore','ipc']});let released=false;const release=process.argv[4];fs.watch(require('node:path').dirname(release),()=>{if(!released&&fs.existsSync(release)){released=true;c.send('release');}});const publish=p=>{fs.writeFileSync(p+'.pending',String(c.pid));fs.renameSync(p+'.pending',p);};c.on('message',m=>{if(m==='started')publish(process.argv[3]);if(m==='ready'){publish(process.argv[2]);if(process.argv[5]==='output cap')process.stdout.write('x'.repeat(2048));}});setInterval(()=>{},1000)";
+  const pending = runCargo("two_node_cli", { command: [process.execPath, "-e", leader, leaf, marker, started, release, mode], maxOutputBytes: mode === "output cap" ? 1024 : 4096, signal, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  t.after(async () => { controller.abort(); await pending; await rm(directory, { recursive: true, force: true }); });
+  const setup = AbortSignal.any([t.signal, AbortSignal.timeout(10000)]);
+  const pid = await backendReadyMarker(started, pending, setup);
+  await assert.rejects(readFile(marker, "utf8"), { code: "ENOENT" }, "the actual leaf must wait at the readiness gate");
+  await writeFile(release, "release");
+  assert.equal(await backendReadyMarker(marker, pending, setup), pid);
+  if (mode === "cancellation") controller.abort();
+  const result = await pending;
+  assert.equal(result.timedOut, false, JSON.stringify(result));
+  assert.equal(result.cancelled, mode === "cancellation", JSON.stringify(result));
+  assert.match(result.failure, mode === "output cap" ? /output.*limit/i : /cancelled/i);
+  assert.equal(result.cleanupUnverified, false, JSON.stringify(result));
   const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
   assert.ok(!state || state.startsWith("Z"), `next suite would overlap a runnable worker: ${state}`);
+  const next = await runCargo("two_node_cli", { command: [process.execPath, "-e", "console.log('next suite')"], signal: t.signal, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  assert.equal(next.code, 0, JSON.stringify(next));
+  assert.match(next.stdout, /next suite/);
 });
 
 test("backend cancellation and unverified cleanup stop admission of later suites", async () => {
@@ -101,11 +158,12 @@ test("intentional lifecycle fault fixtures cannot cancel their real validation o
   // A fresh test driver must not inherit node:test's child-context marker,
   // which otherwise silently suppresses execution of these nested test files.
   const { env } = toolVersionFixture(directory, { ...process.env, CI: "1", MESH_VALIDATION_PROCESS_GROUP_OWNER: "", NODE_TEST_CONTEXT: undefined });
-  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)), "fault-fixtures", "--", process.execPath, "--test", "--test-reporter=tap", "--test-name-pattern", "backend (output cap|timeout)|bounded child execution|browser wrapper exposes", ...files], { cwd: directory, env, encoding: "utf8", timeout: 25000 });
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)), "fault-fixtures", "--", process.execPath, "--test", "--test-reporter=tap", "--test-name-pattern", "backend (output cap|timeout|cancellation retires)|bounded child execution|browser wrapper exposes", ...files], { cwd: directory, env, encoding: "utf8", timeout: 25000 });
   assert.equal(result.status, 0, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   assert.match(result.stdout, /browser wrapper exposes/);
   assert.match(result.stdout, /backend timeout/);
-  assert.match(result.stdout, /^# pass 4$/mu, "all four selected fault controls must actually pass");
+  assert.match(result.stdout, /backend cancellation retires/);
+  assert.match(result.stdout, /^# pass 5$/mu, "all five selected fault controls must actually pass");
 });
 
 

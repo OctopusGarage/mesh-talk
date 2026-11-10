@@ -131,6 +131,7 @@
             "paired_control_followup_requires_a_new_admitted_operation_or_wake_token",
             "paired_control_new_publication_reuses_completed_background_without_dropping_partial_foreground",
             "paired_control_recycles_parked_completed_background_only_for_genuine_followup",
+            "queued_setup_retires_wake_replacement_before_arming_the_natural_hold",
             "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
             "selected_queued_source_dispatches_while_unrelated_local_maintenance_is_held",

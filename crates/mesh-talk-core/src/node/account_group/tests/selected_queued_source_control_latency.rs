@@ -9,6 +9,71 @@ use crate::node::account_sync_wire::AccountHistoryFrame;
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore, oneshot};
 
+/// A scope-complete event is historical until its actual page and any paired
+/// comparison retire. The original natural hold must start after this setup.
+#[derive(Default)]
+struct QueuedSetupComparison {
+    scope: ColdControlScope,
+    task: Option<tokio::task::Id>,
+    page_finished: bool,
+}
+
+impl QueuedSetupComparison {
+    fn observe(&mut self, phase: &str, task: Option<tokio::task::Id>) {
+        if phase.starts_with("control_task ") {
+            self.task = task;
+            self.page_finished = false;
+        } else if phase.starts_with("control_cancel ") {
+            self.page_finished = false;
+        }
+        if phase != "document_scope_settled scope=Control" || (task.is_some() && task == self.task)
+        {
+            self.scope.observe(phase, true);
+        }
+        if task.is_some()
+            && task == self.task
+            && phase.starts_with("page_end ")
+            && phase.contains("outcome=ok")
+        {
+            self.page_finished = true;
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.scope.ready() && self.page_finished
+    }
+}
+
+#[tokio::test]
+async fn queued_setup_retires_wake_replacement_before_arming_the_natural_hold() {
+    tokio::spawn(async {
+        let task = Some(tokio::task::id());
+        let mut comparison = QueuedSetupComparison::default();
+        comparison.observe("control_task paired=false protected=false ", task);
+        comparison.observe("document_scope_settled scope=Control", task);
+        assert!(
+            !comparison.ready(),
+            "scope completion still has an active page"
+        );
+        comparison.observe("control_cancel task=old reason=same_source", None);
+        comparison.observe("control_task paired=true protected=true ", task);
+        comparison.observe("document_scope_settled scope=Control", task);
+        comparison.observe("page_end outcome=ok", None);
+        assert!(!comparison.ready(), "a different task cannot finish setup");
+        comparison.observe("page_end outcome=ok", task);
+        assert!(
+            !comparison.ready(),
+            "the real Wake replacement still owes its pair"
+        );
+        comparison.observe("control_pair_retired", None);
+        assert!(comparison.ready());
+        comparison.observe("control_task paired=false protected=false ", task);
+        assert!(!comparison.ready(), "a new read invalidates old settlement");
+    })
+    .await
+    .unwrap();
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QueuedRecoverySnapshot {
     rows_complete: bool,
@@ -664,6 +729,10 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let setup_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let setup_wake_observed = Arc::new(Mutex::new(None::<std::time::Instant>));
+    let setup_wake_min_revision = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let a_setup_comparison = Arc::new(Mutex::new(QueuedSetupComparison::default()));
+    let first_hold_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let first_rejections = Arc::new(Mutex::new([0_u64; 6]));
     let setup_wake_ready = Arc::new(Semaphore::new(0));
     let _release_setup_wake = ReleaseQueuedReads(setup_wake_ready.clone());
     let preparation_read = Arc::new(PreparationReadGate::default());
@@ -774,6 +843,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let peer_a = a.identity.public();
         let setup_wake_observed = setup_wake_observed.clone();
+        let setup_wake_min_revision = setup_wake_min_revision.clone();
+        let a_setup_comparison = a_setup_comparison.clone();
         let peer_b = b.identity.public();
         let own = reference.identity.public();
         let local_maintenance = local_maintenance.clone();
@@ -798,8 +869,26 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let setup_trace = setup_trace.clone();
         let first_held_task = first_held_task.clone();
         move |peer, phase| {
-            if peer == peer_a && phase.starts_with("wake_received revision=") {
-                *setup_wake_observed.lock().unwrap() = Some(std::time::Instant::now());
+            if peer == peer_a {
+                if let Some(revision) = phase
+                    .strip_prefix("wake_received revision=")
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    let minimum =
+                        setup_wake_min_revision.load(std::sync::atomic::Ordering::Acquire);
+                    if minimum > 0 && revision >= minimum {
+                        setup_wake_observed
+                            .lock()
+                            .unwrap()
+                            .get_or_insert_with(std::time::Instant::now);
+                    }
+                }
+                if setup_wake_observed.lock().unwrap().is_some() {
+                    a_setup_comparison
+                        .lock()
+                        .unwrap()
+                        .observe(&phase, tokio::task::try_id());
+                }
             }
             let held_task = *first_held_task.lock().unwrap();
             if peer == peer_a
@@ -1027,6 +1116,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let expected = reference.identity.public();
         let setup_wake_ready = setup_wake_ready.clone();
         let setup_wake_observed = setup_wake_observed.clone();
+        let first_hold_armed = first_hold_armed.clone();
+        let first_rejections = first_rejections.clone();
         let release = release.clone();
         let first_tx = first_tx.clone();
         let resume_tx = resume_tx.clone();
@@ -1042,6 +1133,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             let expected = expected.clone();
             let setup_wake_ready = setup_wake_ready.clone();
             let setup_wake_observed = setup_wake_observed.clone();
+            let first_hold_armed = first_hold_armed.clone();
+            let first_rejections = first_rejections.clone();
             let release = release.clone();
             let first_tx = first_tx.clone();
             let resume_tx = resume_tx.clone();
@@ -1079,14 +1172,24 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                     decided: false,
                 };
                 let first_pending = first_tx.lock().unwrap().is_some();
-                if first_pending
-                    && (!b_readiness.lock().unwrap().ready()
-                        || !pages.lock().unwrap().request(&request).is_some_and(|page| {
-                            page.dispatch()
-                                .is_some_and(|dispatch| !dispatch.paired && !dispatch.protected)
-                        }))
-                {
-                    return;
+                if first_pending {
+                    let rejected = if !first_hold_armed.load(std::sync::atomic::Ordering::Acquire) {
+                        Some(0)
+                    } else if !b_readiness.lock().unwrap().ready() {
+                        Some(1)
+                    } else if !pages.lock().unwrap().request(&request).is_some_and(|page| {
+                        page.dispatch()
+                            .is_some_and(|dispatch| !dispatch.paired && !dispatch.protected)
+                    }) {
+                        Some(2)
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = rejected {
+                        let mut counts = first_rejections.lock().unwrap();
+                        counts[reason] = counts[reason].saturating_add(1);
+                        return;
+                    }
                 }
                 // Only the initial qualified unpaired read waits for setup
                 // WakeAck. Paired/protected cold reads must finish above so B
@@ -1097,6 +1200,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                 // Re-resolve after the wait: a pre-Wake child may have retired
                 // while the authenticated change was being processed.
                 let Some(page) = pages.lock().unwrap().live_request(&request) else {
+                    let mut counts = first_rejections.lock().unwrap();
+                    counts[3] = counts[3].saturating_add(1);
                     return;
                 };
                 if first_pending
@@ -1105,9 +1210,13 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                         .unwrap()
                         .is_some_and(|at| page.dispatched_at >= at)
                 {
+                    let mut counts = first_rejections.lock().unwrap();
+                    counts[4] = counts[4].saturating_add(1);
                     return;
                 }
                 let Some(dispatch) = page.dispatch() else {
+                    let mut counts = first_rejections.lock().unwrap();
+                    counts[5] = counts[5].saturating_add(1);
                     return;
                 };
                 {
@@ -1361,26 +1470,35 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         }
     }));
     let (first_task, first_task_lifetime) = super::cold_account_setup(async {
-        // The first hold must follow settled B setup. An unchanged notification
-        // need not open A again; publish real signed input after arming its hook.
-        while !b_readiness.lock().unwrap().ready() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+        // A real setup Wake may replace an active natural comparison. Let
+        // that exact signed comparison and its pair finish while the hold is
+        // unarmed, then open the original through receiver-owned demand only.
+        let key = crate::node::account_documents::sync::seed_legacy_control_page_for_test(
             &a,
             ConversationId::new([67; 32]),
         );
+        let (_, revision) = a.account_wake_token_for_test();
+        setup_wake_min_revision.store(revision.checked_add(1).unwrap(), std::sync::atomic::Ordering::Release);
         a.note_account_local_change();
         send_boundary_wake(&a, &reference).await;
+        loop {
+            let a_ready = a_setup_comparison.lock().unwrap().ready();
+            let b_ready = b_readiness.lock().unwrap().ready();
+            if a_ready && b_ready && reference.account_document_meta(&key) == a.account_document_meta(&key) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         setup_wake_ready.close();
-        reference.account_sync_notify.notify_one();
+        first_hold_armed.store(true, std::sync::atomic::Ordering::Release);
+        reference.request_sibling_pull_for_test(&a.identity.public());
         first_rx.await
     })
         .await
         .unwrap_or_else(|error| {
             let ready = b_readiness.lock().unwrap().ready();
             let observed = pages.lock().unwrap().summary();
-            panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={ready} B_partial={}; pages={observed:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
+            panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={ready} B_partial={}; A_setup_ready={}; armed={}; rejected_unarmed_B_unready_ineligible_not_live_pre_wake_missing_dispatch={:?}; pages={observed:?}", b_partial.load(std::sync::atomic::Ordering::Acquire), a_setup_comparison.lock().unwrap().ready(), first_hold_armed.load(std::sync::atomic::Ordering::Acquire), *first_rejections.lock().unwrap());
         })
         .unwrap();
     let first_active = pages.lock().unwrap().is_active(first_task);
