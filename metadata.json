@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M71T23A58YW7CFRAMQ57ZN4D",
+  "strategy": "manual-commit",
+  "branch": "fix/pr-explicit-validation-owners",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "frontend/e2e/chat.spec.ts",
+    "frontend/e2e/reaction-summaries.spec.ts",
+    "frontend/e2e/ui-audit-message-log.spec.ts",
+    "frontend/src/features/chat/MessageBubble.tsx",
+    "frontend/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 53225,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 945920,
+    "output_tokens": 3200,
+    "api_call_count": 18,
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 3541,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 3541,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
