@@ -66,13 +66,16 @@
         "frontend/src/components/ui/dialog.tsx",
         "frontend/src/components/ui/dialog.test.ts",
         "frontend/src/components/ui/context-menu.tsx",
+        "frontend/src/components/ui/context-menu.test.ts",
+        "frontend/src/components/ui/focus-restoration.ts",
         "frontend/e2e/context-menu-focus.spec.ts",
         "frontend/e2e/helpers/ui-audit.ts",
         "frontend/e2e/helpers/sidebar-actions.ts",
         "frontend/e2e/minimum-window.spec.ts"
       ],
       "frontend": [
-        "src/components/ui/dialog.test.ts"
+        "src/components/ui/dialog.test.ts",
+        "src/components/ui/context-menu.test.ts"
       ],
       "capability": {
         "summary": "Preserve active focus ownership and visible keyboard indication across shared dialogs, menus and subsequent user interactions.",

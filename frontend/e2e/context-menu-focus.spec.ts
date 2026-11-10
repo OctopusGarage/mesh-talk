@@ -76,5 +76,11 @@ for (const theme of ["light", "dark"] as const) {
     expect(style.outlineOffset).toBe("-2px");
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("reaction-picker")).toBeVisible();
+    await expect(page.getByTestId("reaction-picker")).toHaveAttribute(
+      "data-state",
+      "open",
+    );
+    await page.getByTestId("reaction-option-🔥").click();
+    await expect(page.getByTestId("reaction-chip").first()).toContainText("🔥");
   });
 }

@@ -1,6 +1,7 @@
 import * as React from "react";
 import * as ContextMenuPrimitive from "@radix-ui/react-context-menu";
 import { cn } from "@/lib/utils";
+import { preserveNewerFocusOnClose } from "./focus-restoration";
 
 const ContextMenu = ContextMenuPrimitive.Root;
 const ContextMenuTrigger = ContextMenuPrimitive.Trigger;
@@ -8,7 +9,7 @@ const ContextMenuTrigger = ContextMenuPrimitive.Trigger;
 const ContextMenuContent = React.forwardRef<
   React.ElementRef<typeof ContextMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Content>
->(({ className, ...props }, ref) => (
+>(({ className, onCloseAutoFocus, ...props }, ref) => (
   <ContextMenuPrimitive.Portal>
     <ContextMenuPrimitive.Content
       ref={ref}
@@ -20,6 +21,10 @@ const ContextMenuContent = React.forwardRef<
         className,
       )}
       {...props}
+      onCloseAutoFocus={(event) => {
+        onCloseAutoFocus?.(event);
+        preserveNewerFocusOnClose(event);
+      }}
     />
   </ContextMenuPrimitive.Portal>
 ));

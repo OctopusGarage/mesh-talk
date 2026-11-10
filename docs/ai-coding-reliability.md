@@ -352,6 +352,13 @@ entry. Revalidate through the existing atomic commit seam before side effects
 and before publishing private results. Treat frontend generation guards as UI
 ownership, not host authorization. Read commands can expose stale private data too.
 
+A closing popup's delayed cleanup can outlive a newer popup's focus ownership.
+Default restoration may act only while focus is neutral or still belongs to the
+closing content. Reuse the [shared focus owner](module-boundaries.md#dialog-focus-ownership)
+for dialogs and context menus; preserve consumer cancellation and ordinary trigger
+restoration. The real Radix controls hold old unmount cleanup until a newer
+popover owns focus, then require that popover and its action to remain usable.
+
 A routing or capability preview must not become a second admission owner. When
 the canonical reader reports a typed stale projection, preserve its existing
 bounded preparation path before deciding authorization. Any cached local candidate
@@ -546,6 +553,9 @@ Shared audit helpers must make teardown explicit when a later assertion still
 needs the open menu; preserve default cleanup for other callers. The
 [focus owner](module-boundaries.md#dialog-focus-ownership) retains real keyboard
 navigation and activation controls in both themes.
+Visibility during an exit animation does not certify an open popup. Check the
+semantic open state and complete the new action; observing the transient shell
+alone can accept an already dismissed interaction.
 
 For repeated lifecycle or memory churn, distinguish cumulative input-driver waits
 from the invariant being measured. The [memory guardrail](../frontend/e2e/memory.spec.ts)

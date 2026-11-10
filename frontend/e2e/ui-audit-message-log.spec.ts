@@ -30,6 +30,10 @@ test("message log actions, menus, and reaction chips stay usable", async ({
   await expectVisibleFocus(page, reactAction, { dismissAfter: false });
   await reactAction.click();
   await expect(page.getByTestId("reaction-picker")).toBeVisible();
+  await expect(page.getByTestId("reaction-picker")).toHaveAttribute(
+    "data-state",
+    "open",
+  );
   await page.getByTestId("reaction-option-🔥").click();
   const firstReactionChip = page.getByTestId("reaction-chip").first();
   await expect(firstReactionChip).toBeVisible();
