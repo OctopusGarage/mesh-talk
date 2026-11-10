@@ -10,23 +10,38 @@
 //! only honoured when that account is the target message's author; channel recalls are
 //! honoured only when the `Delete` event's author equals the target event's author.
 
+mod indexed;
 use super::node::{Node, now_millis};
-use super::queries::decode_account_entry;
+#[cfg(test)]
 use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::node::NodeError;
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 use crate::node::dm_envelope::RecallEnvelope;
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
 use bincode::Options;
+pub(crate) use indexed::IndexedRecallLog;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
 use std::path::Path;
 
 /// How long after sending a message it may still be recalled (WeChat's 2 minutes).
 pub const RECALL_WINDOW_MS: u64 = 2 * 60 * 1000;
 
 const RECALL_LOG_MAGIC: &[u8; 6] = b"MTRECL";
+
+/// Sticker artwork preserves message recall while ordinary attachments keep
+/// their existing contract. Validation prevents a filename alone granting it.
+fn recallable_manifest(bytes: &[u8]) -> bool {
+    super::files::validated_manifest(bytes).is_some_and(|manifest| {
+        manifest.protection().is_some() || crate::file::sticker::is_sticker_name(manifest.name())
+    })
+}
 
 /// The plaintext payload of a channel/DM `Delete` event: the message being recalled.
 /// Sealed like a reaction before it ships.
@@ -62,11 +77,14 @@ pub struct RecallMark {
 }
 
 /// A local-only, password-encrypted log of our own recalls, indexed by conversation.
+#[cfg(test)]
 pub struct RecallLog {
     file: EncryptedRecordLog<RecallMark>,
     by_conversation: HashMap<ConversationId, Vec<RecallMark>>,
+    revision: u64,
 }
 
+#[cfg(test)]
 impl RecallLog {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, marks) =
@@ -80,6 +98,7 @@ impl RecallLog {
         }
         Ok(Self {
             file,
+            revision: by_conversation.values().map(Vec::len).sum::<usize>() as u64,
             by_conversation,
         })
     }
@@ -104,7 +123,8 @@ impl RecallLog {
             target,
             wall_clock,
         };
-        self.file.append(&mark)?;
+        self.file.append_durable(&mark)?;
+        self.revision = self.revision.wrapping_add(1);
         self.by_conversation
             .entry(conversation)
             .or_default()
@@ -159,7 +179,57 @@ mod recovery_snapshot_tests {
     }
 }
 
+pub(in crate::node) enum ChannelRecallPreparation {
+    Retry(Option<EventId>),
+    Ignored,
+    Mark(RecallMark),
+}
+
 impl Node {
+    pub(in crate::node) fn prepare_channel_recall(
+        &self,
+        event: &Event,
+        author_x: Option<[u8; 32]>,
+        content_admitted: bool,
+    ) -> Result<ChannelRecallPreparation, NodeError> {
+        if !content_admitted
+            || event.kind != EventKind::Delete
+            || !event.verify_integrity()
+            || !event.verify_signature()
+        {
+            return Ok(ChannelRecallPreparation::Ignored);
+        }
+        let Some(author_x) = author_x.or_else(|| {
+            self.historical_author(event.author.ed25519_pub())
+                .map(|p| p.x25519_pub)
+        }) else {
+            return Ok(ChannelRecallPreparation::Retry(None));
+        };
+        let Some(payload) = super::channel::SealedPayload::decode(&event.ciphertext)
+            .and_then(|sealed| sealed.open(&self.identity, &author_x))
+            .and_then(|plain| DeletePayload::decode(&plain))
+        else {
+            return Ok(ChannelRecallPreparation::Ignored);
+        };
+        let Some(target) = self
+            .log
+            .lock()
+            .expect("log mutex")
+            .repository()?
+            .header(&payload.target)?
+        else {
+            return Ok(ChannelRecallPreparation::Retry(Some(payload.target)));
+        };
+        if target.author != event.author || target.conversation != event.conversation_id {
+            return Ok(ChannelRecallPreparation::Ignored);
+        }
+        Ok(ChannelRecallPreparation::Mark(RecallMark {
+            conversation: event.conversation_id,
+            target: payload.target,
+            wall_clock: target.wall_clock,
+        }))
+    }
+
     /// Recall (unsend) one of OUR OWN account messages: `target` is the logical msg id from
     /// account history. Fails if the message isn't ours or the 2-minute window has passed.
     /// Fans a `RecallEnvelope` (a `Delete` event) out to every device of `target_account_id`
@@ -184,21 +254,34 @@ impl Node {
         authorize(&mut || Ok(()))?;
         let my_account = self.account.account_id();
         let acct_conv = account_conversation_id(&my_account, target_account_id);
-        // Authorship + window: the message must be ours, i.e. present in our sent sidecar
-        // under this account conversation. Its original wall_clock gauges the window.
-        let wall = {
-            let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
-            sent.entries(&acct_conv)
-                .into_iter()
-                .find(|e| decode_account_entry(&e.plaintext).0 == target)
-                .map(|e| e.wall_clock)
+        // Sibling copies preserve original account authorship and send time.
+        let wall = self
+            .private_dm_target_route(target_account_id, target)?
+            .filter(|(sender, recipient, _)| {
+                sender == &my_account && recipient == target_account_id
+            })
+            .map(|(_, _, wall)| wall);
+        let wall = match wall {
+            Some(wall) => Some(wall),
+            None => self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .entry_in(&acct_conv, target)?
+                .filter(|row| row.from == self.user_id() && recallable_manifest(&row.plaintext))
+                .map(|row| row.wall_clock),
         };
         let Some(wall) = wall else {
             return Err(NodeError::Channel(
                 "can only recall your own message".into(),
             ));
         };
-        if now_millis().saturating_sub(wall) > RECALL_WINDOW_MS {
+        let already_accepted = self
+            .recalls
+            .lock()
+            .expect("recalls mutex")
+            .contains(acct_conv, target)?;
+        if !already_accepted && now_millis().saturating_sub(wall) > RECALL_WINDOW_MS {
             return Err(NodeError::Channel(
                 "the 2-minute recall window has passed".into(),
             ));
@@ -225,7 +308,8 @@ impl Node {
             }
             // Account recalls retain their best-effort fanout contract, including
             // a durable local recall when every destination is currently unavailable.
-            self.record_my_recall(acct_conv, target, wall)
+            self.record_my_recall(acct_conv, target, wall)?;
+            self.publish_own_account_recall(target_account_id, target, wall)
         })?;
         for (peer, conv) in deliveries {
             self.deliver_direct(&peer, conv).await.ok();
@@ -255,18 +339,29 @@ impl Node {
         + Send,
     ) -> Result<(), NodeError> {
         authorize(&mut || Ok(()))?;
+        // Authorization precedes derived preparation, and the durable callback
+        // still rejects a membership change after this bounded continuation.
+        self.await_channel_metadata(channel).await?;
         let me = Author::from_ed25519(self.identity.public().ed25519_pub);
+        let recallable_file_target = self
+            .received_files
+            .lock()
+            .expect("received files lock")
+            .entry_in(&channel, target)?
+            .is_some_and(|row| recallable_manifest(&row.plaintext));
         let wall = {
             let log = self.log.lock().expect("log mutex not poisoned");
             let event = log
-                .get(&target)
+                .get(&target)?
                 .ok_or_else(|| NodeError::Channel("unknown message".into()))?;
             if event.author != me {
                 return Err(NodeError::Channel(
                     "can only recall your own message".into(),
                 ));
             }
-            if event.kind != EventKind::Message {
+            if event.kind != EventKind::Message
+                && !(event.kind == EventKind::FileManifest && recallable_file_target)
+            {
                 return Err(NodeError::Channel("not a message".into()));
             }
             event.wall_clock
@@ -277,21 +372,36 @@ impl Node {
             ));
         }
 
-        let members = {
+        let (members, epoch) = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !state.is_accepted_member(&self.user_id()) {
+            if !self.channel_identity_is_current(state)? {
                 return Err(NodeError::Channel("not a channel member".into()));
             }
-            state.members().to_vec()
+            (state.recipient_members(), state.epoch())
         };
         let payload = DeletePayload { target };
         let sealed =
             crate::node::channel::SealedPayload::seal(&self.identity, &members, &payload.encode())
                 .map_err(|e| NodeError::Channel(format!("recall seal failed: {e}")))?;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            {
+                let book = self.channels.lock().expect("channels lock");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+                if state.epoch() != epoch || !self.channel_identity_is_current(state)? {
+                    return Err(NodeError::Channel(
+                        "channel membership changed; retry the operation".into(),
+                    ));
+                }
+            }
             self.append_event(channel, EventKind::Delete, sealed.encode())?;
             self.record_my_recall(channel, target, wall)
         })?;
@@ -312,199 +422,106 @@ impl Node {
             .map_err(NodeError::Log)
     }
 
-    /// The set of recalled message ids for a CHANNEL: our own recalls (durable) plus peer
-    /// `Delete` events whose author authored the target message.
+    /// Selected-row visibility. The caller supplies the author from its already
+    /// authenticated transcript/manifest. Producers persist verified peer recall
+    /// marks; account-private claims are read by their exact certified key.
+    pub(crate) fn message_recalled_selected(
+        &self,
+        conversation: ConversationId,
+        id: EventId,
+        account: Option<&str>,
+        author_account: Option<&str>,
+    ) -> Result<bool, NodeError> {
+        if account
+            .is_some_and(|peer| account_conversation_id(&self.account_id(), peer) != conversation)
+        {
+            return Ok(false);
+        }
+        let (logical, mut aliases) = {
+            let identities = self
+                .file_message_identities
+                .lock()
+                .expect("file identity mutex");
+            (
+                identities.logical(conversation, id)?,
+                identities.aliases(conversation, id)?,
+            )
+        };
+        if !aliases.contains(&logical) {
+            aliases.push(logical);
+        }
+        if !aliases.contains(&id) {
+            aliases.push(id);
+        }
+        for target in aliases {
+            if self
+                .recalls
+                .lock()
+                .expect("recalls mutex")
+                .contains(conversation, target)?
+            {
+                return Ok(true);
+            }
+            if let (Some(peer), Some(author)) = (account, author_account)
+                && self.private_dm_recall_selected(peer, target, author)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Compatibility enumeration for legacy recall fixtures.
+    #[cfg(test)]
     pub(in crate::node) fn recalled_targets_channel(
         &self,
         conv: ConversationId,
-    ) -> HashSet<EventId> {
-        let content_gate = self.channel_content_gate(conv);
-        let mut out: HashSet<EventId> = self
-            .recalls
-            .lock()
-            .expect("recalls mutex not poisoned")
-            .targets(&conv)
-            .into_iter()
-            .collect();
-
-        let delete_events: Vec<Event> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&conv)
-                .into_iter()
-                .filter(|e| {
-                    e.kind == EventKind::Delete
-                        && content_gate.as_ref().is_none_or(|ids| ids.contains(&e.id))
-                })
-                .cloned()
-                .collect()
-        };
-        for event in &delete_events {
-            let author_uid = event.author.user_id();
-            // The recaller's x25519 key (to open their sealed Delete): prefer the channel's
-            // current member set, then fall back to the discovery roster. The roster fallback
-            // covers a recaller who was removed from the channel within the 2-min recall
-            // window but is still a known peer — without it their recall would be dropped and
-            // the message would un-tombstone. (The two locks are taken sequentially, never
-            // nested, to keep a consistent lock order.) The author's x25519 isn't derivable
-            // from the event Author, which carries only the ed25519 key.
-            let author_x = {
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                book.state(&conv).and_then(|s| {
-                    s.members()
-                        .iter()
-                        .find(|m| m.user_id() == author_uid)
-                        .map(|m| m.x25519_pub)
-                })
+    ) -> Result<HashSet<EventId>, NodeError> {
+        let mut out = HashSet::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .recalls
+                .lock()
+                .expect("recalls mutex")
+                .page(Some(conv), after, 128)?;
+            if page.is_empty() {
+                break;
             }
-            .or_else(|| {
-                self.historical_author(event.author.ed25519_pub())
-                    .map(|proof| proof.public().x25519_pub)
-            });
-            let plaintext = author_x.and_then(|ax| {
-                crate::node::channel::SealedPayload::decode(&event.ciphertext)
-                    .and_then(|sealed| sealed.open(&self.identity, &ax))
-            });
-            let Some(p) = plaintext.and_then(|b| DeletePayload::decode(&b)) else {
-                continue;
-            };
-            // Only the message's own author may recall it.
-            let target_wall_clock = {
-                let log = self.log.lock().expect("log mutex not poisoned");
-                log.get(&p.target)
-                    .filter(|target| target.author == event.author)
-                    .map(|target| target.wall_clock)
-            };
-            if let Some(wall_clock) = target_wall_clock {
-                if let Err(error) = self
-                    .recalls
-                    .lock()
-                    .expect("recalls mutex not poisoned")
-                    .record(conv, p.target, wall_clock)
-                {
-                    log::warn!("could not persist verified channel recall: {error}");
-                }
-                out.insert(p.target);
+            for mark in page {
+                after = Some((mark.conversation, mark.target));
+                out.insert(mark.target);
             }
         }
-        out
+        Ok(out)
     }
-
-    /// The set of recalled (logical) message ids for the ACCOUNT conversation with
-    /// `peer_account_id`: our own recalls plus peer `RecallEnvelope`s, each authorised
-    /// against the target message's author account.
+    #[cfg(test)]
     pub(in crate::node) fn recalled_targets_account(
         &self,
-        peer_account_id: &str,
-    ) -> HashSet<EventId> {
-        let my_account = self.account.account_id();
-        let me = self.identity.public().user_id();
-        let acct_conv = account_conversation_id(&my_account, peer_account_id);
-
-        let mut out: HashSet<EventId> = self
-            .recalls
-            .lock()
-            .expect("recalls mutex not poisoned")
-            .targets(&acct_conv)
-            .into_iter()
-            .collect();
-
-        // The device-pair conversations whose Delete events can carry this account's recalls
-        // (mirrors `account_reactions`): ours-with-each-target-device and ours-with-each-own-
-        // other-device.
-        let convs: Vec<(ConversationId, [u8; 32], Option<String>)> = {
-            self.historical_dm_peers()
-                .into_iter()
-                .filter(|p| {
-                    let account = p.account_id();
-                    let a = account.as_deref();
-                    a == Some(peer_account_id)
-                        || (a == Some(my_account.as_str()) && p.public().user_id() != me)
-                })
-                .map(|p| {
-                    let public = p.public();
-                    (
-                        dm_conversation_id(&self.identity.public(), &public),
-                        public.x25519_pub,
-                        p.account_id(),
-                    )
-                })
-                .collect()
-        };
-        // Collect the peer recall claims (target, claimed-sender-account) from Delete events,
-        // already bound to the authenticating peer key. Decrypting these is the only required
-        // work; if there are none we skip the expensive author_of rebuild below.
-        let mut claims: Vec<(EventId, String)> = Vec::new();
-        for (conv, author_x, peer_account) in convs {
-            let delete_events: Vec<Event> = {
-                let log = self.log.lock().expect("log mutex not poisoned");
-                log.events(&conv)
-                    .into_iter()
-                    .filter(|e| e.kind == EventKind::Delete)
-                    .cloned()
-                    .collect()
-            };
-            for event in &delete_events {
-                let Ok(pt) = crate::dm::open(&self.identity, &author_x, &event.ciphertext) else {
-                    continue;
-                };
-                let Some(env) = RecallEnvelope::decode(&pt) else {
-                    continue;
-                };
-                // Bind the claimed sender account to the peer key that authenticated it.
-                if peer_account.as_deref() != Some(env.route.sender_account.as_str()) {
-                    continue;
-                }
-                claims.push((EventId::new(env.target), env.route.sender_account));
+        peer: &str,
+    ) -> Result<HashSet<EventId>, NodeError> {
+        for author in self.historical_dm_peers() {
+            if matches!(author.account_id().as_deref(),Some(a) if a==peer||a==self.account_id()) {
+                self.project_private_dm_controls(dm_conversation_id(
+                    &self.identity.public(),
+                    &author.public(),
+                ))?;
             }
         }
-        if claims.is_empty() {
-            return out;
-        }
-
-        // Who authored each logical message in this account conversation (to authorise
-        // peer recalls): our sends are ours, received entries carry the sender account.
-        let mut author_of: HashMap<EventId, (String, u64)> = HashMap::new();
-        for e in self
-            .sentlog
-            .lock()
-            .expect("sentlog mutex not poisoned")
-            .entries(&acct_conv)
-        {
-            author_of.insert(
-                decode_account_entry(&e.plaintext).0,
-                (my_account.clone(), e.wall_clock),
-            );
-        }
-        for e in self
-            .received
-            .lock()
-            .expect("received mutex not poisoned")
-            .entries(&acct_conv)
-        {
-            author_of.insert(
-                decode_account_entry(&e.plaintext).0,
-                (e.from.clone(), e.wall_clock),
-            );
-        }
-        // Only the message's own author account may recall it.
-        for (target, sender_account) in claims {
-            if let Some((author, wall_clock)) = author_of.get(&target)
-                && author == &sender_account
+        let conv = account_conversation_id(&self.account_id(), peer);
+        let mut out = self.recalled_targets_channel(conv)?;
+        for (target, actor) in self.private_dm_recall_claims(peer) {
+            if let Some((author, _, wall)) = self.private_dm_target_route(peer, target)?
+                && actor == author
             {
-                // Keep the verified tombstone even after the old device keys and
-                // peer roster disappear during recovery.
-                if let Err(error) = self
-                    .recalls
+                self.recalls
                     .lock()
-                    .expect("recalls mutex not poisoned")
-                    .record(acct_conv, target, *wall_clock)
-                {
-                    log::warn!("could not persist verified peer recall: {error}");
-                }
+                    .expect("recalls mutex")
+                    .record(conv, target, wall)?;
                 out.insert(target);
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -553,6 +570,217 @@ mod acceptance_tests {
     use crate::identity::{account::Account, device::DeviceIdentity};
 
     #[tokio::test]
+    async fn sibling_recalls_imported_account_message_without_original_device_sentlog() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account = Account::generate();
+        let source_identity = DeviceIdentity::generate();
+        let sibling_identity = DeviceIdentity::generate();
+        let recipient_identity = DeviceIdentity::generate();
+        let recipient_account = Account::generate();
+        let source_proof = Announce::new_with_account(&source_identity, &account, "source", 9);
+        let sibling_proof = Announce::new_with_account(&sibling_identity, &account, "sibling", 9);
+        let recipient_proof = Announce::new_with_account(
+            &recipient_identity,
+            &recipient_account,
+            "recipient",
+            listener.local_addr().unwrap().port(),
+        );
+        let (source, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("source"),
+            source_identity,
+            Account::from_secret_bytes(account.secret_bytes()),
+            &recipient_proof,
+        );
+        let (sibling, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("sibling"),
+            sibling_identity,
+            account,
+            &recipient_proof,
+        );
+        let (recipient, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("recipient"),
+            recipient_identity,
+            recipient_account,
+            &source_proof,
+        );
+        for (node, folder, proof) in [
+            (&source, "source", &source_proof),
+            (&sibling, "sibling", &sibling_proof),
+            (&recipient, "recipient", &recipient_proof),
+        ] {
+            node.configure_privacy(
+                &dir.path().join(folder),
+                "pw",
+                proof,
+                Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+        }
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(recipient.clone().run_accept_loop(listener));
+        let id = source
+            .enqueue_to_account(&recipient.account_id(), b"account-owned original", None)
+            .await
+            .unwrap();
+        source.flush_delivery(id).await;
+        assert_eq!(
+            recipient.account_history(&source.account_id(), 10).unwrap()[0].id,
+            id
+        );
+        sibling
+            .import_account_backfill(&source.export_account_backfill().unwrap())
+            .unwrap();
+        let conversation = account_conversation_id(&sibling.account_id(), &recipient.account_id());
+        assert!(
+            sibling
+                .sentlog
+                .lock()
+                .unwrap()
+                .entries(&conversation)
+                .is_empty()
+        );
+        let imported = sibling
+            .account_history(&recipient.account_id(), 10)
+            .unwrap();
+        assert_eq!(imported[0].id, id);
+        assert!(imported[0].from_me);
+        sibling
+            .recall_account(&recipient.account_id(), id)
+            .await
+            .expect("a certified sibling can recall the account's imported own message");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if recipient.account_history(&source.account_id(), 10).unwrap()[0].recalled {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("external recipient accepts the sibling's account-authorized recall");
+        let recalled = sibling
+            .account_history(&recipient.account_id(), 10)
+            .unwrap();
+        assert!(recalled[0].recalled);
+        assert_eq!(
+            recalled[0].recalled_text.as_deref(),
+            Some(b"account-owned original".as_slice())
+        );
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn imported_recall_keeps_original_window_and_rejects_foreign_or_wrong_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let foreign_account = Account::generate();
+        let foreign =
+            Announce::new_with_account(&DeviceIdentity::generate(), &foreign_account, "foreign", 9);
+        let (source, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("source"),
+            DeviceIdentity::generate(),
+            Account::from_secret_bytes(account.secret_bytes()),
+            &foreign,
+        );
+        let (sibling, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("sibling"),
+            DeviceIdentity::generate(),
+            account,
+            &foreign,
+        );
+        let own = source.account_id();
+        let peer = foreign_account.account_id();
+        let personal = account_conversation_id(&own, &own);
+        let external = account_conversation_id(&own, &peer);
+        let old = EventId::new([51; 32]);
+        let incoming = EventId::new([52; 32]);
+        let old_wall = now_millis() - RECALL_WINDOW_MS - 10_000;
+        let body = super::super::MessageBody::new(b"original".to_vec(), None).encode();
+        source
+            .sentlog
+            .lock()
+            .unwrap()
+            .record(
+                personal,
+                1,
+                old_wall,
+                &super::super::DmEnvelope::new(
+                    own.clone(),
+                    own.clone(),
+                    *old.as_bytes(),
+                    body.clone(),
+                )
+                .encode(),
+            )
+            .unwrap();
+        source
+            .received
+            .lock()
+            .unwrap()
+            .record(
+                external,
+                peer.clone(),
+                now_millis(),
+                &super::super::DmEnvelope::new(
+                    peer.clone(),
+                    own.clone(),
+                    *incoming.as_bytes(),
+                    body,
+                )
+                .encode(),
+                incoming,
+            )
+            .unwrap();
+        sibling
+            .import_account_backfill(&source.export_account_backfill().unwrap())
+            .unwrap();
+        assert!(
+            sibling
+                .sentlog
+                .lock()
+                .unwrap()
+                .entries(&personal)
+                .is_empty()
+        );
+        assert_eq!(
+            sibling.account_history(&own, 10).unwrap()[0].wall_clock,
+            old_wall
+        );
+        assert!(sibling.account_history(&own, 10).unwrap()[0].from_me);
+        assert!(!sibling.account_history(&peer, 10).unwrap()[0].from_me);
+        assert!(matches!(
+            sibling.recall_account(&own, old).await,
+            Err(NodeError::Channel(message)) if message.contains("2-minute"),
+        ));
+        for target in [old, incoming] {
+            assert!(matches!(
+                sibling.recall_account(&peer, target).await,
+                Err(NodeError::Channel(message)) if message.contains("own message"),
+            ));
+        }
+        for conversation in [personal, external] {
+            assert!(
+                sibling
+                    .recalls
+                    .lock()
+                    .unwrap()
+                    .targets(&conversation)
+                    .is_empty()
+            );
+        }
+        assert!(
+            sibling
+                .account_documents(super::super::AccountDocumentDomain::DmRecall, None, 64,)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn rejected_channel_recall_append_does_not_create_tombstone() {
         let dir = tempfile::tempdir().unwrap();
         let own = DeviceIdentity::generate();
@@ -592,10 +820,91 @@ mod acceptance_tests {
             .unwrap();
             target
         };
+        super::super::test_support::settle_group_metadata(&node, channel);
         assert!(matches!(
             node.recall_channel(channel, target.id).await,
             Err(NodeError::Log(LogError::ClockExhausted))
         ));
         assert!(node.recalls.lock().unwrap().targets(&channel).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod selected_lookup_tests {
+    use super::*;
+    use crate::{
+        discovery::Announce,
+        identity::{account::Account, device::DeviceIdentity},
+    };
+    #[test]
+    fn selected_recall_lookup_binds_scope_and_authenticated_author() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = Account::generate();
+        let peer = Account::generate();
+        let proof = Announce::new_with_account(&DeviceIdentity::generate(), &peer, "peer", 9);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::from_secret_bytes(own.secret_bytes()),
+            &proof,
+        );
+        let host = account_conversation_id(&own.account_id(), &peer.account_id());
+        let selected = EventId::new([19; 32]);
+        assert!(
+            !node
+                .message_recalled_selected(
+                    host,
+                    selected,
+                    Some(&peer.account_id()),
+                    Some(&own.account_id())
+                )
+                .unwrap()
+        );
+        node.publish_own_account_recall(&peer.account_id(), selected, 100)
+            .unwrap();
+        assert!(
+            node.message_recalled_selected(
+                host,
+                selected,
+                Some(&peer.account_id()),
+                Some(&own.account_id())
+            )
+            .unwrap()
+        );
+        assert!(
+            !node
+                .message_recalled_selected(
+                    host,
+                    selected,
+                    Some(&peer.account_id()),
+                    Some(&peer.account_id())
+                )
+                .unwrap()
+        );
+        assert!(
+            !node
+                .message_recalled_selected(host, selected, Some(&peer.account_id()), None)
+                .unwrap()
+        );
+        assert!(
+            !node
+                .message_recalled_selected(
+                    ConversationId::new([42; 32]),
+                    selected,
+                    Some(&peer.account_id()),
+                    Some(&own.account_id())
+                )
+                .unwrap()
+        );
+        node.record_my_recall(host, selected, 100).unwrap();
+        assert!(
+            node.message_recalled_selected(host, selected, None, None)
+                .unwrap()
+        );
+        assert!(
+            !node
+                .message_recalled_selected(ConversationId::new([42; 32]), selected, None, None)
+                .unwrap()
+        );
     }
 }

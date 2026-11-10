@@ -1,17 +1,37 @@
 //! Four-process bridge rig. Separate UDP ports model LAN discovery scopes;
 //! each participant learns E through a routed unicast query, then E introduces
 //! A/B and C. DMs must cross the opaque post-office mailbox in both directions.
+#[path = "support/peer_observer.rs"]
+mod peer_observer;
 mod support;
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 struct Node {
     child: Child,
     input: ChildStdin,
     lines: Receiver<String>,
+    name: String,
+    output: Arc<Mutex<VecDeque<String>>>,
+    readers: Vec<std::thread::JoinHandle<()>>,
+}
+
+// Diagnostic history is separate from the readiness receiver: retaining output
+// must not consume a roster row or change which actual line admits the peer.
+fn retain_output(output: &Mutex<VecDeque<String>>, stream: &str, line: &str) {
+    let mut output = output.lock().unwrap();
+    if output.len() == 96 {
+        output.pop_front();
+    }
+    output.push_back(format!(
+        "{stream}: {}",
+        line.chars().take(1024).collect::<String>()
+    ));
 }
 
 impl Node {
@@ -71,24 +91,55 @@ impl Node {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let input = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let output = Arc::new(Mutex::new(VecDeque::new()));
         let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
+        let stdout_output = output.clone();
+        let stdout_reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
-                if tx.send(line.unwrap()).is_err() {
+                let line = line.unwrap();
+                retain_output(&stdout_output, "stdout", &line);
+                if tx.send(line).is_err() {
                     break;
                 }
+            }
+        });
+        let stderr_output = output.clone();
+        let stderr_reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        retain_output(&stderr_output, "stderr read error", &error.to_string());
+                        break;
+                    }
+                };
+                retain_output(&stderr_output, "stderr", &line);
+                eprintln!("{line}");
             }
         });
         Self {
             child,
             input,
             lines,
+            name: name.to_owned(),
+            output,
+            readers: vec![stdout_reader, stderr_reader],
         }
+    }
+
+    fn recent_output(&self) -> VecDeque<String> {
+        // Release the trace mutex before formatting a panic; diagnostics must
+        // not poison the readers that still drain the owned child's pipes.
+        self.output
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     fn send(&mut self, command: &str) {
@@ -103,7 +154,7 @@ impl Node {
             let line = self
                 .lines
                 .recv_timeout(remaining)
-                .unwrap_or_else(|_| panic!("did not observe {text:?} within {timeout:?}"));
+                .unwrap_or_else(|_| panic!("node {:?} pid={} did not observe {text:?} within {timeout:?}; recent output={:?}", self.name, self.child.id(), self.recent_output()));
             if line.contains(text) {
                 return line;
             }
@@ -125,14 +176,19 @@ impl Node {
             let poll_end = Instant::now() + Duration::from_millis(500);
             while Instant::now() < poll_end {
                 if let Ok(line) = self.lines.recv_timeout(Duration::from_millis(100))
-                    && line.contains(id)
+                    && peer_observer::is_peer_listing(&line, id)
                 {
                     return;
                 }
             }
             std::thread::sleep(Duration::from_millis(250));
         }
-        panic!("expected peer was not introduced within 45 seconds");
+        panic!(
+            "node {:?} pid={} expected peer was not introduced within 45 seconds; recent output={:?}",
+            self.name,
+            self.child.id(),
+            self.recent_output()
+        );
     }
 
     fn await_relay(&mut self, id: &str, port: u16) {
@@ -143,13 +199,18 @@ impl Node {
             let poll_end = Instant::now() + Duration::from_secs(2);
             while Instant::now() < poll_end {
                 if let Ok(line) = self.lines.recv_timeout(Duration::from_millis(150))
-                    && line.contains(id)
+                    && peer_observer::is_peer_listing(&line, id)
                 {
                     return;
                 }
             }
         }
-        panic!("expected relay was not discovered within 30 seconds");
+        panic!(
+            "node {:?} pid={} expected relay via UDP port {port} was not discovered within 30 seconds; recent output={:?}",
+            self.name,
+            self.child.id(),
+            self.recent_output()
+        );
     }
 }
 
@@ -222,6 +283,18 @@ fn bridge_gateway_exposes_only_the_pinned_remote_relay() {
 impl Drop for Node {
     fn drop(&mut self) {
         support::stop_cli(&mut self.child, &mut self.input);
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        if std::thread::panicking() {
+            eprintln!(
+                "bridge node {:?} pid={} exit={:?} recent output={:?}",
+                self.name,
+                self.child.id(),
+                self.child.try_wait(),
+                self.recent_output()
+            );
+        }
     }
 }
 
@@ -327,7 +400,7 @@ fn three_sites_share_one_pinned_hub_despite_another_local_post_office() {
         None,
         true,
     );
-    let gateway_y_id = gateway_y.identity("post-office ");
+    let _ = gateway_y.identity("post-office ");
     let mut gateway_z = Node::start_with_config(
         &dir.path().join("gateway-z"),
         "Gateway H",
@@ -337,7 +410,7 @@ fn three_sites_share_one_pinned_hub_despite_another_local_post_office() {
         None,
         true,
     );
-    let gateway_z_id = gateway_z.identity("post-office ");
+    let _ = gateway_z.identity("post-office ");
 
     let mut x = Node::start_with_config(
         &dir.path().join("x"),
@@ -372,8 +445,10 @@ fn three_sites_share_one_pinned_hub_despite_another_local_post_office() {
 
     x.await_relay(&local_id, base + 1);
     x.await_relay(&hub_id, base);
-    y.await_relay(&gateway_y_id, base + 2);
-    z.await_relay(&gateway_z_id, base + 3);
+    // A gateway's own row only proves its local listener. Require the pinned
+    // hub's signed route through each gateway before measuring introductions.
+    y.await_relay(&hub_id, base + 2);
+    z.await_relay(&hub_id, base + 3);
     for (node, peers) in [
         (&mut x, [&y_id, &z_id]),
         (&mut y, [&x_id, &z_id]),

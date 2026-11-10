@@ -5,6 +5,19 @@ use crate::commands::CommandError;
 use crate::{runtime_admission::RuntimeAdmission, state::AppState};
 use mesh_talk_core::node::{AccountPreference, DeviceSyncPolicy, DeviceSyncStatus, SyncCategory};
 
+/// Credential installation is independent of optional history synchronization.
+#[tauri::command]
+pub async fn get_account_login_sync_status(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    owner: String,
+) -> Result<crate::shared_account_login::AccountLoginSyncStatus, CommandError> {
+    let root = crate::recovery::data_root(&state);
+    RuntimeAdmission::capture(&app, &state, &owner)?
+        .with_runtime(|runtime| crate::shared_account_login::sync_status(&root, &owner, runtime))
+        .await
+}
+
 /// Return the local account's synchronization category policy.
 #[tauri::command]
 pub async fn get_device_sync_policy(
@@ -26,6 +39,29 @@ pub async fn get_device_sync_status(
 ) -> Result<Vec<DeviceSyncStatus>, CommandError> {
     RuntimeAdmission::capture(&app, &state, &owner)?
         .with_runtime(|runtime| Ok(runtime.handle().device_sync_status()))
+        .await
+}
+
+/// Read private hostname metadata under the exact desktop and account admission.
+#[tauri::command]
+pub async fn get_device_hostnames(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    owner: String,
+    expected_account: String,
+) -> Result<std::collections::BTreeMap<String, String>, CommandError> {
+    RuntimeAdmission::capture(&app, &state, &owner)?
+        .blocking(move |runtime, _| {
+            if runtime.account_id() != expected_account {
+                return Err(CommandError::Authorization(
+                    "Account changed during device read".into(),
+                ));
+            }
+            runtime
+                .handle()
+                .device_hostnames()
+                .map_err(CommandError::from)
+        })
         .await
 }
 
@@ -70,12 +106,54 @@ pub async fn set_account_preference(
     key: String,
     value: Option<String>,
     owner: String,
+    expected_account: String,
 ) -> Result<AccountPreference, CommandError> {
     RuntimeAdmission::capture(&app, &state, &owner)?
         .with_runtime(|runtime| {
+            if runtime.account_id() != expected_account {
+                return Err(CommandError::Authorization(
+                    "Preference belongs to another account".into(),
+                ));
+            }
+            if key.starts_with("settings.") {
+                return Err(CommandError::Authorization(
+                    "Settings preferences must use the settings command".into(),
+                ));
+            }
             runtime
                 .handle()
                 .set_account_preference(category, key, value)
+                .map_err(CommandError::from)
+        })
+        .await
+}
+
+/// Seed an absent account preference atomically; existing values and clears win.
+#[tauri::command]
+pub async fn seed_account_preference(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    category: SyncCategory,
+    key: String,
+    value: Option<String>,
+    owner: String,
+    expected_account: String,
+) -> Result<AccountPreference, CommandError> {
+    RuntimeAdmission::capture(&app, &state, &owner)?
+        .with_runtime(|runtime| {
+            if runtime.account_id() != expected_account {
+                return Err(CommandError::Authorization(
+                    "Preference belongs to another account".into(),
+                ));
+            }
+            if key.starts_with("settings.") {
+                return Err(CommandError::Authorization(
+                    "Settings preferences must use the settings command".into(),
+                ));
+            }
+            runtime
+                .handle()
+                .set_account_preference_if_absent(category, key, value)
                 .map_err(CommandError::from)
         })
         .await
@@ -99,6 +177,7 @@ mod tests {
             "test".into(),
             crate::services::user::User {
                 user_id: "sync-test".into(),
+                account_login_name: None,
                 name: "sync-test".into(),
                 display_name: "Sync Test".into(),
                 address: "fixture".into(),
@@ -153,7 +232,8 @@ mod tests {
                 SyncCategory::Contacts,
                 "alias".into(),
                 Some("Alice".into()),
-                "sync-test".into()
+                "sync-test".into(),
+                "pending-account".into()
             )
             .await
             .is_err()
@@ -173,7 +253,7 @@ mod tests {
         )
         .await
         .unwrap();
-        *managed.0.lock().await = Some(runtime);
+        *managed.0.write().await = Some(runtime);
 
         // A webview command queued by a previous login must not borrow the
         // replacement account's runtime, even when it starts after the switch.
@@ -193,11 +273,109 @@ mod tests {
                 SyncCategory::Appearance,
                 "theme".into(),
                 Some("previous-owner-value".into()),
-                "previous-owner".into()
+                "previous-owner".into(),
+                "previous-crypto-account".into()
             )
             .await,
             Err(CommandError::Authorization(_))
         ));
+
+        let expected_account = state
+            .0
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        state
+            .0
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .handle()
+            .set_device_hostname(Some("Private-Desktop"))
+            .unwrap();
+        assert!(matches!(
+            get_device_hostnames(
+                app.state::<AppState>(),
+                state.clone(),
+                "previous-owner".into(),
+                expected_account.clone()
+            )
+            .await,
+            Err(CommandError::Authorization(_))
+        ));
+        assert!(matches!(
+            get_device_hostnames(
+                app.state::<AppState>(),
+                state.clone(),
+                "sync-test".into(),
+                "previous-account".into()
+            )
+            .await,
+            Err(CommandError::Authorization(_))
+        ));
+        let hostnames = get_device_hostnames(
+            app.state::<AppState>(),
+            state.clone(),
+            "sync-test".into(),
+            expected_account.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            hostnames.values().collect::<Vec<_>>(),
+            vec!["Private-Desktop"]
+        );
+
+        assert!(
+            set_account_preference(
+                app.state::<AppState>(),
+                state.clone(),
+                SyncCategory::Contacts,
+                "favorite:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                Some("old account".into()),
+                "sync-test".into(),
+                "previous-crypto-account".into(),
+            )
+            .await
+            .is_err()
+        );
+
+        for key in [
+            "settings.privacy_level",
+            "settings.auto_lock_seconds",
+            "settings.stay_signed_in",
+        ] {
+            assert!(matches!(
+                set_account_preference(
+                    app.state(),
+                    state.clone(),
+                    SyncCategory::Appearance,
+                    key.into(),
+                    Some("0".into()),
+                    "sync-test".into(),
+                    expected_account.clone()
+                )
+                .await,
+                Err(CommandError::Authorization(_))
+            ));
+            assert!(matches!(
+                seed_account_preference(
+                    app.state(),
+                    state.clone(),
+                    SyncCategory::Appearance,
+                    key.into(),
+                    Some("0".into()),
+                    "sync-test".into(),
+                    expected_account.clone()
+                )
+                .await,
+                Err(CommandError::Authorization(_))
+            ));
+        }
 
         let original =
             get_device_sync_policy(app.state::<AppState>(), state.clone(), "sync-test".into())
@@ -245,6 +423,7 @@ mod tests {
             "theme".into(),
             Some("dark".into()),
             "sync-test".into(),
+            expected_account.clone(),
         )
         .await
         .unwrap();
@@ -267,7 +446,8 @@ mod tests {
                 SyncCategory::Appearance,
                 "invalid key".into(),
                 Some("dark".into()),
-                "sync-test".into()
+                "sync-test".into(),
+                expected_account.clone()
             )
             .await
             .is_err()
@@ -279,11 +459,12 @@ mod tests {
                 SyncCategory::History,
                 "history".into(),
                 Some("enabled".into()),
-                "sync-test".into()
+                "sync-test".into(),
+                expected_account.clone()
             )
             .await
             .is_err()
         );
-        managed.0.lock().await.take().unwrap().stop().await;
+        managed.0.write().await.take().unwrap().stop().await;
     }
 }

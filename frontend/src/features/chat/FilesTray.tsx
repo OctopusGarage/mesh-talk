@@ -37,7 +37,13 @@ import { TransferBar } from "./TransferBar";
 import { ReceiveProgress } from "./ReceiveProgress";
 import { fileGlyph } from "./mediaFile";
 
-export function FilesTray({ navigation = false }: { navigation?: boolean }) {
+export function FilesTray({
+  navigation = false,
+  compact = false,
+}: {
+  navigation?: boolean;
+  compact?: boolean;
+}) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   // Images sent as media appear inline automatically. Files, folders and videos
@@ -154,7 +160,13 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   };
 
   // Always-prompt "Save as…" override; the dialog opens at the Downloads folder.
-  const saveAs = async (fileConv: string, name: string, mime: string) => {
+  const saveAs = async (
+    fileConv: string,
+    name: string,
+    mime: string,
+    size: number,
+    media: boolean,
+  ) => {
     const lease = captureChatOwnership();
     if (
       !lease.current() ||
@@ -164,7 +176,9 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
       return;
     try {
       setSavingFile(fileConv);
-      await saveAttachment({ fileConv, name, mime }, lease, { mode: "as" });
+      await saveAttachment({ fileConv, name, mime, size, media }, lease, {
+        mode: "as",
+      });
     } catch (e) {
       if (lease.current() && markUnavailableFileError(fileConv, e)) return;
       if (lease.current()) handleSaveError(e);
@@ -206,15 +220,17 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
           aria-label={t("files.received")}
           className={
             navigation
-              ? "relative h-10 w-full justify-start gap-3 px-3 text-muted-foreground hover:text-foreground"
+              ? "relative min-h-11 min-w-0 w-full justify-start gap-2 px-2 text-muted-foreground hover:text-foreground"
               : "relative h-9 w-9 shrink-0 p-0 text-muted-foreground"
           }
         >
           <Download className="h-4 w-4 shrink-0" />
           <span
-            className={navigation ? "sidebar-tool-label truncate" : "sr-only"}
+            className={
+              navigation ? "sidebar-tool-label min-w-0 truncate" : "sr-only"
+            }
           >
-            {t("files.received")}
+            {t(compact ? "files.shortLabel" : "files.received")}
           </span>
           {files.length > 0 && (
             <Badge
@@ -224,7 +240,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                   : "absolute -right-0.5 -top-0.5 h-4 min-w-4 justify-center bg-primary px-1 text-primary-foreground"
               }
             >
-              {files.length}
+              {compact && files.length > 999 ? "999+" : files.length}
             </Badge>
           )}
         </Button>
@@ -327,7 +343,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                   {fileGlyph(f.name, f.mime)}
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">
-                      {attachmentLabel(f.name, f.mime)}
+                      {attachmentLabel(f.name, f.mime, f, t("message.sticker"))}
                     </div>
                     <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                       <IdentityGlyph
@@ -410,7 +426,9 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                     disabled={
                       !statuses[f.fileConv]?.ready || savingFile !== null
                     }
-                    onClick={() => void saveAs(f.fileConv, f.name, f.mime)}
+                    onClick={() =>
+                      void saveAs(f.fileConv, f.name, f.mime, f.size, f.media)
+                    }
                     className="mt-1 pl-6 text-xs text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {t("files.saveAs")}

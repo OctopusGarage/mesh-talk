@@ -17,6 +17,7 @@ export function ConversationSection({
   onTogglePin,
   onRename,
   onHide,
+  onDelete,
 }: {
   rows: readonly ConversationListRow[];
   firstPosition: number;
@@ -30,6 +31,7 @@ export function ConversationSection({
   onTogglePin: (id: string, pinned: boolean) => void;
   onRename: (id: string, name: string) => void;
   onHide: (id: string, hidden: boolean) => void;
+  onDelete?: (id: string, name: string) => void;
 }) {
   const virtual = rows.length > VIRTUALIZE_AT;
   const renderRow = (index: number, row: ConversationListRow) => (
@@ -46,6 +48,11 @@ export function ConversationSection({
       listSize={listSize}
       onTogglePin={() => onTogglePin(row.id, !row.pinned)}
       onRename={() => onRename(row.id, row.renameName)}
+      onDelete={
+        row.deletable && onDelete
+          ? () => onDelete(row.id, row.conv.name)
+          : undefined
+      }
       onHide={row.channel ? () => onHide(row.id, true) : undefined}
     />
   );

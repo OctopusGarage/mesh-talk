@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { lstat, open, opendir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { join } from "node:path";
 import { inspectPng } from "../evals/png-evidence.mjs";
 
 export const nativeInvalidCredentialTexts = () => Promise.all(["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"].map(async language => JSON.parse(await readFile(new URL(`../../frontend/src/locales/${language}.json`, import.meta.url), "utf8")).login.invalidCredentials));
@@ -89,4 +91,81 @@ export async function captureNativeFailure({ command, execute }) {
   const surface = await execute(captureSurface);
   const png = Buffer.from(await command("GET", "/screenshot"), "base64");
   return { png, surface };
+}
+
+export const nativeApplicationLogLimits = Object.freeze({ entries: 128, files: 4, fileBytes: 64 * 1024, totalBytes: 192 * 1024 });
+
+/** Diagnostic only: collect private release logs after the actual process owners retire. */
+export async function collectNativeApplicationLogs({ fixture, output, retired, password }) {
+  const result = { status: "not-retired", files: [], issues: [] };
+  if (!retired) return result;
+  const limits = nativeApplicationLogLimits;
+  const reason = error => typeof error?.code === "string" ? error.code : "collection-error";
+  let directory;
+  try {
+    // Check every fixture-owned parent; following a linked logs directory could
+    // publish unrelated host data. No application process may still mutate it.
+    for (const path of [fixture, join(fixture, "app"), join(fixture, "app", "logs")]) {
+      const stat = await lstat(path);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        result.status = "unavailable";
+        result.issues.push({ reason: "unsafe-directory" });
+        return result;
+      }
+    }
+    directory = await opendir(join(fixture, "app", "logs"));
+  } catch (error) {
+    result.status = error.code === "ENOENT" ? "missing" : "unavailable";
+    result.issues.push({ reason: reason(error) });
+    return result;
+  }
+  let entries = 0, attemptedFiles = 0, totalBytes = 0;
+  try {
+    const names = [];
+    while (entries < limits.entries) {
+      const entry = await directory.read();
+      if (!entry) break;
+      entries++;
+      if (/^mesh-talk.*\.log$/.test(entry.name)) names.push(entry.name);
+    }
+    if (entries === limits.entries) result.issues.push({ reason: "entry-limit" });
+    // Selection is bounded by the scanned names. Capture the logger's current
+    // file before rotations can consume the file or source-byte allowance.
+    names.sort((a, b) => Number(b === "mesh-talk.log") - Number(a === "mesh-talk.log"));
+    for (const name of names) {
+      if (attemptedFiles >= limits.files) { result.issues.push({ reason: "file-limit" }); break; }
+      if (totalBytes >= limits.totalBytes) { result.issues.push({ reason: "byte-limit" }); break; }
+      attemptedFiles++;
+      let file;
+      try {
+        const path = join(fixture, "app", "logs", name);
+        const before = await lstat(path);
+        if (before.isSymbolicLink() || !before.isFile()) { result.issues.push({ reason: "unsafe-file" }); continue; }
+        file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        const stat = await file.stat();
+        if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino) { result.issues.push({ reason: "unsafe-file" }); continue; }
+        const size = Math.min(stat.size, limits.fileBytes, limits.totalBytes - totalBytes);
+        const buffer = Buffer.alloc(size);
+        const offset = stat.size - size;
+        const { bytesRead } = await file.read(buffer, 0, size, offset);
+        totalBytes += bytesRead;
+        let tail = buffer.subarray(0, bytesRead).toString("utf8");
+        // Discard a cut first line so a password straddling the tail boundary
+        // cannot escape redaction as a partial secret.
+        if (offset > 0) tail = tail.includes("\n") ? tail.slice(tail.indexOf("\n") + 1) : "";
+        if (password) tail = tail.replaceAll(password, "[REDACTED]");
+        const bytes = Buffer.from(tail).subarray(0, size);
+        const artifact = `native-application-${result.files.length + 1}.log`;
+        await writeFile(join(output, artifact), bytes, { flag: "wx" });
+        result.files.push({ artifact, bytes: bytes.length, truncated: offset > 0 });
+      } catch (error) { result.issues.push({ reason: reason(error) }); }
+      finally { await file?.close(); }
+    }
+  } catch (error) { result.issues.push({ reason: reason(error) }); }
+  finally {
+    try { await directory.close(); }
+    catch (error) { result.issues.push({ reason: reason(error) }); }
+  }
+  result.status = result.issues.length ? "partial" : result.files.length ? "collected" : "empty";
+  return result;
 }

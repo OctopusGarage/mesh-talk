@@ -4,6 +4,8 @@
 import type { ChatMessage } from "@/store/chat";
 import { messageSegments } from "@/lib/mentions";
 import { isImage, isVideo } from "@/lib/mediaTypes";
+import { messageSticker } from "./messagePresentation";
+import type { CustomizationPack } from "./pack";
 
 export type HistoryCategory = "media" | "files" | "links" | "other";
 
@@ -28,9 +30,20 @@ export function categorize(m: ChatMessage): HistoryCategory {
 }
 
 /** Case-insensitive substring match of `term` against a message's text (or file name). */
-export function matchesQuery(m: ChatMessage, term: string): boolean {
+export function matchesQuery(
+  m: ChatMessage,
+  term: string,
+  packs: CustomizationPack[] = [],
+): boolean {
   const q = term.trim().toLowerCase();
   if (!q) return true;
-  if (m.text.toLowerCase().includes(q)) return true;
-  return m.file ? m.file.name.toLowerCase().includes(q) : false;
+  if (m.protection || m.recalled) return false;
+  const sticker = messageSticker(m, packs);
+  if (sticker)
+    return `${sticker.label ?? ""} ${sticker.fallback}`
+      .toLowerCase()
+      .includes(q);
+  return (
+    m.text.toLowerCase().includes(q) || !!m.file?.name.toLowerCase().includes(q)
+  );
 }

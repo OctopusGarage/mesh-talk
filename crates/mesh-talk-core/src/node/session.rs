@@ -8,14 +8,18 @@
 //! The store is shared as a `&Mutex<S>` and locked only for the synchronous
 //! handler calls — never across an `.await` — so a `std::sync::Mutex` is correct.
 
-use crate::eventlog::event::{ConversationId, EventId};
+use crate::eventlog::event::{ConversationId, EventId, EventKind};
+use crate::eventlog::sync::network::NetworkSyncStore;
 use crate::eventlog::sync::{
     ApplyReport, FileConsentStatus, FpRequest, FpResponse, MAX_REJECTED_DETAIL, SyncFollowup,
-    SyncRequest, SyncResponse, SyncStore, build_request, handle_followup, handle_request_bounded,
-    handle_response_bounded_burst,
+    SyncRequest, SyncResponse, SyncStore,
 };
 use crate::transport::{MAX_PLAINTEXT, SecureChannel, TransportError};
+mod backend;
+mod have_budget;
+use backend::*;
 use bincode::Options;
+pub use have_budget::RemoteHaveBudget;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -43,7 +47,7 @@ const MAX_HAVE_CHUNKS: usize = 1000;
 /// per-chunk + chunk-count bounds. Without it a peer could pin `HAVE_IDS_PER_CHUNK *
 /// MAX_HAVE_CHUNKS` ids (~48 MB) per concurrent sync against the always-on relay; this
 /// caps it at ~6 MB while staying far above any realistic conversation's id-set.
-const MAX_HAVE_IDS_TOTAL: usize = 200_000;
+pub(super) const MAX_HAVE_IDS_TOTAL: usize = 200_000;
 
 /// One framed sync message on the wire.
 ///
@@ -99,19 +103,119 @@ enum SyncWire {
         manifest: EventId,
         control: Option<crate::eventlog::Event>,
     },
+    /// History policy and key release require support for kinds 15 and 16.
+    /// Keep these appended so every earlier envelope retains its wire tag.
+    FpRequestV3(FpRequest),
+    RequestV3(SyncRequest),
+    FollowupV3(SyncFollowup),
+    /// Account-principal membership and certified-device inheritance (17/18).
+    FpRequestV4(FpRequest),
+    RequestV4(SyncRequest),
+    FollowupV4(SyncFollowup),
+    /// Optional local-artwork reuse; old decoders close this disposable session.
+    StickerFileConsentRequest {
+        file: ConversationId,
+        manifest: EventId,
+        headers: Vec<crate::eventlog::Event>,
+    },
+    StickerFileConsentResponse {
+        file: ConversationId,
+        manifest: EventId,
+        control: Option<crate::eventlog::Event>,
+    },
+    StickerFileProofRequest {
+        file: ConversationId,
+        manifest: EventId,
+    },
+    StickerFileProofResponse {
+        file: ConversationId,
+        manifest: EventId,
+        headers: Option<Vec<crate::eventlog::Event>>,
+    },
+    /// Appended optional metadata exchange; MFM3 and history card bytes stay frozen.
+    FileMessageIdentitiesRequest {
+        requests: Vec<(ConversationId, EventId)>,
+        offers: Vec<crate::eventlog::Event>,
+    },
+    FileMessageIdentitiesResponse {
+        bundles: Vec<crate::eventlog::Event>,
+    },
+    /// Encrypted owner group metadata requires kind 19.
+    FpRequestV5(FpRequest),
+    RequestV5(SyncRequest),
+    FollowupV5(SyncFollowup),
+}
+
+fn supports_event_kind(kind: EventKind, v2: bool, v3: bool, v4: bool, v5: bool) -> bool {
+    match kind {
+        EventKind::ChannelMetadata => v5,
+        EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance => v4,
+        EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory => v3,
+        EventKind::ChannelReplica => v2,
+        _ => true,
+    }
 }
 
 #[cfg(test)]
 pub(in crate::node) fn is_followup(bytes: &[u8], conversation: ConversationId) -> bool {
-    matches!(decode(bytes), Ok(SyncWire::Followup(frame) | SyncWire::FollowupV2(frame)) if frame.conversation == conversation)
+    matches!(decode(bytes), Ok(SyncWire::Followup(frame) | SyncWire::FollowupV2(frame) | SyncWire::FollowupV3(frame) | SyncWire::FollowupV4(frame)
+            | SyncWire::FollowupV5(frame)) if frame.conversation == conversation)
 }
 
 #[cfg(test)]
 pub(in crate::node) fn round_request_conversation(bytes: &[u8]) -> Option<ConversationId> {
     match decode(bytes) {
-        Ok(SyncWire::Request(request) | SyncWire::RequestV2(request)) => Some(request.conversation),
+        Ok(
+            SyncWire::Request(request)
+            | SyncWire::RequestV2(request)
+            | SyncWire::RequestV3(request)
+            | SyncWire::RequestV4(request)
+            | SyncWire::RequestV5(request),
+        ) => Some(request.conversation),
         _ => None,
     }
+}
+
+#[cfg(test)]
+pub(in crate::node) fn fingerprint_request_conversation(bytes: &[u8]) -> Option<ConversationId> {
+    match decode(bytes) {
+        Ok(
+            SyncWire::FpRequest(request)
+            | SyncWire::FpRequestV2(request)
+            | SyncWire::FpRequestV3(request)
+            | SyncWire::FpRequestV4(request)
+            | SyncWire::FpRequestV5(request),
+        ) => Some(request.conversation),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn sticker_test_frame(bytes: &[u8], file: ConversationId) -> (bool, usize) {
+    let (proof, events) = match decode(bytes) {
+        Ok(SyncWire::StickerFileConsentRequest { headers, .. }) => (true, headers),
+        Ok(SyncWire::StickerFileProofRequest { .. }) => (true, vec![]),
+        Ok(SyncWire::StickerFileProofResponse { headers, .. }) => {
+            (true, headers.unwrap_or_default())
+        }
+        Ok(SyncWire::Response(response)) => (false, response.events),
+        Ok(
+            SyncWire::Followup(frame)
+            | SyncWire::FollowupV2(frame)
+            | SyncWire::FollowupV3(frame)
+            | SyncWire::FollowupV4(frame)
+            | SyncWire::FollowupV5(frame),
+        ) => (false, frame.events),
+        _ => return (false, 0),
+    };
+    (
+        proof,
+        events
+            .iter()
+            .filter(|event| event.conversation_id == file)
+            .map(|event| event.ciphertext.len())
+            .sum(),
+    )
 }
 
 #[cfg(test)]
@@ -120,11 +224,20 @@ pub(in crate::node) fn requests_response(bytes: &[u8]) -> bool {
         decode(bytes),
         Ok(SyncWire::Request(_)
             | SyncWire::RequestV2(_)
+            | SyncWire::RequestV3(_)
+            | SyncWire::RequestV4(_)
+            | SyncWire::RequestV5(_)
             | SyncWire::FpRequest(_)
             | SyncWire::FpRequestV2(_)
+            | SyncWire::FpRequestV3(_)
+            | SyncWire::FpRequestV4(_)
+            | SyncWire::FpRequestV5(_)
             | SyncWire::DurableHaveRequest { .. }
             | SyncWire::FileConsentRequest { .. }
-            | SyncWire::SignedFileConsentRequest { .. })
+            | SyncWire::SignedFileConsentRequest { .. }
+            | SyncWire::StickerFileConsentRequest { .. }
+            | SyncWire::StickerFileProofRequest { .. }
+            | SyncWire::FileMessageIdentitiesRequest { .. })
     )
 }
 
@@ -158,6 +271,8 @@ struct HaveChunk {
 /// Errors from a sync session.
 #[derive(Debug)]
 pub enum SessionError {
+    /// Local event-store operation failed.
+    Store(crate::eventlog::LogError),
     /// Channel send/recv failure.
     Transport(TransportError),
     /// (De)serialization of a wire message failed.
@@ -166,20 +281,37 @@ pub enum SessionError {
     UnexpectedMessage,
     /// Neither local application nor acceptance of the previous push advanced.
     NoProgress,
+    /// Local process RAM admission/allocation failed; retry on a fresh channel.
+    ResourceUnavailable,
 }
 
 impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SessionError::Store(e) => write!(f, "sync store error: {e}"),
             SessionError::Transport(e) => write!(f, "sync transport error: {e}"),
             SessionError::Serialization(m) => write!(f, "sync serialization error: {m}"),
             SessionError::UnexpectedMessage => write!(f, "unexpected sync message"),
+            SessionError::ResourceUnavailable => write!(f, "local sync resources unavailable"),
             SessionError::NoProgress => write!(f, "sync made no progress"),
         }
     }
 }
 
-impl std::error::Error for SessionError {}
+impl std::error::Error for SessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Transport(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl From<crate::eventlog::LogError> for SessionError {
+    fn from(error: crate::eventlog::LogError) -> Self {
+        Self::Store(error)
+    }
+}
 
 impl From<TransportError> for SessionError {
     fn from(e: TransportError) -> Self {
@@ -234,6 +366,19 @@ where
     }
 }
 
+#[cfg(test)]
+pub(in crate::node) fn durable_have_query_for_test(
+    bytes: &[u8],
+) -> Option<(ConversationId, EventId)> {
+    match decode(bytes).ok()? {
+        SyncWire::DurableHaveRequest {
+            conversation,
+            event_id,
+        } => Some((conversation, event_id)),
+        _ => None,
+    }
+}
+
 /// Query a recipient after the manifest is durable and before a chunk is sent.
 /// An older endpoint closes on this appended variant; the caller handles that
 /// explicit compatibility fallback on a fresh connection.
@@ -282,8 +427,91 @@ where
     }
 }
 
+/// Offer only signed metadata for local reconstruction before ordinary consent.
+pub(crate) async fn request_sticker_file_consent<IO>(
+    channel: &mut SecureChannel<IO>,
+    file: ConversationId,
+    manifest: EventId,
+    headers: Vec<crate::eventlog::Event>,
+) -> Result<Option<crate::eventlog::Event>, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    channel
+        .send(&encode(&SyncWire::StickerFileConsentRequest {
+            file,
+            manifest,
+            headers,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::StickerFileConsentResponse {
+            file: got_file,
+            manifest: got_manifest,
+            control,
+        } if file == got_file && manifest == got_manifest => Ok(control),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
+/// Ask an authorized source for metadata, never an image or a public hash lookup.
+pub(crate) async fn request_sticker_file_proof<IO>(
+    channel: &mut SecureChannel<IO>,
+    file: ConversationId,
+    manifest: EventId,
+) -> Result<Option<Vec<crate::eventlog::Event>>, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    channel
+        .send(&encode(&SyncWire::StickerFileProofRequest {
+            file,
+            manifest,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::StickerFileProofResponse {
+            file: got_file,
+            manifest: got_manifest,
+            headers,
+        } if file == got_file && manifest == got_manifest => Ok(headers),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
+pub(in crate::node) const MAX_FILE_IDENTITIES: usize = 8;
+
+/// Optional exact-ID metadata, separately negotiated from attachment bytes/history.
+pub(crate) async fn request_file_message_identities<IO>(
+    channel: &mut SecureChannel<IO>,
+    requests: Vec<(ConversationId, EventId)>,
+    offers: Vec<crate::eventlog::Event>,
+) -> Result<Vec<crate::eventlog::Event>, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
+        return Err(SessionError::UnexpectedMessage);
+    }
+    channel
+        .send(&encode(&SyncWire::FileMessageIdentitiesRequest {
+            requests,
+            offers,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::FileMessageIdentitiesResponse { bundles }
+            if bundles.len() <= MAX_FILE_IDENTITIES =>
+        {
+            Ok(bundles)
+        }
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
 /// Stream a `have` id-set as chunk frames (always ≥1 frame, so the receiver gets an
 /// explicit terminator even for an empty set). `wrap` selects `ReqHave` vs `RespHave`.
+#[cfg(test)]
 async fn send_have<IO>(
     channel: &mut SecureChannel<IO>,
     conversation: ConversationId,
@@ -341,6 +569,17 @@ where
         if have.len() + chunk.ids.len() > MAX_HAVE_IDS_TOTAL {
             return Err(SessionError::UnexpectedMessage);
         }
+        let required = have.len() + chunk.ids.len();
+        if required > have.capacity() {
+            let target = required
+                .max(have.capacity().saturating_mul(2))
+                .min(MAX_HAVE_IDS_TOTAL);
+            have.try_reserve_exact(target - have.len())
+                .map_err(|_| SessionError::ResourceUnavailable)?;
+            if have.capacity() > MAX_HAVE_IDS_TOTAL {
+                return Err(SessionError::ResourceUnavailable);
+            }
+        }
         have.extend(chunk.ids);
         if !chunk.more {
             return Ok(have);
@@ -349,10 +588,27 @@ where
     Err(SessionError::UnexpectedMessage)
 }
 
+async fn recv_have_owned<IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    want_req: bool,
+    conversation: ConversationId,
+    budget: Option<&RemoteHaveBudget>,
+) -> Result<have_budget::ReceivedHave, SessionError> {
+    // Never await admission: requester/responder endpoints may already be in
+    // opposite network phases while holding other resources.
+    let permit = budget.map(RemoteHaveBudget::try_admit).transpose()?;
+    let ids = recv_have(channel, want_req, conversation).await?;
+    have_budget::ReceivedHave::from_vec(ids, permit)
+}
+
 /// Run one reconciliation round as the REQUESTER over `channel`, for
 /// `conversation`: send a Request (+ our streamed have), receive the Response
 /// (ingesting its events) + the responder's streamed have, then send the Followup.
 /// Converges the conversation in both directions. Returns what this side applied.
+/// SDK callers own the authenticated channel, selected conversation and store;
+/// they must enforce their own disclosure/admission policy before invoking it.
+/// This compatibility entrypoint explicitly uses the legacy collecting adapter;
+/// bounded source consumers call [`request_round_paged`].
 pub async fn request_round<S, IO>(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
@@ -379,38 +635,21 @@ where
     Ok(progress.total)
 }
 
-/// File conversations can send several existing Followup frames after each
-/// full have-set exchange. Ordinary conversations retain their single-frame
-/// reconciliation for predictable scheduling.
-pub(in crate::node) async fn request_file_round<S, IO>(
-    channel: &mut SecureChannel<IO>,
-    store: &Mutex<S>,
-    conversation: ConversationId,
-) -> Result<ApplyReport, SessionError>
-where
-    S: SyncStore,
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut progress = SyncProgress::default();
-    while !progress
-        .step_burst(channel, store, conversation, FILE_FOLLOWUP_BURST)
-        .await?
-    {}
-    Ok(progress.total)
-}
-
 /// Resume only between complete protocol exchanges, never midway through
 /// a Noise frame. A caller timing out a step must discard its channel and state.
 #[derive(Default)]
 pub(in crate::node) struct SyncProgress {
     started: bool,
     v2: bool,
+    v3: bool,
+    v4: bool,
+    v5: bool,
     rounds: usize,
     previous_push: std::collections::HashSet<EventId>,
     total: ApplyReport,
     first_have: usize,
     pushed_total: usize,
-    /// IDs the authenticated responder reported holding in its durable log.
+    /// Intersection of local advertised IDs and peer availability, never custody.
     remote_have_count: Option<usize>,
 }
 
@@ -443,6 +682,40 @@ impl SyncProgress {
         S: SyncStore,
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        self.step_backend(
+            channel,
+            &LegacyCollectingNetworkAdapter(store),
+            conversation,
+            max_followups,
+        )
+        .await
+    }
+
+    pub(in crate::node) async fn step_burst_paged<
+        S: NetworkSyncStore,
+        IO: AsyncRead + AsyncWrite + Unpin,
+    >(
+        &mut self,
+        channel: &mut SecureChannel<IO>,
+        store: &Mutex<S>,
+        conversation: ConversationId,
+        max_followups: usize,
+    ) -> Result<bool, SessionError> {
+        self.step_backend(
+            channel,
+            &PagedNetworkBackend(store, None),
+            conversation,
+            max_followups,
+        )
+        .await
+    }
+    async fn step_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        channel: &mut SecureChannel<IO>,
+        backend: &B,
+        conversation: ConversationId,
+        max_followups: usize,
+    ) -> Result<bool, SessionError> {
         if max_followups == 0 || max_followups > FILE_FOLLOWUP_BURST {
             return Err(SessionError::UnexpectedMessage);
         }
@@ -454,44 +727,67 @@ impl SyncProgress {
         // only skip a diff — never corrupt — so this is safe.)
         if !self.started {
             self.started = true;
-            let (fp, local_count, local_v2) = {
-                let store = store.lock().expect("store mutex not poisoned");
-                let (fp, count) = store.fingerprint_and_len(&conversation);
-                (fp, count, store.requires_channel_v2(&conversation))
-            };
-            self.v2 |= local_v2;
-            let request = FpRequest {
-                conversation,
-                fingerprint: fp,
-            };
-            channel
-                .send(&encode(&if self.v2 {
-                    SyncWire::FpRequestV2(request)
-                } else {
-                    SyncWire::FpRequest(request)
-                })?)
-                .await?;
-            match decode(&channel.recv().await?)? {
-                SyncWire::UpgradeRequired { conversation: c } if c == conversation && !self.v2 => {
-                    self.v2 = true;
-                    self.started = false;
-                    return Ok(false);
+            let (metadata, probe_view) = backend::prepared_probe(backend, &conversation).await?;
+            let local_count = usize::try_from(metadata.count)
+                .map_err(|_| crate::eventlog::LogError::RepositoryCounterExhausted)?;
+            let (local_v2, local_v3, local_v4, local_v5) = (
+                metadata.channel_v2,
+                metadata.channel_v3,
+                metadata.channel_v4,
+                metadata.channel_v5,
+            );
+            self.v2 |= local_v2 || local_v3 || local_v4 || local_v5;
+            self.v3 |= local_v3 || local_v4 || local_v5;
+            self.v4 |= local_v4 || local_v5;
+            self.v5 |= local_v5;
+            if let Some(fp) = metadata.fingerprint {
+                if let Some(view) = &probe_view {
+                    backend.validate_view(view)?;
                 }
-                SyncWire::FpResponse(FpResponse { matched: true }) => {
-                    self.remote_have_count = Some(local_count);
-                    log::debug!(
-                        target: "mesh_talk::sync",
-                        "sync conv={} fp_match skipped",
-                        hex::encode(&conversation.as_bytes()[..4]),
-                    );
-                    return Ok(true);
+                let request = FpRequest {
+                    conversation,
+                    fingerprint: fp,
+                };
+                channel
+                    .send(&encode(&if self.v5 {
+                        SyncWire::FpRequestV5(request)
+                    } else if self.v4 {
+                        SyncWire::FpRequestV4(request)
+                    } else if self.v3 {
+                        SyncWire::FpRequestV3(request)
+                    } else if self.v2 {
+                        SyncWire::FpRequestV2(request)
+                    } else {
+                        SyncWire::FpRequest(request)
+                    })?)
+                    .await?;
+                match decode(&channel.recv().await?)? {
+                    SyncWire::UpgradeRequired { conversation: c }
+                        if c == conversation && !self.v5 =>
+                    {
+                        self.v5 = self.v4;
+                        self.v4 = self.v3;
+                        self.v3 = self.v2;
+                        self.v2 = true;
+                        self.started = false;
+                        return Ok(false);
+                    }
+                    SyncWire::FpResponse(FpResponse { matched: true }) => {
+                        self.remote_have_count = Some(local_count);
+                        log::debug!(
+                            target: "mesh_talk::sync",
+                            "sync conv={} fp_match skipped",
+                            hex::encode(&conversation.as_bytes()[..4]),
+                        );
+                        return Ok(true);
+                    }
+                    SyncWire::FpResponse(FpResponse { matched: false }) => {
+                        // A complete exchange is a scheduling boundary for
+                        // bounded callers, even when reconciliation must follow.
+                        return Ok(false);
+                    }
+                    _ => return Err(SessionError::UnexpectedMessage),
                 }
-                SyncWire::FpResponse(FpResponse { matched: false }) => {
-                    // A complete exchange is a scheduling boundary for
-                    // bounded callers, even when reconciliation must follow.
-                    return Ok(false);
-                }
-                _ => return Err(SessionError::UnexpectedMessage),
             }
         }
 
@@ -500,12 +796,10 @@ impl SyncProgress {
         // metadata cost is O(N) per round. Capture N, the diff, and the round count so we can
         // evaluate reconciliation scaling (e.g. range-based / Negentropy) on real workloads.
         let round = self.rounds;
-        let have = {
-            let store = store.lock().expect("store mutex not poisoned");
-            build_request(&*store, conversation).have
-        };
+        let have_view = backend::open_prepared_view(backend, &conversation).await?;
+        let local_count = have_count(backend.advertised_count(&have_view)?)?;
         if round == 0 {
-            self.first_have = have.len();
+            self.first_have = local_count;
         }
         self.rounds += 1;
         // Opening Request carries an empty inline have; the real set is streamed.
@@ -514,18 +808,34 @@ impl SyncProgress {
             have: Vec::new(),
         };
         channel
-            .send(&encode(&if self.v2 {
+            .send(&encode(&if self.v5 {
+                SyncWire::RequestV5(request)
+            } else if self.v4 {
+                SyncWire::RequestV4(request)
+            } else if self.v3 {
+                SyncWire::RequestV3(request)
+            } else if self.v2 {
                 SyncWire::RequestV2(request)
             } else {
                 SyncWire::Request(request)
             })?)
             .await?;
-        send_have(channel, conversation, &have, SyncWire::ReqHave).await?;
+        send_have_pages(
+            channel,
+            backend,
+            &have_view,
+            conversation,
+            SyncWire::ReqHave,
+        )
+        .await?;
 
         // Response carries the (bounded) events; the responder's have is streamed after.
-        let mut response = match decode(&channel.recv().await?)? {
+        let response = match decode(&channel.recv().await?)? {
             SyncWire::Response(r) => r,
-            SyncWire::UpgradeRequired { conversation: c } if c == conversation && !self.v2 => {
+            SyncWire::UpgradeRequired { conversation: c } if c == conversation && !self.v5 => {
+                self.v5 = self.v4;
+                self.v4 = self.v3;
+                self.v3 = self.v2;
                 self.v2 = true;
                 self.started = false;
                 return Ok(false);
@@ -533,53 +843,73 @@ impl SyncProgress {
             _ => return Err(SessionError::UnexpectedMessage),
         };
         if response.conversation != conversation
-            || response
-                .events
-                .iter()
-                .any(|event| event.conversation_id != conversation)
+            || response.events.iter().any(|event| {
+                event.conversation_id != conversation
+                    || !supports_event_kind(event.kind, self.v2, self.v3, self.v4, self.v5)
+            })
         {
             return Err(SessionError::UnexpectedMessage);
         }
-        response.have = recv_have(channel, false, conversation).await?;
-        // Count only distinct local events the authenticated peer claims to
-        // hold. Sort in place so large transfers need no second Have set.
-        response.have.sort_unstable();
-        response.have.dedup();
-        self.remote_have_count = Some(
-            have.iter()
-                .filter(|id| response.have.binary_search(id).is_ok())
-                .count(),
-        );
-
-        let (report, mut followups) = {
-            let mut store = store.lock().expect("store mutex not poisoned");
-            let result =
-                handle_response_bounded_burst(&mut *store, &response, MAX_PLAINTEXT, max_followups);
-            if store.admission_denied() {
-                return Err(SessionError::UnexpectedMessage);
-            }
-            result
-        };
+        let remote_have =
+            recv_have_owned(channel, false, conversation, backend.remote_have_budget()).await?;
+        self.remote_have_count = Some(intersection_count(backend, &have_view, &remote_have).await?);
+        drop(have_view);
+        let report = backend.apply(&response.events)?;
+        if backend.admission_denied() {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        // Ingest may add causal parents; select a fresh outgoing cutoff.
+        let outgoing_view = backend::open_prepared_view(backend, &conversation).await?;
+        let mut followups = select_export_frames(
+            backend,
+            &outgoing_view,
+            conversation,
+            &remote_have,
+            max_followups,
+        )
+        .await?;
         let made_progress = report.applied > 0;
-        // A local replica preference may arrive after the fingerprint probe.
-        // Finish the legacy round empty, then restart before sending kind 14.
-        if !self.v2
-            && followups.iter().any(|frame| {
-                frame
-                    .events
-                    .iter()
-                    .any(|event| event.kind == crate::eventlog::event::EventKind::ChannelReplica)
-            })
-        {
-            channel
-                .send(&encode(&SyncWire::Followup(SyncFollowup {
-                    conversation,
-                    events: Vec::new(),
-                }))?)
-                .await?;
+        // New controls may arrive after the fingerprint probe. Complete this
+        // round empty and restart with the required capability before sending.
+        let needs_v3 = followups
+            .iter()
+            .flat_map(|frame| &frame.events)
+            .any(|event| !supports_event_kind(event.kind, true, false, false, false));
+        let needs_v4 = followups
+            .iter()
+            .flat_map(|frame| &frame.events)
+            .any(|event| !supports_event_kind(event.kind, true, true, false, false));
+        let needs_v5 = followups
+            .iter()
+            .flat_map(|frame| &frame.events)
+            .any(|event| event.kind == EventKind::ChannelMetadata);
+        let unsupported = followups
+            .iter()
+            .flat_map(|frame| &frame.events)
+            .any(|event| !supports_event_kind(event.kind, self.v2, self.v3, self.v4, self.v5));
+        if unsupported {
+            let empty = SyncFollowup {
+                conversation,
+                events: Vec::new(),
+            };
+            let wire = if self.v5 {
+                SyncWire::FollowupV5(empty)
+            } else if self.v4 {
+                SyncWire::FollowupV4(empty)
+            } else if self.v3 {
+                SyncWire::FollowupV3(empty)
+            } else if self.v2 {
+                SyncWire::FollowupV2(empty)
+            } else {
+                SyncWire::Followup(empty)
+            };
+            channel.send(&encode(&wire)?).await?;
             self.total.applied += report.applied;
             self.total.duplicates += report.duplicates;
             self.v2 = true;
+            self.v3 |= needs_v3;
+            self.v4 |= needs_v4;
+            self.v5 |= needs_v5;
             self.started = false;
             self.previous_push.clear();
             return Ok(false);
@@ -589,10 +919,7 @@ impl SyncProgress {
         // repeating a push, unless this round advanced our own store instead.
         if !self.previous_push.is_empty()
             && !made_progress
-            && !response
-                .have
-                .iter()
-                .any(|id| self.previous_push.contains(id))
+            && !remote_have.iter().any(|id| self.previous_push.contains(id))
         {
             return Err(SessionError::NoProgress);
         }
@@ -612,8 +939,15 @@ impl SyncProgress {
             });
         }
         for followup in followups {
+            backend.validate_view(&outgoing_view)?;
             channel
-                .send(&encode(&if self.v2 {
+                .send(&encode(&if self.v5 {
+                    SyncWire::FollowupV5(followup)
+                } else if self.v4 {
+                    SyncWire::FollowupV4(followup)
+                } else if self.v3 {
+                    SyncWire::FollowupV3(followup)
+                } else if self.v2 {
                     SyncWire::FollowupV2(followup)
                 } else {
                     SyncWire::Followup(followup)
@@ -651,7 +985,8 @@ pub enum Served {
 /// Serve ONE inbound wire message as the RESPONDER over `channel`: a Request is
 /// answered with a Response; a Followup is ingested. Returns the conversation
 /// handled, or `Closed` when the peer hangs up (a recv error is treated as a
-/// clean close so the serve loop can stop).
+/// clean close so the serve loop can stop). This compatibility entrypoint uses
+/// the legacy collecting adapter; bounded sources call [`serve_one_paged`].
 pub async fn serve_one<S, IO>(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
@@ -670,6 +1005,8 @@ where
 /// Serve one ALREADY-READ sync wire frame (the body of [`serve_one`] after the recv).
 /// Exposed so a caller that peeked the first frame of a connection — e.g. to detect a
 /// non-sync protocol like device pairing — can still serve a sync frame it consumed.
+/// This is the legacy collecting wrapper; use [`serve_wire_bytes_paged`] for a
+/// mandatory paged source.
 pub async fn serve_wire_bytes<S, IO>(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
@@ -679,12 +1016,78 @@ where
     S: SyncStore,
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    serve_wire_backend(channel, &LegacyCollectingNetworkAdapter(store), bytes).await
+}
+
+async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    backend: &B,
+    bytes: &[u8],
+) -> Result<Served, SessionError> {
     match decode(bytes)? {
+        SyncWire::FileMessageIdentitiesRequest { requests, offers } => {
+            if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            let conversation = requests
+                .first()
+                .map(|(file, _)| *file)
+                .or_else(|| offers.first().map(|event| event.conversation_id))
+                .unwrap_or(ConversationId::new([0; 32]));
+            for bundle in offers {
+                backend.accept_file_message_identity(bundle)?;
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut bundles = Vec::new();
+            for (file, manifest) in requests {
+                if let Some(bundle) = backend.file_message_identity(&file, &manifest)?
+                    && seen.insert(bundle.id)
+                {
+                    bundles.push(bundle);
+                }
+            }
+            channel
+                .send(&encode(&SyncWire::FileMessageIdentitiesResponse {
+                    bundles,
+                })?)
+                .await?;
+            Ok(Served::Handled(conversation))
+        }
+        SyncWire::StickerFileProofRequest { file, manifest } => {
+            let headers = backend.sticker_file_proof(&file, &manifest)?;
+            channel
+                .send(&encode(&SyncWire::StickerFileProofResponse {
+                    file,
+                    manifest,
+                    headers,
+                })?)
+                .await?;
+            Ok(Served::Handled(file))
+        }
+        SyncWire::StickerFileConsentRequest {
+            file,
+            manifest,
+            headers,
+        } => {
+            let control = if headers.len() <= 64
+                && headers.iter().all(|event| {
+                    event.ciphertext.is_empty() && event.parents.len() <= 1 && event.sig.len() == 64
+                }) {
+                backend.sticker_file_consent(&file, &manifest, headers)?
+            } else {
+                None
+            };
+            channel
+                .send(&encode(&SyncWire::StickerFileConsentResponse {
+                    file,
+                    manifest,
+                    control,
+                })?)
+                .await?;
+            Ok(Served::Handled(file))
+        }
         SyncWire::SignedFileConsentRequest { file, manifest } => {
-            let control = store
-                .lock()
-                .expect("store mutex not poisoned")
-                .signed_file_consent(&file, &manifest);
+            let control = backend.signed_file_consent(&file, &manifest)?;
             channel
                 .send(&encode(&SyncWire::SignedFileConsentResponse {
                     file,
@@ -695,10 +1098,7 @@ where
             Ok(Served::Handled(file))
         }
         SyncWire::FileConsentRequest { file, manifest } => {
-            let status = store
-                .lock()
-                .expect("store mutex not poisoned")
-                .file_consent(&file, &manifest);
+            let status = backend.file_consent(&file, &manifest)?;
             channel
                 .send(&encode(&SyncWire::FileConsentResponse {
                     file,
@@ -712,10 +1112,9 @@ where
             conversation,
             event_id,
         } => {
-            let stored = store
-                .lock()
-                .expect("store mutex not poisoned")
-                .durable_have(&conversation, &event_id);
+            let view = backend::open_prepared_view(backend, &conversation).await?;
+            let stored = backend.durable_have_in_view(&view, &conversation, &event_id)?;
+            backend.validate_view(&view)?;
             channel
                 .send(&encode(&SyncWire::DurableHaveResponse {
                     conversation,
@@ -725,20 +1124,33 @@ where
                 .await?;
             Ok(Served::Handled(conversation))
         }
-        SyncWire::Request(request) | SyncWire::RequestV2(request) => {
+        SyncWire::Request(request)
+        | SyncWire::RequestV2(request)
+        | SyncWire::RequestV3(request)
+        | SyncWire::RequestV4(request)
+        | SyncWire::RequestV5(request) => {
             let conversation = request.conversation;
-            let v2 = matches!(decode(bytes)?, SyncWire::RequestV2(_));
+            let v5 = matches!(decode(bytes)?, SyncWire::RequestV5(_));
+            let v4 = v5 || matches!(decode(bytes)?, SyncWire::RequestV4(_));
+            let v3 = v4 || matches!(decode(bytes)?, SyncWire::RequestV3(_));
+            let v2 = v3 || matches!(decode(bytes)?, SyncWire::RequestV2(_));
             // The Request's inline have is empty on the networked path; read the
             // requester's streamed have, then answer.
-            let have = recv_have(channel, true, conversation).await?;
-            let full = SyncRequest { conversation, have };
-            let response = {
-                let store = store.lock().expect("store mutex not poisoned");
-                if !v2 && store.requires_channel_v2(&conversation) {
-                    None
-                } else {
-                    Some(handle_request_bounded(&*store, &full, MAX_PLAINTEXT))
-                }
+            let have =
+                recv_have_owned(channel, true, conversation, backend.remote_have_budget()).await?;
+            let view = backend::open_prepared_view(backend, &conversation).await?;
+            let metadata = backend.metadata(&view)?;
+            have_count(metadata.count)?;
+            let response = if unsupported_metadata(metadata, v2, v3, v4, v5) {
+                None
+            } else {
+                let mut frames =
+                    select_export_frames(backend, &view, conversation, &have, 1).await?;
+                let events = frames.pop().map_or_else(Vec::new, |frame| frame.events);
+                events
+                    .iter()
+                    .all(|event| supports_event_kind(event.kind, v2, v3, v4, v5))
+                    .then_some(events)
             };
             let Some(response) = response else {
                 channel
@@ -746,47 +1158,56 @@ where
                     .await?;
                 return Ok(Served::Handled(conversation));
             };
-            let responder_have = response.have;
+            backend.validate_view(&view)?;
             channel
                 .send(&encode(&SyncWire::Response(SyncResponse {
                     conversation,
-                    events: response.events,
+                    events: response,
                     have: Vec::new(),
                 }))?)
                 .await?;
-            send_have(channel, conversation, &responder_have, SyncWire::RespHave).await?;
+            send_have_pages(channel, backend, &view, conversation, SyncWire::RespHave).await?;
             Ok(Served::Handled(conversation))
         }
-        SyncWire::Followup(followup) | SyncWire::FollowupV2(followup) => {
+        SyncWire::Followup(followup)
+        | SyncWire::FollowupV2(followup)
+        | SyncWire::FollowupV3(followup)
+        | SyncWire::FollowupV4(followup)
+        | SyncWire::FollowupV5(followup) => {
             let conversation = followup.conversation;
-            let v2 = matches!(decode(bytes)?, SyncWire::FollowupV2(_));
+            let v5 = matches!(decode(bytes)?, SyncWire::FollowupV5(_));
+            let v4 = v5 || matches!(decode(bytes)?, SyncWire::FollowupV4(_));
+            let v3 = v4 || matches!(decode(bytes)?, SyncWire::FollowupV3(_));
+            let v2 = v3 || matches!(decode(bytes)?, SyncWire::FollowupV2(_));
             if followup.events.iter().any(|event| {
                 event.conversation_id != conversation
-                    || (!v2 && event.kind == crate::eventlog::event::EventKind::ChannelReplica)
+                    || !supports_event_kind(event.kind, v2, v3, v4, v5)
             }) {
                 return Err(SessionError::UnexpectedMessage);
             }
-            {
-                let mut store = store.lock().expect("store mutex not poisoned");
-                handle_followup(&mut *store, &followup);
-                if store.admission_denied() {
-                    return Err(SessionError::UnexpectedMessage);
-                }
+            backend.apply(&followup.events)?;
+            if backend.admission_denied() {
+                return Err(SessionError::UnexpectedMessage);
             }
             Ok(Served::Handled(conversation))
         }
-        SyncWire::FpRequest(req) | SyncWire::FpRequestV2(req) => {
+        SyncWire::FpRequest(req)
+        | SyncWire::FpRequestV2(req)
+        | SyncWire::FpRequestV3(req)
+        | SyncWire::FpRequestV4(req)
+        | SyncWire::FpRequestV5(req) => {
             // Compare the requester's whole-set digest to ours. On match the requester
             // skips the full exchange; on mismatch it follows up with a normal Request.
             let conversation = req.conversation;
-            let v2 = matches!(decode(bytes)?, SyncWire::FpRequestV2(_));
-            let matched = {
-                let store = store.lock().expect("store mutex not poisoned");
-                if !v2 && store.requires_channel_v2(&conversation) {
-                    None
-                } else {
-                    Some(store.fingerprint_and_len(&conversation).0 == req.fingerprint)
-                }
+            let v5 = matches!(decode(bytes)?, SyncWire::FpRequestV5(_));
+            let v4 = v5 || matches!(decode(bytes)?, SyncWire::FpRequestV4(_));
+            let v3 = v4 || matches!(decode(bytes)?, SyncWire::FpRequestV3(_));
+            let v2 = v3 || matches!(decode(bytes)?, SyncWire::FpRequestV2(_));
+            let (metadata, probe_view) = backend::prepared_probe(backend, &conversation).await?;
+            let matched = if unsupported_metadata(metadata, v2, v3, v4, v5) {
+                None
+            } else {
+                Some(metadata.fingerprint.is_some_and(|fp| fp == req.fingerprint))
             };
             let Some(matched) = matched else {
                 channel
@@ -794,6 +1215,9 @@ where
                     .await?;
                 return Ok(Served::Handled(conversation));
             };
+            if let Some(view) = &probe_view {
+                backend.validate_view(view)?;
+            }
             channel
                 .send(&encode(&SyncWire::FpResponse(FpResponse { matched }))?)
                 .await?;
@@ -807,7 +1231,10 @@ where
         | SyncWire::UpgradeRequired { .. } => Err(SessionError::UnexpectedMessage),
         SyncWire::DurableHaveResponse { .. }
         | SyncWire::FileConsentResponse { .. }
-        | SyncWire::SignedFileConsentResponse { .. } => Err(SessionError::UnexpectedMessage),
+        | SyncWire::SignedFileConsentResponse { .. }
+        | SyncWire::StickerFileConsentResponse { .. }
+        | SyncWire::StickerFileProofResponse { .. }
+        | SyncWire::FileMessageIdentitiesResponse { .. } => Err(SessionError::UnexpectedMessage),
     }
 }
 
@@ -817,6 +1244,234 @@ mod tests {
     use crate::eventlog::event::{Event, EventKind};
     use crate::eventlog::store::EventLog;
     use crate::identity::device::DeviceIdentity;
+
+    #[derive(Clone, Copy)]
+    enum ReadFault {
+        Fingerprint,
+        Capabilities,
+        Ids,
+        Body,
+        Ingest,
+        Durable,
+        Consent,
+        SignedConsent,
+        FileIdentity,
+        AcceptFileIdentity,
+        StickerProof,
+        StickerConsent,
+    }
+    struct FailedReadStore(ReadFault);
+    impl FailedReadStore {
+        fn error() -> crate::eventlog::LogError {
+            std::io::Error::other("injected local read failure").into()
+        }
+    }
+    impl SyncStore for FailedReadStore {
+        fn event_ids(&self, _: &ConversationId) -> Result<Vec<EventId>, crate::eventlog::LogError> {
+            if matches!(self.0, ReadFault::Ids) {
+                Err(Self::error())
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn events_excluding(
+            &self,
+            _: &ConversationId,
+            _: &std::collections::HashSet<EventId>,
+        ) -> Result<Vec<Event>, crate::eventlog::LogError> {
+            if matches!(self.0, ReadFault::Body | ReadFault::Capabilities) {
+                Err(Self::error())
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn fingerprint_and_len(
+            &self,
+            _: &ConversationId,
+        ) -> Result<([u8; 32], usize), crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn durable_have(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<bool, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn file_consent(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<FileConsentStatus, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn signed_file_consent(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<Option<Event>, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn file_message_identity(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<Option<Event>, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn accept_file_message_identity(
+            &mut self,
+            _: Event,
+        ) -> Result<bool, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn sticker_file_proof(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<Option<Vec<Event>>, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn sticker_file_consent(
+            &mut self,
+            _: &ConversationId,
+            _: &EventId,
+            _: Vec<Event>,
+        ) -> Result<Option<Event>, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn ingest(
+            &mut self,
+            _: Event,
+        ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+    }
+
+    #[tokio::test]
+    async fn store_read_failures_over_loopback_emit_no_success_reply() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            for fault in [
+                ReadFault::Fingerprint,
+                ReadFault::Capabilities,
+                ReadFault::Ids,
+                ReadFault::Body,
+                ReadFault::Ingest,
+                ReadFault::Durable,
+                ReadFault::Consent,
+                ReadFault::SignedConsent,
+                ReadFault::FileIdentity,
+                ReadFault::AcceptFileIdentity,
+                ReadFault::StickerProof,
+                ReadFault::StickerConsent,
+            ] {
+                let alice = DeviceIdentity::generate();
+                let bob = DeviceIdentity::generate();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut channel = SecureChannel::accept(stream, &bob).await.unwrap();
+                    let result = serve_one(&mut channel, &Mutex::new(FailedReadStore(fault))).await;
+                    assert!(matches!(
+                        result,
+                        Err(SessionError::Store(crate::eventlog::LogError::Io(_)))
+                    ));
+                    let error = result.unwrap_err();
+                    let source = std::error::Error::source(&error).unwrap();
+                    assert!(source.downcast_ref::<crate::eventlog::LogError>().is_some());
+                    assert!(
+                        source
+                            .source()
+                            .unwrap()
+                            .downcast_ref::<std::io::Error>()
+                            .is_some()
+                    );
+                });
+                let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+                let mut channel = SecureChannel::connect(stream, &alice, None).await.unwrap();
+                let event_id = EventId::new([3; 32]);
+                let wire = match fault {
+                    ReadFault::Fingerprint => SyncWire::FpRequestV4(FpRequest {
+                        conversation: conv(),
+                        fingerprint: crate::eventlog::sync::fingerprint(vec![]),
+                    }),
+                    ReadFault::Capabilities => SyncWire::FpRequest(FpRequest {
+                        conversation: conv(),
+                        fingerprint: crate::eventlog::sync::fingerprint(vec![]),
+                    }),
+                    ReadFault::Ingest => SyncWire::FollowupV4(SyncFollowup {
+                        conversation: conv(),
+                        events: vec![Event::new(
+                            &alice,
+                            conv(),
+                            0,
+                            vec![],
+                            1,
+                            0,
+                            EventKind::Message,
+                            vec![1],
+                        )],
+                    }),
+                    ReadFault::Ids | ReadFault::Body => SyncWire::RequestV4(SyncRequest {
+                        conversation: conv(),
+                        have: vec![],
+                    }),
+                    ReadFault::Durable => SyncWire::DurableHaveRequest {
+                        conversation: conv(),
+                        event_id,
+                    },
+                    ReadFault::Consent => SyncWire::FileConsentRequest {
+                        file: conv(),
+                        manifest: event_id,
+                    },
+                    ReadFault::SignedConsent => SyncWire::SignedFileConsentRequest {
+                        file: conv(),
+                        manifest: event_id,
+                    },
+                    ReadFault::FileIdentity => SyncWire::FileMessageIdentitiesRequest {
+                        requests: vec![(conv(), event_id)],
+                        offers: vec![],
+                    },
+                    ReadFault::AcceptFileIdentity => SyncWire::FileMessageIdentitiesRequest {
+                        requests: vec![],
+                        offers: vec![Event::new(
+                            &alice,
+                            conv(),
+                            1,
+                            vec![],
+                            1,
+                            0,
+                            EventKind::Message,
+                            vec![],
+                        )],
+                    },
+                    ReadFault::StickerProof => SyncWire::StickerFileProofRequest {
+                        file: conv(),
+                        manifest: event_id,
+                    },
+                    ReadFault::StickerConsent => SyncWire::StickerFileConsentRequest {
+                        file: conv(),
+                        manifest: event_id,
+                        headers: vec![],
+                    },
+                };
+                channel.send(&encode(&wire).unwrap()).await.unwrap();
+                if matches!(fault, ReadFault::Ids | ReadFault::Body) {
+                    send_have(&mut channel, conv(), &[], SyncWire::ReqHave)
+                        .await
+                        .unwrap();
+                }
+                assert!(
+                    channel.recv().await.is_err(),
+                    "a failed local read must not emit an empty, matched or custody response"
+                );
+                server.await.unwrap();
+            }
+        })
+        .await
+        .expect("loopback store-failure test timed out");
+    }
 
     #[tokio::test]
     async fn rejected_relay_upload_over_loopback_preserves_retention_and_valid_delivery() {
@@ -1237,6 +1892,434 @@ mod tests {
         );
         assert!(bincode::deserialize::<LegacyWire>(&answer).is_err());
         server.await.unwrap();
+    }
+
+    #[test]
+    fn channel_history_envelopes_preserve_existing_wire_tags() {
+        let request = || SyncRequest {
+            conversation: conv(),
+            have: vec![],
+        };
+        let fp = || FpRequest {
+            conversation: conv(),
+            fingerprint: [0; 32],
+        };
+        let followup = || SyncFollowup {
+            conversation: conv(),
+            events: vec![],
+        };
+        for (wire, tag) in [
+            (SyncWire::FpRequestV2(fp()), 11_u32),
+            (SyncWire::RequestV2(request()), 12),
+            (SyncWire::FollowupV2(followup()), 13),
+            (
+                SyncWire::UpgradeRequired {
+                    conversation: conv(),
+                },
+                14,
+            ),
+            (
+                SyncWire::SignedFileConsentRequest {
+                    file: conv(),
+                    manifest: EventId::new([0; 32]),
+                },
+                15,
+            ),
+            (
+                SyncWire::SignedFileConsentResponse {
+                    file: conv(),
+                    manifest: EventId::new([0; 32]),
+                    control: None,
+                },
+                16,
+            ),
+            (SyncWire::FpRequestV3(fp()), 17),
+            (SyncWire::RequestV3(request()), 18),
+            (SyncWire::FollowupV3(followup()), 19),
+            (SyncWire::FpRequestV4(fp()), 20),
+            (SyncWire::RequestV4(request()), 21),
+            (SyncWire::FollowupV4(followup()), 22),
+            (SyncWire::FpRequestV5(fp()), 29),
+            (SyncWire::RequestV5(request()), 30),
+            (SyncWire::FollowupV5(followup()), 31),
+        ] {
+            let encoded = encode(&wire).unwrap();
+            assert_eq!(&encoded[..4], &tag.to_le_bytes());
+            assert!(decode(&encoded).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn group_metadata_requires_v5_before_fingerprint_or_content_transfer() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let event = Event::new(
+            &bob,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::ChannelMetadata,
+            vec![1],
+        );
+        let (a, b) = tokio::io::duplex(65536);
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+            let mut log = EventLog::default();
+            log.append(event).unwrap();
+            let store = Mutex::new(log);
+            for _ in 0..8 {
+                serve_one(&mut channel, &store).await.unwrap();
+            }
+        });
+        let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+        for version in 1..=4 {
+            let probe = FpRequest {
+                conversation: conv(),
+                fingerprint: [0; 32],
+            };
+            let wire = match version {
+                1 => SyncWire::FpRequest(probe),
+                2 => SyncWire::FpRequestV2(probe),
+                3 => SyncWire::FpRequestV3(probe),
+                _ => SyncWire::FpRequestV4(probe),
+            };
+            channel.send(&encode(&wire).unwrap()).await.unwrap();
+            assert!(matches!(
+                decode(&channel.recv().await.unwrap()).unwrap(),
+                SyncWire::UpgradeRequired { .. }
+            ));
+            let request = SyncRequest {
+                conversation: conv(),
+                have: vec![],
+            };
+            let wire = match version {
+                1 => SyncWire::Request(request),
+                2 => SyncWire::RequestV2(request),
+                3 => SyncWire::RequestV3(request),
+                _ => SyncWire::RequestV4(request),
+            };
+            channel.send(&encode(&wire).unwrap()).await.unwrap();
+            send_have(&mut channel, conv(), &[], SyncWire::ReqHave)
+                .await
+                .unwrap();
+            assert!(matches!(
+                decode(&channel.recv().await.unwrap()).unwrap(),
+                SyncWire::UpgradeRequired { .. }
+            ));
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_authority_requires_v4_for_fingerprint_and_event_transfer() {
+        for kind_index in [17_u32, 18] {
+            let kind: EventKind = bincode::deserialize(&kind_index.to_le_bytes()).unwrap();
+            let alice = DeviceIdentity::generate();
+            let bob = DeviceIdentity::generate();
+            let event = Event::new(&bob, conv(), 1, vec![], 1, 0, kind, vec![1]);
+            let (a, b) = tokio::io::duplex(65536);
+            let server = tokio::spawn(async move {
+                let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                let mut log = EventLog::default();
+                log.append(event).unwrap();
+                let store = Mutex::new(log);
+                for _ in 0..6 {
+                    serve_one(&mut channel, &store).await.unwrap();
+                }
+            });
+            let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+            for version in [1, 2, 3] {
+                let probe = FpRequest {
+                    conversation: conv(),
+                    fingerprint: [0; 32],
+                };
+                let wire = if version == 1 {
+                    SyncWire::FpRequest(probe)
+                } else if version == 2 {
+                    SyncWire::FpRequestV2(probe)
+                } else {
+                    SyncWire::FpRequestV3(probe)
+                };
+                channel.send(&encode(&wire).unwrap()).await.unwrap();
+                assert!(
+                    matches!(decode(&channel.recv().await.unwrap()).unwrap(), SyncWire::UpgradeRequired { conversation } if conversation == conv())
+                );
+                let request = SyncRequest {
+                    conversation: conv(),
+                    have: vec![],
+                };
+                let wire = if version == 1 {
+                    SyncWire::Request(request)
+                } else if version == 2 {
+                    SyncWire::RequestV2(request)
+                } else {
+                    SyncWire::RequestV3(request)
+                };
+                channel.send(&encode(&wire).unwrap()).await.unwrap();
+                send_have(&mut channel, conv(), &[], SyncWire::ReqHave)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(decode(&channel.recv().await.unwrap()).unwrap(), SyncWire::UpgradeRequired { conversation } if conversation == conv())
+                );
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_history_requires_v3_for_fingerprint_and_event_transfer() {
+        for kind_index in [15_u32, 16] {
+            let kind: EventKind = bincode::deserialize(&kind_index.to_le_bytes()).unwrap();
+            let alice = DeviceIdentity::generate();
+            let bob = DeviceIdentity::generate();
+            let event = Event::new(&bob, conv(), 1, vec![], 1, 0, kind, vec![1]);
+            let (a, b) = tokio::io::duplex(65536);
+            let server = tokio::spawn(async move {
+                let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                let mut log = EventLog::default();
+                log.append(event).unwrap();
+                let store = Mutex::new(log);
+                for _ in 0..4 {
+                    serve_one(&mut channel, &store).await.unwrap();
+                }
+            });
+            let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+            for version in [1, 2] {
+                let probe = FpRequest {
+                    conversation: conv(),
+                    fingerprint: [0; 32],
+                };
+                let wire = if version == 1 {
+                    SyncWire::FpRequest(probe)
+                } else {
+                    SyncWire::FpRequestV2(probe)
+                };
+                channel.send(&encode(&wire).unwrap()).await.unwrap();
+                assert!(
+                    matches!(decode(&channel.recv().await.unwrap()).unwrap(), SyncWire::UpgradeRequired { conversation } if conversation == conv())
+                );
+                let request = SyncRequest {
+                    conversation: conv(),
+                    have: vec![],
+                };
+                let wire = if version == 1 {
+                    SyncWire::Request(request)
+                } else {
+                    SyncWire::RequestV2(request)
+                };
+                channel.send(&encode(&wire).unwrap()).await.unwrap();
+                send_have(&mut channel, conv(), &[], SyncWire::ReqHave)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(decode(&channel.recv().await.unwrap()).unwrap(), SyncWire::UpgradeRequired { conversation } if conversation == conv())
+                );
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn account_authority_rejects_events_in_older_followup_envelopes() {
+        for kind in [
+            EventKind::ChannelAccountAuthority,
+            EventKind::ChannelDeviceInheritance,
+        ] {
+            for version in [1, 2, 3] {
+                let alice = DeviceIdentity::generate();
+                let bob = DeviceIdentity::generate();
+                let event = Event::new(&alice, conv(), 1, vec![], 1, 0, kind, vec![1]);
+                let (a, b) = tokio::io::duplex(65536);
+                let server = tokio::spawn(async move {
+                    let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                    let store = Mutex::new(EventLog::default());
+                    assert!(matches!(
+                        serve_one(&mut channel, &store).await,
+                        Err(SessionError::UnexpectedMessage)
+                    ));
+                    assert!(store.lock().unwrap().events(&conv()).is_empty());
+                });
+                let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+                let followup = SyncFollowup {
+                    conversation: conv(),
+                    events: vec![event],
+                };
+                let wire = if version == 1 {
+                    SyncWire::Followup(followup)
+                } else if version == 2 {
+                    SyncWire::FollowupV2(followup)
+                } else {
+                    SyncWire::FollowupV3(followup)
+                };
+                channel.send(&encode(&wire).unwrap()).await.unwrap();
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_history_rejects_events_in_older_followup_envelopes() {
+        for kind in [
+            EventKind::ChannelHistoryPolicy,
+            EventKind::ChannelJoinHistory,
+        ] {
+            for version in [1, 2] {
+                let alice = DeviceIdentity::generate();
+                let bob = DeviceIdentity::generate();
+                let event = Event::new(&alice, conv(), 1, vec![], 1, 0, kind, vec![1]);
+                let (a, b) = tokio::io::duplex(65536);
+                let server = tokio::spawn(async move {
+                    let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                    let store = Mutex::new(EventLog::default());
+                    assert!(matches!(
+                        serve_one(&mut channel, &store).await,
+                        Err(SessionError::UnexpectedMessage)
+                    ));
+                    assert!(store.lock().unwrap().events(&conv()).is_empty());
+                });
+                let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+                let followup = SyncFollowup {
+                    conversation: conv(),
+                    events: vec![event],
+                };
+                let wire = if version == 1 {
+                    SyncWire::Followup(followup)
+                } else {
+                    SyncWire::FollowupV2(followup)
+                };
+                channel.send(&encode(&wire).unwrap()).await.unwrap();
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn account_authority_arriving_after_probe_restarts_without_legacy_followup_leak() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let alice = DeviceIdentity::generate();
+            let bob = DeviceIdentity::generate();
+            let prior = Event::new(&bob, conv(), 1, vec![], 1, 0, EventKind::Message, vec![1]);
+            let added = Event::new(
+                &alice,
+                conv(),
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::ChannelAccountAuthority,
+                vec![1],
+            );
+            let added_id = added.id;
+            let mut remote = EventLog::default();
+            remote.append(prior).unwrap();
+            let remote = std::sync::Arc::new(Mutex::new(remote));
+            let serving = remote.clone();
+            let (a, b) = tokio::io::duplex(65536);
+            let server = tokio::spawn(async move {
+                let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                while let Ok(Served::Handled(_)) = serve_one(&mut channel, &serving).await {}
+            });
+            let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+            let local = Mutex::new(EventLog::default());
+            let mut progress = SyncProgress::default();
+            assert!(!progress.step(&mut channel, &local, conv()).await.unwrap());
+            assert!(!progress.v4);
+            local.lock().unwrap().append(added).unwrap();
+            assert!(!progress.step(&mut channel, &local, conv()).await.unwrap());
+            assert!(progress.v4);
+            assert!(
+                !remote.lock().unwrap().has(&added_id),
+                "the incomplete legacy round must carry no new-version event"
+            );
+            let mut complete = false;
+            for _ in 0..8 {
+                if progress.step(&mut channel, &local, conv()).await.unwrap() {
+                    complete = true;
+                    break;
+                }
+            }
+            assert!(complete);
+            assert!(remote.lock().unwrap().has(&added_id));
+            drop(channel);
+            server.await.unwrap();
+        })
+        .await
+        .expect("late authority negotiation must converge within a bounded exchange");
+    }
+
+    #[tokio::test]
+    async fn account_authority_negotiates_v4_and_transfers_in_both_directions() {
+        for kind_index in [17_u32, 18] {
+            for responder_owns_event in [false, true] {
+                let kind: EventKind = bincode::deserialize(&kind_index.to_le_bytes()).unwrap();
+                let alice = DeviceIdentity::generate();
+                let bob = DeviceIdentity::generate();
+                let event = Event::new(&alice, conv(), 1, vec![], 1, 0, kind, vec![1]);
+                let id = event.id;
+                let mut source = EventLog::default();
+                source.append(event).unwrap();
+                let (initiator_log, responder_log) = if responder_owns_event {
+                    (EventLog::default(), source)
+                } else {
+                    (source, EventLog::default())
+                };
+                let (a, b) = tokio::io::duplex(65536);
+                let responder_log = std::sync::Arc::new(Mutex::new(responder_log));
+                let server_store = responder_log.clone();
+                let server = tokio::spawn(async move {
+                    let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                    while let Ok(Served::Handled(_)) = serve_one(&mut channel, &server_store).await
+                    {
+                    }
+                });
+                let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+                let store = Mutex::new(initiator_log);
+                request_round(&mut channel, &store, conv()).await.unwrap();
+                assert!(store.lock().unwrap().has(&id));
+                assert!(responder_log.lock().unwrap().has(&id));
+                drop(channel);
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_history_negotiates_v3_and_transfers_in_both_directions() {
+        for kind_index in [15_u32, 16] {
+            for responder_owns_event in [false, true] {
+                let kind: EventKind = bincode::deserialize(&kind_index.to_le_bytes()).unwrap();
+                let alice = DeviceIdentity::generate();
+                let bob = DeviceIdentity::generate();
+                let event = Event::new(&alice, conv(), 1, vec![], 1, 0, kind, vec![1]);
+                let id = event.id;
+                let mut source = EventLog::default();
+                source.append(event).unwrap();
+                let (initiator_log, responder_log) = if responder_owns_event {
+                    (EventLog::default(), source)
+                } else {
+                    (source, EventLog::default())
+                };
+                let (a, b) = tokio::io::duplex(65536);
+                let responder_log = std::sync::Arc::new(Mutex::new(responder_log));
+                let server_store = responder_log.clone();
+                let server = tokio::spawn(async move {
+                    let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                    while let Ok(Served::Handled(_)) = serve_one(&mut channel, &server_store).await
+                    {
+                    }
+                });
+                let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+                let store = Mutex::new(initiator_log);
+                request_round(&mut channel, &store, conv()).await.unwrap();
+                assert!(store.lock().unwrap().has(&id));
+                assert!(responder_log.lock().unwrap().has(&id));
+                drop(channel);
+                server.await.unwrap();
+            }
+        }
     }
 
     /// Repeatable protocol-scale rehearsal. Run with `--ignored --nocapture` to
@@ -1759,7 +2842,7 @@ mod tests {
         let bob = DeviceIdentity::generate();
         let (aio, bio) = tokio::io::duplex(512 * 1024);
         let log = build_large_responder_store(&alice, conv(), 10, 20 * 1024);
-        let ids = log.event_ids(&conv());
+        let ids = log.event_ids(&conv()).unwrap();
         let server = tokio::spawn(async move {
             let mut channel = SecureChannel::accept(bio, &bob).await.unwrap();
             let store = Mutex::new(EventLog::default());
@@ -1805,7 +2888,7 @@ mod tests {
             handled > 9,
             "transfer requires more rounds than the stall diagnostic cutoff"
         );
-        assert_eq!(remote.event_ids(&conv()), ids);
+        assert_eq!(remote.event_ids(&conv()).unwrap(), ids);
         for event in store.lock().unwrap().events(&conv()) {
             assert_eq!(remote.get(&event.id), Some(event));
         }
@@ -1817,7 +2900,7 @@ mod tests {
         let bob = DeviceIdentity::generate();
         let (aio, bio) = tokio::io::duplex(512 * 1024);
         let log = build_large_responder_store(&alice, conv(), 10, 20 * 1024);
-        let ids = log.event_ids(&conv());
+        let ids = log.event_ids(&conv()).unwrap();
         let server = tokio::spawn(async move {
             let mut channel = SecureChannel::accept(bio, &bob).await.unwrap();
             let store = Mutex::new(EventLog::default());
@@ -1842,7 +2925,7 @@ mod tests {
             "burst must avoid per-chunk reconciliation"
         );
         drop(channel);
-        assert_eq!(server.await.unwrap().event_ids(&conv()), ids);
+        assert_eq!(server.await.unwrap().event_ids(&conv()).unwrap(), ids);
     }
 
     #[tokio::test]
@@ -1859,7 +2942,7 @@ mod tests {
         const NUM_EVENTS: usize = 4;
 
         let b_log = build_large_responder_store(&b_id, conv_id, NUM_EVENTS, EVENT_PAYLOAD);
-        let responder_event_count = b_log.event_ids(&conv_id).len();
+        let responder_event_count = b_log.event_ids(&conv_id).unwrap().len();
         assert_eq!(responder_event_count, NUM_EVENTS);
 
         let server = tokio::spawn(async move {
@@ -1883,13 +2966,16 @@ mod tests {
         drop(a_ch);
 
         let b_final = server.await.unwrap();
-        let requester_count = a_store.lock().unwrap().event_ids(&conv_id).len();
+        let requester_count = a_store.lock().unwrap().event_ids(&conv_id).unwrap().len();
         assert_eq!(
             requester_count, responder_event_count,
             "requester should have all {responder_event_count} events after multi-round sync"
         );
         // Responder also still has all events.
-        assert_eq!(b_final.event_ids(&conv_id).len(), responder_event_count);
+        assert_eq!(
+            b_final.event_ids(&conv_id).unwrap().len(),
+            responder_event_count
+        );
     }
 
     #[tokio::test]
@@ -1904,7 +2990,7 @@ mod tests {
         const NUM_EVENTS: usize = 2500;
 
         let b_log = build_large_responder_store(&b_id, conv_id, NUM_EVENTS, 8);
-        assert_eq!(b_log.event_ids(&conv_id).len(), NUM_EVENTS);
+        assert_eq!(b_log.event_ids(&conv_id).unwrap().len(), NUM_EVENTS);
 
         let server = tokio::spawn(async move {
             let mut b_ch = SecureChannel::accept(b_io, &b_id).await.unwrap();
@@ -1924,9 +3010,747 @@ mod tests {
         server.await.unwrap();
 
         assert_eq!(
-            a_store.lock().unwrap().event_ids(&conv_id).len(),
+            a_store.lock().unwrap().event_ids(&conv_id).unwrap().len(),
             NUM_EVENTS,
             "requester pulled all events despite a >1-frame have id-set",
         );
     }
+
+    #[tokio::test]
+    async fn optional_file_message_identity_exchange_keeps_metadata_out_of_history() {
+        struct Identities {
+            log: EventLog,
+            bundle: Event,
+            manifest: EventId,
+            imported: Vec<Event>,
+        }
+        impl SyncStore for Identities {
+            fn event_ids(
+                &self,
+                conversation: &ConversationId,
+            ) -> Result<Vec<EventId>, crate::eventlog::LogError> {
+                self.log.event_ids(conversation)
+            }
+            fn events_excluding(
+                &self,
+                conversation: &ConversationId,
+                have: &std::collections::HashSet<EventId>,
+            ) -> Result<Vec<Event>, crate::eventlog::LogError> {
+                self.log.events_excluding(conversation, have)
+            }
+            fn ingest(
+                &mut self,
+                event: Event,
+            ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+                self.log.append(event)
+            }
+            fn file_message_identity(
+                &self,
+                file: &ConversationId,
+                manifest: &EventId,
+            ) -> Result<Option<Event>, crate::eventlog::LogError> {
+                Ok((*file == conv() && *manifest == self.manifest).then(|| self.bundle.clone()))
+            }
+            fn accept_file_message_identity(
+                &mut self,
+                bundle: Event,
+            ) -> Result<bool, crate::eventlog::LogError> {
+                self.imported.push(bundle);
+                Ok(true)
+            }
+        }
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let manifest = EventId::new([97; 32]);
+        let bundle = Event::new(
+            &bob,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"identity".to_vec(),
+        );
+        let offered = Event::new(
+            &alice,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"offered identity".to_vec(),
+        );
+        let offered_id = offered.id;
+        let expected_bundle = bundle.clone();
+        let server_message = Event::new(
+            &bob,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"ordinary server message".to_vec(),
+        );
+        let server_message_id = server_message.id;
+        let client_message = Event::new(
+            &alice,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"ordinary client message".to_vec(),
+        );
+        let client_message_id = client_message.id;
+        let (a, b) = tokio::io::duplex(65536);
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+            let store = Mutex::new(Identities {
+                log: EventLog::default(),
+                bundle,
+                manifest,
+                imported: vec![],
+            });
+            serve_one(&mut channel, &store).await.unwrap();
+            {
+                let mut snapshot = store.lock().unwrap();
+                assert_eq!(snapshot.imported[0].id, offered_id);
+                assert!(snapshot.log.event_ids(&conv()).unwrap().is_empty());
+                snapshot.log.append(server_message).unwrap();
+            }
+            loop {
+                if matches!(
+                    serve_one(&mut channel, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+            }
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.log.event_ids(&conv()).unwrap().len(), 2);
+            assert!(snapshot.log.get(&client_message_id).is_some());
+            assert!(snapshot.log.get(&offered_id).is_none());
+        });
+        let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+        let bundles = request_file_message_identities(
+            &mut channel,
+            vec![(conv(), manifest), (conv(), EventId::new([98; 32]))],
+            vec![offered],
+        )
+        .await
+        .unwrap();
+        assert_eq!(bundles, vec![expected_bundle]);
+        let mut ordinary = EventLog::default();
+        ordinary.append(client_message).unwrap();
+        let ordinary = Mutex::new(ordinary);
+        request_round(&mut channel, &ordinary, conv())
+            .await
+            .unwrap();
+        assert_eq!(
+            ordinary.lock().unwrap().event_ids(&conv()).unwrap().len(),
+            2
+        );
+        assert!(ordinary.lock().unwrap().get(&server_message_id).is_some());
+        drop(channel);
+        server.await.unwrap();
+    }
+
+    async fn attachment_test_channels() -> (
+        SecureChannel<tokio::io::DuplexStream>,
+        SecureChannel<tokio::io::DuplexStream>,
+    ) {
+        let requester = DeviceIdentity::generate();
+        let responder = DeviceIdentity::generate();
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let (client, server) = tokio::join!(
+            SecureChannel::connect(client_io, &requester, None),
+            SecureChannel::accept(server_io, &responder)
+        );
+        (client.unwrap(), server.unwrap())
+    }
+
+    #[tokio::test]
+    async fn legacy_store_attachment_extensions_fail_closed_and_keep_ordinary_sync_usable() {
+        let source = DeviceIdentity::generate();
+        let ordinary = Event::new(
+            &source,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"retained ordinary message".to_vec(),
+        );
+        let ordinary_id = ordinary.id;
+        let offered = Event::new(
+            &DeviceIdentity::generate(),
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"optional unrecognized metadata".to_vec(),
+        );
+        let offered_id = offered.id;
+        let (mut client, mut server) = attachment_test_channels().await;
+        let server_task = tokio::spawn(async move {
+            let mut log = EventLog::default();
+            log.append(ordinary).unwrap();
+            let store = Mutex::new(log);
+            loop {
+                if matches!(
+                    serve_one(&mut server, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+            }
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.event_ids(&conv()).unwrap(), vec![ordinary_id]);
+            assert!(
+                snapshot.get(&offered_id).is_none(),
+                "unsupported control metadata is never an ordinary history event"
+            );
+        });
+        let manifest = EventId::new([52; 32]);
+        assert_eq!(
+            request_file_consent(&mut client, conv(), manifest)
+                .await
+                .unwrap(),
+            FileConsentStatus::Pending
+        );
+        assert!(
+            request_signed_file_consent(&mut client, conv(), manifest)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            request_sticker_file_consent(&mut client, conv(), manifest, vec![])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            request_sticker_file_proof(&mut client, conv(), manifest)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            request_file_message_identities(&mut client, vec![(conv(), manifest)], vec![offered])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let destination = Mutex::new(EventLog::default());
+        request_round(&mut client, &destination, conv())
+            .await
+            .unwrap();
+        assert_eq!(
+            destination.lock().unwrap().event_ids(&conv()).unwrap(),
+            vec![ordinary_id]
+        );
+        drop(client);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn optional_attachment_replies_must_match_exact_requested_file_and_manifest() {
+        for protocol in 0..3 {
+            for wrong_file in [false, true] {
+                let (mut client, mut server) = attachment_test_channels().await;
+                let manifest = EventId::new([61; 32]);
+                let response_file = if wrong_file {
+                    ConversationId::new([62; 32])
+                } else {
+                    conv()
+                };
+                let response_manifest = if wrong_file {
+                    manifest
+                } else {
+                    EventId::new([63; 32])
+                };
+                let response = match protocol {
+                    0 => SyncWire::SignedFileConsentResponse {
+                        file: response_file,
+                        manifest: response_manifest,
+                        control: None,
+                    },
+                    1 => SyncWire::StickerFileConsentResponse {
+                        file: response_file,
+                        manifest: response_manifest,
+                        control: None,
+                    },
+                    _ => SyncWire::StickerFileProofResponse {
+                        file: response_file,
+                        manifest: response_manifest,
+                        headers: None,
+                    },
+                };
+                let responder = tokio::spawn(async move {
+                    let request = decode(&server.recv().await.unwrap()).unwrap();
+                    assert!(matches!(
+                        request,
+                        SyncWire::SignedFileConsentRequest { .. }
+                            | SyncWire::StickerFileConsentRequest { .. }
+                            | SyncWire::StickerFileProofRequest { .. }
+                    ));
+                    server.send(&encode(&response).unwrap()).await.unwrap();
+                });
+                let rejected = match protocol {
+                    0 => matches!(
+                        request_signed_file_consent(&mut client, conv(), manifest).await,
+                        Err(SessionError::UnexpectedMessage)
+                    ),
+                    1 => matches!(
+                        request_sticker_file_consent(&mut client, conv(), manifest, vec![]).await,
+                        Err(SessionError::UnexpectedMessage)
+                    ),
+                    _ => matches!(
+                        request_sticker_file_proof(&mut client, conv(), manifest).await,
+                        Err(SessionError::UnexpectedMessage)
+                    ),
+                };
+                assert!(
+                    rejected,
+                    "optional replies cannot authorize another request's attachment"
+                );
+                responder.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_client_enforces_request_offer_and_response_budgets() {
+        let signer = DeviceIdentity::generate();
+        let control = Event::new(
+            &signer,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"identity control".to_vec(),
+        );
+        let manifest = EventId::new([64; 32]);
+        let (mut client, mut server) = attachment_test_channels().await;
+        assert!(matches!(
+            request_file_message_identities(
+                &mut client,
+                vec![(conv(), manifest); MAX_FILE_IDENTITIES + 1],
+                vec![]
+            )
+            .await,
+            Err(SessionError::UnexpectedMessage)
+        ));
+        client.send(b"after rejected request budget").await.unwrap();
+        assert_eq!(
+            server.recv().await.unwrap(),
+            b"after rejected request budget",
+            "over-budget requests must not reach the wire"
+        );
+        assert!(matches!(
+            request_file_message_identities(
+                &mut client,
+                vec![],
+                vec![control.clone(); MAX_FILE_IDENTITIES + 1]
+            )
+            .await,
+            Err(SessionError::UnexpectedMessage)
+        ));
+        client.send(b"after rejected offer budget").await.unwrap();
+        assert_eq!(server.recv().await.unwrap(), b"after rejected offer budget");
+        let responder = tokio::spawn(async move {
+            assert!(matches!(
+                decode(&server.recv().await.unwrap()).unwrap(),
+                SyncWire::FileMessageIdentitiesRequest { .. }
+            ));
+            server
+                .send(
+                    &encode(&SyncWire::FileMessageIdentitiesResponse {
+                        bundles: vec![control; MAX_FILE_IDENTITIES + 1],
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        assert!(
+            matches!(
+                request_file_message_identities(&mut client, vec![(conv(), manifest)], vec![])
+                    .await,
+                Err(SessionError::UnexpectedMessage)
+            ),
+            "over-budget replies cannot enter the identity registry"
+        );
+        responder.await.unwrap();
+    }
+
+    struct AttachmentAdmissionProbe {
+        log: EventLog,
+        control: Event,
+        proof_calls: usize,
+        imported: usize,
+        identity_requests: std::sync::atomic::AtomicUsize,
+    }
+    impl SyncStore for AttachmentAdmissionProbe {
+        fn event_ids(
+            &self,
+            conversation: &ConversationId,
+        ) -> Result<Vec<EventId>, crate::eventlog::LogError> {
+            self.log.event_ids(conversation)
+        }
+        fn events_excluding(
+            &self,
+            conversation: &ConversationId,
+            have: &std::collections::HashSet<EventId>,
+        ) -> Result<Vec<Event>, crate::eventlog::LogError> {
+            self.log.events_excluding(conversation, have)
+        }
+        fn ingest(
+            &mut self,
+            event: Event,
+        ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+            self.log.append(event)
+        }
+        fn file_message_identity(
+            &self,
+            _file: &ConversationId,
+            _manifest: &EventId,
+        ) -> Result<Option<Event>, crate::eventlog::LogError> {
+            self.identity_requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Some(self.control.clone()))
+        }
+        fn accept_file_message_identity(
+            &mut self,
+            _bundle: Event,
+        ) -> Result<bool, crate::eventlog::LogError> {
+            self.imported += 1;
+            Ok(true)
+        }
+        fn sticker_file_consent(
+            &mut self,
+            _file: &ConversationId,
+            _manifest: &EventId,
+            _headers: Vec<Event>,
+        ) -> Result<Option<Event>, crate::eventlog::LogError> {
+            self.proof_calls += 1;
+            Ok(Some(self.control.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_wire_bounds_reject_before_callbacks_and_bounded_metadata_stays_out_of_history()
+     {
+        use std::sync::atomic::Ordering;
+        let signer = DeviceIdentity::generate();
+        let control = Event::new(
+            &signer,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"control".to_vec(),
+        );
+        let manifest = EventId::new([65; 32]);
+        let store = Mutex::new(AttachmentAdmissionProbe {
+            log: EventLog::default(),
+            control: control.clone(),
+            proof_calls: 0,
+            imported: 0,
+            identity_requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        for request in [
+            SyncWire::FileMessageIdentitiesRequest {
+                requests: vec![(conv(), manifest); MAX_FILE_IDENTITIES + 1],
+                offers: vec![],
+            },
+            SyncWire::FileMessageIdentitiesRequest {
+                requests: vec![(conv(), manifest)],
+                offers: vec![control.clone(); MAX_FILE_IDENTITIES + 1],
+            },
+        ] {
+            let (mut client, mut server) = attachment_test_channels().await;
+            client.send(&encode(&request).unwrap()).await.unwrap();
+            let wire = server.recv().await.unwrap();
+            assert!(matches!(
+                serve_wire_bytes(&mut server, &store, &wire).await,
+                Err(SessionError::UnexpectedMessage)
+            ));
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.imported, 0);
+            assert_eq!(snapshot.identity_requests.load(Ordering::Relaxed), 0);
+        }
+        let mut malformed = Vec::new();
+        let mut header = control.clone();
+        header.ciphertext.clear();
+        malformed.push(vec![header.clone(); 65]);
+        let mut payload = header.clone();
+        payload.ciphertext.push(1);
+        malformed.push(vec![payload]);
+        let mut ancestry = header.clone();
+        ancestry.parents = vec![EventId::new([66; 32]), EventId::new([67; 32])];
+        malformed.push(vec![ancestry]);
+        let mut signature = header.clone();
+        signature.sig.pop();
+        malformed.push(vec![signature]);
+        for headers in malformed {
+            let (mut client, mut server) = attachment_test_channels().await;
+            client
+                .send(
+                    &encode(&SyncWire::StickerFileConsentRequest {
+                        file: conv(),
+                        manifest,
+                        headers,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let wire = server.recv().await.unwrap();
+            serve_wire_bytes(&mut server, &store, &wire).await.unwrap();
+            assert!(matches!(
+                decode(&client.recv().await.unwrap()).unwrap(),
+                SyncWire::StickerFileConsentResponse { control: None, .. }
+            ));
+            assert_eq!(
+                store.lock().unwrap().proof_calls,
+                0,
+                "invalid header envelopes must not invoke storage admission"
+            );
+        }
+        let (mut client, mut server) = attachment_test_channels().await;
+        client
+            .send(
+                &encode(&SyncWire::StickerFileConsentRequest {
+                    file: conv(),
+                    manifest,
+                    headers: vec![header],
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let wire = server.recv().await.unwrap();
+        serve_wire_bytes(&mut server, &store, &wire).await.unwrap();
+        assert!(matches!(
+            decode(&client.recv().await.unwrap()).unwrap(),
+            SyncWire::StickerFileConsentResponse {
+                control: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(store.lock().unwrap().proof_calls, 1);
+        let requests = vec![(conv(), manifest); MAX_FILE_IDENTITIES];
+        client
+            .send(
+                &encode(&SyncWire::FileMessageIdentitiesRequest {
+                    requests,
+                    offers: vec![control.clone(); MAX_FILE_IDENTITIES],
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let wire = server.recv().await.unwrap();
+        serve_wire_bytes(&mut server, &store, &wire).await.unwrap();
+        let SyncWire::FileMessageIdentitiesResponse { bundles } =
+            decode(&client.recv().await.unwrap()).unwrap()
+        else {
+            panic!("expected bounded metadata response")
+        };
+        assert_eq!(
+            bundles,
+            vec![control.clone()],
+            "identical returned controls are deduplicated within the request budget"
+        );
+        {
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.imported, MAX_FILE_IDENTITIES);
+            assert_eq!(
+                snapshot.identity_requests.load(Ordering::Relaxed),
+                MAX_FILE_IDENTITIES
+            );
+            assert!(snapshot.log.event_ids(&conv()).unwrap().is_empty());
+        }
+        for response in [
+            SyncWire::StickerFileConsentResponse {
+                file: conv(),
+                manifest,
+                control: None,
+            },
+            SyncWire::StickerFileProofResponse {
+                file: conv(),
+                manifest,
+                headers: None,
+            },
+            SyncWire::FileMessageIdentitiesResponse { bundles: vec![] },
+        ] {
+            assert!(
+                matches!(
+                    serve_wire_bytes(&mut server, &store, &encode(&response).unwrap()).await,
+                    Err(SessionError::UnexpectedMessage)
+                ),
+                "unsolicited metadata responses cannot mutate the responder"
+            );
+        }
+        let normal_server = Event::new(
+            &signer,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"normal server event".to_vec(),
+        );
+        let normal_server_id = normal_server.id;
+        store.lock().unwrap().log.append(normal_server).unwrap();
+        let normal_client = Event::new(
+            &DeviceIdentity::generate(),
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"normal client event".to_vec(),
+        );
+        let normal_client_id = normal_client.id;
+        let mut client_log = EventLog::default();
+        client_log.append(normal_client).unwrap();
+        let client_log = Mutex::new(client_log);
+        let responder = tokio::spawn(async move {
+            loop {
+                if matches!(
+                    serve_one(&mut server, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+            }
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.log.event_ids(&conv()).unwrap().len(), 2);
+            assert!(snapshot.log.get(&normal_client_id).is_some());
+            assert!(snapshot.log.get(&control.id).is_none());
+        });
+        request_round(&mut client, &client_log, conv())
+            .await
+            .unwrap();
+        assert!(client_log.lock().unwrap().get(&normal_server_id).is_some());
+        drop(client);
+        responder.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod paged_tests;
+
+/// Direct mandatory paged requester. On cancellation/error discard the channel;
+/// a partially streamed exchange cannot be reused.
+#[allow(dead_code)] // Direct callers land in the separate SQL runtime cutover.
+pub async fn request_round_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+) -> Result<ApplyReport, SessionError> {
+    let mut progress = SyncProgress::default();
+    while !progress
+        .step_backend(channel, &PagedNetworkBackend(store, None), conversation, 1)
+        .await?
+    {}
+    Ok(progress.total)
+}
+pub(in crate::node) async fn request_file_round_paged<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+) -> Result<ApplyReport, SessionError> {
+    let mut progress = SyncProgress::default();
+    while !progress
+        .step_burst_paged(channel, store, conversation, FILE_FOLLOWUP_BURST)
+        .await?
+    {}
+    Ok(progress.total)
+}
+/// Serve one frame using the direct bounded store contract.
+#[allow(dead_code)] // Direct callers land in the separate SQL runtime cutover.
+pub async fn serve_one_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+) -> Result<Served, SessionError> {
+    let bytes = match channel.recv().await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(Served::Closed),
+    };
+    serve_wire_bytes_paged(channel, store, &bytes).await
+}
+/// Serve an already-read frame through the direct paged backend.
+#[allow(dead_code)] // Direct callers land in the separate SQL runtime cutover.
+pub async fn serve_wire_bytes_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    bytes: &[u8],
+) -> Result<Served, SessionError> {
+    serve_wire_backend(channel, &PagedNetworkBackend(store, None), bytes).await
+}
+
+/// Dedicated runtime requester; the process owner's shared Have budget is mandatory.
+pub(crate) async fn request_round_budgeted<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+    budget: &RemoteHaveBudget,
+) -> Result<ApplyReport, SessionError> {
+    let mut progress = SyncProgress::default();
+    while !progress
+        .step_backend(
+            channel,
+            &PagedNetworkBackend(store, Some(budget)),
+            conversation,
+            1,
+        )
+        .await?
+    {}
+    Ok(progress.total)
+}
+/// Dedicated runtime responder; every path retains the process owner RAM gate.
+pub(crate) async fn serve_wire_bytes_budgeted<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    bytes: &[u8],
+    budget: &RemoteHaveBudget,
+) -> Result<Served, SessionError> {
+    serve_wire_backend(channel, &PagedNetworkBackend(store, Some(budget)), bytes).await
+}
+pub(crate) async fn serve_one_budgeted<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    budget: &RemoteHaveBudget,
+) -> Result<Served, SessionError> {
+    let bytes = match channel.recv().await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(Served::Closed),
+    };
+    serve_wire_bytes_budgeted(channel, store, &bytes, budget).await
 }

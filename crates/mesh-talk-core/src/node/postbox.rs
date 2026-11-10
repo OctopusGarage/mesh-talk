@@ -85,6 +85,22 @@ pub fn post_office_candidates_for(
     candidates
 }
 
+/// Performance never changes candidate eligibility; equal costs retain stable policy order.
+fn prioritize_responsive_relays(
+    candidates: &mut [PeerRecord],
+    preferred: Option<&str>,
+    cost: impl Fn(&PeerRecord) -> (bool, Duration),
+) {
+    candidates.sort_by_cached_key(|relay| {
+        let (ready, latency) = cost(relay);
+        (
+            !ready,
+            preferred != Some(relay.public.user_id().as_str()),
+            latency,
+        )
+    });
+}
+
 impl super::Node {
     pub fn set_bridge_hub_id(&self, id: Option<&str>) -> Result<(), &'static str> {
         if id
@@ -115,7 +131,9 @@ impl super::Node {
             .bridge_hub_id
             .lock()
             .expect("bridge hub lock not poisoned");
-        post_office_candidates(roster, preferred.as_deref())
+        let mut candidates = post_office_candidates(roster, preferred.as_deref());
+        self.rank_relay_candidates(&mut candidates, preferred.as_deref(), None);
+        candidates
     }
 
     pub(in crate::node) fn post_office_candidates_for(
@@ -127,7 +145,42 @@ impl super::Node {
             .bridge_hub_id
             .lock()
             .expect("bridge hub lock not poisoned");
-        post_office_candidates_for(roster, preferred.as_deref(), recipient)
+        let mut candidates = post_office_candidates_for(roster, preferred.as_deref(), recipient);
+        self.rank_relay_candidates(
+            &mut candidates,
+            preferred.as_deref(),
+            roster
+                .get(&recipient.user_id())
+                .filter(|record| record.public == *recipient),
+        );
+        candidates
+    }
+
+    fn rank_relay_candidates(
+        &self,
+        candidates: &mut [PeerRecord],
+        preferred: Option<&str>,
+        recipient: Option<&PeerRecord>,
+    ) {
+        let now = std::time::Instant::now();
+        prioritize_responsive_relays(candidates, preferred, |relay| {
+            let hops = recipient.and_then(|peer| {
+                peer.presence_routes(now)
+                    .filter(|(route, _, _)| {
+                        route.source == RouteSource::PostOffice && route.addr == relay.addr
+                    })
+                    .filter_map(|(route, _, _)| route.origin_hops)
+                    .min()
+            });
+            let measured = self.sessions.routing_cost(&relay.public, relay.addr);
+            let cold = Duration::from_millis(if relay.has_lan_route() { 250 } else { 1000 });
+            // The forwarding allowance is a cold topology estimate, never an end-to-end SLA.
+            let forwarding = Duration::from_millis(u64::from(hops.unwrap_or(4)) * 50);
+            (
+                self.relay_retry_due(&relay.public),
+                measured.unwrap_or(cold) + forwarding,
+            )
+        });
     }
 }
 
@@ -151,7 +204,7 @@ pub(super) async fn serve_relay_or_bridge_connection<IO>(
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    serve_relay_or_bridge_connection_with_trust(channel, store, directory, None).await;
+    serve_relay_or_bridge_connection_with_trust(channel, store, directory, None, None).await;
 }
 
 #[derive(Clone)]
@@ -165,6 +218,7 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
     store: Arc<Mutex<PostOffice>>,
     directory: Option<Arc<Mutex<BridgeDirectory>>>,
     federation_trust: Option<RelayTrust>,
+    origin_signer: Option<&DeviceIdentity>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
@@ -198,7 +252,17 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
                     channel.peer_publicly_visible(),
                     std::time::Instant::now(),
                 );
-                peers.and_then(|peers| directory.encode_snapshot(&first, &peers))
+                peers.and_then(|peers| {
+                    if !directory.apply_origin_request(
+                        &first,
+                        channel.peer_identity(),
+                        origin_signer,
+                        crate::node::discovery_origin::unix_now(),
+                    ) {
+                        return None;
+                    }
+                    directory.encode_snapshot(&first, &peers)
+                })
             };
             if let Some(response) = response {
                 for page in response {
@@ -224,13 +288,8 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
         // and subsequent mailbox rounds; a slow authenticated relay cannot
         // renew its reservation indefinitely by sending one more frame.
         let _ = tokio::time::timeout(RELAY_IDLE_TIMEOUT, async {
-            let Ok(session_store) = federation::send_inventory(
-                &mut channel,
-                &store,
-                directory.as_ref(),
-                federation::presence_limit(&first),
-            )
-            .await
+            let Ok(session_store) =
+                federation::send_inventory(&mut channel, &store, directory.as_ref(), &first).await
             else {
                 return;
             };
@@ -313,6 +372,27 @@ pub async fn run_bridge_relay_accept_loop(
         listener,
         store,
         Some(Arc::new(Mutex::new(BridgeDirectory::default()))),
+    )
+    .await;
+}
+
+/// Named opt-in bridge; the name is disclosed only with participant consent.
+pub async fn run_named_bridge_relay_accept_loop(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    gateway: Option<Arc<Mutex<Option<GatewayProof>>>>,
+    name: &str,
+) {
+    let mut directory = gateway
+        .map(BridgeDirectory::with_gateway)
+        .unwrap_or_default();
+    directory.set_office_name(name);
+    run_relay_accept_loop_inner(
+        identity,
+        listener,
+        store,
+        Some(Arc::new(Mutex::new(directory))),
     )
     .await;
 }
@@ -409,6 +489,12 @@ async fn run_relay_accept_loop_inner_with_trust(
         .lock()
         .expect("relay store lock not poisoned")
         .require_opaque_envelopes();
+    if let Some(directory) = &directory {
+        directory
+            .lock()
+            .expect("bridge directory lock not poisoned")
+            .set_office_public(identity.public());
+    }
     let conns = Arc::new(Semaphore::new(MAX_CONCURRENT_RELAY_CONNS));
     let identity = Arc::new(identity);
     loop {
@@ -441,6 +527,7 @@ async fn run_relay_accept_loop_inner_with_trust(
                     store,
                     directory,
                     federation_trust,
+                    Some(&identity),
                 )
                 .await;
             }
@@ -475,6 +562,42 @@ mod tests {
             );
         }
         roster
+    }
+
+    #[test]
+    fn responsive_relay_order_preserves_preference_and_avoids_failed_paths() {
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let roster = po_roster(&[(&a, 5001), (&b, 5002)], &[]);
+        let mut candidates = post_office_candidates(&roster, None);
+        let fast = candidates[1].public.user_id();
+        let slow = candidates[0].public.user_id();
+        prioritize_responsive_relays(&mut candidates, None, |relay| {
+            (
+                true,
+                Duration::from_millis(if relay.public.user_id() == fast {
+                    20
+                } else {
+                    900
+                }),
+            )
+        });
+        assert_eq!(candidates[0].public.user_id(), fast);
+        prioritize_responsive_relays(&mut candidates, Some(&slow), |relay| {
+            (
+                true,
+                Duration::from_millis(if relay.public.user_id() == fast {
+                    20
+                } else {
+                    900
+                }),
+            )
+        });
+        assert_eq!(candidates[0].public.user_id(), slow);
+        prioritize_responsive_relays(&mut candidates, Some(&slow), |relay| {
+            (relay.public.user_id() != slow, Duration::from_millis(20))
+        });
+        assert_eq!(candidates[0].public.user_id(), fast);
     }
 
     #[test]
@@ -768,6 +891,183 @@ mod tests {
         .unwrap();
         assert!(first_store.lock().unwrap().has(&reply_outer.id));
         second_server.abort();
+    }
+
+    #[tokio::test]
+    async fn origin_registration_crosses_encrypted_federation_with_bounded_opt_out() {
+        let root = tempfile::tempdir().unwrap();
+        let office = DeviceIdentity::generate();
+        let forwarder = DeviceIdentity::generate();
+        let office_keys = office.secret_bytes();
+        let forwarder_keys = forwarder.secret_bytes();
+        let office_public = office.public();
+        let forwarder_public = forwarder.public();
+        let office_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("office"), "pw", office).unwrap(),
+        ));
+        let forwarding_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("forwarder"), "pw", forwarder).unwrap(),
+        ));
+        let source = federation::FederationDirectory::new();
+        source.set_office_name("Windows 10 office");
+        let forwarded = federation::FederationDirectory::new();
+        forwarded.set_office_name("Another office");
+        let office_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let office_addr = office_listener.local_addr().unwrap();
+        let forwarding_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forwarding_addr = forwarding_listener.local_addr().unwrap();
+        let office_server = tokio::spawn(run_federated_relay_accept_loop_with_directory(
+            DeviceIdentity::from_secret_bytes(office_keys.0, office_keys.1),
+            office_listener,
+            office_store.clone(),
+            Arc::new(HashSet::from([forwarder_public.user_id()])),
+            source.clone(),
+        ));
+        let forwarding_server = tokio::spawn(run_federated_relay_accept_loop_with_directory(
+            DeviceIdentity::from_secret_bytes(forwarder_keys.0, forwarder_keys.1),
+            forwarding_listener,
+            forwarding_store,
+            Arc::new(HashSet::from([office_public.user_id()])),
+            forwarded.clone(),
+        ));
+        let user = DeviceIdentity::generate();
+        let viewer = DeviceIdentity::generate();
+        let account = Account::generate();
+        let user_proof = Announce::new_with_account(&user, &account, "Duncan", 47474);
+        let viewer_proof = Announce::new_with_account(&viewer, &account, "Viewer", 47475);
+
+        for share in [true, false] {
+            let mut registration = SecureChannel::connect_with_presence(
+                tokio::net::TcpStream::connect(office_addr).await.unwrap(),
+                &user,
+                Some(&office_public),
+                Some(&user_proof),
+            )
+            .await
+            .unwrap();
+            registration
+                .send(&bridge_directory::origin_request(
+                    &user,
+                    &office_public,
+                    share,
+                ))
+                .await
+                .unwrap();
+            let mut response = bridge_directory::DirectoryResponse::new(office_public.clone());
+            loop {
+                let page = registration.recv().await.unwrap();
+                if matches!(
+                    response.add_page(&page).unwrap(),
+                    bridge_directory::DirectoryProgress::Complete(_)
+                ) {
+                    break;
+                }
+            }
+            // The participant also refreshes the forwarding office without
+            // consenting to that office being labeled as the origin.
+            let mut forwarding_registration = SecureChannel::connect_with_presence(
+                tokio::net::TcpStream::connect(forwarding_addr)
+                    .await
+                    .unwrap(),
+                &user,
+                Some(&forwarder_public),
+                Some(&user_proof),
+            )
+            .await
+            .unwrap();
+            forwarding_registration
+                .send(&bridge_directory::origin_request(
+                    &user,
+                    &forwarder_public,
+                    false,
+                ))
+                .await
+                .unwrap();
+            let mut registration_response =
+                bridge_directory::DirectoryResponse::new(forwarder_public.clone());
+            loop {
+                let page = forwarding_registration.recv().await.unwrap();
+                if matches!(
+                    registration_response.add_page(&page).unwrap(),
+                    bridge_directory::DirectoryProgress::Complete(_)
+                ) {
+                    break;
+                }
+            }
+            let local = source.shared().lock().unwrap().export_with_origins(
+                std::time::Instant::now(),
+                crate::node::discovery_origin::unix_now(),
+            );
+            assert_eq!(
+                local
+                    .iter()
+                    .find(|entry| entry.presence.announce.user_id == user.user_id())
+                    .unwrap()
+                    .origin
+                    .is_some(),
+                share
+            );
+            source
+                .sync_with_relay(
+                    forwarding_addr,
+                    &DeviceIdentity::from_secret_bytes(office_keys.0, office_keys.1),
+                    &forwarder_public,
+                    &office_store,
+                )
+                .await
+                .unwrap();
+            let mut query = SecureChannel::connect_with_presence(
+                tokio::net::TcpStream::connect(forwarding_addr)
+                    .await
+                    .unwrap(),
+                &viewer,
+                Some(&forwarder_public),
+                Some(&viewer_proof),
+            )
+            .await
+            .unwrap();
+            query
+                .send(&bridge_directory::origin_request(
+                    &viewer,
+                    &forwarder_public,
+                    false,
+                ))
+                .await
+                .unwrap();
+            let mut response = bridge_directory::DirectoryResponse::new(forwarder_public.clone());
+            loop {
+                let page = query.recv().await.unwrap();
+                if matches!(
+                    response.add_page(&page).unwrap(),
+                    bridge_directory::DirectoryProgress::Complete(_)
+                ) {
+                    break;
+                }
+            }
+            let origin = response.expiries[&user.user_id()].origin.as_ref();
+            // Forwarded copies expire at their original deadline. An unsigned
+            // omission alone cannot revoke a different office's signed evidence.
+            assert!(origin.is_some());
+            if let Some(origin) = origin {
+                assert_eq!(origin.office_user_id(), office_public.user_id());
+                assert_eq!(origin.office_name(), "Windows 10 office");
+                assert!(
+                    origin.valid_for(&user.public(), crate::node::discovery_origin::unix_now())
+                );
+                assert_ne!(origin.office_user_id(), forwarder_public.user_id());
+                assert!(
+                    forwarded
+                        .shared()
+                        .lock()
+                        .unwrap()
+                        .export_with_origins(std::time::Instant::now(), origin.expires_at_secs())
+                        .iter()
+                        .all(|entry| entry.origin.is_none())
+                );
+            }
+        }
+        office_server.abort();
+        forwarding_server.abort();
     }
 
     #[tokio::test]

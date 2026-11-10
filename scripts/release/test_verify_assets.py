@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import io
+import tarfile
 import plistlib
 import subprocess
 import tempfile
@@ -10,7 +12,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from verify_assets import archive_member, elf_fingerprint, native_metadata, normalize_bundle_markers, verify_directory, verify_post_office_binary
+from verify_assets import mac_updater_metadata, archive_member, elf_fingerprint, native_metadata, normalize_bundle_markers, verify_directory, verify_post_office_binary
 
 
 class ReleaseAssetsTests(unittest.TestCase):
@@ -19,6 +21,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.entries = {}
+        self.standalone = {}
         for platform, extensions in {
             "macos_arm64": ["dmg"], "macos_x86_64": ["dmg"],
             "windows_x86_64": ["exe", "msi"],
@@ -28,26 +31,29 @@ class ReleaseAssetsTests(unittest.TestCase):
         }.items():
             entries = {f"release/installer 0.1.5.{ext}": b"installer bytes" for ext in extensions}
             self.entries[platform] = entries
-            for variant in ("default", "lite"):
-                self.write_archive(platform, variant=variant)
-                (self.root / (self.name(platform, variant) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
+            self.standalone[platform] = {}
+            self.write_archive(platform)
+            (self.root / (self.name(platform) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
             self.write_post_office_archive(platform)
             (self.root / (self.post_office_name(platform) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
         (self.root / "mesh-talk.cdx.json").write_text(json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "mesh-talk"}]}))
 
     @staticmethod
-    def name(platform, variant="default"):
-        suffix = "_lite" if variant == "lite" else ""
-        return f"mesh-talk_v0.1.5_{platform}{suffix}.zip"
+    def name(platform):
+        return f"mesh-talk_v0.1.5_{platform}.zip"
 
-    def write_archive(self, platform, checksums=None, variant="default"):
+    def write_archive(self, platform, checksums=None, updater_checksums=None):
         entries = self.entries[platform]
         if checksums is None:
             checksums = "".join(f"{hashlib.sha256(data).hexdigest()}  ./{name.removeprefix('release/')}\n" for name, data in entries.items() if name.count("/") == 1)
-        with zipfile.ZipFile(self.root / self.name(platform, variant), "w") as archive:
+        with zipfile.ZipFile(self.root / self.name(platform), "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name, data in entries.items():
                 archive.writestr(name, data)
             archive.writestr("release/SHA256SUMS", checksums)
+            if self.standalone[platform]:
+                if updater_checksums is None:
+                    updater_checksums = "".join(f"{hashlib.sha256(data).hexdigest()}  ./{name.removeprefix('release/')}\n" for name, data in self.standalone[platform].items())
+                archive.writestr("release/UPDATER_SHA256SUMS", updater_checksums)
 
     @staticmethod
     def post_office_name(platform):
@@ -77,13 +83,139 @@ class ReleaseAssetsTests(unittest.TestCase):
         for asset in list(self.root.iterdir()):
             if "v0.1.5" in asset.name:
                 asset.rename(asset.with_name(asset.name.replace("v0.1.5", tag)))
-        self.assertEqual(len(verify_directory(self.root, tag, "0.1.5", check_installers=False)), 18)
+        self.assertEqual(len(verify_directory(self.root, tag, "0.1.5", check_installers=False)), 12)
         for invalid in ("v0.1.5-nightly.0.1", "v0.1.5-nightly.123.01", "v0.1.5-beta.1"):
             with self.assertRaisesRegex(ValueError, "invalid artifact tag"):
                 verify_directory(self.root, invalid, "0.1.5", check_installers=False)
 
     def test_complete_release(self):
-        self.assertEqual(len(self.verify()), 18)
+        self.assertEqual(len(self.verify()), 12)
+
+    def add_updater_assets(self):
+        for platform in self.entries:
+            extension = "app.tar.gz" if platform.startswith("macos_") else "nsis.exe" if platform.startswith("windows_") else "AppImage"
+            name = f"mesh-talk-update_v0.1.5_{platform}.{extension}"
+            data = b"signed updater payload" if platform.startswith("macos_") else b"installer bytes"
+            for file, data in ((name, data), (name + ".sig", b"version-bound signature")):
+                (self.root / file).write_bytes(data)
+                self.standalone[platform]["release/" + file] = data
+            self.write_archive(platform)
+
+    def test_standalone_updater_assets_must_match_the_signed_checksum_manifest(self):
+        self.add_updater_assets()
+        self.assertEqual(len(self.verify()), 12)
+        path = next(self.root.glob("mesh-talk-update_*.sig"))
+        path.write_bytes(b"substituted signature")
+        with self.assertRaisesRegex(ValueError, "updater checksum mismatch"):
+            self.verify()
+
+    def test_updater_payloads_must_not_be_duplicated_in_manual_installers(self):
+        self.add_updater_assets()
+        platform = "macos_arm64"
+        name, data = next(iter(self.standalone[platform].items()))
+        self.entries[platform][name] = data
+        self.write_archive(platform)
+        with self.assertRaisesRegex(ValueError, "unexpected installer set"):
+            self.verify()
+
+    def test_standalone_roles_cannot_be_omitted_from_the_signed_manifest(self):
+        self.add_updater_assets()
+        platform = "macos_arm64"
+        self.standalone[platform].clear()
+        self.write_archive(platform)
+        with self.assertRaisesRegex(ValueError, "checksum manifest"):
+            self.verify()
+
+    def test_updater_manifest_requires_exact_bounded_role_entries(self):
+        self.add_updater_assets()
+        platform = "macos_arm64"
+        lines = [f"{hashlib.sha256(data).hexdigest()}  ./{name.removeprefix('release/')}\n" for name, data in self.standalone[platform].items()]
+        for manifest in ("", lines[0], "".join(lines + [lines[0]]), "".join(lines) + "0" * 64 + "  ./unknown\n", "x" * (64 * 1024 + 1)):
+            with self.subTest(manifest_length=len(manifest)):
+                self.write_archive(platform, updater_checksums=manifest)
+                with self.assertRaisesRegex(ValueError, "checksum"):
+                    self.verify()
+
+    def test_windows_and_linux_updaters_still_match_the_native_installer(self):
+        for platform in ("windows_x86_64", "windows_arm64", "linux_x86_64", "linux_aarch64"):
+            with self.subTest(platform=platform):
+                self.add_updater_assets()
+                name = next(name for name in self.standalone[platform] if not name.endswith(".sig"))
+                data = b"different but consistently checksummed native installer"
+                self.standalone[platform][name] = data
+                (self.root / name.removeprefix("release/")).write_bytes(data)
+                self.write_archive(platform)
+                with self.assertRaisesRegex(ValueError, "updater must match native installer"):
+                    self.verify()
+
+    def test_macos_manual_package_budget_rejects_oversized_compressible_installers(self):
+        self.entries["macos_arm64"] = {"release/installer.dmg": b"\0" * (24 * 1024**2 + 1)}
+        self.write_archive("macos_arm64")
+        with self.assertRaisesRegex(ValueError, "macOS .*size budget"):
+            self.verify()
+
+    def test_macos_outer_zip_and_checksum_manifest_have_independent_budgets(self):
+        path = self.root / self.name("macos_x86_64")
+        with path.open("ab") as archive:
+            archive.write(b"\0" * (24 * 1024**2))
+        with self.assertRaisesRegex(ValueError, "macOS ZIP exceeds size budget"):
+            self.verify()
+        self.write_archive("macos_x86_64")
+        self.write_archive("macos_arm64", "x" * (64 * 1024 + 1))
+        with self.assertRaisesRegex(ValueError, "checksum manifest exceeds size limit"):
+            self.verify()
+
+    def test_macos_standalone_updater_remains_bound_to_the_dmg_executable(self):
+        from unittest.mock import patch
+        self.add_updater_assets()
+        def native(path, extension, version, platform):
+            return {"macho": "expected"} if extension == "dmg" else {"elf": "expected"}
+        def updater(source, version, platform):
+            self.assertEqual(source.read(), b"signed updater payload")
+            return {"macho": "expected"}
+        with patch("verify_assets.native_metadata", side_effect=native), patch("verify_assets.verify_post_office_archive"), patch("verify_assets.mac_updater_metadata", side_effect=updater):
+            self.assertEqual(len(verify_directory(self.root, "v0.1.5", "0.1.5")), 12)
+        with patch("verify_assets.native_metadata", side_effect=native), patch("verify_assets.verify_post_office_archive"), patch("verify_assets.mac_updater_metadata", return_value={"macho": "different"}):
+            with self.assertRaisesRegex(ValueError, "updater/versioned DMG executable mismatch"):
+                verify_directory(self.root, "v0.1.5", "0.1.5")
+
+    def test_all_standalone_role_bytes_are_authenticated_by_the_signed_manifest(self):
+        self.add_delta_assets()
+        for name, original in self.standalone["macos_arm64"].items():
+            with self.subTest(role=name):
+                path = self.root / name.removeprefix("release/")
+                path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                try:
+                    with self.assertRaises(ValueError):
+                        self.verify()
+                finally:
+                    path.write_bytes(original)
+        self.assertEqual(len(self.verify()), 12)
+
+    def test_updater_assets_require_the_complete_platform_matrix(self):
+        self.add_updater_assets()
+        next(self.root.glob("mesh-talk-update_*.AppImage")).unlink()
+        with self.assertRaisesRegex(ValueError, "asset set"):
+            self.verify()
+
+    def test_macos_updater_checks_version_architecture_and_executable_mode(self):
+        def bundle(version="0.1.5", cpu=0x0100000C, mode=0o755):
+            result = io.BytesIO()
+            with tarfile.open(fileobj=result, mode="w:gz") as archive:
+                for name, data, permissions in (
+                    ("mesh-talk.app/Contents/Info.plist", plistlib.dumps({"CFBundleShortVersionString": version, "CFBundleExecutable": "mesh-talk"}), 0o644),
+                    ("mesh-talk.app/Contents/MacOS/mesh-talk", b"\xcf\xfa\xed\xfe" + cpu.to_bytes(4, "little"), mode),
+                ):
+                    member = tarfile.TarInfo(name)
+                    member.size = len(data)
+                    member.mode = permissions
+                    archive.addfile(member, io.BytesIO(data))
+            result.seek(0)
+            return result
+        self.assertIn("macho", mac_updater_metadata(bundle(), "0.1.5", "macos_arm64"))
+        for source in (bundle(version="0.1.4"), bundle(cpu=0x01000007), bundle(mode=0o644)):
+            with self.assertRaises(ValueError):
+                mac_updater_metadata(source, "0.1.5", "macos_arm64")
 
     def test_macos_archive_needs_only_the_dmg(self):
         for platform in ("macos_arm64", "macos_x86_64"):
@@ -92,7 +224,7 @@ class ReleaseAssetsTests(unittest.TestCase):
                     {name for name in archive.namelist() if not name.endswith("SHA256SUMS")},
                     {"release/installer 0.1.5.dmg"},
                 )
-        self.assertEqual(len(self.verify()), 18)
+        self.assertEqual(len(self.verify()), 12)
 
     def test_missing_post_office_archive(self):
         (self.root / self.post_office_name("linux_x86_64")).unlink()
@@ -152,8 +284,8 @@ class ReleaseAssetsTests(unittest.TestCase):
             output.write(b"tampered")
         self.assertNotEqual(subprocess.run(command, cwd=self.root, capture_output=True).returncode, 0)
 
-    def test_missing_lite_variant(self):
-        (self.root / self.name("windows_arm64", "lite")).unlink()
+    def test_rejects_extra_legacy_edition(self):
+        (self.root / "mesh-talk_v0.1.5_windows_arm64_lite.zip").write_bytes(b"legacy")
         with self.assertRaisesRegex(ValueError, "asset set"):
             self.verify()
 
@@ -215,7 +347,7 @@ class ReleaseAssetsTests(unittest.TestCase):
             self.verify()
 
     def test_duplicate_archive_member(self):
-        with zipfile.ZipFile(self.root / self.name("windows_x86_64"), "a") as archive:
+        with self.assertWarnsRegex(UserWarning, "Duplicate name"), zipfile.ZipFile(self.root / self.name("windows_x86_64"), "a") as archive:
             archive.writestr("release/SHA256SUMS", "bad")
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.verify()
@@ -318,7 +450,7 @@ class ReleaseAssetsTests(unittest.TestCase):
     def test_dmg_member_ignores_7zip_trailing_bytes(self):
         from unittest.mock import patch
         listing = "Path = mesh-talk/mesh-talk.app/Contents/Info.plist\nFolder = -\nSize = 5\n"
-        with patch("verify_assets.shutil.which", return_value="7zz"), patch(
+        with patch("verify_assets.sevenzip_tool", return_value="7zz"), patch(
             "verify_assets.subprocess.check_output", side_effect=[listing, b"helloextra"]
         ):
             self.assertEqual(archive_member(self.root / "test.dmg", "mesh-talk.app/Contents/Info.plist"), b"hello")
@@ -406,6 +538,99 @@ class ReleaseAssetsTests(unittest.TestCase):
             with patch("verify_assets.native_metadata", side_effect=wrong_appimage), patch("verify_assets.verify_post_office_archive"):
                 with self.assertRaisesRegex(ValueError, "AppImage/versioned Debian"):
                     verify_directory(self.root, "v0.1.5", "0.1.5")
+
+
+    def add_delta_assets(self):
+        self.add_updater_assets()
+        platform = "macos_arm64"
+        full = "mesh-talk-update_v0.1.5_macos_arm64.app.tar.gz"
+        payload = b"full" * (1024 * 1024)
+        self.standalone[platform]["release/" + full] = payload
+        (self.root / full).write_bytes(payload)
+        raw = full.replace("mesh-talk-update_", "mesh-talk-update-raw_")
+        patch = "mesh-talk-patch_v0.1.5_macos_arm64_from-v0.1.4.zst"
+        def artifact(name, data):
+            return {"name": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        catalog = {"schema": 1, "role": "mesh-talk-delta", "algorithm": "zstd-prefix-v1", "tag": "v0.1.5", "release_kind": "stable", "os": "macos", "arch": "aarch64", "fallback": artifact(full, payload), "target": artifact(raw, b"raw native"), "bases": [{"tag": "v0.1.4", "size": 123, "sha256": "a" * 64, "patch": artifact(patch, b"patch")}]}
+        for name, data in ((raw, b"raw native"), (raw + ".sig", b"signature"), (full + ".delta.json", json.dumps(catalog).encode()), (full + ".delta.json.sig", b"signature"), (patch, b"patch")):
+            (self.root / name).write_bytes(data)
+            self.standalone[platform]["release/" + name] = data
+        self.write_archive(platform)
+        return catalog
+
+    def test_complete_optional_delta_set_is_bound_to_the_signed_manifest_without_payload_duplication(self):
+        self.add_delta_assets()
+        self.assertEqual(len(self.verify()), 12)
+        next(self.root.glob("mesh-talk-patch_*")).write_bytes(b"other")
+        with self.assertRaisesRegex(ValueError, "(updater|delta).*match"):
+            self.verify()
+
+    def test_optional_delta_set_rejects_partial_extra_and_identity_contradictions(self):
+        self.add_delta_assets()
+        raw_sig = next(self.root.glob("mesh-talk-update-raw_*.sig"))
+        raw_sig.unlink()
+        with self.assertRaisesRegex(ValueError, "(asset set|delta)"):
+            self.verify()
+
+    def test_optional_delta_catalog_rejects_wrong_target_hash_and_unworthwhile_patch(self):
+        catalog = self.add_delta_assets()
+        path = next(self.root.glob("*.delta.json"))
+        for mutate in (lambda c: c.update(os="windows"), lambda c: c["target"].update(sha256="b" * 64), lambda c: c["fallback"].update(size=100)):
+            candidate = json.loads(json.dumps(catalog))
+            mutate(candidate)
+            data = json.dumps(candidate).encode()
+            path.write_bytes(data)
+            self.standalone["macos_arm64"]["release/" + path.name] = data
+            self.write_archive("macos_arm64")
+            with self.assertRaisesRegex(ValueError, "delta"):
+                self.verify()
+
+
+    def test_nsis_decoder_errors_fail_before_payload_extraction(self):
+        from delta_assets import nsis_files
+        from unittest.mock import patch
+        application = b"MZ__TAURI_BUNDLE_TYPE_VAR_NSS"
+        listing = ("Type = Nsis\nSubType = NSIS-3 Unicode BadCmd=13\n\n"
+                   f"Path = mesh-talk.exe\nSize = {len(application)}\n")
+        def command(args, **kwargs):
+            return listing if args[1] == "l" else application
+        with patch("delta_assets.sevenzip_tool", return_value="7zz"), patch("delta_assets.subprocess.check_output", side_effect=command) as inspect:
+            with self.assertRaisesRegex(ValueError, "NSIS decoder"):
+                nsis_files(self.root / "installer.exe")
+            self.assertEqual(inspect.call_count, 1, "an incomplete decoder table must not accept even numeric members")
+
+    def test_delta_native_equivalence_binds_tar_bytes_and_all_windows_resources(self):
+        import gzip
+        from delta_assets import equivalent
+        from unittest.mock import patch
+        canonical, raw = self.root / "canonical", self.root / "raw"
+        canonical.write_bytes(gzip.compress(b"exact tar bytes", compresslevel=9))
+        raw.write_bytes(gzip.compress(b"exact tar bytes", compresslevel=0))
+        equivalent(canonical, raw, "macos")
+        raw.write_bytes(gzip.compress(b"changed tar bytes", compresslevel=0))
+        with self.assertRaisesRegex(ValueError, "exact canonical tar"):
+            equivalent(canonical, raw, "macos")
+        members = {"mesh-talk.exe": b"MZ__TAURI_BUNDLE_TYPE_VAR_NSS", "resources/config.json": b"resource", "$PLUGINSDIR/StartMenu.dll": b"plugin"}
+        listing = "Type = Nsis\n\n" + "\n\n".join(f"Path = {name}\nSize = {len(data) + (5 if name.startswith('$PLUGINSDIR/') else 0)}" for name, data in members.items()) + "\n\nPath = uninstall.exe\nSize = \
+"
+        changed = None
+        def command(args, **kwargs):
+            if args[1] == "l":
+                return listing
+            data = members[args[-1]]
+            return b"mutated!" if args[3] == str(raw) and args[-1] == changed else data
+        with patch("delta_assets.sevenzip_tool", return_value="7zz"), patch("delta_assets.subprocess.check_output", side_effect=command):
+            equivalent(canonical, raw, "windows")
+            changed = "resources/config.json"
+            with self.assertRaisesRegex(ValueError, "application files differ"):
+                equivalent(canonical, raw, "windows")
+            changed = "$PLUGINSDIR/StartMenu.dll"
+            with self.assertRaisesRegex(ValueError, "application files differ"):
+                equivalent(canonical, raw, "windows")
+            members["mesh-talk.exe"] = b"MZ__TAURI_BUNDLE_TYPE_VAR_MSI"
+            changed = None
+            with self.assertRaisesRegex(ValueError, "bundle marker"):
+                equivalent(canonical, raw, "windows")
 
 
 if __name__ == "__main__":

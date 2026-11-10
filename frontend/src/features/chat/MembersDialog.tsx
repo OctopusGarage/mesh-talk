@@ -1,7 +1,25 @@
+import { DeleteChatDialog } from "./DeleteChatDialog";
+import { GroupControlStatus, PendingGroupControls } from "./GroupControlStatus";
+import { useGroupControlOperation } from "./useGroupControlOperation";
+import { canManageChannel, canParticipateChannel } from "./channelPermissions";
+import { ChannelMetadataSettings } from "./ChannelMetadataSettings";
+import {
+  channelMemberAccounts,
+  channelInviteAccounts,
+} from "./channelMemberProjection";
 import { displayIdentity } from "@/lib/displayIdentity";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Crown, LogOut, MessageCircle, Users, UserPlus, X } from "lucide-react";
+import {
+  ArrowLeft,
+  Crown,
+  LogOut,
+  MessageCircle,
+  Settings,
+  Users,
+  UserPlus,
+  X,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   Dialog,
@@ -33,6 +51,7 @@ import { useContactPolicy } from "@/store/contactPolicy";
 import { peerAccountKey, rosterProjection } from "@/lib/rosterProjection";
 import { visiblePeers } from "@/lib/contactVisibility";
 import { VirtualRosterList, VIRTUALIZE_AT } from "./VirtualRosterList";
+import { GroupPreferences } from "./GroupPreferences";
 import { MemberProfileDialog } from "./MemberProfileDialog";
 import type { MemberProfileTarget } from "./memberProfileDetails";
 
@@ -48,6 +67,9 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     baseline: { members: ChannelMemberInfo[]; owner: string };
     members: ChannelMemberInfo[];
     owner: string;
+    can_manage?: boolean;
+    account_access?: import("@/lib/types").AccountGroupAccessInfo | null;
+    owner_account_id?: string | null;
   } | null>(null);
   const storedSnapshotRef = useRef({
     members: storedMembers,
@@ -65,7 +87,27 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
       : null;
   const members = liveSnapshot?.members ?? storedMembers;
   const channelOwner = liveSnapshot?.owner ?? storedOwner;
-  const animateMembers = motionOK && members.length <= MAX_STAGGER_ITEMS;
+  const channel = useChat((s) =>
+    s.channels?.find((item) => item.channel_id === channelId),
+  );
+  const sharedReference = channel?.shared_reference === true;
+  const accountAccess =
+    liveSnapshot?.account_access !== undefined
+      ? liveSnapshot.account_access
+      : channel?.account_access;
+  const referenceOnly =
+    sharedReference && (!accountAccess || accountAccess.role === "unknown");
+  const authority = {
+    ...channel,
+    owner: channelOwner,
+    account_access: accountAccess,
+    can_manage: liveSnapshot?.can_manage ?? channel?.can_manage,
+    owner_account_id:
+      (liveSnapshot?.owner_account_id !== undefined
+        ? liveSnapshot.owner_account_id
+        : channel?.owner_account_id) ??
+      (accountAccess?.role === "owner" ? accountAccess.account_id : null),
+  };
   const peers = useChat((s) => s.peers);
   const accounts = useChat((s) => s.accounts);
   const roster = rosterProjection(peers);
@@ -75,8 +117,12 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
   const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
+  const localOwner = useAuth((s) => s.user?.id);
+  const authGeneration = useAuth((s) => s.generation);
+  const runtimeScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const addMember = useChat((s) => s.addMember);
   const removeMember = useChat((s) => s.removeMember);
+  const removeMemberAccount = useChat((s) => s.removeMemberAccount);
   const dissolveChannel = useChat((s) => s.dissolveChannel);
   const transferChannelOwner = useChat((s) => s.transferChannelOwner);
   const leaveChannel = useChat((s) => s.leaveChannel);
@@ -84,36 +130,58 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   // Whole presence map (the dialog reads many ids at once; one subscription).
   const presenceMap = usePresence((s) => s.map);
   const [open, setOpen] = useState(false);
+  const [deleteChatTarget, setDeleteChatTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const [profileTarget, setProfileTarget] =
     useState<MemberProfileTarget | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const operation = useGroupControlOperation(channelId);
+  const busy = operation.busy;
   const [pendingRemoval, setPendingRemoval] = useState<{
     channelId: string;
     id: string;
     name: string;
+    account: boolean;
   } | null>(null);
-  const [removing, setRemoving] = useState(false);
+  const removing = busy;
   const [pendingTransfer, setPendingTransfer] = useState<{
     channelId: string;
     id: string;
     name: string;
   } | null>(null);
-  const [transferring, setTransferring] = useState(false);
+  const transferring = busy;
   const [confirmLeave, setConfirmLeave] = useState<string | null>(null);
-  const [leaving, setLeaving] = useState(false);
+  const leaving = busy;
+  const savedLeaveHistory =
+    operation.outcome && "status" in operation.outcome
+      ? operation.outcome.status.delete_history
+      : undefined;
+  const [deleteLeaveHistory, setDeleteLeaveHistory] = useState(false);
+  useEffect(() => setDeleteLeaveHistory(false), [channelId]);
   const [activitySnapshot, setActivitySnapshot] = useState<{
     channelId: string;
     entries: ChannelActivityInfo[];
   } | null>(null);
   const activity =
     activitySnapshot?.channelId === channelId ? activitySnapshot.entries : [];
-  const [replicaOverride, setReplicaOverride] = useState<boolean | null>(null);
-  const [replicaBusy, setReplicaBusy] = useState(false);
-  const [replicaError, setReplicaError] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsTriggerRef = useRef<HTMLButtonElement>(null);
+  const membersBackRef = useRef<HTMLButtonElement>(null);
+  const wasSettingsOpen = useRef(false);
   useEffect(() => {
-    setReplicaOverride(null);
-    setReplicaError(false);
+    if (!open) {
+      wasSettingsOpen.current = false;
+      return;
+    }
+    if (settingsOpen) membersBackRef.current?.focus();
+    else if (wasSettingsOpen.current) settingsTriggerRef.current?.focus();
+    wasSettingsOpen.current = settingsOpen;
+  }, [open, settingsOpen]);
+  const ownMember = members.find((member) => member.user_id === myId);
+  useEffect(() => {
+    setSettingsOpen(false);
     setLiveMembers(null);
     setProfileTarget(null);
     setPendingRemoval(null);
@@ -121,7 +189,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     setConfirming(null);
     setConfirmLeave(null);
     setActivitySnapshot(null);
-  }, [active?.id]);
+  }, [active?.id, sharedReference]);
   useEffect(() => {
     if (!open || active?.kind !== "channel") return;
     let live = true;
@@ -134,6 +202,9 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             baseline,
             members: info.members,
             owner: info.owner,
+            can_manage: info.can_manage,
+            account_access: info.account_access,
+            owner_account_id: info.owner_account_id,
           });
       },
       () => {},
@@ -141,7 +212,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     return () => {
       live = false;
     };
-  }, [open, active?.id, active?.kind]);
+  }, [open, active?.id, active?.kind, sharedReference, settingsOpen]);
   useEffect(() => {
     if (!open || active?.kind !== "channel") return;
     let live = true;
@@ -164,10 +235,13 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const confirmRemoval = async () => {
     if (!pendingRemoval || pendingRemoval.channelId !== channelId || removing)
       return;
-    setRemoving(true);
-    const removed = await removeMember(pendingRemoval.id);
-    setRemoving(false);
-    if (removed) setPendingRemoval(null);
+    await operation.run(
+      () =>
+        (pendingRemoval.account ? removeMemberAccount : removeMember)(
+          pendingRemoval.id,
+        ),
+      () => setPendingRemoval(null),
+    );
   };
   const confirmTransfer = async () => {
     if (
@@ -176,20 +250,20 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
       transferring
     )
       return;
-    setTransferring(true);
-    const transferred = await transferChannelOwner(pendingTransfer.id);
-    setTransferring(false);
-    if (transferred) setPendingTransfer(null);
+    await operation.run(
+      () => transferChannelOwner(pendingTransfer.id),
+      () => setPendingTransfer(null),
+    );
   };
   const finishLeave = async () => {
     if (confirmLeave !== channelId || leaving) return;
-    setLeaving(true);
-    const left = await leaveChannel();
-    setLeaving(false);
-    if (left) {
-      setConfirmLeave(null);
-      setOpen(false);
-    }
+    await operation.run(
+      () => leaveChannel(deleteLeaveHistory),
+      () => {
+        setConfirmLeave(null);
+        setOpen(false);
+      },
+    );
   };
 
   const statusFor = (accountId: string | null | undefined) =>
@@ -199,25 +273,44 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     () => new Set(members.map((m) => m.user_id)),
     [members],
   );
-  const addable = useMemo(
+  const memberAccounts = useMemo(
+    () =>
+      channelMemberAccounts(members, roster, {
+        deviceId: myId,
+        accountId: myAccountId,
+        ownerId: channelOwner,
+      }),
+    [members, roster, myId, myAccountId, channelOwner],
+  );
+  const animateMembers = motionOK && memberAccounts.length <= MAX_STAGGER_ITEMS;
+  const addableDevices = useMemo(
     () =>
       policyLoaded
         ? visiblePeers(peers, hiddenContacts).filter(
-            (p) => !memberIds.has(p.user_id),
+            (peer) => !memberIds.has(peer.user_id),
           )
         : [],
     [policyLoaded, peers, hiddenContacts, memberIds],
   );
-  // Only the channel owner may change membership — the core enforces this (a non-owner's
-  // add/remove is rejected by every node), so a non-owner only ever sees a read-only list.
-  const isOwner = !dissolved && channelOwner !== "" && channelOwner === myId;
+  const memberAccountIds = new Set(
+    memberAccounts.flatMap((group) =>
+      group.accountId ? [group.accountId] : [],
+    ),
+  );
+  const addable = channelInviteAccounts(
+    addableDevices.filter(
+      (peer) => !!peer.account_id && !memberAccountIds.has(peer.account_id),
+    ),
+  );
+  // The native channel authority includes certified devices of the owner account.
+  // Roster bindings and display names never grant management rights.
+  const isOwner = !dissolved && canManageChannel(authority, myId);
 
-  if (confirming && confirming === channelId) {
+  if (confirming && confirming === channelId && isOwner) {
     return (
       <Dialog
         open={open}
         onOpenChange={(next) => {
-          if (busy) return;
           setOpen(next);
           if (!next) setConfirming(null);
         }}
@@ -232,12 +325,12 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               {t("members.dissolveConfirm")}
             </DialogDescription>
           </DialogHeader>
+          <GroupControlStatus
+            outcome={operation.outcome}
+            cancelRequested={operation.cancelRequested}
+          />
           <div className="flex justify-end gap-2">
-            <Button
-              variant="ghost"
-              disabled={busy}
-              onClick={() => setConfirming(null)}
-            >
+            <Button variant="ghost" onClick={() => setConfirming(null)}>
               {t("common.cancel")}
             </Button>
             <Button
@@ -247,14 +340,13 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               onClick={() => {
                 if (active?.kind !== "channel" || active.id !== confirming)
                   return;
-                setBusy(true);
-                void dissolveChannel(active.id).then((success) => {
-                  if (success) {
+                void operation.run(
+                  () => dissolveChannel(active.id),
+                  () => {
                     setOpen(false);
                     setConfirming(null);
-                  }
-                  setBusy(false);
-                });
+                  },
+                );
               }}
             >
               {t("members.dissolve")}
@@ -269,13 +361,13 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (removing || transferring || leaving) return;
         setOpen(next);
         if (!next) {
           setProfileTarget(null);
           setPendingRemoval(null);
           setPendingTransfer(null);
           setConfirmLeave(null);
+          setSettingsOpen(false);
         }
       }}
     >
@@ -291,325 +383,424 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle className="flex items-baseline gap-2">
-            {t("members.title")}
-            <span className="font-display text-base font-normal tabular-nums text-muted-foreground">
-              {channelId && presenceMap[channelId]?.member_count != null
-                ? t("presence.groupSummary", {
-                    total: presenceMap[channelId].member_count,
-                    online: presenceMap[channelId].online_count ?? 0,
-                  })
-                : t("presence.groupUpdating")}
-            </span>
+          <DialogTitle className="flex min-w-0 flex-wrap items-baseline gap-2">
+            {settingsOpen ? t("members.groupSettings") : t("members.title")}
+            {!settingsOpen && (
+              <span className="font-display text-base font-normal tabular-nums text-muted-foreground">
+                {channelId && presenceMap[channelId]?.member_count != null
+                  ? t("presence.groupSummary", {
+                      total: presenceMap[channelId].member_count,
+                      online: presenceMap[channelId].online_count ?? 0,
+                    })
+                  : sharedReference
+                    ? t("conversation.members", {
+                        count: channel?.member_count ?? 0,
+                      })
+                    : t("presence.groupUpdating")}
+              </span>
+            )}
           </DialogTitle>
-          <DialogDescription>{t("members.description")}</DialogDescription>
-          <p className="text-xs text-muted-foreground">
-            {t("members.replicaHelp")}
-          </p>
-          {replicaError && (
-            <p role="alert" className="text-sm text-destructive">
-              {t("members.replicaError")}
-            </p>
-          )}
+          <DialogDescription
+            className={settingsOpen || referenceOnly ? undefined : "sr-only"}
+          >
+            {settingsOpen
+              ? active?.name
+              : t(
+                  referenceOnly
+                    ? "conversation.sharedReference"
+                    : "members.description",
+                )}
+          </DialogDescription>
+          {!settingsOpen &&
+            sharedReference &&
+            channel?.reference_members_complete === false && (
+              <p className="text-xs text-muted-foreground">
+                {t("members.referencePartial")}
+              </p>
+            )}
         </DialogHeader>
 
-        <motion.div
-          initial={animateMembers ? "hidden" : false}
-          animate="visible"
-          variants={listStagger}
-        >
-          <VirtualRosterList
-            items={members}
-            maxHeight={224}
-            rowHeight={58}
-            focusSelector="[data-member-row]"
-            className="space-y-0.5 overflow-y-auto"
-            itemKey={(m) => m.user_id}
-            renderItem={(m, index) => {
-              // Self presence uses the same expiring runtime snapshot as other accounts.
-              const isSelf = m.user_id === myId;
-              const accountId = roster.accountForMember(m);
-              const identity = displayIdentity({
-                accountId,
-                deviceId: m.user_id,
-                fallbackName: m.name,
-                accounts,
-                peers,
-                favorites,
-              });
-              const name = isSelf
-                ? myName || m.name || t("common.unnamed")
-                : identity.name;
-              const memberPresence =
-                presenceMap[
-                  isSelf
-                    ? myAccountId || ""
-                    : accountId || `device:${m.user_id}`
-                ] ?? OFFLINE;
-              const status = presenceStatus(memberPresence);
-              // Key the crest by ACCOUNT id, not the device user_id: custom/propagated avatars
-              // are stored per account (useAvatar reads account ids), so a device-keyed crest
-              // would never resolve a member's photo. Fall back to the device id if the account
-              // isn't known from the roster yet. (Also makes the glyph match the member's
-              // account-keyed DM glyph.)
-              const crestId = isSelf
-                ? myAccountId || m.user_id
-                : (accountId ?? m.user_id);
-              const memberIsOwner = m.user_id === channelOwner;
-              const replicaEnabled =
-                isSelf && replicaOverride !== null
-                  ? replicaOverride
-                  : m.replica_enabled !== false;
-              // A DM needs a known account. The identity itself remains inspectable even
-              // for an offline member with only a device ID.
-              const dmAccount = isSelf ? null : accountId;
-              const openDm = () => {
-                if (!dmAccount) return;
-                openConversation({ kind: "account", id: dmAccount, name });
-                setOpen(false);
-              };
-              return (
-                <motion.div
-                  key={m.user_id}
-                  variants={fadeSlideUp}
-                  data-member-row={index}
-                  role="group"
-                  aria-label={name}
-                  tabIndex={members.length > VIRTUALIZE_AT ? 0 : undefined}
-                  className="group flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setProfileTarget({
-                        name,
-                        canonicalName: isSelf
-                          ? myName || identity.canonicalName
-                          : identity.canonicalName,
-                        accountId: accountId ?? (isSelf ? myAccountId : null),
-                        deviceId: m.user_id,
-                        isSelf,
-                      })
-                    }
-                    data-testid={`member-profile-${m.user_id}`}
-                    title={t("memberProfile.view")}
-                    className="min-w-0 flex-1 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        <GroupControlStatus
+          outcome={operation.outcome}
+          cancelRequested={operation.cancelRequested}
+        />
+        {channelId && (
+          <PendingGroupControls group={channelId} excludeId={operation.id} />
+        )}
+        {settingsOpen ? (
+          <>
+            <Button
+              variant="ghost"
+              className="justify-start"
+              ref={membersBackRef}
+              data-testid="group-members-back"
+              onClick={() => {
+                setSettingsOpen(false);
+                setConfirmLeave(null);
+              }}
+            >
+              <ArrowLeft className="h-4 w-4" />
+              {t("members.backToMembers")}
+            </Button>
+            {!sharedReference && open && channelId && (
+              <ChannelMetadataSettings
+                key={`${channelId}:${localOwner}:${authGeneration}:${runtimeScope}:${myId}:metadata`}
+                channelId={channelId}
+                canManage={
+                  isOwner &&
+                  !channel?.archived &&
+                  !channel?.left &&
+                  !channel?.pending_invite
+                }
+              />
+            )}
+            {channelId && (
+              <GroupPreferences
+                key={`${channelId}:${localOwner}:${authGeneration}:${runtimeScope}:${myId}`}
+                channelId={channelId}
+                myId={myId}
+                channelOwner={channelOwner}
+                dissolved={dissolved}
+                sharedReference={sharedReference}
+                referenceOnly={referenceOnly}
+                canManage={isOwner}
+                ownMember={ownMember}
+                selfAccepted={
+                  accountAccess !== undefined
+                    ? accountAccess?.role === "owner" ||
+                      accountAccess?.role === "member"
+                    : members.some(
+                        (member) => member.user_id === myId && !member.pending,
+                      )
+                }
+              />
+            )}
+          </>
+        ) : (
+          <>
+            <motion.div
+              initial={animateMembers ? "hidden" : false}
+              animate="visible"
+              variants={listStagger}
+            >
+              <VirtualRosterList
+                items={memberAccounts}
+                maxHeight={224}
+                rowHeight={58}
+                focusSelector="[data-member-row]"
+                className="space-y-0.5 overflow-y-auto"
+                itemKey={(group) => group.key}
+                renderItem={(group, index) => {
+                  const m = group.representative;
+                  // Self presence uses the same expiring runtime snapshot as other accounts.
+                  const accountId = group.accountId;
+                  const isSelf = accountId
+                    ? accountId === myAccountId
+                    : m.user_id === myId;
+                  const identity = displayIdentity({
+                    accountId,
+                    deviceId: m.user_id,
+                    fallbackName: m.name,
+                    accounts,
+                    peers,
+                    favorites,
+                  });
+                  const name =
+                    identity.alias ||
+                    (isSelf &&
+                    !accounts.some(
+                      (account) =>
+                        account.account_id === accountId &&
+                        account.names.length,
+                    )
+                      ? myName || identity.name
+                      : identity.name);
+                  const memberPresence =
+                    presenceMap[
+                      isSelf
+                        ? myAccountId || ""
+                        : accountId || `device:${m.user_id}`
+                    ] ?? OFFLINE;
+                  const status = presenceStatus(memberPresence);
+                  // Key the crest by ACCOUNT id, not the device user_id: custom/propagated avatars
+                  // are stored per account (useAvatar reads account ids), so a device-keyed crest
+                  // would never resolve a member's photo. Fall back to the device id if the account
+                  // isn't known from the roster yet. (Also makes the glyph match the member's
+                  // account-keyed DM glyph.)
+                  const crestId = isSelf
+                    ? myAccountId || m.user_id
+                    : (accountId ?? m.user_id);
+                  const memberIsOwner = authority.owner_account_id
+                    ? group.accountId === authority.owner_account_id
+                    : group.devices.some(
+                        (device) => device.user_id === channelOwner,
+                      );
+                  // A DM needs a known account. The identity itself remains inspectable even
+                  // for an offline member with only a device ID.
+                  const dmAccount = isSelf ? null : accountId;
+                  const openDm = () => {
+                    if (!dmAccount) return;
+                    openConversation({ kind: "account", id: dmAccount, name });
+                    setOpen(false);
+                  };
+                  return (
+                    <motion.div
+                      key={group.key}
+                      variants={fadeSlideUp}
+                      data-member-row={index}
+                      role="group"
+                      aria-label={name}
+                      tabIndex={
+                        memberAccounts.length > VIRTUALIZE_AT ? 0 : undefined
+                      }
+                      className="group rounded-lg px-2 py-1.5 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setProfileTarget({
+                              name,
+                              canonicalName: identity.canonicalName,
+                              accountId:
+                                accountId ?? (isSelf ? myAccountId : null),
+                              deviceId: m.user_id,
+                              isSelf,
+                            })
+                          }
+                          data-testid={`member-profile-${m.user_id}`}
+                          title={t("memberProfile.view")}
+                          className="min-w-0 flex-1 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <span className="sr-only">
+                            {t("memberProfile.view")}
+                          </span>
+                          <IdentityCrest
+                            id={crestId}
+                            name={name}
+                            status={status}
+                            variant="compact"
+                            hideId
+                          />
+                          <span
+                            className="block pl-12 text-xs text-muted-foreground"
+                            title={t("presence.offlineHint")}
+                          >
+                            {presenceLabel(memberPresence, t)}
+                          </span>
+                        </button>
+                        {dmAccount && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            onClick={openDm}
+                            data-testid={`member-dm-${m.user_id}`}
+                            title={t("members.openDm")}
+                            aria-label={t("members.openDm")}
+                            className="h-11 w-11 shrink-0 max-[400px]:hidden"
+                          >
+                            <MessageCircle className="h-4 w-4" />
+                          </Button>
+                        )}
+                        {memberIsOwner && (
+                          <span
+                            className="shrink-0 rounded-md bg-signal/15 px-2 py-1 text-[11px] font-medium text-signal"
+                            data-testid="member-owner-badge"
+                          >
+                            {t("members.owner")}
+                          </span>
+                        )}
+                        {group.devices.every((member) => member.pending) && (
+                          <span className="text-xs text-muted-foreground">
+                            {t("members.pendingAcceptance")}
+                          </span>
+                        )}
+                        {isOwner && !memberIsOwner && !group.accountId && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title={t("common.remove")}
+                            aria-label={`${t("common.remove")} ${name}`}
+                            disabled={busy}
+                            onClick={() =>
+                              channelId &&
+                              setPendingRemoval({
+                                channelId,
+                                id: m.user_id,
+                                name,
+                                account: false,
+                              })
+                            }
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        )}
+                        {isOwner &&
+                          !memberIsOwner &&
+                          group.accountId &&
+                          group.devices.some((device) => !device.pending) && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-11 w-11 shrink-0 text-muted-foreground"
+                              title={t("members.transferOwner")}
+                              aria-label={`${t("members.transferOwner")} ${name}`}
+                              data-testid={`member-transfer-account-${group.accountId}`}
+                              disabled={busy}
+                              onClick={() =>
+                                channelId &&
+                                setPendingTransfer({
+                                  channelId,
+                                  id: group.accountId!,
+                                  name,
+                                })
+                              }
+                            >
+                              <Crown className="h-4 w-4" />
+                            </Button>
+                          )}
+                        {isOwner && !memberIsOwner && group.accountId && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-11 w-11 shrink-0 text-muted-foreground hover:text-destructive"
+                            title={t("common.remove")}
+                            aria-label={`${t("common.remove")} ${name}`}
+                            data-testid={`member-remove-account-${group.accountId}`}
+                            disabled={removing || transferring}
+                            onClick={() =>
+                              channelId &&
+                              setPendingRemoval({
+                                channelId,
+                                id: group.accountId!,
+                                name,
+                                account: true,
+                              })
+                            }
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        )}
+                      </div>
+                    </motion.div>
+                  );
+                }}
+              />
+            </motion.div>
+
+            {!referenceOnly && pendingRemoval?.channelId === channelId && (
+              <div className="space-y-3 rounded-lg border border-destructive/30 p-3">
+                <p className="break-words text-sm" role="status">
+                  {t("members.confirmRemove", { name: pendingRemoval.name })}
+                </p>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="ghost"
+                    disabled={removing}
+                    onClick={() => setPendingRemoval(null)}
                   >
-                    <span className="sr-only">{t("memberProfile.view")}</span>
-                    <IdentityCrest
-                      id={crestId}
-                      name={name}
-                      status={status}
-                      variant="compact"
-                    />
-                    <span
-                      className="block pl-12 text-xs text-muted-foreground"
-                      title={t("presence.offlineHint")}
-                    >
-                      {presenceLabel(memberPresence, t)}
-                    </span>
-                  </button>
-                  {dmAccount && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={openDm}
-                      data-testid={`member-dm-${m.user_id}`}
-                      title={t("members.openDm")}
-                      aria-label={t("members.openDm")}
-                      className="h-11 w-11 shrink-0 max-[400px]:hidden"
-                    >
-                      <MessageCircle className="h-4 w-4" />
-                    </Button>
-                  )}
-                  {memberIsOwner && (
-                    <span
-                      className="shrink-0 rounded-md bg-signal/15 px-2 py-1 text-[11px] font-medium text-signal"
-                      data-testid="member-owner-badge"
-                    >
-                      {t("members.owner")}
-                    </span>
-                  )}
-                  {m.pending && (
-                    <span className="shrink-0 rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground">
-                      {t("members.pendingAcceptance")}
-                    </span>
-                  )}
-                  {!replicaEnabled && (
-                    <span
-                      className="shrink-0 rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground"
-                      data-testid={`member-replica-disabled-${m.user_id}`}
-                    >
-                      {t("members.replicaDisabled")}
-                    </span>
-                  )}
-                  {isSelf && !dissolved && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={replicaBusy || m.pending}
-                      onClick={async () => {
-                        if (active?.kind !== "channel") return;
-                        setReplicaBusy(true);
-                        setReplicaError(false);
-                        try {
-                          await chatApi.setChannelReplicaEnabled(
-                            active.id,
-                            !replicaEnabled,
-                          );
-                          setReplicaOverride(!replicaEnabled);
-                        } catch {
-                          setReplicaError(true);
-                        } finally {
-                          setReplicaBusy(false);
-                        }
-                      }}
-                    >
-                      {replicaEnabled
-                        ? t("members.disableReplica")
-                        : t("members.enableReplica")}
-                    </Button>
-                  )}
-                  {/* Only the owner may remove members — the core rejects a non-owner's kick. */}
-                  {isOwner && !memberIsOwner && !m.pending && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-11 w-11 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
-                      title={t("members.transferOwner")}
-                      aria-label={`${t("members.transferOwner")} ${name}`}
-                      disabled={transferring || removing}
-                      onClick={() =>
-                        channelId &&
-                        setPendingTransfer({ channelId, id: m.user_id, name })
-                      }
-                    >
-                      <Crown className="h-4 w-4" />
-                    </Button>
-                  )}
-                  {isOwner && !memberIsOwner && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-11 w-11 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
-                      title={t("common.remove")}
-                      aria-label={`${t("common.remove")} ${name}`}
-                      disabled={removing || transferring}
-                      onClick={() =>
-                        channelId &&
-                        setPendingRemoval({ channelId, id: m.user_id, name })
-                      }
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                  )}
-                </motion.div>
-              );
-            }}
-          />
-        </motion.div>
+                    {t("common.cancel")}
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    disabled={removing}
+                    onClick={() => void confirmRemoval()}
+                  >
+                    {t("members.removeMember")}
+                  </Button>
+                </div>
+              </div>
+            )}
+            {!referenceOnly && pendingTransfer?.channelId === channelId && (
+              <div className="space-y-3 rounded-lg border p-3">
+                <p className="break-words text-sm" role="status">
+                  {t("members.confirmTransfer", { name: pendingTransfer.name })}
+                </p>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="ghost"
+                    disabled={transferring}
+                    onClick={() => setPendingTransfer(null)}
+                  >
+                    {t("common.cancel")}
+                  </Button>
+                  <Button
+                    disabled={transferring}
+                    onClick={() => void confirmTransfer()}
+                  >
+                    {t("members.transferOwner")}
+                  </Button>
+                </div>
+              </div>
+            )}
 
-        {isOwner && active?.kind === "channel" && (
-          <Button
-            variant="ghost"
-            className="text-destructive hover:text-destructive"
-            data-testid="dissolve-channel-trigger"
-            onClick={() => setConfirming(channelId)}
-          >
-            {t("members.dissolve")}
-          </Button>
-        )}
-        {pendingRemoval?.channelId === channelId && (
-          <div className="space-y-3 rounded-lg border border-destructive/30 p-3">
-            <p className="break-words text-sm" role="status">
-              {t("members.confirmRemove", { name: pendingRemoval.name })}
-            </p>
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="ghost"
-                disabled={removing}
-                onClick={() => setPendingRemoval(null)}
-              >
-                {t("common.cancel")}
-              </Button>
-              <Button
-                variant="destructive"
-                disabled={removing}
-                onClick={() => void confirmRemoval()}
-              >
-                {t("members.removeMember")}
-              </Button>
-            </div>
-          </div>
-        )}
-        {pendingTransfer?.channelId === channelId && (
-          <div className="space-y-3 rounded-lg border p-3">
-            <p className="break-words text-sm" role="status">
-              {t("members.confirmTransfer", { name: pendingTransfer.name })}
-            </p>
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="ghost"
-                disabled={transferring}
-                onClick={() => setPendingTransfer(null)}
-              >
-                {t("common.cancel")}
-              </Button>
-              <Button
-                disabled={transferring}
-                onClick={() => void confirmTransfer()}
-              >
-                {t("members.transferOwner")}
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {isOwner && addable.length > 0 && (
-          <div className="space-y-1.5">
-            <div className="text-[12px] font-semibold text-muted-foreground">
-              {t("members.addPeer")}
-            </div>
-            <VirtualRosterList
-              items={addable}
-              maxHeight={160}
-              className="space-y-0.5 overflow-y-auto rounded-lg border p-1"
-              itemKey={(p) => p.user_id}
-              renderItem={(p) => (
-                <button
-                  key={p.user_id}
-                  onClick={() => addMember(p.user_id)}
-                  className="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-accent/50"
-                >
-                  <div className="min-w-0 flex-1">
-                    <IdentityCrest
-                      id={peerAccountKey(p)}
-                      name={
-                        displayIdentity({
-                          accountId: p.account_id,
-                          deviceId: p.user_id,
-                          fallbackName: p.name,
-                          accounts,
-                          peers,
-                          favorites,
-                        }).name
+            {isOwner && addable.length > 0 && (
+              <details className="space-y-1.5">
+                <summary className="cursor-pointer py-2 text-sm font-medium">
+                  {t("members.addPeer")}
+                </summary>
+                <VirtualRosterList
+                  items={addable}
+                  maxHeight={160}
+                  className="space-y-0.5 overflow-y-auto rounded-lg border p-1"
+                  itemKey={(p) => p.user_id}
+                  renderItem={(p) => (
+                    <button
+                      key={p.user_id}
+                      disabled={busy}
+                      onClick={() =>
+                        void operation.run(() => addMember(p.user_id))
                       }
-                      status={statusFor(p.account_id)}
-                      variant="compact"
-                    />
-                  </div>
-                  <UserPlus className="h-4 w-4 shrink-0 text-signal" />
-                </button>
-              )}
-            />
-          </div>
+                      data-testid={`member-invite-${p.user_id}`}
+                      className="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-accent/50"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <IdentityCrest
+                          id={peerAccountKey(p)}
+                          name={
+                            displayIdentity({
+                              accountId: p.account_id,
+                              deviceId: p.user_id,
+                              fallbackName: p.name,
+                              accounts,
+                              peers,
+                              favorites,
+                            }).name
+                          }
+                          status={statusFor(p.account_id)}
+                          variant="compact"
+                        />
+                      </div>
+                      <UserPlus className="h-4 w-4 shrink-0 text-signal" />
+                    </button>
+                  )}
+                />
+              </details>
+            )}
+
+            <Button
+              variant="ghost"
+              className="w-full justify-start"
+              ref={settingsTriggerRef}
+              data-testid="group-settings-trigger"
+              onClick={() => {
+                setSettingsOpen(true);
+                setProfileTarget(null);
+                setPendingRemoval(null);
+                setPendingTransfer(null);
+              }}
+            >
+              <Settings className="h-4 w-4" />
+              {t("members.groupSettings")}
+            </Button>
+          </>
         )}
-        {activity.length > 0 && (
-          <div className="space-y-2 border-t pt-3">
-            <h3 className="text-xs font-semibold text-muted-foreground">
+        {settingsOpen && activity.length > 0 && (
+          <details className="space-y-2 border-t pt-3">
+            <summary className="cursor-pointer py-1 text-sm font-medium">
               {t("members.activity")}
-            </h3>
+            </summary>
             <ol className="max-h-36 space-y-1.5 overflow-y-auto text-xs text-muted-foreground">
               {activity
                 .slice(-20)
@@ -653,50 +844,127 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                   );
                 })}
             </ol>
-          </div>
+          </details>
         )}
-        <div className="border-t pt-3">
-          {dissolved ? (
-            <p className="text-xs text-muted-foreground">
-              {t("conversation.dissolvedChannelHint")}
-            </p>
-          ) : isOwner ? (
-            <p className="text-xs text-muted-foreground">
-              {t("members.transferBeforeLeave")}
-            </p>
-          ) : channelId !== null && confirmLeave === channelId ? (
-            <div className="space-y-3">
-              <p className="text-sm" role="status">
-                {t("members.confirmLeave")}
-              </p>
-              <div className="flex justify-end gap-2">
+        {!settingsOpen && (
+          <>
+            {isOwner && active?.kind === "channel" && (
+              <Button
+                variant="ghost"
+                className="text-destructive hover:text-destructive"
+                data-testid="dissolve-channel-trigger"
+                onClick={() => setConfirming(channelId)}
+              >
+                {t("members.dissolve")}
+              </Button>
+            )}
+            <div className="border-t pt-3">
+              {referenceOnly ? (
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    channel?.legacy_membership
+                      ? "conversation.legacySharedReferenceHint"
+                      : "conversation.sharedReferenceHint",
+                  )}
+                </p>
+              ) : dissolved ||
+                accountAccess?.role === "left" ||
+                (!accountAccess && channel?.left) ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      dissolved
+                        ? "conversation.dissolvedChannelHint"
+                        : "conversation.leftChannelHint",
+                    )}
+                  </p>
+                  <Button
+                    variant="ghost"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => {
+                      if (active?.kind === "channel")
+                        setDeleteChatTarget({
+                          id: active.id,
+                          name: active.name,
+                        });
+                    }}
+                  >
+                    {t("conversationDeletion.delete")}
+                  </Button>
+                </div>
+              ) : isOwner ? (
+                <p className="text-xs text-muted-foreground">
+                  {t("members.transferBeforeLeave")}
+                </p>
+              ) : accountAccess !== undefined &&
+                !canParticipateChannel(authority) ? null : channelId !== null &&
+                confirmLeave === channelId ? (
+                <div className="space-y-3">
+                  <p className="text-sm" role="status">
+                    {t(
+                      leaving
+                        ? "members.savedLeaveOptions"
+                        : "members.confirmLeave",
+                    )}
+                  </p>
+                  {(!leaving || typeof savedLeaveHistory === "boolean") && (
+                    <label className="flex items-start gap-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={
+                          leaving
+                            ? savedLeaveHistory === true
+                            : deleteLeaveHistory
+                        }
+                        disabled={leaving}
+                        onChange={(event) =>
+                          setDeleteLeaveHistory(event.target.checked)
+                        }
+                        className="mt-1 accent-primary"
+                      />
+                      <span>{t("members.deleteLeaveHistory")}</span>
+                    </label>
+                  )}
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="ghost"
+                      onClick={() => setConfirmLeave(null)}
+                    >
+                      {t(leaving ? "common.close" : "common.cancel")}
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      disabled={leaving}
+                      onClick={() => void finishLeave()}
+                    >
+                      {t("members.leave")}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
                 <Button
                   variant="ghost"
-                  disabled={leaving}
-                  onClick={() => setConfirmLeave(null)}
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => {
+                    setDeleteLeaveHistory(false);
+                    setConfirmLeave(channelId);
+                  }}
                 >
-                  {t("common.cancel")}
-                </Button>
-                <Button
-                  variant="destructive"
-                  disabled={leaving}
-                  onClick={() => void finishLeave()}
-                >
+                  <LogOut className="h-4 w-4" />
                   {t("members.leave")}
                 </Button>
-              </div>
+              )}
             </div>
-          ) : (
-            <Button
-              variant="ghost"
-              className="text-destructive hover:text-destructive"
-              onClick={() => setConfirmLeave(channelId)}
-            >
-              <LogOut className="h-4 w-4" />
-              {t("members.leave")}
-            </Button>
-          )}
-        </div>
+          </>
+        )}
+        {deleteChatTarget && (
+          <DeleteChatDialog
+            key={deleteChatTarget.id}
+            channelId={deleteChatTarget.id}
+            name={deleteChatTarget.name}
+            onClose={() => setDeleteChatTarget(null)}
+          />
+        )}
         <MemberProfileDialog
           target={profileTarget}
           onOpenChange={(next) => {

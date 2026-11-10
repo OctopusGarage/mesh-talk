@@ -1,0 +1,163 @@
+name: Full Chromium shards
+
+on:
+  workflow_call:
+    inputs:
+      operating_systems:
+        type: string
+        required: true
+        description: JSON array of hosted runner labels
+      shards:
+        type: string
+        default: '[1,2,3,4]'
+        description: Complete ordered partition identifiers
+      shard_total:
+        type: number
+        default: 4
+        description: Full-suite partition count for every requested OS
+      timeout_minutes:
+        type: number
+        default: 25
+        description: Total runner budget including preparation and evidence
+      max_parallel:
+        type: number
+        default: 4
+        description: Maximum concurrent full-suite shard runners
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Full UI regression (${{ matrix.os }}, shard ${{ matrix.shard }}/${{ inputs.shard_total }})
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix:
+        os: ${{ fromJSON(inputs.operating_systems) }}
+        shard: ${{ fromJSON(inputs.shards) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Reserve browser cleanup and evidence time
+        shell: bash
+        env:
+          UI_JOB_MINUTES: ${{ inputs.timeout_minutes }}
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+          const minutes = Number(process.env.UI_JOB_MINUTES);
+          if (!Number.isFinite(minutes) || minutes <= 2) throw Error("Invalid browser job budget");
+          const startedAt = Date.now();
+          const deadline = startedAt + (minutes - 2) * 60000;
+          mkdirSync("ui-runner-evidence", { recursive: true });
+          writeFileSync("ui-runner-evidence/budget.json", JSON.stringify({ startedAt, deadline, jobMinutes: minutes, reserveMinutes: 2 }));
+          appendFileSync(process.env.GITHUB_ENV, `MESH_UI_DEADLINE_MS=${deadline}\n`);
+          JS
+      - name: Validate full-suite partition layout
+        run: node ../scripts/evals/chromium-evidence.mjs layout
+        env:
+          CHROMIUM_OS: ${{ matrix.os }}
+          CHROMIUM_SHARDS: ${{ inputs.shards }}
+          CHROMIUM_TOTAL: ${{ inputs.shard_total }}
+          CHROMIUM_SHARD: ${{ matrix.shard }}
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      # Fresh browser contexts repeatedly load Vite's module graph. Windows'
+      # default 16K outbound ports can exhaust before TIME_WAIT sockets expire,
+      # leaving unrelated tests with ERR_NO_BUFFER_SPACE and a blank login page.
+      # Keep the server's port 5173 outside this disposable runner's client pool.
+      - name: Reserve Windows browser connection capacity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 set dynamicport tcp start=10000 num=55535
+          if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
+          netsh int ipv4 show dynamicport tcp
+      # One browser per runner preserves the existing resource budget. Spread
+      # tests across machines rather than competing with Vite on one runner.
+      - name: Run UI E2E
+        id: ui
+        run: node ../scripts/ci/ui-runner.mjs --workers=1 --retries=0 --shard=${{ matrix.shard }}/${{ inputs.shard_total }} --reporter=list,blob,json,../scripts/ci/ui-runner.mjs
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: full-results.json
+          EVAL_SOURCE_SHA: ${{ github.sha }}
+          MESH_TALK_E2E_COVERAGE: ${{ runner.os == 'Linux' && '1' || '0' }}
+      - name: Validate portable evidence from this full-suite shard
+        run: node ../scripts/evals/chromium-evidence.mjs extract full-results.json eval-results/chromium-shard
+        env:
+          CHROMIUM_SHARD: ${{ matrix.shard }}
+      - name: Upload portable shard evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: chromium-portable-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: frontend/eval-results/chromium-shard/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+      - name: Diagnose Windows browser connection failures
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 show dynamicport tcp
+          Get-NetTCPConnection | Group-Object State | Select-Object Count, Name | Format-Table
+      - name: Record Linux coverage identity
+        if: runner.os == 'Linux'
+        run: >-
+          node --input-type=module -e
+          'import { writeFileSync } from "node:fs";
+          writeFileSync("coverage/shard.json", JSON.stringify({ sourceSha: process.env.SOURCE_SHA, shard: Number(process.env.SHARD), total: 4 }));'
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SHARD: ${{ matrix.shard }}
+      - name: Upload Linux coverage parts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-coverage-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            frontend/coverage/shard.json
+            frontend/coverage/e2e-parts/*.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload UI evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-ui-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          # Blobs contain the screenshot/trace attachments used to rebuild reports.
+          compression-level: 0
+          path: |
+            frontend/blob-report/
+            frontend/full-results.json
+            frontend/ui-runner-evidence/
+          if-no-files-found: error
+          retention-days: 7
+      # Preserve partial attachments when interruption prevents a complete blob.
+      - name: Preserve raw attachments after unsuccessful UI execution
+        if: always() && steps.ui.outcome != 'success' && hashFiles('frontend/test-results/**') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-failure-attachments-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: frontend/test-results/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7

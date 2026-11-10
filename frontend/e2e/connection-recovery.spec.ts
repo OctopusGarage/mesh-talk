@@ -152,3 +152,49 @@ test("manual endpoint discovery retries after failure and submits a trimmed addr
   await address.fill("100.101.102.104");
   await expect(dialog.getByRole("status")).toHaveCount(0);
 });
+
+test("node unavailability recovers automatically after the identity boot window", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-connection");
+  await expect(page.getByTestId("diagnostics-status")).not.toContainText(
+    "Node unavailable",
+  );
+  await page.evaluate(() => {
+    const win = window as unknown as {
+      __identityUnavailable: boolean;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    win.__identityUnavailable = true;
+    const invoke = win.__TAURI_INTERNALS__.invoke.bind(win.__TAURI_INTERNALS__);
+    win.__TAURI_INTERNALS__.invoke = (cmd, args) => {
+      if (cmd === "owner_node_identity" && win.__identityUnavailable)
+        return Promise.reject(new Error("temporary identity timeout"));
+      return invoke(cmd, args);
+    };
+  });
+  // Include the thirty-second push-supported roster fallback and boot window.
+  await page.clock.runFor(65_000);
+  await expect(page.getByTestId("diagnostics-status")).toContainText(
+    "Node unavailable",
+  );
+  await page.evaluate(() => {
+    (
+      window as unknown as { __identityUnavailable: boolean }
+    ).__identityUnavailable = false;
+  });
+  await page.clock.runFor(12_000);
+  await expect(page.getByTestId("diagnostics-status")).not.toContainText(
+    "Node unavailable",
+  );
+  await expect(page.getByTestId("diagnostics-status")).toContainText(
+    "Ready to find people",
+  );
+});

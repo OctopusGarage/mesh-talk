@@ -9,9 +9,9 @@ import { createServer } from "node:net";
 import { createSocket } from "node:dgram";
 import { setTimeout as delay } from "node:timers/promises";
 import { verifyNativeBuild } from "../validation/native-build.mjs";
-import { captureNativeEvidence, captureNativeFailure, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
+import { captureNativeEvidence, captureNativeFailure, collectNativeApplicationLogs, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
-import { coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode } from "./native-core-scenarios.mjs";
+import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -242,16 +242,7 @@ async function login(username, register = false) {
   if (await execute("return document.querySelector('[data-testid=login-stay-signed-in]')?.checked === true;")) await click("login-stay-signed-in");
   await until("stay signed in disabled in production settings", async () => (await observe("get_app_settings")).stay_signed_in === false);
   await until("stay signed in unchecked", () => execute("const e=document.querySelector('[data-testid=login-stay-signed-in]'); return !!e && !e.disabled && !e.checked;"));
-  if (register) await click("login-tab-register");
-  await fill("login-username", username);
-  await fill("login-password", password);
-  await click("login-submit");
-  if (register) {
-    await until("registration completed", () => execute("return document.querySelector('[data-testid=login-tab-signin]')?.getAttribute('data-state')==='active';"));
-    await fill("login-password", password);
-    await click("login-submit");
-  }
-  await element("chat-shell");
+  await enterNativeAccount({ click, fill, element }, username, password, register);
   if (!registeredOwners.has(username)) {
     // The production node creates accounts/<local user UUID> after the real UI
     // login. Observe that on-disk namespace rather than guessing the username is
@@ -532,6 +523,7 @@ try {
   for (const child of [...owned]) {
     try { await stop(child, child === peer); } catch (error) { report.cleanupFailure = redact(error.message); process.exitCode = 1; }
   }
+  report.applicationLogs = await collectNativeApplicationLogs({ fixture, output, retired: owned.size === 0, password });
   report.cleanSource = initialStatus === "" && execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() === "" && execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() === gitSha;
   const finalBuildProof = await verifyNativeBuild({ sourceSha, appBinary, nodeBinary, expectedManifestDigest: initialBuildProof.manifestDigest });
   report.buildVerified = initialBuildProof.buildVerified && finalBuildProof.buildVerified && initialBuildProof.manifestDigest === finalBuildProof.manifestDigest;

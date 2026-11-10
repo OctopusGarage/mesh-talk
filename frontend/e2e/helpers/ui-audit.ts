@@ -80,7 +80,11 @@ export async function expectMinTargetSize(
   ).toBeGreaterThanOrEqual(minPx);
 }
 
-export async function expectVisibleFocus(page: Page, locator: Locator) {
+export async function expectVisibleFocus(
+  page: Page,
+  locator: Locator,
+  { dismissAfter = true }: { dismissAfter?: boolean } = {},
+) {
   await expect(locator).toBeVisible();
   await locator.scrollIntoViewIfNeeded();
   await page.evaluate(() => {
@@ -103,7 +107,7 @@ export async function expectVisibleFocus(page: Page, locator: Locator) {
       gainedVisibleFocusTreatment,
     "focused element has no visible focus treatment",
   ).toBe(true);
-  await page.keyboard.press("Escape");
+  if (dismissAfter) await page.keyboard.press("Escape");
 }
 
 type FocusStyle = {

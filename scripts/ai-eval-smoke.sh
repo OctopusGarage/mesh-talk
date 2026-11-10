@@ -95,7 +95,11 @@ require_file "frontend/e2e/ui-audit-message-log.spec.ts"
 require_file "frontend/e2e/ui-audit-composer.spec.ts"
 require_file "frontend/e2e/ui-audit-dialogs.spec.ts"
 require_contains "frontend/package.json" "\"e2e\": \"playwright test\"" "frontend e2e npm entry"
-require_contains ".github/workflows/e2e-ui.yml" "npx playwright test" "UI e2e CI entry"
+# Launcher wiring and execution semantics belong to ui-shard-orchestration and
+# ui-runner regressions; this smoke only checks their maintained entry points.
+require_file ".github/workflows/e2e-ui.yml"
+require_file ".github/workflows/ui-shards.yml"
+require_file "scripts/ci/ui-runner.mjs"
 
 # AI / agent rule contracts. These are deterministic prompt-contract checks, not LLM scoring.
 require_file "AGENTS.md"
@@ -124,7 +128,7 @@ require_contains "scripts/check-health.sh" "scripts/ai-eval-smoke.sh" "check-hea
 require_contains "scripts/check-health.sh" "scripts/test-ai-eval.mjs" "check-health AI eval harness tests"
 require_contains "scripts/check-health.sh" "frontend/dist" "fast gate Tauri frontendDist guard"
 require_contains "hooks/pre-commit" "git diff --cached --check" "pre-commit source check trigger"
-require_contains ".github/workflows/ci.yml" "make eval-smoke" "CI eval-smoke trigger"
+require_contains ".github/workflows/check-health.yml" "make eval-smoke" "Health eval-smoke trigger"
 require_contains ".github/workflows/ai-eval.yml" "make ai-eval" "CI/manual real AI eval trigger"
 require_contains ".github/pull_request_template.md" "AI eval / smoke" "PR validation checklist"
 require_contains "specifications/task_completion_criteria.md" "make eval-smoke" "definition-of-done eval entry"

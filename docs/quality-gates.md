@@ -8,9 +8,16 @@ Keep implementation plans and transient verification logs outside the repository
 
 Prefer independently reviewable PRs with one feature or mechanism. Record the exact
 tested commit, executed commands, failing-baseline evidence, native runner links,
-and limitations in the PR. Before requesting review run `make test` and
-`CI=1 MT_TARGET_CLEAN=0 ./scripts/check-health.sh`. The full health gate builds
-frontend assets before Tauri compilation, including on a fresh checkout.
+and limitations in the PR. Follow the [validation stages](testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
+for affected feedback and boundary evidence; comprehensive local preparation is
+optional, and current-candidate protected CI remains required before merge.
+Use the existing [PR preparation entry point](testing-feedback-loop.md#fast-pr-creation-and-optional-full-local-preparation)
+when comprehensive local evidence is needed. The full health gate builds frontend
+assets before Tauri compilation, including on a fresh checkout.
+
+[CI maintenance](ci-maintenance.md) owns efficiency and reliability decisions.
+Gate scope, evidence requirements and release acceptance remain owned here;
+an optimization proposal does not itself authorize reducing them.
 
 For each applicable scenario, assert externally observable outcomes. A test should
 fail with the old implementation or a deliberate incorrect mutation. Do not weaken
@@ -29,6 +36,12 @@ Rust unit/integration, real multi-process backend E2E, browser UI tests, and nat
 desktop tests answer different questions. A VM/Xvfb/software-renderer pass does not
 establish that a reported physical GPU or VMware compositor fault is fixed.
 
+A clean exact-current-main promotion into dev may use the
+[trusted main synchronization proof](ci-maintenance.md#synchronizing-an-accepted-main-source-into-dev)
+for PR preparation. Its source must already satisfy the existing complete trusted
+main-push acceptance owner, and dev still requires its own integration checks.
+Ordinary source changes retain the configured local patch coverage target.
+
 ## Test quality and evidence
 
 `node --test scripts/diagnostics/*.test.mjs` runs in three-platform CI and the health
@@ -39,35 +52,87 @@ Full health requires cargo-deny, cargo-machete, typos, Gitleaks, ShellCheck and
 actionlint; missing tools fail rather than being silently skipped. CI installs them
 explicitly. `--fast` remains a clearly labeled partial local check.
 
-Full macOS/Windows health checks also run on PRs, not only after merging to main.
-Independent matrix results are retained even if another platform fails. Superseded
-CI, health and mutation runs are cancelled automatically. Windows gates explicitly
-use Bash: opening a `.sh` file through PowerShell file associations or passing a
-literal test glob is not execution evidence. Require the native health check names
-alongside `verify` in branch protection to make these PR checks merge-blocking;
-the workflow alone does not change administrator branch-protection settings.
+For full-scope candidates, Health runs inside the UI orchestrator for every PR and
+merge candidate, and independently on its weekly/manual triggers. All three
+platform diagnostic suites remain mandatory. The complete frontend unit suite
+runs once with coverage on Linux; its platform branches use explicit mocks,
+while real browser/native behavior retains the platform matrices. Source-only
+formatting, type/lint and dependency policy run once. The Linux coverage producer seals
+its line map for same-run UI consumers; source, workflow, run, attempt and digest
+must all match. Superseded PR and merge candidates are cancelled automatically. Every main push
+has its own verification group, preserving pending commits for release evidence.
+Health uses a distinct caller-workflow/event namespace, so independent manual or
+scheduled runs cannot cancel the UI caller or its same-run evidence producer.
 
-Mutation testing uses pinned cargo-mutants 27.1.0 and examines both Rust workspace
-members. Each run rotates through one of 256 round-robin samples and partitions that
-same sample across four runners (subshards of 1024), without changing the selected
-mutant set. Each runner uses one in-place worker, incremental compilation, the
-symbol-free `mutants` Cargo profile, and the workspace-root build cache. Every
-mutant still runs the workspace tests through pinned cargo-nextest 0.9.148. Its
-`mutants` profile isolates each test in a process and fails tests exceeding 60
-seconds (with a five-second termination grace period). This catches injected busy
-loops even when they prevent an async timeout from being polled. The 240-second
-whole-suite deadline remains a hard failure. Reports are uploaded as `mutants-report-0`
-through `mutants-report-3`; assess all four reports for the complete sample.
+Inert documentation PRs may omit unrelated product execution only after the
+[documentation scope owner](ci-maintenance.md#documentation-only-pr-scope)
+proves eligibility against the exact tested merge. Required check identities
+remain present and validate that decision; their success means the product work
+is not applicable, not that its tests ran. Applicable documentation and security
+checks still run. Failed selection, mixed changes and authority inputs cannot
+qualify. Main pushes, merge groups, schedules and manual runs retain complete
+execution. Release consumers require checks from the owning successful trusted
+main-push workflow suite, never PR-only scope decisions.
 
-The mutation tool runs a hard unmutated workspace baseline for each nonempty
-selection; no separate workspace test duplicates that baseline. Empty selections
-only validate selection/tooling and do not constitute baseline evidence. Tiny
-dependency-free fixture crates check the actual pinned CLI, caught/advisory outcomes,
-baseline failure, empty selection, and hanging mutations via
-`node --test scripts/release/run-mutants.test.mjs`.
-Selected counts, completed outcomes, baseline,
-tool exit code and summary counts must agree. Zero selected mutations are recorded
-explicitly and may have no report; a stale report is rejected.
+Main branch protection requires direct execution checks instead of runner-backed
+copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct
+release policy and replacement mapping. Development-only dependency profiles use the
+[exact-merge CI scope owner](ci-maintenance.md#dependabot-development-acceptance)
+and retain the existing `dev` required `verify` compatibility context, whose Linux
+producer requires actual selected npm acceptance. That exception cannot authorize
+main or release acceptance. Source and all platform checks are
+individually required for main; Windows requires its build producer and all archive
+consumers. Release acceptance uses the same direct names plus its main-only
+checks, including ASan and mutation-runner acceptance. A newer failed, pending or
+missing check still rejects the exact source. Stable repeats this strict check
+immediately before public container upload and final release publication, after
+lengthy preparation; Nightly retains its final strict recheck. To inspect a migration, run
+`node scripts/ci/migrate-required-checks.mjs OWNER/REPO main PR_NUMBER --plan`.
+Use `--apply` only after the replacement checks pass on the current PR head. The
+command validates each bound GitHub App, rejects a changed candidate/policy,
+preserves strictness and unrelated checks, and verifies the readback. A missing
+old context before migration is pending, never permission to bypass a gate.
+Diagnostics run on the actual native test machine; a probe on another VM cannot
+certify that machine's network capability. Windows gates explicitly use Bash;
+opening a script through a file association does not establish execution.
+
+Mutation testing uses pinned cargo-mutants 27.1.0 and examines all Rust workspace
+members on daily and manual runs. PR, push and merge-queue runs validate the pinned
+runner with real fixture crates; they do not sample product mutations. See the
+[mutation execution policy](testing-feedback-loop.md) for ownership and budgets.
+Each broad run rotates through one of 256 round-robin samples. The existing
+[mutation evidence owner](../scripts/release/mutation-evidence.mjs) partitions
+that exact selected set into bounded chunks; worker count may grow without
+changing the sample. Each worker retains one in-place mutation process,
+incremental compilation, the symbol-free `mutants` Cargo profile and the existing
+workspace-root cache. Every mutant still tests the complete workspace through the
+pinned cargo-nextest runner. Scheduling and deadlines belong to that owner, the
+[Nextest profile](../.config/nextest.toml) and the workflow rather than duplicated
+numeric assumptions in documentation.
+
+Deep runs execute one complete unmutated workspace baseline before admitting
+workers. Its receipt must attest actual successful execution, complete inventory,
+source, configuration and tool identities. Workers verify the immutable artifact
+against trusted current-run producer outputs before skipping their own inline
+baseline. A successful producer from an earlier attempt of the same run may be
+reused by a failed-only rerun; another source or run cannot qualify it. Raw
+cargo-mutants reports in this mode must contain no inline `Baseline` outcome;
+never fabricate one. Shared execution uses the Linux kernel owner for separately grouped tool work;
+normal exit, cancellation and build cleanup must verify complete retirement before
+any baseline or worker result is sealed. Missing acknowledgment is incomplete
+evidence. Ordinary portable inline baseline execution remains supported.
+Empty selections validate selection/tooling only and do not constitute baseline
+evidence. Assess the baseline receipt and every planned worker report together.
+
+Selected counts, completed outcomes, baseline evidence, tool exits and summary
+counts must agree. A zero selection is recorded explicitly and may have no report;
+a stale report is rejected. Real dependency-free fixtures exercise the pinned CLI,
+caught/advisory outcomes, baseline failure, empty selection, hanging mutations
+and shared-baseline rejection through
+`node --test scripts/release/run-mutants.test.mjs`. Individual process watchdogs
+remain distinct from the complete-suite deadline: intentional hanging-mutant
+controls retain the pinned tool's caught classification, while a failed baseline
+or inconclusive tool-level timeout never qualifies acceptance.
 
 Survivors remain advisory and must be triaged in review. Unviable mutants are not
 caught mutants. Timeouts, usage/diff/internal errors, absent reports and incomplete
@@ -84,7 +149,7 @@ or skipped/inconclusive native scenarios as passed.
 
 Tag pushes and dispatches with `publish_release=false` build and verify a draft:
 
-`preflight → 12 desktop edition/target jobs → aggregate verification → draft upload → downloaded-draft verification`
+`preflight → 6 desktop target jobs → aggregate verification → draft upload → downloaded-draft verification`
 
 A dispatch with `publish_release=true` reuses that verified build:
 
@@ -96,8 +161,8 @@ uses `v<version>-ci.<run-id>` archive names and never writes a GitHub release.
 
 Each platform signs its ZIP and records build provenance. Builds only upload workflow
 artifacts; they cannot independently publish or update a release. The aggregate job
-requires exactly 18 ZIPs (12 desktop edition/target archives and six headless
-archives), 18 signature bundles and one nonempty CycloneDX SBOM: 37 release assets.
+requires exactly 12 ZIPs (six desktop target archives and six headless
+archives), 12 signature bundles and one nonempty CycloneDX SBOM: 25 release assets.
 Native builds reuse the Tauri CLI installed by `npm ci` from the committed lockfile,
 instead of compiling an unpinned latest CLI independently on every runner.
 
@@ -148,7 +213,7 @@ The dispatch downloads that build's `verified-release-evidence` and container
 artifacts, then downloads the current draft. It re-verifies signatures, provenance,
 installer metadata and the recorded snapshot, including repository/source/tag,
 release and asset IDs, sizes, digests and actual file bytes. It then requires
-current-source CI, both full health jobs, UI/backend E2E, Gitleaks, Scorecard, all
+current-source CI, every direct Health check, UI/backend E2E, Gitleaks, Scorecard, all
 three CodeQL languages and no unresolved main code-scanning alerts, plus container
 smoke tests before publishing relay images. Missing, running, skipped or failed
 checks stop publication. The latest check run is used; an older success cannot mask

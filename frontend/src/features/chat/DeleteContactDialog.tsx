@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Dialog,
@@ -9,7 +9,6 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useChat } from "@/store/chat";
-import { usePresenceFor } from "@/store/presence";
 import { captureRuntimeOwner } from "@/store/ownership";
 
 export function DeleteContactDialog({
@@ -24,15 +23,24 @@ export function DeleteContactDialog({
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const online = usePresenceFor(account).online;
+  const [clearHistory, setClearHistory] = useState(false);
+  const live = useRef(true);
+  const scope = useRef(captureRuntimeOwner());
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
   const ready = useChat((s) => s.ready);
   const save = async () => {
-    const lease = captureRuntimeOwner();
+    const lease = scope.current;
+    if (!lease.current()) return;
     setBusy(true);
     setFailed(false);
-    const ok = await useChat.getState().deleteContact(account);
+    const ok = await useChat.getState().deleteContact(account, clearHistory);
+    if (!live.current || !lease.current()) return;
     setBusy(false);
-    if (!lease.current()) return;
     if (ok) onClose();
     else setFailed(true);
   };
@@ -40,7 +48,7 @@ export function DeleteContactDialog({
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open && !busy) onClose();
+        if (!open) onClose();
       }}
     >
       <DialogContent
@@ -60,9 +68,25 @@ export function DeleteContactDialog({
         <p className="break-all font-mono text-xs text-muted-foreground">
           {account}
         </p>
-        {(failed || online) && (
+        <label className="flex items-start gap-3 text-sm">
+          <input
+            data-testid="delete-contact-history"
+            type="checkbox"
+            checked={clearHistory}
+            disabled={busy}
+            onChange={(event) => setClearHistory(event.target.checked)}
+            className="mt-1 accent-primary"
+          />
+          <span>
+            {t("contactDeletion.clearHistory")}
+            <span className="mt-1 block text-xs text-muted-foreground">
+              {t("contactDeletion.historyHint")}
+            </span>
+          </span>
+        </label>
+        {failed && (
           <p role="alert" className="text-sm text-destructive">
-            {t(online ? "contactDeletion.online" : "contactDeletion.error")}
+            {t("contactDeletion.error")}
           </p>
         )}
         <div className="flex flex-wrap justify-end gap-2">
@@ -70,15 +94,14 @@ export function DeleteContactDialog({
             id="delete-contact-cancel"
             data-testid="delete-contact-cancel"
             variant="outline"
-            disabled={busy}
             onClick={onClose}
           >
-            {t("common.cancel")}
+            {t(busy ? "common.close" : "common.cancel")}
           </Button>
           <Button
             data-testid="delete-contact-confirm"
             variant="destructive"
-            disabled={busy || online || !ready}
+            disabled={busy || !ready}
             onClick={() => void save()}
           >
             {t(busy ? "common.loading" : "contactDeletion.delete")}

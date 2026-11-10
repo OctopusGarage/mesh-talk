@@ -97,15 +97,14 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
             }
             MENU_SHOW => {
-                if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
-                    let _ = crate::window_visibility::show(&window);
-                    let _ = window.set_focus();
+                if let Err(error) = crate::window_visibility::restore_main(app) {
+                    log::warn!("Cannot restore main window from tray: {error}");
                 }
             }
             MENU_DIAGNOSTICS | MENU_SETTINGS | MENU_ABOUT | MENU_HELP => {
-                if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
-                    let _ = crate::window_visibility::show(&window);
-                    let _ = window.set_focus();
+                if let Err(error) = crate::window_visibility::restore_main(app) {
+                    log::warn!("Cannot restore main window for tray navigation: {error}");
+                } else {
                     let _ = app.emit("tray-navigate", event.id.as_ref());
                 }
             }
@@ -135,12 +134,13 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
 fn toggle_window_visibility(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
         match window.is_visible() {
-            Ok(true) => {
+            Ok(true) if !window.is_minimized().unwrap_or(false) => {
                 let _ = crate::window_visibility::hide(&window);
             }
             _ => {
-                let _ = crate::window_visibility::show(&window);
-                let _ = window.set_focus();
+                if let Err(error) = crate::window_visibility::restore_main(app) {
+                    log::warn!("Cannot restore main window on tray click: {error}");
+                }
             }
         }
     }

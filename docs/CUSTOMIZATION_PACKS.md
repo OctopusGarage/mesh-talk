@@ -1,10 +1,10 @@
 # Customization packs
 
-Mesh-Talk keeps its basic light, dark, and OLED themes in both desktop editions. The default edition installs the 40-sticker Google Noto ZIP on first launch. It is removable, and lite starts without it. Avatar libraries, personal themes, and custom sticker libraries are ZIP packs. The default edition bundles and installs the thirteen current avatar and theme collections plus Cat Stickers and Google Noto on first launch. Each is removable; removing one does not cause it to return on restart. The lite edition bundles no optional packs and starts with an empty optional library. Both editions can install a pack from the marketplace or a local ZIP file. Installed packs are stored per device in IndexedDB and remain available offline. Switching editions preserves packs already installed on that device. Removing an avatar library does not change avatars already selected for a profile or channel, because selected avatars are copied into the existing avatar store. Removing the active theme switches the app to dark. Removing a sticker pack makes its previously sent stickers display their fallback text on this device. Previously sent cat stickers use their original IDs and resolve to Cat Stickers artwork when that pack is installed. Previously sent unprefixed Noto stickers resolve through Google Noto (or a still-installed Noto Favorites pack); removing both leaves their emoji fallback. Existing Noto Favorites installations remain until the user removes them.
+Mesh-Talk includes basic light, dark, and OLED themes and starts without optional packs. Avatar libraries, personal themes, and sticker libraries can be installed from the marketplace or a local ZIP file. Installed packs are stored per device in IndexedDB and remain available offline, including packs installed by earlier releases. Removing an avatar library does not change avatars already selected for a profile or channel, because selected avatars are copied into the existing avatar store. Removing the active theme switches the app to dark. Removing a sticker pack removes its collection from the picker. New sticker messages retain their own encrypted media independently; older ID-only messages display their fallback text when their pack is absent. Previously sent cat stickers use their original IDs and resolve to Cat Stickers artwork when that pack is installed. Previously sent unprefixed Noto stickers resolve through Google Noto (or a still-installed Noto Favorites pack); removing both leaves their emoji fallback. Existing Noto Favorites installations remain until the user removes them.
 
-## Build editions
+## Desktop builds
 
-`cd frontend && npm run build` makes the default frontend and includes fifteen ZIPs under `dist/builtin-packs/`, including Google Noto. `npm run build:lite` makes the lite frontend without bundled pack ZIPs. Neither edition ships a separate Noto artwork directory. To build a lite desktop installer, set `MESH_TALK_VARIANT=lite` in the environment before running the Tauri build; the release workflow builds both editions for each platform. Default release ZIP names are unchanged, while lite release ZIPs end in `_lite.zip`. The editions use the same app identity, so they replace one another rather than install side by side.
+`cd frontend && npm run build` makes the frontend without optional pack ZIPs or a separate Noto artwork directory. Tauri builds use the same behavior. The release workflow publishes one desktop package per platform and CPU architecture, with no edition flag or filename suffix. Upgrading preserves packs already installed on the device.
 
 ## Create a pack
 
@@ -79,7 +79,7 @@ A sticker library:
 }
 ```
 
-A sticker pack has 1–100 stickers. Each sticker ID is unique within its pack, uses lowercase letters, digits, underscores, or hyphens, and is at most 40 characters. `fallback` is required, at most eight Unicode code points, and appears when a recipient has not installed the same pack. Sticker images are stored locally; chat messages send only the pack/sticker ID and fallback, so recipients must install the pack to see its artwork. Google Noto is a removable 40-sticker pack in the default edition and can be installed from the marketplace in either edition. Older unprefixed Noto messages retain emoji fallbacks when the pack is removed. Noto Favorites has been retired from the active catalog; existing installations and messages remain usable.
+A sticker pack has 1–100 stickers. Each sticker ID is unique within its pack, uses lowercase letters, digits, underscores, or hyphens, and is at most 40 characters. `fallback` is required, at most eight Unicode code points, and appears when a recipient has not installed the same pack. New sends snapshot the selected sticker image and a short semantic label, then deliver them as encrypted media with a pack/sticker identity and fallback. Choose a concise label that describes the emotion or situation, such as `Wave` or `静下心`; it is used in conversation previews and quoted replies, not the source filename. Recipients do not need to install the pack to view the image. Older ID-only messages still depend on an installed matching pack. Google Noto is a removable 40-sticker pack available from the marketplace. Older unprefixed Noto messages retain emoji fallbacks when the pack is removed. Noto Favorites has been retired from the active catalog; existing installations and messages remain usable.
 
 Package the files with a normal ZIP tool, keeping `manifest.json` at the root. Open **Settings → Appearance → Install ZIP** for a theme, open an avatar gallery and choose **Install ZIP** for an avatar library, or open a chat's **Stickers → Manage sticker packs → Install ZIP** for stickers. The same screens show marketplace packs with their versions and **Install**, **Reinstall**, or **Replace** actions, plus **Remove** for installed packs. Invalid packs leave installed packs untouched.
 
@@ -100,11 +100,177 @@ npm run pack:check -- ../my-pack.zip
 
 The app rejects oversized archives, duplicate ZIP entries, unexpected files, unsafe paths, unsupported image types, bad image signatures, invalid manifest values, and images that its browser engine cannot decode or that exceed 4096 pixels on either side or 16 million pixels total. Marketplace downloads also need to match the catalog's SHA-256 and the selected listing's ID, name, version, type, and avatar category. These checks protect the app's pack format; a checksum proves download integrity relative to the catalog, not that a creator is trustworthy. They cannot guarantee that an image has no maliciously crafted decoder payload, and they do not identify offensive, copyrighted, or otherwise inappropriate artwork. Review previews and the source before importing an unfamiliar pack. A locally installed ZIP does not become public automatically.
 
+## Sticker message delivery
+
+Installing a sticker pack adds a collection to the picker. Receiving one sticker
+does not install or fetch the rest of its pack. New sends snapshot the selected
+image and use ordinary encrypted media delivery; the attachment checksum binds
+the exact bytes. Updating, replacing or uninstalling a pack therefore cannot
+change retained new-message artwork. Legacy ID-only messages keep their existing
+installed-pack lookup and fallback behavior; their original images cannot be
+reconstructed reliably from an ID alone.
+
+For direct messaging, matching installed artwork can supply the image locally.
+The desktop registers validated installed snapshots with the current account's
+node; the optional in-memory cache is bounded to 128 images and 32 MiB and is
+rebuilt for each runtime. A pack ID or sticker ID alone never establishes a match:
+the incoming authenticated manifest must match the exact checksum and byte size.
+
+Compatible direct peers exchange only the original signed chunk headers when
+local artwork matches. The recipient reconstructs deterministic encrypted chunks
+from its local bytes, verifies every original event ID and signature, then uses
+the ordinary authorized admission, durable media persistence and exact receipt
+path. The headers contain no image payload. Both sender delivery and receiver
+recovery can negotiate this optimization. Missing, changed, evicted or invalid
+artwork and older peers fall back to ordinary media transfer. Relay-only delivery
+and channel media continue using their existing transfer paths. Removing an
+installed pack cannot change an image already retained in message history.
+
+The deployed MFM3 media envelope remains unchanged. Its filename carries a
+versioned presentation marker; it is never the user-facing name of a recognized
+sticker:
+
+- Legacy v1: `mt-sticker-v1-<base64url-no-padding(UTF-8(id + newline + fallback))>.<extension>`.
+- Labelled v2: `mt-sticker-v2-<base64url-no-padding(UTF-8(id + newline + fallback + newline + label))>.<extension>`.
+
+Both keep the original ID and fallback rules. The ID is 1–126 lowercase ASCII
+letters, digits, colons, periods, underscores or hyphens. The fallback is 1–8
+non-control Unicode scalar values, at most 32 UTF-8 bytes. Supported extensions
+are `png`, `jpg`, `webp` and `gif`, with matching MIME types. V1 names remain
+bounded to 233 ASCII bytes; v2 names are bounded to 255 ASCII bytes including
+the extension. A v2 label must be nonempty, trimmed, at most 80 Unicode scalar
+values, and contain no controls, surrogate values, bidi formatting characters
+(U+061C, U+200E/F, U+202A–202E, U+2066–2069), or U+FEFF. Extra fields and
+noncanonical encodings are rejected by both the Rust and TypeScript readers.
+
+New sends clean creator labels, collapse whitespace, and fit them to the name's
+remaining UTF-8/base64 budget at whole grapheme boundaries. Prefer short semantic
+labels; long pack/sticker IDs leave less room. When no usable label remains,
+the sender retains v1 compatibility. The ZIP manifest stays at format 1 and does
+not require repackaging. V2 labels belong to the sent message and remain stable
+through pack replacement/removal, retries, history reload, linked-device sharing
+and backup restoration. Legacy messages can use an available local pack label
+as best-effort presentation; their original label cannot be reconstructed from
+an unknown ID alone.
+
+Conversation previews, reply banners/quotes, history search, Favorites summaries
+and accessible descriptions use `[label]`, or the localized `[Sticker]` when no
+label can be recovered. Protected, expired and recalled content takes priority
+over that presentation. History and Favorites search match the semantic label
+or emoji fallback instead of encoded transport names. Ordinary attachment names
+retain their existing behavior. Save-as dialogs suggest a filesystem-safe image
+name derived from the sticker label, or `sticker` for unlabelled media, rather
+than the encoded marker. Native file notifications use the received v2
+label or `[Sticker]` for valid sticker media, subject to the existing focus,
+lock, notification-preview and private-mode policy; native notification body
+copy remains English like the existing host notifications.
+
+This marker conveys presentation and source identity, never read authorization.
+Older media-capable clients show v2 as an ordinary image, without its semantic
+sticker treatment. No positional fields, event kinds or file-kind discriminants
+are introduced. Artwork is contained in the existing 128-pixel chat area without
+cropping or an added bubble. Sticker receipt details use a compact accessible
+trigger; receipt still does not mean read or image-download completion.
+
+Sticker payloads must be nonempty and at most 3 MiB, have at most 4096 pixels per
+side and 16 million canvas pixels, and decode as their declared format. Animations
+are limited to 256 frames and 64 million aggregate canvas pixels. A conservative
+four-buffer canvas budget limits animation working buffers to 64 MiB; decoder
+allocation limits are additional best-effort checks, not a process memory sandbox.
+Complete bytes are validated before durable preview persistence or exposure.
+
+Local recovery retires once retained, authenticated group or own media has a
+durable copy, even when that transfer has no recipient completion record.
+Later recovery wakes must not decode and overwrite the same completed media.
+Missing media remains recoverable, and incoming offers with completion bindings
+remain pending until their completion metadata is durable. This local decision
+does not authorize network delivery proofs or synthesize recipient receipts.
+Incoming group media retains its real bound completion evidence. Already stored
+bytes still pass through the existing chunk-reclamation owner: local-only media
+can retire its chunks, while sources with other group members retain signed chunks
+under the channel replica budget. Skipping a byte rewrite must not skip that policy.
+Chunk reclamation remains best-effort; retiring local byte recovery does not assert
+that every storage cleanup write succeeded.
+
+Repeated sends can reuse an own-authored, retained, byte-identical sticker
+transfer among the last 256 visible messages in the same conversation with the
+same expiration deadline. Reuse requires complete verified source chunks;
+missing, erased or incompatible sources stage a fresh transfer. File keys are
+never reused across recipient conversations, groups or retention scopes. Normal
+event reconciliation transfers only missing ciphertext chunks. This is scoped
+reuse, not global hash-based discovery or convergent encryption.
+
+A file or sticker sent to several devices is one
+[logical file message](../CONTEXT.md#conversations-and-history). The sender's
+signed identity binding associates its exact destination manifests with that
+message; account history, recall and local deletion resolve the binding while
+consent and completion keep their device-specific event IDs. Equal artwork,
+transfer IDs or timestamps never establish message equivalence. Two intentional
+sends therefore remain two messages even when they reuse one transfer.
+
+The binding is supplemental signed metadata carried over authenticated direct
+sessions, private sibling reconciliation and encrypted post-office controls.
+Existing MFM3 media and account-history card encodings remain unchanged; older
+peers ignore the optional metadata and retain ordinary file delivery. Retained
+source cards can supply bindings for earlier sends when the original signing
+device is still available. After account adoption, an existing historical binding
+remains immutable; lazy repair cannot sign an old account's outgoing card with
+the newly loaded account certificate. Bindings are persisted in the account's
+encrypted storage and included in recovery snapshots using existing signed-event
+records.
+
+Every repeated message still needs completion for its exact manifest event.
+After ciphertext reclamation, a cached sticker may complete a new compatible
+manifest only when retained verified ancestry, source identity/certificate,
+recipient account, conversation and immutable transfer metadata agree and the
+durable bytes pass their checksum and image validation. A cache path or matching
+hash alone cannot create a delivery proof. This preserves exact completion
+controls for relay-only delivery as well as direct historical custody checks.
+
+Media retention, authorized source recovery, post-office custody, backup and
+linked-device attachment policy belong to the existing file subsystem. Deleting
+one message does not remove an image still referenced by another retained
+message. Explicit cleanup, expiry and recall keep their existing authority.
+A received message or past custody count does not guarantee available image
+bytes: an authorized reachable source must still retain them. The interface
+shows the fallback and transfer state while missing media is retried. Protected
+sending remains unavailable for stickers.
+
+## Account-scoped startup appearance
+
+Installed private packs are cached under both the local user and the verified
+cryptographic account. Startup restores the selected theme from that cache before
+enumerating unrelated gallery assets. This does not require a network download or
+completion of account synchronization.
+
+The desktop can expose public account/device IDs after its existing keystore
+unlock, while durable stores are still opening. That observation is bound to the
+current desktop session and startup attempt; it does not grant messaging or
+runtime access. Private appearance cannot load from an unverified last-account
+identifier. A temporary readiness failure retains the same account's restored
+appearance. Logout, account adoption or session replacement revokes the old
+scope and its wallpaper CSS, including delayed cache reads.
+
+The application root owns authenticated runtime and appearance startup before the
+chat view is downloaded. Its startup canvas uses the same wallpaper composition
+as chat and renders private images only for the matching unlocked user, account
+and runtime session.
+
+Normal native launches keep the initial window hidden until that authorized
+surface and selected local wallpaper are ready for display. The pack owner
+records when the selected-theme lookup has settled for the current scope; this
+permits display while unrelated gallery enumeration continues. Storage without
+that lookup retains full-library completion as a fallback.
+Signed-out and locked launches prepare their public entry surfaces. A one-shot
+native fallback preserves startup liveness; hidden autostart and explicit user
+visibility choices remain authoritative. Full message-store readiness and remote
+account synchronization do not delay a locally prepared appearance.
+
 ## Marketplace publishing
 
 [OctopusGarage/marketplace](https://github.com/OctopusGarage/marketplace) owns the shared pack specification, validator, creator Studio, source artwork, catalog, and immutable versioned ZIPs. Its GitHub Pages site hosts the public catalog at `https://octopusgarage.github.io/marketplace/catalog.json`. A listing gives the app ID, version, type, supported apps, ZIP size and SHA-256. Mesh Talk checks the catalog path, size, hash, and manifest identity before installing. The catalog currently lists 15 packs; artwork rights review status is marked `pending` for migrated packs and must be checked before reuse elsewhere.
 
-Mesh Talk keeps a snapshot of the 15 ZIPs in `site/market/packs/` for offline default bundling and tests, and pins its 15 preinstalled IDs and hashes in `frontend/bundled-packs.lock.json`. The lite build includes none. This snapshot is not served by Mesh Talk Pages; update it from a reviewed marketplace release when changing pinned packs. The two repositories have separate PRs and release schedules. Publish the marketplace PR before a Mesh Talk release that relies on its catalog.
+Mesh Talk keeps a snapshot of the 15 ZIPs in `site/market/packs/` for offline tests. Desktop builds include none. This snapshot is not served by Mesh Talk Pages; update it from a reviewed marketplace release when updating the test snapshot. The two repositories have separate PRs and release schedules. Publish the marketplace PR before a Mesh Talk release that relies on its catalog.
 
 ## Share a pack
 

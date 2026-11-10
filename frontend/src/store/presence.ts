@@ -69,6 +69,18 @@ export function agePresence(
             ...e,
             last_seen_secs: e.last_seen_secs + Math.floor(elapsed),
             expires_in_secs: Math.max(0, e.expires_in_secs - elapsed),
+            ...(e.registration_origin
+              ? {
+                  registration_origin:
+                    e.registration_origin.expires_in_secs > elapsed
+                      ? {
+                          ...e.registration_origin,
+                          expires_in_secs:
+                            e.registration_origin.expires_in_secs - elapsed,
+                        }
+                      : undefined,
+                }
+              : {}),
           }))
           .filter((e) => e.expires_in_secs > 0),
       }))
@@ -180,8 +192,11 @@ export const usePresence = create<PresenceState>((set, get) => ({
           consider(value.reconnect_expires_in_secs);
         if (value.devices) {
           for (const device of value.devices)
-            for (const evidence of device.evidence)
+            for (const evidence of device.evidence) {
               consider(evidence.expires_in_secs);
+              if (evidence.registration_origin)
+                consider(evidence.registration_origin.expires_in_secs);
+            }
         } else if (value.online) consider(15);
       }
       if (Number.isFinite(next))

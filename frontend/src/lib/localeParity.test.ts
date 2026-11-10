@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import en from "@/locales/en.json";
+import { SUPPORTED_LANGUAGES, LANGUAGE_LABELS } from "./i18n";
 
 const locales = import.meta.glob<Record<string, unknown>>("../locales/*.json", {
   eager: true,
@@ -36,11 +37,19 @@ function variables(value: string) {
 }
 
 it("keeps all supported locales aligned with the English interface", () => {
+  const registered = [...SUPPORTED_LANGUAGES].sort();
+  expect(
+    Object.keys(locales)
+      .map((path) => path.split("/").pop()!.replace(".json", ""))
+      .sort(),
+  ).toEqual(registered);
+  expect(Object.keys(LANGUAGE_LABELS)).toEqual([...SUPPORTED_LANGUAGES]);
   const reference = keys(en).sort();
   for (const [path, locale] of Object.entries(locales)) {
     expect(keys(locale).sort(), path).toEqual(reference);
     const translated = values(locale);
     for (const [key, source] of Object.entries(values(en))) {
+      expect(translated[key]?.trim(), `${path}: ${key}`).toBeTruthy();
       expect(variables(translated[key]), `${path}: ${key}`).toEqual(
         variables(source),
       );

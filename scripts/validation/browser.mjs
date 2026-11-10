@@ -24,7 +24,7 @@ if (mode === "portable") {
   delete env.PLAYWRIGHT_JSON_OUTPUT_FILE;
 }
 async function checked(args) {
-  const result = await runCommand(process.execPath, args, { cwd: process.cwd(), env, timeoutMs: timeoutSeconds * 1000, detached: false, logPath: path.join(directory, `step-${checked.index++}.log`) });
+  const result = await runCommand(process.execPath, args, { cwd: process.cwd(), env, timeoutMs: timeoutSeconds * 1000, logPath: path.join(directory, `step-${checked.index++}.log`) });
   process.stdout.write(result.output);
   if (result.timedOut) throw Error(`Browser ${mode} execution budget exceeded (${timeoutSeconds} seconds); evidence: ${directory}`);
   if (result.code !== 0) process.exit(result.code || 1);

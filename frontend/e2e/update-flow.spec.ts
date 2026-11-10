@@ -184,7 +184,7 @@ test("a long update download can be canceled and retried", async ({ page }) => {
   await expect(page.getByTestId("update-error")).toHaveCount(0);
 });
 
-test("Nightly choice persists, discards candidates and downloads the same lite edition", async ({
+test("Nightly choice persists, discards candidates and downloads the same desktop package", async ({
   page,
 }) => {
   await enterChat(page);
@@ -224,9 +224,9 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
           release_url:
             "https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.4-nightly.42.1",
           notes: "Nightly preview",
-          package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
+          package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip",
           package_size: 42,
-          edition: "lite",
+          edition: "default",
         };
       }
       if (cmd === "download_update") {
@@ -237,8 +237,8 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
           channel: args.updateChannel,
         };
         return {
-          path: "/Downloads/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
-          file_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
+          path: "/Downloads/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip",
+          file_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip",
         };
       }
       return original(cmd, args);
@@ -250,7 +250,7 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
   await page.getByTestId("check-for-updates").click();
   await expect(page.getByText("Installed: 0.4.4-nightly.41.1")).toBeVisible();
   await expect(
-    page.getByText(/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip/),
+    page.getByText(/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip/),
   ).toBeVisible();
   await choice.selectOption("stable");
   await expect(page.getByTestId("download-update")).toHaveCount(0);
@@ -274,4 +274,202 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
     version: "0.4.4-nightly.42.1",
     channel: "nightly",
   });
+});
+
+test("a signed update offers one-click installation and retries authorization without downloading again", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const window_ = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __updatePreparations: number;
+      __updateInstallations: number;
+      __installedUpdate?: unknown;
+    };
+    const original = window_.__TAURI_INTERNALS__.invoke;
+    window_.__updatePreparations = 0;
+    window_.__updateInstallations = 0;
+    window_.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "check_for_update")
+        return {
+          channel: "stable",
+          automatic_install: true,
+          current_version: "0.4.4",
+          latest_version: "0.4.5",
+          is_newer: true,
+          release_url:
+            "https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.5",
+          notes: "Smoother desktop updates",
+          package_name: "mesh-talk-update_v0.4.5_macos_arm64.app.tar.gz",
+          package_size: 42,
+          edition: "default",
+        };
+      if (command === "prepare_update") {
+        window_.__updatePreparations++;
+        return {
+          path: "/private/verified-update/payload",
+          file_name: "app.tar.gz",
+          installable: true,
+        };
+      }
+      if (command === "install_update") {
+        window_.__installedUpdate = {
+          version: args.version,
+          channel: args.updateChannel,
+        };
+        if (++window_.__updateInstallations === 1)
+          throw new Error("Authorization canceled");
+        return null;
+      }
+      return original(command, args);
+    };
+  });
+  await openAbout(page);
+  await page.getByTestId("check-for-updates").click();
+  await page
+    .getByRole("button", { name: "Update and restart", exact: true })
+    .click();
+  await expect(page.getByTestId("update-error")).toContainText(
+    "Authorization canceled",
+  );
+  await expect(
+    page.getByRole("button", { name: "Download manually", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Restart to update", exact: true })
+    .click();
+  await expect(page.getByTestId("update-install-status")).toContainText(
+    "Restarting Mesh-Talk",
+  );
+  await expect(page.getByTestId("check-for-updates")).toBeDisabled();
+  expect(
+    await page.evaluate(() => {
+      const result = window as unknown as {
+        __updatePreparations: number;
+        __updateInstallations: number;
+        __installedUpdate: unknown;
+      };
+      return [
+        result.__updatePreparations,
+        result.__updateInstallations,
+        result.__installedUpdate,
+      ];
+    }),
+  ).toEqual([1, 2, { version: "0.4.5", channel: "stable" }]);
+});
+
+test("incremental preparation and full fallback show truthful progress and cancellation prevents installation", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __emitUpdateProgress?: (progress: {
+        downloaded: number;
+        total: number;
+        phase?: "preparing" | "fallback";
+      }) => void;
+      __updateInstallations: number;
+    };
+    const original = host.__TAURI_INTERNALS__.invoke;
+    let rejectPreparation: (reason: Error) => void = () => {};
+    host.__updateInstallations = 0;
+    host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "check_for_update")
+        return {
+          channel: "stable",
+          automatic_install: true,
+          current_version: "0.4.4",
+          latest_version: "0.4.5",
+          is_newer: true,
+          release_url:
+            "https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.5",
+          notes: "Incremental download",
+          package_name: "mesh-talk-update_v0.4.5_macos_arm64.app.tar.gz",
+          package_size: 10485760,
+          edition: "default",
+        };
+      if (command === "prepare_update") {
+        const channel = args.onProgress as {
+          onmessage: NonNullable<typeof host.__emitUpdateProgress>;
+        };
+        host.__emitUpdateProgress = (progress) => channel.onmessage(progress);
+        return new Promise((_resolve, reject) => {
+          rejectPreparation = reject;
+        });
+      }
+      if (command === "cancel_update_download") {
+        rejectPreparation(new Error("Download canceled"));
+        return null;
+      }
+      if (command === "install_update") {
+        host.__updateInstallations++;
+        return null;
+      }
+      return original(command, args);
+    };
+  });
+  await openAbout(page);
+  await page.getByTestId("check-for-updates").click();
+  await page
+    .getByRole("button", { name: "Update and restart", exact: true })
+    .click();
+  await page.evaluate(() =>
+    (
+      window as unknown as { __emitUpdateProgress: (value: unknown) => void }
+    ).__emitUpdateProgress({ downloaded: 50, total: 100 }),
+  );
+  await expect(page.getByTestId("update-panel")).toContainText("50%");
+  await page.evaluate(() =>
+    (
+      window as unknown as { __emitUpdateProgress: (value: unknown) => void }
+    ).__emitUpdateProgress({ phase: "preparing", downloaded: 0, total: 0 }),
+  );
+  await expect(
+    page.getByText("Preparing update…", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("progress")).not.toHaveAttribute("value");
+  await expect(
+    page.getByLabel("Update channel", { exact: true }),
+  ).toBeDisabled();
+  await page.evaluate(() =>
+    (
+      window as unknown as { __emitUpdateProgress: (value: unknown) => void }
+    ).__emitUpdateProgress({
+      phase: "fallback",
+      downloaded: 0,
+      total: 10485760,
+    }),
+  );
+  await expect(
+    page.getByText("Downloading full update…", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("progress")).toHaveAttribute("value", "0");
+  await expectDialogFitsViewport(page, "about-dialog");
+  await page
+    .getByRole("button", { name: "Cancel download", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Update and restart", exact: true }),
+  ).toBeEnabled();
+  await expect(page.getByTestId("update-error")).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __updateInstallations: number })
+          .__updateInstallations,
+    ),
+  ).toBe(0);
 });

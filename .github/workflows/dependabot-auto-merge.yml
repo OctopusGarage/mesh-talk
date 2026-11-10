@@ -3,37 +3,70 @@ name: Dependabot auto-merge
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited]
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: Dependabot PR number to retry
-        required: true
-        type: number
 
 permissions:
   contents: write
   pull-requests: write
 
 concurrency:
-  group: dependabot-auto-merge-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  group: dependabot-auto-merge-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.user.login == 'dependabot[bot]'
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    timeout-minutes: 5
     steps:
-      # Auto-merge Dependabot updates that target the dev branch.
-      # Required CI status checks gate the merge; this workflow only enables it.
+      # Read metadata only. Never check out or execute the PR in this privileged workflow.
+      - id: metadata
+        if: github.event_name == 'pull_request_target'
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Classify auto-merge eligibility
+        id: policy
+        env:
+          TARGET: ${{ github.event.pull_request.base.ref }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          DIRECTORY: ${{ steps.metadata.outputs.directory }}
+          UPDATE: ${{ steps.metadata.outputs.update-type }}
+          NAMES: ${{ steps.metadata.outputs.dependency-names }}
+          MAINTAINER_CHANGES: ${{ steps.metadata.outputs.maintainer-changes }}
+        run: |
+          eligible=false
+          if [ "$TARGET" = dev ] && [ "$ECOSYSTEM" = npm_and_yarn ] && [ "$MAINTAINER_CHANGES" = false ]; then
+            case "$DIRECTORY" in
+              /frontend|/tools/help)
+                case "$UPDATE" in
+                  version-update:semver-patch|version-update:semver-minor)
+                    case "$NAMES" in
+                      ''|*@tauri-apps/*) ;;
+                      *) eligible=true ;;
+                    esac
+                    ;;
+                esac
+                ;;
+            esac
+          fi
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+      - name: Retain manual review for other updates
+        if: ${{ always() && steps.policy.outputs.eligible != 'true' }}
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          enabled="$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')"
+          if [ "$enabled" = true ]; then
+            gh pr merge --disable-auto "$PR_URL"
+          fi
+      # Required CI status checks still gate every eligible merge.
       - name: Enable auto-merge
+        if: steps.policy.outputs.eligible == 'true'
         run: |
           set -euo pipefail
 
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            pr_url="$SERVER_URL/$REPOSITORY/pull/$PR_NUMBER"
-          else
-            pr_url="$EVENT_PR_URL"
-          fi
+          pr_url="$EVENT_PR_URL"
 
           author="$(gh pr view "$pr_url" --json author --jq '.author.login')"
           base="$(gh pr view "$pr_url" --json baseRefName --jq '.baseRefName')"
@@ -57,19 +90,19 @@ jobs:
             exit 0
           fi
 
+          current_head="$(gh pr view "$pr_url" --json headRefOid --jq '.headRefOid')"
+          test "$current_head" = "$EVENT_HEAD"
+
           for attempt in 1 2 3; do
-            if gh pr merge --auto --squash "$pr_url"; then
+            if gh pr merge --auto --squash --match-head-commit "$EVENT_HEAD" "$pr_url"; then
               exit 0
             fi
             echo "Auto-merge enable failed on attempt $attempt; retrying..."
             sleep 5
           done
 
-          gh pr merge --auto --squash "$pr_url"
+          gh pr merge --auto --squash --match-head-commit "$EVENT_HEAD" "$pr_url"
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
           EVENT_PR_URL: ${{ github.event.pull_request.html_url || '' }}
-          PR_NUMBER: ${{ inputs.pr_number || '' }}
-          REPOSITORY: ${{ github.repository }}
-          SERVER_URL: ${{ github.server_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

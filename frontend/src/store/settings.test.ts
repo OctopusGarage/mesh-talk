@@ -6,8 +6,73 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import { useSettings } from "./settings";
 import { DEFAULT_RINGTONE } from "@/lib/ringtones";
 import { useAuth } from "./auth";
+import { registerRuntimeSnapshot } from "./ownership";
+import { DEFAULT_SCREENSHOT_SHORTCUTS } from "@/lib/screenshotShortcuts";
+
+it("retires a stalled initial settings read before a healthy retry", async () => {
+  vi.useFakeTimers();
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  let settled = false;
+  const pending = useSettings
+    .getState()
+    .load()
+    .then(() => {
+      settled = true;
+    });
+  try {
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(settled).toBe(true);
+    await pending;
+    invoke.mockResolvedValueOnce({ calls_enabled: true });
+    await useSettings.getState().load();
+    finish({ calls_enabled: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useSettings.getState().callsEnabled).toBe(true);
+  } finally {
+    finish?.({});
+    vi.useRealTimers();
+  }
+});
+
+it("loads device-local screenshot bindings and clears them when the owner changes", async () => {
+  const shortcuts = { capture: "Alt+KeyB", capture_hidden: null, global: true };
+  invoke.mockResolvedValue({ screenshot_shortcuts: shortcuts });
+  await useSettings.getState().load();
+  expect(useSettings.getState().screenshotShortcuts).toEqual(shortcuts);
+  useSettings.getState().setOwner("bob");
+  expect(useSettings.getState().screenshotShortcuts).toEqual(
+    DEFAULT_SCREENSHOT_SHORTCUTS,
+  );
+  expect(useSettings.getState().screenshotRegistration.global_active).toBe(
+    false,
+  );
+});
+
+it("ignores registration status from a replaced login generation", async () => {
+  let finish!: (status: unknown) => void;
+  invoke.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = useSettings.getState().syncScreenshotShortcuts();
+  useAuth.setState({ generation: 2 });
+  finish({ global_active: true, generation: 17, error: null });
+  await pending;
+  expect(useSettings.getState().screenshotRegistration.global_active).toBe(
+    false,
+  );
+});
 
 beforeEach(() => {
+  registerRuntimeSnapshot(() => ({ runEpoch: 0, identityEpoch: 0 }));
   invoke.mockReset();
   useAuth.setState({
     user: { id: "alice", username: "alice", display_name: "Alice" },
@@ -19,7 +84,11 @@ beforeEach(() => {
 });
 
 it("does not install an old owner's delayed settings", async () => {
-  let finish!: (value: { calls_enabled: boolean; ringtone: string }) => void;
+  let finish!: (value: {
+    calls_enabled: boolean;
+    ringtone: string;
+    notifications: boolean;
+  }) => void;
   invoke.mockImplementation(
     () =>
       new Promise((resolve) => {
@@ -32,16 +101,22 @@ it("does not install an old owner's delayed settings", async () => {
     generation: 1,
   });
   useSettings.getState().setOwner("bob");
-  finish({ calls_enabled: true, ringtone: "marimba" });
+  finish({ calls_enabled: true, ringtone: "marimba", notifications: true });
   await pending;
   expect(useSettings.getState().callsEnabled).toBe(false);
   expect(useSettings.getState().ringtone).toBe(DEFAULT_RINGTONE);
+  expect(useSettings.getState().notificationsEnabled).toBeNull();
 });
 
 describe("useSettings.load", () => {
   it("maps calls_enabled and the (valid) ringtone from persisted settings", async () => {
-    invoke.mockResolvedValue({ calls_enabled: true, ringtone: "marimba" });
+    invoke.mockResolvedValue({
+      calls_enabled: true,
+      ringtone: "marimba",
+      notifications: false,
+    });
     await useSettings.getState().load();
+    expect(useSettings.getState().notificationsEnabled).toBe(false);
     expect(useSettings.getState().callsEnabled).toBe(true);
     expect(useSettings.getState().ringtone).toBe("marimba");
   });
@@ -94,4 +169,22 @@ it("loads every presentation privacy field and restores safe defaults on owner r
     confirm_sensitive_copy: false,
     clipboard_clear_seconds: 0,
   });
+});
+
+it("does not install delayed settings after the same local owner adopts another account", async () => {
+  let runtime = { runEpoch: 1, identityEpoch: 1, accountId: "old-account" };
+  registerRuntimeSnapshot(() => runtime);
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = useSettings.getState().load();
+  runtime = { ...runtime, identityEpoch: 2, accountId: "adopted-account" };
+  finish({ calls_enabled: true, ringtone: "marimba", notifications: true });
+  await pending;
+  expect(useSettings.getState().callsEnabled).toBe(false);
+  expect(useSettings.getState().ringtone).toBe(DEFAULT_RINGTONE);
 });

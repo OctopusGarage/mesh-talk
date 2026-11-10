@@ -10,6 +10,7 @@ Requires Node.js 22 or newer. From the repository root:
 npm ci --prefix tools/help --ignore-scripts
 node --test tools/help/*.test.mjs
 node tools/help/build.mjs --out /tmp/mesh-talk-help
+node tools/help/build-site.mjs --out /tmp/mesh-talk-public
 node tools/help/server.mjs
 ```
 
@@ -21,9 +22,22 @@ inside the version snapshot at `v/<workspace-version>/`. A build does not delete
 older version directories already present in the output. A clean Pages build
 publishes the current version snapshot only.
 
-The build emits HTML, source Markdown, a full-body `index.json`, `version.json`,
-and `llms.txt`, both at the help root and in the version directory. Version comes
-from `[workspace.package]` in `Cargo.toml`.
+The help build emits HTML, source Markdown, `index.md`, a full-body `index.json`,
+`version.json`, `llms.txt` and `llms-full.txt`, both at the help root and in the
+version directory, plus a current-HTML sitemap. Version comes from
+`[workspace.package]` in `Cargo.toml` and identifies documentation source, not a
+published Stable release. Topic metadata uses distinct current/version canonical
+URLs; aggregate Markdown links retain their source scope.
+
+Use `build-site.mjs` for the complete deployable site, as Pages and browser
+fixtures do. It generates the project overview from `about-mesh-talk`, a project
+documentation index/full manual, structured application metadata and a sitemap
+covering the landing page and current help. Its `--url` defaults to
+`https://octopusgarage.github.io/mesh-talk/` and requires an HTTPS directory URL
+without credentials, query or fragment. It excludes the separately owned `market/`
+assets. Serve output over HTTP for local preview. Explicit `.md` files work on
+static hosting; `Accept: text/markdown` is not implemented for HTML URLs.
+See [publication contracts](../../docs/help-system.md#public-discovery-and-factual-accuracy).
 
 ## MCP client configuration
 

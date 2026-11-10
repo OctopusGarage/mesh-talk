@@ -14,6 +14,26 @@ import { useAvatars } from "./avatars";
 import { usePresence } from "./presence";
 import { useContactPolicy } from "./contactPolicy";
 import { usePrivacy } from "./privacy";
+import { auth } from "@/lib/api/auth";
+
+it("bounds the lock-status observation used before automatic login", async () => {
+  vi.useFakeTimers();
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const rejected = expect(auth.lockStatus()).rejects.toThrow("timed out");
+  try {
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejected;
+  } finally {
+    finish?.(null);
+    vi.useRealTimers();
+  }
+});
 
 beforeEach(() => {
   useAppLock.setState({ locked: false, busy: false, error: null });

@@ -69,3 +69,41 @@ test("missing, incomplete and inconsistent reports fail even when the tool exits
 test("usage, baseline, diff, timeout and internal failures never become advisory successes", () => {
   for (const code of [1, 3, 4, 5, 6, 70, 137, null]) assert.throws(() => validateMutationReport(3, report, code), /exit/);
 });
+
+test("bounded plans retain the exact rotating sample and reject tampering", async () => {
+  const { createMutationPlan, verifyMutationPlan } = await import("../release/mutation-evidence.mjs");
+  const selected = Array.from({ length: 129 }, (_, index) => ({ name: `mutant-${index}` }));
+  const plan = createMutationPlan(472, selected);
+  assert.equal(plan.workers.length, 33);
+  assert.ok(plan.workers.every(worker => worker.selected.length <= 4));
+  assert.deepEqual(plan.workers.flatMap(worker => worker.selected).sort((a, b) => a.name.localeCompare(b.name)), [...selected].sort((a, b) => a.name.localeCompare(b.name)));
+  verifyMutationPlan(plan);
+  assert.throws(() => verifyMutationPlan({ ...plan, workers: plan.workers.slice(1) }), /plan/);
+  assert.throws(() => createMutationPlan(1, [selected[0], selected[0]]), /duplicate/i);
+  assert.throws(() => createMutationPlan(1, [{ name: "same", diff: "first" }, { name: "same", diff: "changed rendering" }]), /duplicate/i);
+  assert.throws(() => createMutationPlan(1, Array.from({ length: 1025 }, (_, index) => ({ index }))), /capacity/);
+  assert.deepEqual(createMutationPlan(1, []).workers, []);
+});
+
+test("external reports require verified evidence and zero manufactured baseline records", async () => {
+  const { evidenceDigest, verifyBaselineReceipt } = await import("../release/mutation-evidence.mjs");
+  const receipt = { schema: 1, role: "mutation-baseline", identity: { source: "a", runId: "1" }, producerAttempt: "1", planDigest: "p", tests: 4, passed: 3, ignored: 1, files: { inventory: "i", execution: "e" } };
+  const expected = { identity: receipt.identity, producerAttempt: "1", planDigest: "p", receiptDigest: evidenceDigest(receipt) };
+  verifyBaselineReceipt(receipt, expected);
+  const external = { ...report, outcomes: report.outcomes.slice(1) };
+  assert.deepEqual(validateMutationReport(3, external, 2, { externalBaseline: receipt, expectedBaseline: expected }), { selected: 3, caught: 1, missed: 1, unviable: 1, timeout: 0 });
+  assert.throws(() => validateMutationReport(3, external, 2), /baseline/);
+  assert.throws(() => validateMutationReport(3, report, 2, { externalBaseline: receipt, expectedBaseline: expected }), /baseline/);
+  for (const wrong of [{ ...expected, producerAttempt: "2" }, { ...expected, identity: { source: "b" } }, { ...expected, receiptDigest: "wrong" }]) assert.throws(() => verifyBaselineReceipt(receipt, wrong));
+  assert.throws(() => verifyBaselineReceipt({ ...receipt, passed: 2 }, { ...expected, receiptDigest: evidenceDigest({ ...receipt, passed: 2 }) }), /incomplete/);
+});
+
+test("raw pinned outcomes omit only rendered diff and must retain every selected identity", async () => {
+  const { verifyMutationOutcomes } = await import("../release/mutation-evidence.mjs");
+  const selected = [{ name: "one", file: "src/lib.rs", replacement: "true", diff: "rendered patch" }, { name: "two", file: "src/lib.rs", replacement: "false", diff: "second patch" }];
+  const outcomes = selected.map(({ diff: _diff, ...identity }) => ({ scenario: { Mutant: identity }, summary: "CaughtMutant" }));
+  verifyMutationOutcomes(selected, { outcomes });
+  assert.throws(() => verifyMutationOutcomes(selected, { outcomes: [outcomes[0], outcomes[0]] }), /omission or duplicate/);
+  assert.throws(() => verifyMutationOutcomes(selected, { outcomes: outcomes.slice(1) }), /omission or duplicate/);
+  assert.throws(() => verifyMutationOutcomes(selected, { outcomes: [{ scenario: { Mutant: { ...outcomes[0].scenario.Mutant, replacement: "0" } } }, outcomes[1]] }), /omission or duplicate/);
+});

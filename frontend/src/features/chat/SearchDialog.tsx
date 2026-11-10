@@ -15,7 +15,13 @@ import { IdentityGlyph } from "@/components/identity";
 import { chat } from "@/lib/api";
 import { formatDay } from "@/lib/format";
 import { useChat, type Conversation } from "@/store/chat";
-import type { SearchHitInfo } from "@/lib/types";
+import type { ReferencedSearchHit, RecentSearch } from "@/lib/api/chat";
+import { captureRuntimeOwner } from "@/store/ownership";
+import { useAuth } from "@/store/auth";
+import {
+  fromHistoryItem,
+  sameSearchReference,
+} from "@/store/conversationState";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { visibleSearchHits } from "@/lib/contactVisibility";
 import { rosterProjection } from "@/lib/rosterProjection";
@@ -26,15 +32,27 @@ export function SearchDialog() {
   const peers = useChat((s) => s.peers);
   const roster = rosterProjection(peers);
   const ready = useChat((s) => s.ready);
+  const runEpoch = useChat((s) => s.runEpoch);
+  const identityEpoch = useChat((s) => s.identityEpoch);
+  const owner = useAuth((s) => s.user?.id);
+  const generation = useAuth((s) => s.generation);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [results, setHits] = useState<SearchHitInfo[]>([]);
+  const [results, setHits] = useState<ReferencedSearchHit[]>([]);
   const contacts = useContactPolicy((s) => s.contacts);
   const policyLoaded = useContactPolicy((s) => s.loaded);
   const hits = useMemo(
     () => visibleSearchHits(results, peers, contacts, policyLoaded),
     [results, contacts, peers, policyLoaded],
   );
+  const [coverage, setCoverage] = useState<RecentSearch["coverage"] | null>(
+    null,
+  );
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  const navigation = useRef(0);
+  const visibleHits = useRef(hits);
+  visibleHits.current = hits;
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState(false);
   const [retryTick, setRetryTick] = useState(0);
@@ -61,7 +79,13 @@ export function SearchDialog() {
   useEffect(() => {
     // Don't invoke backend search before the node is up (gates the one node-dependent
     // control reachable during the two-phase startup window).
-    if (!dialogOpen || !ready) return;
+    setHits([]);
+    setCoverage(null);
+    setContextError(null);
+    setOpening(false);
+    navigation.current++;
+    const lease = captureRuntimeOwner();
+    if (!dialogOpen || !ready || !lease.current()) return;
     if (!query.trim()) {
       setHits([]);
       setSearching(false);
@@ -76,49 +100,95 @@ export function SearchDialog() {
     let active = true;
     timer.current = setTimeout(async () => {
       try {
-        const results = await chat.search(query.trim());
-        if (active) {
-          setHits(results);
+        const results = await chat.searchRecent(lease.owner!, query.trim());
+        if (active && lease.current()) {
+          setHits(results.hits);
+          setCoverage(results.coverage);
           setActiveIdx(0);
         }
       } catch {
-        if (active) {
+        if (active && lease.current()) {
           setHits([]);
           setSearchError(true);
         }
       } finally {
-        if (active) setSearching(false);
+        if (active && lease.current()) setSearching(false);
       }
     }, 250);
     return () => {
       active = false;
       clearTimeout(timer.current);
     };
-  }, [query, dialogOpen, ready, retryTick]);
+  }, [
+    query,
+    dialogOpen,
+    ready,
+    retryTick,
+    owner,
+    generation,
+    runEpoch,
+    identityEpoch,
+  ]);
 
-  const go = (h: SearchHitInfo) => {
-    let conv: Conversation;
-    if (h.is_channel) {
-      conv = { kind: "channel", id: h.target, name: h.label };
-    } else {
-      // Resolve a device-id target to its account so account_history works.
-      conv = {
-        kind: "account",
-        id: h.account_id ?? roster.accountForDevice(h.target) ?? h.target,
-        name: h.label,
-      };
+  const go = async (h: ReferencedSearchHit) => {
+    if (opening || !visibleHits.current.includes(h)) return;
+    const lease = captureRuntimeOwner();
+    if (!lease.current()) return;
+    const request = ++navigation.current;
+    const reference = h.reference;
+    const account =
+      reference.kind === "legacy-device"
+        ? (h.account_id ?? roster.accountForDevice(reference.target))
+        : reference.target;
+    if (!account) {
+      setContextError("search.legacyUnavailable");
+      return;
     }
-    void open(conv, {
-      wallClock: h.wall_clock,
-      text: h.text,
-      fromMe: h.from_me,
-    });
-    setDialogOpen(false);
+    const conv: Conversation = {
+      kind: reference.kind === "channel" ? "channel" : "account",
+      id: account,
+      name: h.label,
+    };
+    setOpening(true);
+    setContextError(null);
+    try {
+      const context = await chat.searchContext(lease.owner!, reference);
+      if (
+        !lease.current() ||
+        request !== navigation.current ||
+        !visibleHits.current.includes(h)
+      )
+        return;
+      if (
+        context.status !== "found" ||
+        !sameSearchReference(reference, context.reference) ||
+        reference.message_id === null ||
+        !context.messages.some(
+          (row) =>
+            row.id === reference.message_id &&
+            !row.recalled &&
+            (row.expires_at_ms == null || row.expires_at_ms > Date.now()),
+        )
+      ) {
+        setContextError("search.contextUnavailable");
+        return;
+      }
+      void open(conv, {
+        reference,
+        context: context.messages.map(fromHistoryItem),
+      });
+      setDialogOpen(false);
+    } catch {
+      if (lease.current() && request === navigation.current)
+        setContextError("search.contextUnavailable");
+    } finally {
+      if (lease.current() && request === navigation.current) setOpening(false);
+    }
   };
 
   // Keyboard navigation across results (↑/↓ move, Enter opens).
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (searching || searchError || hits.length === 0) return;
+    if (searching || opening || searchError || hits.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActiveIdx(Math.min(selectedIdx + 1, hits.length - 1));
@@ -128,7 +198,7 @@ export function SearchDialog() {
     } else if (e.key === "Enter") {
       e.preventDefault();
       const h = hits[selectedIdx];
-      if (h) go(h);
+      if (h) void go(h);
     }
   };
 
@@ -137,7 +207,10 @@ export function SearchDialog() {
       open={dialogOpen}
       onOpenChange={(next) => {
         setDialogOpen(next);
-        if (!next) setSearching(false);
+        if (!next) {
+          setSearching(false);
+          navigation.current++;
+        }
       }}
     >
       <DialogTrigger asChild>
@@ -186,6 +259,19 @@ export function SearchDialog() {
             }
           />
         </div>
+        {coverage && !searching && (
+          <p role="status" className="text-xs text-muted-foreground">
+            {t("search.recentCoverage", {
+              count: coverage.per_conversation_limit,
+            })}
+            {coverage.truncated && <> {t("search.truncated")}</>}
+          </p>
+        )}
+        {contextError && (
+          <p role="alert" className="text-sm text-muted-foreground">
+            {t(contextError)}
+          </p>
+        )}
         <div
           ref={resultsScroll}
           className="min-h-0 max-h-80 flex-1 space-y-1 overflow-y-auto"
@@ -238,7 +324,8 @@ export function SearchDialog() {
                   id={`search-result-${i}`}
                   role="option"
                   data-testid="search-result"
-                  onClick={() => go(h)}
+                  disabled={opening}
+                  onClick={() => void go(h)}
                   onMouseEnter={() => setActiveIdx(i)}
                   aria-selected={i === selectedIdx}
                   className={

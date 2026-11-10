@@ -5,7 +5,7 @@ Use an existing routed network or a configured post-office bridge to reach anoth
 ## Use an existing reachable path
 
 1. Set up the routed network outside Mesh-Talk, such as Tailscale or EasyTier.
-2. Open **More → Settings → Connection & delivery**.
+2. Open **More → Settings → Network & delivery**.
 3. Choose **Device discovery scope → Local and routed networks**. Mesh-Talk can use supported local Tailscale and EasyTier inventories when available.
 4. If discovery is unavailable, choose **Add device address…** and supply the reachable remote endpoint.
 5. Check **More → Connection** to distinguish discovery from an established connection.

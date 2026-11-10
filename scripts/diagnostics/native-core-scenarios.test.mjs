@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Writable } from "node:stream";
+import { runInNewContext } from "node:vm";
 import { writeChildCommand } from "./native-core-scenarios.mjs";
 test("Windows native helper only emits bounded owned-PID control keys with ABI-sized SendInput", async () => {
   const { nativeWindowsKeyboardScript } = await import("./native-core-scenarios.mjs");
-  for (const [key, vk] of [["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33]]) {
+  for (const [key, vk] of [["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33], ["\uE00F", 34]]) {
     const script = nativeWindowsKeyboardScript(12345, key);
     assert.ok(script.includes(`[NativeKeyboard]::SendOwned(12345, ${vk})`));
     for (const text of ["GetForegroundWindow", "GetWindowThreadProcessId", "actualPid != ownedPid", "Marshal.SizeOf(typeof(INPUT))", "SendInput(2", "inserted != 2", "GetLastWin32Error", "LayoutKind.Explicit", "MOUSEINPUT", "KEYEVENTF_KEYUP", "EnumWindows", "IsWindowVisible", "SetForegroundWindow", "FocusOwned", "Mark 'start'", "Mark 'activate'", "Mark 'compiled'", "keyboard:owned", "Mark 'sent'", "Out.Flush"]) assert.ok(script.includes(text), text);
@@ -23,6 +24,28 @@ test("Windows native helper only emits bounded owned-PID control keys with ABI-s
   assert.ok(runner.includes('until("native keyboard helper completion", () => !owned.has(child), process.platform === "win32" ? 60000 : 10000)'));
   assert.ok(runner.includes("redact(child.output.slice(-2000))"));
   assert.ok(runner.includes("nativeWindowsKeyboardScript(pid, value)"));
+});
+test("every emitted Windows control key is accepted by the native policy", async () => {
+  const { nativeWindowsKeyboardScript } = await import("./native-core-scenarios.mjs");
+  for (const [key, vk] of [["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33], ["\uE00F", 34]]) {
+    const script = nativeWindowsKeyboardScript(12345, key);
+    const rejected = script.match(/if \((vk !=[^)]*)\) throw new InvalidOperationException\("Unsupported control key"\)/)?.[1];
+    assert.ok(rejected, "generated native key rejection policy is present");
+    const acceptedKeys = [...rejected.matchAll(/vk != (\d+)/g)].map(match => Number(match[1]));
+    assert.ok(acceptedKeys.includes(vk), `emitted VK${vk} is accepted by native policy`);
+    assert.deepEqual(acceptedKeys, [9, 13, 27, 33, 34], "native policy rejects every unsupported VK");
+  }
+});
+test("Windows paging keys retain the extended-key flag without changing other controls", async () => {
+  const { nativeWindowsKeyboardScript } = await import("./native-core-scenarios.mjs");
+  for (const [key, vk, extended] of [["\uE004", 9, false], ["\uE007", 13, false], ["\uE00C", 27, false], ["\uE00E", 33, true], ["\uE00F", 34, true]]) {
+    const script = nativeWindowsKeyboardScript(12345, key);
+    const policy = script.match(/uint extended = (.*?) \? 1u : 0u;/)?.[1];
+    assert.ok(policy, "generated native extended-key policy is present");
+    const extendedKeys = [...policy.matchAll(/vk == (\d+)/g)].map(match => Number(match[1]));
+    assert.equal(extendedKeys.includes(vk), extended, `VK${vk} native extended flag`);
+    assert.deepEqual(extendedKeys, [33, 34], "only paging keys use the extended flag");
+  }
 });
 test("cold receipt checkpoint requires exited peer and durable original IDs before navigation", async () => {
   const { receiptColdRestartCheckpoint } = await import("./native-core-scenarios.mjs");
@@ -141,21 +164,41 @@ test("native historical rendering uses the focusable message log and real PageUp
   const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
   const commands = [], keys = [];
   let polls = 0;
-  await revealHistoricalNativeMessage({ execute: async (_script, args) => args ? ++polls === 3 : true, command: async (method, path, body) => { commands.push({ method, path, body }); return { "element-6066-11e4-a52e-4f735466cecf": "log" }; }, key: async value => keys.push(value), until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("history not visible"); } }, "old message");
+  await revealHistoricalNativeMessage({ execute: async (_script, args) => args ? { visible: ++polls === 3 } : true, command: async (method, path, body) => { commands.push({ method, path, body }); return { "element-6066-11e4-a52e-4f735466cecf": "log" }; }, key: async value => keys.push(value), until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("history not visible"); } }, "old message");
   assert.equal(commands[0].body.value, '[role="log"]');
   assert.equal(commands[1].path, "/element/log/click");
   assert.deepEqual(keys, ["\uE00E", "\uE00E"]);
 });
 
+test("native historical rendering scrolls until the receipt badge clears both log edges", async () => {
+  const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
+  for (const [initialTop, expectedKey, hasBadge] of [[93, "\uE00E", true], [610, "\uE00F", true], [93, null, false]]) {
+    let top = initialTop;
+    const keys = [];
+    const rect = (top, bottom) => ({ top, bottom, left: 300, right: 1010, width: 710, height: bottom - top });
+    const badge = { getBoundingClientRect: () => rect(top, top + 24) };
+    const bubble = { textContent: "old receipt", getBoundingClientRect: () => rect(top - 55, top + 26), querySelectorAll: () => hasBadge ? [badge] : [] };
+    const log = { getBoundingClientRect: () => rect(102, 624) };
+    const document = { activeElement: log, querySelector: () => log, querySelectorAll: () => [bubble] };
+    await revealHistoricalNativeMessage({
+      execute: async (script, args = []) => Function("document", "innerWidth", "innerHeight", `return function(){${script}}`)(document, 1040, 720)(...args),
+      command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }),
+      key: async value => { keys.push(value); top = 300; },
+      until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("receipt remains clipped"); },
+    }, "old receipt");
+    assert.deepEqual(keys, expectedKey ? [expectedKey] : [], "an intersecting body is sufficient only when there is no receipt footer");
+  }
+});
+
 test("native historical rendering does not turn missing history into success", async () => {
   const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
-  await assert.rejects(revealHistoricalNativeMessage({ execute: async (_script, args) => !args, command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }), key: async () => {}, until: async (_label, poll) => { if (await poll()) return true; throw new Error("history not visible"); } }, "missing message"), /history not visible/);
+  await assert.rejects(revealHistoricalNativeMessage({ execute: async (_script, args) => args ? { visible: false } : true, command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }), key: async () => {}, until: async (_label, poll) => { if (await poll()) return true; throw new Error("history not visible"); } }, "missing message"), /history not visible/);
 });
 
 test("native historical rendering waits for asynchronous history hydration before locating the scroller", async () => {
   const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
   let hydrated = false, polls = 0;
-  await revealHistoricalNativeMessage({ execute: async (_script, args) => args ? true : (hydrated = ++polls > 1), command: async () => { assert.equal(hydrated, true); return { "element-6066-11e4-a52e-4f735466cecf": "log" }; }, key: async () => { throw new Error("visible history needs no key"); }, until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("not hydrated"); } }, "restored message");
+  await revealHistoricalNativeMessage({ execute: async (_script, args) => args ? { visible: true } : (hydrated = ++polls > 1), command: async () => { assert.equal(hydrated, true); return { "element-6066-11e4-a52e-4f735466cecf": "log" }; }, key: async () => { throw new Error("visible history needs no key"); }, until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("not hydrated"); } }, "restored message");
   assert.equal(polls, 2);
 });
 
@@ -256,22 +299,33 @@ test("native attachment fixture creates an owned download directory before confi
   const { prepareNativeDownloadFixture } = await import("./native-core-scenarios.mjs");
   const fixture = await mkdtemp(join(tmpdir(), "native-download-fixture-"));
   const owner = "fixture-user";
+  const account = "0123456789abcdef0123456789abcdef";
   let settings = { download_dir: "", stay_signed_in: false, retention_days: 30 };
   const calls = [];
   try {
     await assert.rejects(stat(join(fixture, "downloads")), { code: "ENOENT" });
     const invoke = async (command, args) => {
-      assert.equal(args.owner, owner, "fixture settings remain scoped to the signed-in owner");
       calls.push(command);
-      if (command === "get_app_settings") return settings;
+      if (command === "account_id") { assert.deepEqual(args, {}); return account; }
+      assert.equal(args.owner, owner, "fixture settings remain scoped to the signed-in owner");
+      if (command === "get_app_settings") {
+        const snapshot = { ...settings };
+        if (calls.filter((call) => call === "get_app_settings").length === 1)
+          settings = { ...settings, retention_days: 7 };
+        return snapshot;
+      }
       assert.equal(command, "set_app_settings");
-      assert.equal((await stat(args.settings.download_dir)).isDirectory(), true, "save destination exists before it is configured");
-      settings = args.settings;
+      assert.equal(args.expectedAccount, account, "settings target the current cryptographic account");
+      assert.deepEqual(Object.keys(args).sort(), ["expectedAccount", "owner", "patch", "settings"]);
+      assert.equal(args.settings.retention_days, 30, "required IPC settings carrier may be stale");
+      assert.equal((await stat(args.patch.download_dir)).isDirectory(), true, "save destination exists before it is configured");
+      assert.deepEqual(args.patch, { download_dir: join(fixture, "downloads") });
+      settings = { ...settings, ...args.patch };
     };
     const directory = await prepareNativeDownloadFixture({ fixture, owner, invoke });
     assert.equal(directory, join(fixture, "downloads"));
-    assert.deepEqual(settings, { download_dir: directory, stay_signed_in: false, retention_days: 30 });
-    assert.deepEqual(calls, ["get_app_settings", "set_app_settings", "get_app_settings"]);
+    assert.deepEqual(settings, { download_dir: directory, stay_signed_in: false, retention_days: 7 });
+    assert.deepEqual(calls, ["account_id", "get_app_settings", "set_app_settings", "get_app_settings"]);
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
 
@@ -317,4 +371,57 @@ test("public restoration rechecks an early empty CLI roster despite stale pre-pr
   });
   assert.equal(found, rawPeer);
   assert.equal(queries, 2, "old stdout and one early empty query cannot prove current public discovery");
+});
+
+test("native account entry submits once and defers the optional backup reminder", async () => {
+  const { enterNativeAccount } = await import("./native-core-scenarios.mjs");
+  for (const register of [false, true]) {
+    const calls = [];
+    const ui = {
+      click: async id => calls.push(["click", id]),
+      fill: async (id, value) => calls.push(["fill", id, value]),
+      element: async id => calls.push(["element", id]),
+    };
+    await enterNativeAccount(ui, "alice", "password123", register);
+    assert.deepEqual(calls, [
+      ...(register ? [["click", "login-tab-register"]] : []),
+      ["fill", "login-username", "alice"],
+      ["fill", "login-password", "password123"],
+      ["click", "login-submit"],
+      ["element", "chat-shell"],
+      ...(register ? [["click", "account-protection-later"]] : []),
+    ]);
+  }
+});
+
+
+test("native attachment fixture never writes settings without a current account", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { prepareNativeDownloadFixture } = await import("./native-core-scenarios.mjs");
+  const fixture = await mkdtemp(join(tmpdir(), "native-download-account-"));
+  const calls = [];
+  try {
+    await assert.rejects(prepareNativeDownloadFixture({ fixture, owner: "fixture-user", invoke: async (command) => { calls.push(command); return undefined; } }), /requires the current account/);
+    assert.deepEqual(calls, ["account_id"]);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
+
+test("native historical receipts keep scrolling when a visible message has a clipped badge", async () => {
+  const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
+  let offset = 0;
+  const log = { getBoundingClientRect: () => ({ top: 102, bottom: 624, left: 284, right: 1040 }) };
+  const badge = { getBoundingClientRect: () => ({ top: 93 + offset, bottom: 117 + offset, left: 986, right: 1010, width: 24, height: 24 }) };
+  const bubble = { textContent: "receipt-text", getBoundingClientRect: () => ({ top: 38 + offset, bottom: 119 + offset, left: 284, right: 1030, width: 746, height: 81 }), querySelectorAll: () => [badge] };
+  const document = { activeElement: log, querySelector: () => log, querySelectorAll: () => [bubble] };
+  const keys = [];
+  await revealHistoricalNativeMessage({
+    execute: async (script, args = []) => runInNewContext(`(function(){${script}})(...args)`, { document, args, innerWidth: 1040, innerHeight: 720 }),
+    command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }),
+    key: async key => { keys.push(key); offset = 300; },
+    until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("badge remains clipped"); },
+  }, "receipt-text");
+  assert.deepEqual(keys, ["\uE00E"], "a partially visible message cannot certify its clipped receipt");
 });

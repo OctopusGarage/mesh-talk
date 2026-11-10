@@ -8,6 +8,14 @@ pub(crate) fn wrap(body: &[u8], expires_at_ms: Option<u64>) -> Vec<u8> {
     let Some(deadline) = expires_at_ms else {
         return body.to_vec();
     };
+    // Keep the zero sentinel outermost: deployed body decoders only split once.
+    if let Some(protected) = body.strip_prefix(b"MTEX1\0\0\0\0\0\0\0\0") {
+        let mut wire = b"MTEX1\0\0\0\0\0\0\0\0".to_vec();
+        wire.extend_from_slice(MAGIC);
+        wire.extend_from_slice(&deadline.to_le_bytes());
+        wire.extend_from_slice(protected);
+        return wire;
+    }
     let mut wire = Vec::with_capacity(HEADER + body.len());
     wire.extend_from_slice(MAGIC);
     wire.extend_from_slice(&deadline.to_le_bytes());
@@ -22,7 +30,26 @@ pub(crate) fn split(wire: &[u8]) -> Option<(Option<u64>, &[u8])> {
     };
     let (time, body) = rest.split_at_checked(8)?;
     let deadline = u64::from_le_bytes(time.try_into().ok()?);
-    (deadline != 0 && !body.is_empty()).then_some((Some(deadline), body))
+    if deadline == 0 {
+        let (deadline, content) = if let Some(rest) = body.strip_prefix(MAGIC) {
+            let (time, content) = rest.split_at_checked(8)?;
+            let deadline = u64::from_le_bytes(time.try_into().ok()?);
+            if deadline == 0 {
+                return None;
+            }
+            (Some(deadline), content)
+        } else {
+            (None, body)
+        };
+        return content.starts_with(b"MTPR1").then_some((deadline, content));
+    }
+    // A second deadline is only supported inside the outer protection sentinel
+    // handled above. Never return a nested reserved frame to a legacy raw-text
+    // fallback, which would project protected framing as ordinary content.
+    if body.is_empty() || body.starts_with(MAGIC) {
+        return None;
+    }
+    Some((Some(deadline), body))
 }
 
 /// A valid deadline in the authenticated plaintext, if present.
@@ -44,6 +71,22 @@ mod tests {
             Some((Some(1_700_000_000_000), body.as_slice()))
         );
         assert_eq!(wrap(body, None), body);
+    }
+
+    #[test]
+    fn ordinary_deadline_rejects_nested_reserved_deadline_frames() {
+        for inner in [
+            b"MTEX1".as_slice(),
+            b"MTEX1\0\0\0\0\0\0\0\0MTPR1opaque",
+            b"MTEX1\x01\0\0\0\0\0\0\0ordinary",
+        ] {
+            // wrap() preserves a protection sentinel, so construct the
+            // unsupported nested deadline directly.
+            let mut nested = b"MTEX1".to_vec();
+            nested.extend_from_slice(&1_700_000_000_000u64.to_le_bytes());
+            nested.extend_from_slice(inner);
+            assert_eq!(split(&nested), None);
+        }
     }
 
     #[test]

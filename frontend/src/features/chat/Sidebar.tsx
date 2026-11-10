@@ -1,3 +1,8 @@
+import { DeleteChatDialog } from "./DeleteChatDialog";
+import { GroupControlStatus } from "./GroupControlStatus";
+import { useGroupControlOperation } from "./useGroupControlOperation";
+import { canManageChannel } from "./channelPermissions";
+import { FavoritesDialog } from "./favorites/FavoritesDialog";
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, Network, Wifi, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -17,6 +22,7 @@ import { usePacks } from "@/store/packs";
 import { CreateChannelDialog } from "./CreateChannelDialog";
 import { SearchDialog } from "./SearchDialog";
 import { FilesTray } from "./FilesTray";
+import { UnreadMessages } from "./UnreadMessages";
 import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { ProfileDialog } from "./ProfileDialog";
@@ -58,11 +64,17 @@ function SectionLabel({
 
 export function Sidebar() {
   const { t } = useTranslation();
+  const [deletingChat, setDeletingChat] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const rawAccounts = useChat((s) => s.accounts);
   const hiddenContacts = useContactPolicy((s) => s.contacts);
   const policyLoaded = useContactPolicy((s) => s.loaded);
   const policyError = useContactPolicy((s) => s.error);
   const owner = useAuth((s) => s.user?.id);
+  const generation = useAuth((s) => s.generation);
+  const favoritesScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const publiclyVisible = usePrivacy(
     (s) => s.owner === owner && s.loaded && s.snapshot?.invisible === false,
   );
@@ -119,6 +131,7 @@ export function Sidebar() {
   // Inline rename dialog state (a contact id + a draft alias). Kept local/primitive.
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const renameOperation = useGroupControlOperation(renameId);
   // The own-profile dialog (avatar + display name editing), opened from the identity header.
   const [profileOpen, setProfileOpen] = useState(false);
   // The Wi-Fi network (SSID) we're on — Mesh-Talk is LAN-scoped, so show which network the
@@ -174,7 +187,7 @@ export function Sidebar() {
   // or a channel I don't own (the core would reject the change) — gets a personal alias
   // instead. Single source of truth for that distinction, used by the rename flow + dialog.
   const ownedChannel = (id: string) =>
-    channels.find((c) => c.channel_id === id && c.owner === myId);
+    channels.find((c) => c.channel_id === id && canManageChannel(c, myId));
 
   const startRename = (id: string, current: string) => {
     setRenameId(id);
@@ -188,7 +201,13 @@ export function Sidebar() {
       const owned = ownedChannel(renameId);
       if (owned) {
         const next = renameDraft.trim();
-        if (next && next !== owned.name) void renameChannel(renameId, next);
+        if (next && next !== owned.name) {
+          void renameOperation.run(
+            () => renameChannel(renameId, next),
+            () => setRenameId(null),
+          );
+          return;
+        }
       } else {
         void setAlias(renameId, renameDraft);
       }
@@ -199,12 +218,18 @@ export function Sidebar() {
   const renamingOwnedChannel =
     renameId !== null && ownedChannel(renameId) !== undefined;
 
-  const { pinnedRows, accountRows, channelRows, hiddenChannels, listSize } =
-    useMemo(
-      () =>
-        conversationList(accounts, channels, favorites, t, myAccountId, ready),
-      [accounts, channels, favorites, t, ready, myAccountId],
-    );
+  const {
+    pinnedRows,
+    accountRows,
+    channelRows,
+    hiddenChannels,
+    previousAccountRows,
+    listSize,
+  } = useMemo(
+    () =>
+      conversationList(accounts, channels, favorites, t, myAccountId, ready),
+    [accounts, channels, favorites, t, ready, myAccountId],
+  );
   const pinnedCount = pinnedRows.length;
   const {
     attachNav,
@@ -223,6 +248,7 @@ export function Sidebar() {
     onTogglePin: togglePinned,
     onRename: startRename,
     onHide: setChannelHidden,
+    onDelete: (id: string, name: string) => setDeletingChat({ id, name }),
   };
 
   return (
@@ -244,6 +270,7 @@ export function Sidebar() {
           <span>Mesh-Talk</span>
         </div>
         <SearchDialog />
+        <FavoritesDialog key={`${owner}:${generation}:${favoritesScope}`} />
         <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
       </div>
 
@@ -306,7 +333,7 @@ export function Sidebar() {
         <SectionLabel action={<CreateChannelDialog />}>
           {t("sidebar.channels")}
         </SectionLabel>
-        {channels.length === 0 && (
+        {channels.every((channel) => !!channel.previous_account) && (
           <p className="px-2.5 py-2 text-xs text-muted-foreground">
             {t("sidebar.noChannels")}
           </p>
@@ -317,6 +344,31 @@ export function Sidebar() {
           firstPosition={pinnedCount + accountRows.length + 1}
           listRef={virtualChannelsRef}
         />
+        {previousAccountRows.length > 0 && (
+          <details
+            data-testid="previous-account-groups"
+            className="px-2.5 pt-3 text-xs text-muted-foreground"
+          >
+            <summary className="cursor-pointer rounded-md py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              {t("sidebar.previousAccountGroups", {
+                count: previousAccountRows.length,
+              })}
+            </summary>
+            <div className="space-y-1 pb-2">
+              {previousAccountRows.map((row) => (
+                <button
+                  key={row.id}
+                  type="button"
+                  className="block w-full min-w-0 rounded-md px-2 py-2 text-start hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:min-h-11"
+                  title={row.conv.name}
+                  onClick={() => void useChat.getState().open(row.conv)}
+                >
+                  <span className="block truncate">{row.conv.name}</span>
+                </button>
+              ))}
+            </div>
+          </details>
+        )}
         {hiddenChannels.length > 0 && (
           <details className="px-2.5 pt-3 text-xs text-muted-foreground">
             <summary className="cursor-pointer rounded-md py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
@@ -346,10 +398,14 @@ export function Sidebar() {
       </nav>
 
       <div
-        className="sidebar-tools border-t px-2 py-1.5"
+        className="sidebar-tools grid min-w-0 grid-cols-2 gap-1 border-t px-2 py-1.5"
         aria-label={t("redesign.tools")}
       >
-        <FilesTray navigation />
+        <UnreadMessages
+          compact
+          key={`${owner}:${generation}:${favoritesScope}`}
+        />
+        <FilesTray navigation compact />
       </div>
 
       {/* Stranded prompt: nobody's online and the grace window has passed — offer the
@@ -545,6 +601,7 @@ export function Sidebar() {
           </DialogHeader>
           <Input
             autoFocus
+            disabled={renameOperation.busy}
             value={renameDraft}
             onChange={(e) => setRenameDraft(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && commitRename()}
@@ -554,14 +611,28 @@ export function Sidebar() {
                 : t("sidebar.aliasPlaceholder")
             }
           />
+          <GroupControlStatus
+            outcome={renameOperation.outcome}
+            cancelRequested={renameOperation.cancelRequested}
+          />
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setRenameId(null)}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={commitRename}>{t("common.save")}</Button>
+            <Button disabled={renameOperation.busy} onClick={commitRename}>
+              {t("common.save")}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
+      {deletingChat && (
+        <DeleteChatDialog
+          key={`${owner}:${generation}:${deletingChat.id}`}
+          channelId={deletingChat.id}
+          name={deletingChat.name}
+          onClose={() => setDeletingChat(null)}
+        />
+      )}
     </aside>
   );
 }

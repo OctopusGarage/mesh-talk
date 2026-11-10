@@ -1,11 +1,18 @@
+import { canForward } from "./forwarding/selection";
+import { ForwardedRecordPreview } from "./forwarding/ForwardedRecordPreview";
+import { isForwardedRecord } from "@/lib/forwardedRecord";
+import { canCollect } from "./favorites/selection";
+import { ProtectedMessage } from "./ProtectedMessage";
 import {
   retryAutomaticDownload,
   useAutomaticDownloads,
 } from "@/lib/automaticDownloads";
 import { createAttachmentDecision } from "./attachments/attachmentDecision";
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  Star,
+  ListChecks,
   Copy,
   CornerUpLeft,
   Download,
@@ -15,13 +22,13 @@ import {
   Trash2,
   Undo2,
 } from "lucide-react";
-import { motion } from "framer-motion";
+import { motion, useAnimationControls } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import { IdentityGlyph } from "@/components/identity";
 import {
   Popover,
   PopoverContent,
-  PopoverTrigger,
+  PopoverAnchor,
 } from "@/components/ui/popover";
 import {
   ContextMenu,
@@ -40,17 +47,26 @@ import { useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { formatTime, humanSize, shortId } from "@/lib/format";
-import { fadeSlideUp } from "@/lib/motion";
+import { fadeSlideUp, useMotionOK } from "@/lib/motion";
 import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
 import { usePacks } from "@/store/packs";
 import type { ReactionInfo } from "@/lib/types";
-import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
+import {
+  useChat,
+  captureChatOwnership,
+  reactionFromMe,
+  type ChatMessage,
+} from "@/store/chat";
 import {
   useFileStatus,
   refreshFileAvailability,
   markUnavailableFileError,
 } from "@/store/fileAvailability";
+import { stickerSummary } from "@/lib/stickerMedia";
+import { messageSticker } from "@/lib/messagePresentation";
+import { MediaSticker } from "./MediaSticker";
+import { ReplyPreview } from "./ReplyPreview";
 import { MediaPreview } from "./MediaPreview";
 import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
@@ -153,18 +169,19 @@ function FileBubble({
   // below, so it stays visible and savable instead of rendering an empty bubble.
   if (
     !metadataPending &&
-    available &&
+    !approvalNeeded &&
     file.fileConv &&
     file.media &&
     withinInlineCap(file.name, file.size)
   ) {
     return (
-      <div className="max-w-xs">
+      <div data-inline-media="" className="max-w-xs">
         <MediaPreview
           fileConv={file.fileConv}
           name={file.name}
           size={file.size}
           mime={file.mime}
+          readOnly={readOnly}
         />
         {uploadKey && (
           <TransferBar
@@ -179,11 +196,23 @@ function FileBubble({
   // Attachment (or over-cap media): the file card IS the content — name + size + download.
   return (
     <div className="min-w-[12rem] max-w-xs">
+      {!readOnly &&
+        !metadataPending &&
+        !approvalNeeded &&
+        available &&
+        isForwardedRecord(file.name, file.mime) && (
+          <ForwardedRecordPreview
+            fileConv={file.fileConv}
+            name={file.name}
+            size={file.size}
+            mime={file.mime}
+          />
+        )}
       <div className="flex items-center gap-2">
         {fileGlyph(file.name, file.mime)}
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm">
-            {attachmentLabel(file.name, file.mime)}
+            {attachmentLabel(file.name, file.mime, file, t("message.sticker"))}
           </div>
           <div className="font-mono text-[11px] tabular-nums opacity-70">
             {metadataPending
@@ -303,6 +332,9 @@ function FileBubble({
 export function MessageBubble({
   m,
   parent,
+  onNavigateToParent,
+  parentAuthorName,
+  parentNavigationPending = false,
   showAuthor,
   grouped,
   showTime,
@@ -315,6 +347,7 @@ export function MessageBubble({
   fresh,
   mentioned,
   reactions,
+  onMoreReactions,
   selfReactionId,
   myName: _myName,
   onReply,
@@ -323,9 +356,20 @@ export function MessageBubble({
   onDelete,
   onRecall,
   onReEdit,
+  onCollect,
+  onForward,
+  onSelectMessages,
+  collected = false,
 }: {
+  onCollect?: (m: ChatMessage) => void;
+  onForward?: (m: ChatMessage) => void;
+  onSelectMessages?: (m: ChatMessage) => void;
+  collected?: boolean;
   m: ChatMessage;
   parent: ChatMessage | null;
+  onNavigateToParent?: (id: string) => void;
+  parentAuthorName?: string;
+  parentNavigationPending?: boolean;
   showAuthor: boolean;
   /** Adjacent message from the same person within a short interval. */
   grouped?: boolean;
@@ -349,8 +393,8 @@ export function MessageBubble({
   /** True when this channel message mentions the current user. */
   mentioned?: boolean;
   reactions: ReactionInfo[];
-  // The id that represents "me" in a reaction's `who`: the ACCOUNT id for account
-  // conversations (who is account-keyed there), the device user-id for channels.
+  onMoreReactions?: () => void;
+  // Kept with the presentation identity; ownership comes from the native summary.
   selfReactionId: string;
   myName: string;
   onReply: (m: ChatMessage) => void;
@@ -360,23 +404,39 @@ export function MessageBubble({
   onRecall: (m: ChatMessage) => void;
   onReEdit: (text: string) => void;
 }) {
+  const motionOK = useMotionOK();
+  const arrivalAnimation = useAnimationControls();
+  useLayoutEffect(() => {
+    if (motionOK) void arrivalAnimation.start("visible");
+    else {
+      arrivalAnimation.stop();
+      arrivalAnimation.set({ opacity: 1, y: 0 });
+    }
+    return () => arrivalAnimation.stop();
+  }, [motionOK, arrivalAnimation]);
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
   const installedPacks = usePacks((s) => s.packs);
-  const displayedText = m.text;
+  const displayedText = m.protection ? t("protectedMessage.label") : m.text;
   const mine = m.fromMe;
   const isFile = !!m.file;
   // Sticker messages render bubble-less (Telegram-style): just the animation. Fall back to
   // the big emoji char when this build doesn't bundle that sticker (version skew).
-  const sticker = m.sticker
-    ? stickerById(m.sticker, installedPacks)
-    : undefined;
-  const isSticker = !!m.sticker;
+  const presentation = messageSticker(m, installedPacks);
+  const mediaSticker = presentation?.media ? presentation : null;
+  const stickerDescription = presentation
+    ? stickerSummary(presentation, t("message.sticker"))
+    : t("message.sticker");
+  const sticker =
+    !mediaSticker && m.sticker
+      ? stickerById(m.sticker, installedPacks)
+      : undefined;
+  const isSticker = !!presentation;
   const [pickerOpen, setPickerOpen] = useState(false);
   // Copy the message text to the clipboard. File messages have no text → no-op.
   const copyText = async () => {
     const lease = captureChatOwnership();
-    if (!m.text) return;
+    if (!m.text || m.protection) return;
     try {
       await copySensitiveText(displayedText, t("settings.confirmCopyPrompt"));
     } catch (e) {
@@ -396,9 +456,13 @@ export function MessageBubble({
     : m.failed
       ? t(`message.fail.${m.failReason ?? "unknown"}`)
       : "";
-  const body = isFile
-    ? t("files.sentFile", { name: m.file!.name })
-    : displayedText;
+  const body = m.protection
+    ? displayedText
+    : isSticker
+      ? stickerDescription
+      : isFile
+        ? t("files.sentFile", { name: m.file!.name })
+        : displayedText;
   const ariaLabel = `${speaker}: ${body} · ${formatTime(m.wallClock)}${
     status ? ` · ${status}` : ""
   }`;
@@ -428,8 +492,8 @@ export function MessageBubble({
             ? t("message.recalledByYou")
             : t("message.recalledBy", { name: authorLabel })
         }
-        initial={fresh ? "hidden" : false}
-        animate="visible"
+        initial={motionOK && fresh ? "hidden" : false}
+        animate={arrivalAnimation}
         variants={fadeSlideUp}
         className="flex items-center justify-center gap-2 px-4 py-1"
       >
@@ -457,7 +521,7 @@ export function MessageBubble({
         </ContextMenu>
         {/* Re-edit: only for our own recalled TEXT messages (WeChat). Drops the original
             text back into the composer. */}
-        {mine && m.recalledText && !readOnly && (
+        {mine && m.recalledText && !m.protection && !readOnly && (
           <button
             type="button"
             data-testid="msg-reedit"
@@ -476,8 +540,8 @@ export function MessageBubble({
       role="article"
       data-testid="message-bubble"
       aria-label={ariaLabel}
-      initial={fresh ? "hidden" : false}
-      animate="visible"
+      initial={motionOK && fresh ? "hidden" : false}
+      animate={arrivalAnimation}
       variants={fadeSlideUp}
       className={cn(
         "group flex gap-2.5 px-4",
@@ -576,11 +640,12 @@ export function MessageBubble({
                 data-context-menu=""
                 className={cn(
                   "min-w-0 text-[14px] leading-[1.55]",
-                  // Stickers float without a bubble; everything else gets the chat bubble.
+                  // Stickers float; actual inline media removes its text-bubble shell.
+                  // File cards and consent prompts retain the ordinary bubble.
                   isSticker
                     ? ""
                     : cn(
-                        "rounded-xl px-3.5 py-2.5",
+                        "rounded-xl px-3.5 py-2.5 [&:has([data-inline-media])]:border-0 [&:has([data-inline-media])]:bg-transparent [&:has([data-inline-media])]:p-0",
                         mine
                           ? "rounded-br-sm bg-bubble-own text-[hsl(var(--bubble-own-foreground))]"
                           : "rounded-bl-sm border border-border bg-muted text-foreground",
@@ -589,36 +654,39 @@ export function MessageBubble({
                   m.pending && "opacity-75",
                 )}
               >
-                {parent && (
-                  <div
-                    data-testid="message-parent-snippet"
-                    className={cn(
-                      "mb-1 flex items-center gap-1 rounded-md border px-2 py-1 text-xs",
-                      mine
-                        ? "border-primary-foreground/40 bg-primary-foreground/10"
-                        : "border-signal/50 bg-muted/50",
-                    )}
-                  >
-                    <CornerUpLeft className="h-3 w-3 shrink-0 opacity-70" />
-                    <span className="truncate opacity-80">
-                      {parent.text || t("composer.message")}
-                    </span>
-                  </div>
-                )}
-                {isSticker ? (
+                {m.protection ? (
+                  <ProtectedMessage
+                    id={m.id}
+                    protection={m.protection}
+                    image={!!m.file}
+                    mime={m.file?.mime}
+                  />
+                ) : mediaSticker ? (
+                  <MediaSticker
+                    key={m.file!.fileConv || m.clientId}
+                    fileConv={m.file!.fileConv}
+                    mime={m.file!.mime}
+                    fallback={mediaSticker.fallback}
+                    label={presentation?.label}
+                    readOnly={readOnly}
+                  />
+                ) : isSticker ? (
                   sticker ? (
                     <img
                       src={sticker.url}
-                      alt={sticker.label}
+                      alt={stickerDescription}
+                      title={presentation?.label}
                       data-testid="message-sticker"
                       draggable={false}
-                      className="h-32 w-32 select-none"
+                      className="h-32 w-32 max-w-full select-none object-contain"
                     />
                   ) : (
                     // Version skew: peer sent a sticker this build doesn't bundle → show
                     // the fallback emoji char big.
                     <span
                       data-testid="message-sticker-fallback"
+                      role="img"
+                      aria-label={stickerDescription}
                       className="text-6xl"
                     >
                       {displayedText}
@@ -644,9 +712,40 @@ export function MessageBubble({
               </div>
             </ContextMenuTrigger>
             <ContextMenuContent data-testid="message-context-menu">
+              {onForward && canForward(m) && (
+                <ContextMenuItem
+                  data-testid="msg-forward"
+                  onSelect={() => onForward(m)}
+                >
+                  <CornerUpLeft className="h-3.5 w-3.5 opacity-70" />
+                  {t("messageForwarding.forward")}
+                </ContextMenuItem>
+              )}
+              {onCollect && canCollect(m) && (
+                <ContextMenuItem
+                  data-testid="msg-collect"
+                  onSelect={() => onCollect(m)}
+                >
+                  <Star className="h-3.5 w-3.5 opacity-70" />
+                  {t(
+                    collected
+                      ? "messageFavorites.saved"
+                      : "messageFavorites.add",
+                  )}
+                </ContextMenuItem>
+              )}
+              {onSelectMessages && canCollect(m) && (
+                <ContextMenuItem
+                  data-testid="msg-select-messages"
+                  onSelect={() => onSelectMessages(m)}
+                >
+                  <ListChecks className="h-3.5 w-3.5 opacity-70" />
+                  {t("messageForwarding.selectMessages")}
+                </ContextMenuItem>
+              )}
               <ContextMenuItem
                 data-testid="msg-copy"
-                disabled={!m.text}
+                disabled={!m.text || !!m.protection}
                 onSelect={() => void copyText()}
               >
                 <Copy className="h-3.5 w-3.5 opacity-70" />
@@ -702,13 +801,34 @@ export function MessageBubble({
           )}
         </div>
 
+        {m.replyTo && (
+          <button
+            type="button"
+            data-testid="message-parent-snippet"
+            aria-label={t("messageFavorites.viewOriginal")}
+            title={t("messageFavorites.viewOriginal")}
+            aria-busy={parentNavigationPending}
+            disabled={!onNavigateToParent || parentNavigationPending}
+            onClick={() => m.replyTo && onNavigateToParent?.(m.replyTo)}
+            className="mt-1 flex min-h-9 max-w-full items-center gap-2 rounded-md bg-muted px-2.5 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default motion-reduce:transition-none"
+          >
+            {parentNavigationPending ? (
+              <span role="status">{t("common.loading")}</span>
+            ) : parent ? (
+              <ReplyPreview message={parent} authorName={parentAuthorName} />
+            ) : (
+              <span>{t("messageFavorites.viewOriginal")}</span>
+            )}
+          </button>
+        )}
+
         {/* reaction chips */}
-        {reactions.length > 0 && (
+        {(reactions.length > 0 || onMoreReactions) && (
           <div
             className={cn("mt-1 flex flex-wrap gap-1", mine && "justify-end")}
           >
             {reactions.map((r) => {
-              const me = r.who.includes(selfReactionId);
+              const me = reactionFromMe(r, selfReactionId);
               return (
                 <button
                   key={`${r.target}:${r.emoji}`}
@@ -721,7 +841,7 @@ export function MessageBubble({
                   onClick={() => m.id && onReact(m.id, r.emoji)}
                   disabled={readOnly}
                   className={cn(
-                    "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    "reaction-chip flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     me
                       ? "border-signal bg-signal/15 text-signal"
                       : "border-border bg-muted/50 hover:bg-muted",
@@ -729,11 +849,22 @@ export function MessageBubble({
                 >
                   <span>{r.emoji}</span>
                   <span className="font-mono text-[11px] tabular-nums">
-                    {r.who.length}
+                    {r.count}
                   </span>
                 </button>
               );
             })}
+            {onMoreReactions && (
+              <button
+                type="button"
+                onClick={onMoreReactions}
+                aria-label={t("message.reactionsMore")}
+                title={t("message.reactionsMore")}
+                className="flex h-7 w-7 items-center justify-center rounded-full border border-border hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <SmilePlus className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
         )}
 
@@ -808,17 +939,9 @@ function Actions({
         <CornerUpLeft className="h-3.5 w-3.5" />
       </button>
       <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
-        <PopoverTrigger asChild>
-          <button
-            disabled={disabled}
-            data-testid="message-react"
-            title={t("message.react")}
-            aria-label={t("message.react")}
-            className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
-          >
-            <SmilePlus className="h-3.5 w-3.5" />
-          </button>
-        </PopoverTrigger>
+        <PopoverAnchor asChild>
+          <span aria-hidden="true" />
+        </PopoverAnchor>
         <PopoverContent className="w-auto" data-testid="reaction-picker">
           <div className="flex gap-1">
             {EMOJIS.map((e) => (

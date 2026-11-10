@@ -20,6 +20,9 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
+from delta_assets import equivalent
+from sevenzip import sevenzip_tool
+
 PLATFORMS = {
     "macos_arm64": ("dmg",),
     "macos_x86_64": ("dmg",),
@@ -28,8 +31,11 @@ PLATFORMS = {
     "linux_x86_64": ("deb", "rpm", "AppImage"),
     "linux_aarch64": ("deb", "rpm", "AppImage"),
 }
-VARIANTS = ("default", "lite")
 MAX_UNCOMPRESSED = 2 * 1024**3
+# The measured ARM64 manual download contains a roughly 16 MB DMG. Budget both layers
+# independently so compression cannot conceal an oversized installer.
+MACOS_MANUAL_SIZE_LIMIT = 24 * 1024**2
+MAX_CHECKSUM_MANIFEST = 64 * 1024
 
 
 def require(condition, message):
@@ -38,7 +44,7 @@ def require(condition, message):
 
 
 def archive_member(path, suffix):
-    tool = shutil.which("7zz") or shutil.which("7z")
+    tool = sevenzip_tool()
     require(tool, "7-Zip is required to inspect installer contents")
     listing = subprocess.check_output([tool, "l", "-slt", str(path)], text=True, timeout=60)
     members = []
@@ -166,11 +172,96 @@ def native_metadata(path, extension, version, platform=None):
         binary = archive_member(path, "mesh-talk.app/Contents/MacOS/mesh-talk")
         expected_cpu = 0x0100000C if platform == "macos_arm64" else 0x01000007
         require(binary[:8] == b"\xcf\xfa\xed\xfe" + expected_cpu.to_bytes(4, "little"), "DMG embedded application architecture")
-        return {}
+        return {"macho": hashlib.sha256(binary).hexdigest()}
     return {}
 
 
-def verify_archive(path, platform, version, check_installers):
+def mac_updater_metadata(source, version, platform):
+    found = {}
+    total = 0
+    with tarfile.open(fileobj=source, mode="r|gz") as archive:
+        for count, member in enumerate(archive):
+            total += member.size
+            require(count < 10000 and total <= MAX_UNCOMPRESSED, "updater archive exceeds size limits")
+            name = member.name.removeprefix("./")
+            require(name.startswith("mesh-talk.app/") or name == "mesh-talk.app", "unexpected updater app root")
+            require(".." not in PurePosixPath(name).parts and "\\" not in name, "unsafe updater archive path")
+            if name in ("mesh-talk.app/Contents/Info.plist", "mesh-talk.app/Contents/MacOS/mesh-talk"):
+                require(member.isfile() and name not in found and 0 < member.size <= 512 * 1024**2, "invalid updater executable or metadata")
+                found[name] = archive.extractfile(member).read()
+                if name.endswith("/mesh-talk"):
+                    require(member.mode & 0o111, "updater binary is not executable")
+    require(len(found) == 2, "missing updater executable or metadata")
+    metadata = plistlib.loads(found["mesh-talk.app/Contents/Info.plist"])
+    require(metadata.get("CFBundleShortVersionString") == version and metadata.get("CFBundleExecutable") == "mesh-talk", "updater application version")
+    binary = found["mesh-talk.app/Contents/MacOS/mesh-talk"]
+    cpu = 0x0100000C if platform == "macos_arm64" else 0x01000007
+    require(binary[:8] == b"\xcf\xfa\xed\xfe" + cpu.to_bytes(4, "little"), "updater application architecture")
+    return {"macho": hashlib.sha256(binary).hexdigest()}
+
+
+def updater_name(tag, platform):
+    extension = "app.tar.gz" if platform.startswith("macos_") else "nsis.exe" if platform.startswith("windows_") else "AppImage"
+    return f"mesh-talk-update_{tag}_{platform}.{extension}"
+
+
+def delta_asset_set(root, tag, platform):
+    """Require an exact, bounded optional set before accepting any new roles."""
+    full = updater_name(tag, platform)
+    catalog_path = root / (full + ".delta.json")
+    if not catalog_path.exists():
+        return set()
+    require(not platform.startswith("linux_"), "delta unsupported on Linux")
+    require(catalog_path.is_file() and not catalog_path.is_symlink() and 0 < catalog_path.stat().st_size <= 65536, "invalid delta catalog file")
+    catalog = json.loads(catalog_path.read_bytes())
+    require(isinstance(catalog, dict) and set(catalog) == {"schema", "role", "algorithm", "tag", "release_kind", "os", "arch", "fallback", "target", "bases"}, "invalid delta catalog fields")
+    os_name, architecture = platform.split("_", 1)
+    arch = "aarch64" if architecture == "arm64" else architecture
+    require(type(catalog["schema"]) is int and catalog["schema"] == 1 and catalog["role"] == "mesh-talk-delta" and catalog["algorithm"] == "zstd-prefix-v1" and catalog["tag"] == tag and catalog["release_kind"] == ("nightly" if "-nightly." in tag else "stable") and catalog["os"] == os_name and catalog["arch"] == arch, "delta catalog identity contradiction")
+    raw = full.replace("mesh-talk-update_", "mesh-talk-update-raw_", 1)
+    def artifact(value, expected_name, limit):
+        require(isinstance(value, dict) and set(value) == {"name", "size", "sha256"}, "invalid delta artifact fields")
+        require(value["name"] == expected_name and type(value["size"]) is int and 0 < value["size"] <= limit and isinstance(value["sha256"], str) and re.fullmatch(r"[a-f0-9]{64}", value["sha256"]), "invalid delta artifact identity")
+        path = root / expected_name
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size == value["size"], "delta asset size mismatch")
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        require(digest.hexdigest() == value["sha256"], "delta asset hash mismatch")
+    artifact(catalog["fallback"], full, MAX_UNCOMPRESSED)
+    artifact(catalog["target"], raw, 256 * 1024**2)
+    names = {catalog_path.name, catalog_path.name + ".sig", raw, raw + ".sig"}
+    for signature in (catalog_path.name + ".sig", raw + ".sig"):
+        path = root / signature
+        require(path.is_file() and not path.is_symlink() and 0 < path.stat().st_size <= 16384, "invalid delta signature file")
+    bases = catalog["bases"]
+    require(isinstance(bases, list) and 0 < len(bases) <= 2, "invalid delta bases")
+    def version(value):
+        require(isinstance(value, str), "invalid delta base version")
+        m = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-nightly\.([1-9][0-9]*)\.([1-9][0-9]*))?", value)
+        require(m is not None, "invalid delta base version")
+        return tuple(int(v) if v is not None else -1 for v in m.groups())
+    selected = version(tag)
+    seen = set()
+    overhead = catalog_path.stat().st_size + (root / (catalog_path.name + ".sig")).stat().st_size + (root / (raw + ".sig")).stat().st_size
+    for base in bases:
+        require(isinstance(base, dict) and set(base) == {"tag", "size", "sha256", "patch"}, "invalid delta base fields")
+        old = version(base["tag"])
+        require(old < selected and (old[3] >= 0) == (selected[3] >= 0) and base["tag"] not in seen, "delta base version contradiction")
+        seen.add(base["tag"])
+        require(type(base["size"]) is int and 0 < base["size"] <= 128 * 1024**2 and isinstance(base["sha256"], str) and re.fullmatch(r"[a-f0-9]{64}", base["sha256"]), "invalid delta base identity")
+        patch = f"mesh-talk-patch_{tag}_{platform}_from-{base['tag']}.zst"
+        artifact(base["patch"], patch, 256 * 1024**2)
+        total = base["patch"]["size"] + overhead
+        require(total + 1024**2 <= catalog["fallback"]["size"] and total * 4 <= catalog["fallback"]["size"] * 3, "delta offer fails savings threshold")
+        names.add(patch)
+    return names
+
+
+def verify_archive(path, platform, version, check_installers, updater=None, delta_files=None):
+    if platform.startswith("macos_"):
+        require(path.stat().st_size <= MACOS_MANUAL_SIZE_LIMIT, "macOS ZIP exceeds size budget (24 MiB)")
     with zipfile.ZipFile(path) as archive:
         members = archive.infolist()
         names = [entry.filename for entry in members]
@@ -187,23 +278,46 @@ def verify_archive(path, platform, version, check_installers):
             if not entry.is_dir():
                 files[name] = entry
         top = {name.removeprefix("release/"): entry for name, entry in files.items() if name.count("/") == 1}
-        require("SHA256SUMS" in top, "missing checksum manifest")
-        manifest = archive.read(top.pop("SHA256SUMS")).decode("utf8")
-        checksums = {}
-        for line in manifest.splitlines():
-            match = re.fullmatch(r"([a-fA-F0-9]{64}) [ *](?:\./)?([^/\\]+)", line)
-            require(match is not None, "invalid checksum line")
-            digest, name = match.groups()
-            require(name not in checksums, "duplicate checksum entry")
-            checksums[name] = digest.lower()
-        require(checksums and set(checksums) == set(top), "incomplete checksum manifest")
-        require(len(top) == len(PLATFORMS[platform]), "unexpected installer set")
+        def read_checksums(manifest_name):
+            require(manifest_name in top, "missing checksum manifest: " + manifest_name)
+            require(top[manifest_name].file_size <= MAX_CHECKSUM_MANIFEST, "checksum manifest exceeds size limit")
+            manifest = archive.read(top.pop(manifest_name)).decode("utf8")
+            checksums = {}
+            for line in manifest.splitlines():
+                match = re.fullmatch(r"([a-fA-F0-9]{64}) [ *](?:\./)?([^/\\]+)", line)
+                require(match is not None, "invalid checksum line")
+                digest, name = match.groups()
+                require(name not in checksums, "duplicate checksum entry")
+                checksums[name] = digest.lower()
+            require(checksums, "empty checksum manifest")
+            return checksums
+        checksums = read_checksums("SHA256SUMS")
+        updater_files = ({updater, updater + ".sig"} if updater else set()) | (delta_files or set())
+        updater_checksums = read_checksums("UPDATER_SHA256SUMS") if updater_files else {}
+        # The signed ZIP authenticates the manifest, which binds standalone
+        # updater roles by digest without duplicating their bytes in downloads.
+        require(len(top) == len(PLATFORMS[platform]) and not updater_files.intersection(top), "unexpected installer set")
+        require(set(checksums) == set(top) and set(updater_checksums) == updater_files, "incomplete checksum manifest")
+        checksums.update(updater_checksums)
+        for name in updater_files:
+            standalone = path.parent / name
+            require(standalone.is_file() and not standalone.is_symlink() and 0 < standalone.stat().st_size <= MAX_UNCOMPRESSED, "invalid standalone updater file")
+            if name.endswith(".sig"):
+                require(standalone.stat().st_size <= 16 * 1024, "updater signature exceeds size limit")
+            standalone_hash = hashlib.sha256()
+            with standalone.open("rb") as source:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    standalone_hash.update(block)
+            require(standalone_hash.hexdigest() == checksums[name], "standalone updater checksum mismatch")
+        installers = top
         installer_metadata = {}
         for extension in PLATFORMS[platform]:
-            matches = [name for name in top if name.endswith("." + extension)]
+            matches = [name for name in installers if name.endswith("." + extension)]
             require(len(matches) == 1, "missing or duplicate installer format")
             name = matches[0]
             require(top[name].file_size > 0, "empty installer")
+            if platform.startswith("macos_"):
+                require(top[name].file_size <= MACOS_MANUAL_SIZE_LIMIT, "macOS DMG exceeds size budget (24 MiB)")
             digest = hashlib.sha256()
             with archive.open(top[name]) as source:
                 for block in iter(lambda: source.read(1024 * 1024), b""):
@@ -215,6 +329,16 @@ def verify_archive(path, platform, version, check_installers):
                     with archive.open(top[name]) as source, installer.open("wb") as destination:
                         shutil.copyfileobj(source, destination)
                     installer_metadata[extension] = native_metadata(installer, extension, version, platform)
+        if delta_files and check_installers:
+            equivalent(path.parent / updater, path.parent / updater.replace("mesh-talk-update_", "mesh-talk-update-raw_", 1), "macos" if platform.startswith("macos_") else "windows")
+        if updater and platform.startswith("macos_") and check_installers:
+            with (path.parent / updater).open("rb") as source:
+                metadata = mac_updater_metadata(source, version, platform)
+            require(metadata == installer_metadata["dmg"], "updater/versioned DMG executable mismatch")
+        if updater and not platform.startswith("macos_"):
+            extension = "exe" if platform.startswith("windows_") else "AppImage"
+            original = next(name for name in installers if name.endswith("." + extension))
+            require(checksums[updater] == checksums[original], "updater must match native installer")
         require(all(name.count("/") == 1 for name in files), "unexpected installer archive content")
         if check_installers and platform.startswith("linux_"):
             require(installer_metadata["AppImage"]["elf"] == installer_metadata["deb"]["elf"], "AppImage/versioned Debian executable mismatch")
@@ -280,13 +404,20 @@ def verify_directory(root, tag, version, *, check_installers=True):
     require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-ci\.[0-9]+|-nightly\.[1-9][0-9]*\.[1-9][0-9]*)?", tag), "invalid artifact tag")
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version), "invalid version")
     expected = {"mesh-talk.cdx.json"}
+    with_updater = any(path.name.startswith("mesh-talk-update_") for path in root.iterdir())
     for platform in PLATFORMS:
-        for variant in VARIANTS:
-            suffix = "_lite" if variant == "lite" else ""
-            name = f"mesh-talk_{tag}_{platform}{suffix}.zip"
-            expected.update((name, name + ".bundle"))
+        name = f"mesh-talk_{tag}_{platform}.zip"
+        expected.update((name, name + ".bundle"))
+        if with_updater:
+            update = updater_name(tag, platform)
+            expected.update((update, update + ".sig"))
         relay_name = f"mesh-talk-post-office_{tag}_{platform}.zip"
         expected.update((relay_name, relay_name + ".bundle"))
+    delta_files = {}
+    if with_updater:
+        for platform in PLATFORMS:
+            delta_files[platform] = delta_asset_set(root, tag, platform)
+            expected.update(delta_files[platform])
     require({path.name for path in root.iterdir()} == expected, "incomplete or unexpected asset set")
     for name in expected:
         path = root / name
@@ -294,17 +425,15 @@ def verify_directory(root, tag, version, *, check_installers=True):
     sbom = json.loads((root / "mesh-talk.cdx.json").read_text())
     require(sbom.get("bomFormat") == "CycloneDX" and isinstance(sbom.get("components"), list) and sbom["components"], "invalid or empty SBOM")
     for platform in PLATFORMS:
-        for variant in VARIANTS:
-            suffix = "_lite" if variant == "lite" else ""
-            archive = root / f"mesh-talk_{tag}_{platform}{suffix}.zip"
-            bundle = json.loads(Path(str(archive) + ".bundle").read_text())
-            require(isinstance(bundle, dict) and bundle.get("mediaType"), "invalid signature bundle")
-            verify_archive(archive, platform, version, check_installers)
+        archive = root / f"mesh-talk_{tag}_{platform}.zip"
+        bundle = json.loads(Path(str(archive) + ".bundle").read_text())
+        require(isinstance(bundle, dict) and bundle.get("mediaType"), "invalid signature bundle")
+        verify_archive(archive, platform, version, check_installers, updater_name(tag, platform) if with_updater else None, delta_files.get(platform))
         relay_archive = root / f"mesh-talk-post-office_{tag}_{platform}.zip"
         relay_bundle = json.loads(Path(str(relay_archive) + ".bundle").read_text())
         require(isinstance(relay_bundle, dict) and relay_bundle.get("mediaType"), "invalid post-office signature bundle")
         verify_post_office_archive(relay_archive, platform, check_installers)
-    return [f"{platform}:{variant}" for platform in PLATFORMS for variant in VARIANTS] + [f"{platform}:post-office" for platform in PLATFORMS]
+    return [f"{platform}:desktop" for platform in PLATFORMS] + [f"{platform}:post-office" for platform in PLATFORMS]
 
 
 def main():

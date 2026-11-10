@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test test-focused test-plan test-changed verify-plan verify-changed version-check version-sync version-prepare standards-check validation-report validation-audit test-timing e2e eval-smoke ai-eval smoke-full clean clean-builds clean-builds-dry-run check
+.PHONY: dev build pr-check test test-focused test-plan test-changed verify-plan verify-changed version-check version-sync version-prepare standards-check validation-report validation-audit test-timing e2e eval-smoke ai-eval smoke-full clean clean-builds clean-builds-dry-run check
 
 # Managed commands coordinate with cache eviction across all local worktrees.
 MANAGED_BUILD = python3 scripts/build-retention.py run --
@@ -34,6 +34,10 @@ test-plan:
 
 test-changed:
 	$(MANAGED_BUILD) node scripts/validation/changed.mjs --run $(VALIDATION_ARGS)
+
+# Cheap PR preparation: static/policy checks, no application suites or builds.
+pr-check:
+	node scripts/validation/changed.mjs --cheap --base origin/main $(VALIDATION_ARGS)
 
 verify-plan:
 	node scripts/validation/changed.mjs --checks $(VALIDATION_ARGS)
@@ -70,7 +74,7 @@ test-timing:
 # (--test-threads=1) to avoid discovery-port / CPU contention between the heavy processes.
 e2e:
 	$(MANAGED_BUILD) nice -n 10 cargo test -p mesh-talk-core --test two_node_cli --test persistent_history --test post_office_offline --test channel_and_file_cli --test bridge_cross_lan -- --ignored --test-threads=1
-	$(MANAGED_BUILD) nice -n 10 cargo test -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
+	$(MANAGED_BUILD) nice -n 10 cargo test -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1
 
 eval-smoke:
 	./scripts/ai-eval-smoke.sh

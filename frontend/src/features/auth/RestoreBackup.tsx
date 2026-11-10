@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,10 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { recovery } from "@/lib/api";
+import { googleDrive, type DriveArchive } from "@/lib/api/googleDrive";
+import { GoogleDriveConnection } from "@/features/recovery/GoogleDriveConnection";
+import { GoogleDriveProgress } from "@/features/recovery/GoogleDriveProgress";
+import { useAuth } from "@/store/auth";
 import type { BackupPreview, RestoreComplete } from "@/lib/api/recovery";
 import { errorMessage } from "@/lib/error";
 
@@ -29,6 +33,23 @@ export function RestoreBackup({
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [source, setSource] = useState("local");
+  const [connectionId, setConnectionId] = useState(() => crypto.randomUUID());
+  const [driveConnected, setDriveConnected] = useState(false);
+  const [archives, setArchives] = useState<DriveArchive[]>([]);
+  const [selectedArchive, setSelectedArchive] = useState("");
+  const [downloaded, setDownloaded] = useState(false);
+  const [transfer, setTransfer] = useState(false);
+  const generation = useRef(0);
+  const pending = useRef(false);
+  const authGeneration = useAuth((state) => state.generation);
+  useEffect(() => {
+    generation.current++;
+    pending.current = false;
+    return () => {
+      generation.current = generation.current + 1;
+    };
+  }, [authGeneration, open, source, connectionId]);
   const [path, setPath] = useState("");
   const [key, setKey] = useState("");
   const [preview, setPreview] = useState<BackupPreview | null>(null);
@@ -39,49 +60,110 @@ export function RestoreBackup({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const loadBackups = async () => {
+    const run = generation.current;
+    setBusy(true);
+    setError("");
+    try {
+      const list = await googleDrive.list(connectionId);
+      if (run === generation.current) {
+        setArchives(list);
+        setSelectedArchive(list[0]?.id ?? "");
+        setDownloaded(false);
+        setPreview(null);
+      }
+    } catch (cause) {
+      if (run === generation.current) setError(errorMessage(cause));
+    } finally {
+      if (run === generation.current) setBusy(false);
+    }
+  };
   const choose = async () => {
-    const selected = await openFile({
-      multiple: false,
-      filters: [{ name: "Mesh-Talk backup", extensions: ["mtbackup"] }],
-    });
-    if (typeof selected === "string") {
-      setPath(selected);
-      setKey("");
-      setPreview(null);
-      setResult(null);
-      setError("");
+    if (pending.current) return;
+    pending.current = true;
+    const run = generation.current;
+    setBusy(true);
+    try {
+      const selected = await openFile({
+        multiple: false,
+        filters: [{ name: "Mesh-Talk backup", extensions: ["mtbackup"] }],
+      });
+      if (run === generation.current && typeof selected === "string") {
+        setPath(selected);
+        setKey("");
+        setPreview(null);
+        setResult(null);
+        setError("");
+      }
+    } catch (cause) {
+      if (run === generation.current) setError(errorMessage(cause));
+    } finally {
+      if (run === generation.current) {
+        pending.current = false;
+        setBusy(false);
+      }
     }
   };
   const inspect = async () => {
+    if (pending.current) return;
+    pending.current = true;
+    const run = generation.current;
     setBusy(true);
     setError("");
     try {
-      setPreview(await recovery.inspect(path, key));
+      if (source === "drive" && !downloaded) {
+        setTransfer(true);
+        await googleDrive.download(connectionId, selectedArchive);
+        if (run !== generation.current) return;
+        setDownloaded(true);
+        setTransfer(false);
+      }
+      const next =
+        source === "drive"
+          ? await googleDrive.inspect(connectionId, key)
+          : await recovery.inspect(path, key);
+      if (run === generation.current) setPreview(next);
     } catch (cause) {
-      setError(errorMessage(cause));
-      setPreview(null);
+      if (run === generation.current) {
+        setError(errorMessage(cause));
+        setPreview(null);
+      }
     } finally {
-      setBusy(false);
+      if (run === generation.current) {
+        pending.current = false;
+        setBusy(false);
+        setTransfer(false);
+      }
     }
   };
   const restore = async () => {
+    if (pending.current) return;
+    pending.current = true;
+    const run = generation.current;
     setBusy(true);
     setError("");
     try {
-      const restored = await recovery.restore(
-        path,
-        key,
-        username.trim(),
-        password,
-      );
+      const restored =
+        source === "drive"
+          ? await googleDrive.restore(
+              connectionId,
+              key,
+              username.trim(),
+              password,
+            )
+          : await recovery.restore(path, key, username.trim(), password);
+      if (run !== generation.current) return;
       setResult(restored);
       setPassword("");
       setKey("");
       onRestored(restored.username);
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (run === generation.current) setError(errorMessage(cause));
     } finally {
-      setBusy(false);
+      if (run === generation.current) {
+        pending.current = false;
+        setBusy(false);
+      }
     }
   };
 
@@ -96,6 +178,12 @@ export function RestoreBackup({
             setPassword("");
             setPreview(null);
             setResult(null);
+            setCompromised(false);
+            setDownloaded(false);
+            setDriveConnected(false);
+            setArchives([]);
+            setSelectedArchive("");
+            setConnectionId(crypto.randomUUID());
           }
         }
       }}
@@ -114,36 +202,170 @@ export function RestoreBackup({
           {!result && (
             <>
               <div className="space-y-2">
-                <Label>{t("recovery.backupFile")}</Label>
-                <Button
-                  variant="secondary"
-                  onClick={() => void choose()}
+                <Label htmlFor="backup-source">{t("drive.source")}</Label>
+                <select
+                  id="backup-source"
+                  className="w-full rounded-md border bg-background p-2"
                   disabled={busy}
-                >
-                  {path ? path.split(/[\\/]/).pop() : t("recovery.chooseFile")}
-                </Button>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="restore-key">{t("recovery.recoveryKey")}</Label>
-                <Input
-                  id="restore-key"
-                  data-testid="restore-key"
-                  type="password"
-                  autoComplete="off"
-                  value={key}
+                  value={source}
                   onChange={(event) => {
-                    setKey(event.target.value);
+                    setSource(event.target.value);
+                    setCompromised(false);
                     setPreview(null);
+                    setKey("");
+                    setDownloaded(false);
+                    setError("");
+                    setDriveConnected(false);
+                    setArchives([]);
+                    setSelectedArchive("");
                   }}
-                />
+                >
+                  <option value="local">{t("drive.local")}</option>
+                  <option value="drive">{t("drive.cloud")}</option>
+                </select>
               </div>
+              {open && source === "drive" && (
+                <div className="space-y-2">
+                  <GoogleDriveConnection
+                    key={connectionId}
+                    connectionId={connectionId}
+                    disabled={busy}
+                    onConnected={() => {
+                      setDriveConnected(true);
+                      void loadBackups();
+                    }}
+                    onDisconnected={() => {
+                      generation.current++;
+                      pending.current = false;
+                      setDriveConnected(false);
+                      setDownloaded(false);
+                      setPreview(null);
+                      setKey("");
+                      setArchives([]);
+                      setSelectedArchive("");
+                    }}
+                  />
+                  {driveConnected && (
+                    <>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => void loadBackups()}
+                      >
+                        {busy && !transfer
+                          ? t("drive.loading")
+                          : t("drive.load")}
+                      </Button>
+                      {archives.length > 0 ? (
+                        <>
+                          <Label htmlFor="drive-backup">
+                            {t("drive.choose")}
+                          </Label>
+                          <select
+                            id="drive-backup"
+                            className="w-full rounded-md border bg-background p-2"
+                            value={selectedArchive}
+                            disabled={busy}
+                            onChange={(event) => {
+                              setSelectedArchive(event.target.value);
+                              setDownloaded(false);
+                              setPreview(null);
+                              setKey("");
+                            }}
+                          >
+                            {archives.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.name} (
+                                {(Number(item.size) / 1024 / 1024).toFixed(1)}{" "}
+                                MB)
+                              </option>
+                            ))}
+                          </select>
+                        </>
+                      ) : (
+                        !busy && <p role="status">{t("drive.empty")}</p>
+                      )}
+                    </>
+                  )}
+                  {transfer && (
+                    <>
+                      <GoogleDriveProgress connectionId={connectionId} />
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          void googleDrive
+                            .disconnect(connectionId)
+                            .catch(() => {});
+                          generation.current++;
+                          pending.current = false;
+                          setBusy(false);
+                          setTransfer(false);
+                          setDriveConnected(false);
+                          setDownloaded(false);
+                          setArchives([]);
+                          setConnectionId(crypto.randomUUID());
+                        }}
+                      >
+                        {t("drive.cancel")}
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
+              {source === "local" && (
+                <div className="space-y-2">
+                  <Label>{t("recovery.backupFile")}</Label>
+                  <Button
+                    variant="secondary"
+                    onClick={() => void choose()}
+                    disabled={busy}
+                  >
+                    {path
+                      ? path.split(/[\\/]/).pop()
+                      : t("recovery.chooseFile")}
+                  </Button>
+                </div>
+              )}
+              {(source === "local" ? !!path : !!selectedArchive) && (
+                <div className="space-y-2">
+                  <Label htmlFor="restore-key">
+                    {t("recovery.recoveryKey")}
+                  </Label>
+                  <Input
+                    id="restore-key"
+                    data-testid="restore-key"
+                    type="password"
+                    autoComplete="off"
+                    value={key}
+                    disabled={busy}
+                    onChange={(event) => {
+                      setKey(event.target.value);
+                      setPreview(null);
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("recovery.restoreKeyHint")}
+                  </p>
+                </div>
+              )}
               {!preview && (
                 <Button
                   data-testid="restore-inspect"
-                  disabled={!path || !key || busy}
+                  disabled={
+                    (source === "drive"
+                      ? !driveConnected || !selectedArchive
+                      : !path) ||
+                    !key ||
+                    busy
+                  }
                   onClick={() => void inspect()}
                 >
-                  {busy ? t("recovery.verifying") : t("recovery.inspect")}
+                  {busy
+                    ? transfer
+                      ? t("drive.downloading")
+                      : t("recovery.verifying")
+                    : t("recovery.continue")}
                 </Button>
               )}
             </>
@@ -173,6 +395,17 @@ export function RestoreBackup({
                 <p>
                   {t("recovery.missingMedia", { count: preview.missing_media })}
                 </p>
+                <p>
+                  {t("recovery.favoriteCounts", {
+                    favorites: preview.favorites,
+                    files: preview.favorite_files,
+                  })}
+                </p>
+                <p>
+                  {t("recovery.missingFavoriteFiles", {
+                    count: preview.missing_favorite_files,
+                  })}
+                </p>
                 <p className="text-xs text-muted-foreground">
                   {t("recovery.newerMissing")}
                 </p>
@@ -181,6 +414,7 @@ export function RestoreBackup({
                 <input
                   type="checkbox"
                   checked={compromised}
+                  disabled={busy}
                   onChange={(event) => setCompromised(event.target.checked)}
                   className="mt-1 accent-signal"
                 />
@@ -194,6 +428,7 @@ export function RestoreBackup({
                   <p>{t("recovery.compromiseWarning")}</p>
                   <Button
                     className="mt-3"
+                    disabled={busy}
                     variant="secondary"
                     onClick={() => {
                       setOpen(false);
@@ -218,6 +453,7 @@ export function RestoreBackup({
                       data-testid="restore-username"
                       autoComplete="username"
                       value={username}
+                      disabled={busy}
                       onChange={(event) => setUsername(event.target.value)}
                     />
                   </div>
@@ -231,6 +467,7 @@ export function RestoreBackup({
                       type="password"
                       autoComplete="new-password"
                       value={password}
+                      disabled={busy}
                       onChange={(event) => setPassword(event.target.value)}
                     />
                   </div>

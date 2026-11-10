@@ -17,7 +17,7 @@ applyPlatformClass();
 void usePacks
   .getState()
   .load()
-  .then(() => useTheme.getState().refresh())
+  .then(() => useTheme.getState().refresh(true))
   .catch((error) => {
     console.error("Could not load customization packs", error);
   });

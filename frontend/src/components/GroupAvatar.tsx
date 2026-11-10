@@ -3,14 +3,15 @@ import { IdentityGlyph } from "@/components/identity";
 import { useChat } from "@/store/chat";
 import { useAvatar } from "@/store/avatars";
 import { rosterProjection } from "@/lib/rosterProjection";
+import { channelMemberAccounts } from "@/features/chat/channelMemberProjection";
 import type { ChannelMemberInfo } from "@/lib/types";
 
 const NO_MEMBERS: ChannelMemberInfo[] = [];
 
 /**
- * A WeChat-style group avatar: a square montage of up to 9 member identity glyphs/avatars,
- * derived LIVE from the channel's current members (no stored group photo, no protocol — it
- * always reflects who's in the channel). Each tile is a member's custom avatar if they set
+ * A WeChat-style group avatar: a square montage of up to 9 account identity glyphs/avatars,
+ * derived LIVE from the channel's current members when no private/shared photo exists.
+ * Each tile is an account's custom avatar if they set
  * one, else their deterministic IdentityGlyph. Falls back to a mesh sigil until members load.
  */
 export function GroupAvatar({
@@ -31,19 +32,34 @@ export function GroupAvatar({
   // A photo explicitly set for this channel (e.g. a club logo from the gallery) wins over
   // the auto-composite — IdentityGlyph(channelId) renders that avatar.
   const custom = useAvatar(channelId);
-  if (custom) {
-    return <IdentityGlyph seed={channelId} size={size} title={title} />;
+  const shared = useChat(
+    (s) =>
+      s.channels.find((channel) => channel.channel_id === channelId)?.metadata
+        ?.cover?.content,
+  );
+  const photo = custom ?? shared;
+  if (photo) {
+    return (
+      <img
+        src={photo}
+        width={size}
+        height={size}
+        alt={title ?? ""}
+        title={title}
+        className="shrink-0 rounded-[28%] object-cover"
+      />
+    );
   }
 
-  // A member's avatar seed is its account id. Membership carries the durable binding,
-  // while the roster supplies it for older responses that lack that field.
-  const seeds = members
+  // Match the header's accepted-account count; invitations remain in the member
+  // dialog without adding people to the default avatar.
+  const seeds = channelMemberAccounts(
+    members.filter((member) => !member.pending),
+    roster,
+    { deviceId: myId, accountId: myAccountId, ownerId: "" },
+  )
     .slice(0, 9)
-    .map((m) =>
-      m.user_id === myId
-        ? myAccountId || m.user_id
-        : (roster.accountForMember(m) ?? m.user_id),
-    );
+    .map((account) => account.accountId ?? account.representative.user_id);
 
   if (seeds.length === 0) {
     return (
@@ -72,9 +88,9 @@ export function GroupAvatar({
       title={title}
       aria-hidden
     >
-      {seeds.map((seed, i) => (
+      {seeds.map((seed) => (
         <IdentityGlyph
-          key={`${seed}-${i}`}
+          key={seed}
           seed={seed}
           size={cell}
           className="!rounded-none"

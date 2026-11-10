@@ -45,6 +45,25 @@ pub struct RoutedDiscovery {
     pending: Mutex<QueryTracker>,
     signer: ResponseSigner,
     replies: Mutex<ResponseBudget>,
+    #[cfg(test)]
+    trace: std::sync::OnceLock<Mutex<DiscoveryTrace>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct DiscoveryWitness {
+    pub elapsed_ms: u128,
+    pub stage: &'static str,
+    pub endpoint: SocketAddr,
+    pub nonce: Option<Nonce>,
+    pub outcome: String,
+}
+
+#[cfg(test)]
+struct DiscoveryTrace {
+    started: Instant,
+    omitted: usize,
+    events: std::collections::VecDeque<DiscoveryWitness>,
 }
 
 #[derive(Default)]
@@ -52,10 +71,16 @@ struct ResponseBudget {
     window: Option<Instant>,
     sent: u8,
     recent: HashMap<IpAddr, Instant>,
+    // Hold an actual consumed quota window until its rejection is observed.
+    // Instance-local test evidence must not depend on signing or scheduling time.
+    #[cfg(test)]
+    observed_window: Option<(Instant, Arc<tokio::sync::Notify>)>,
 }
 
 impl ResponseBudget {
     fn allow(&mut self, source: IpAddr, now: Instant) -> bool {
+        #[cfg(test)]
+        let now = self.observed_window.as_ref().map_or(now, |(now, _)| *now);
         if self
             .window
             .is_none_or(|start| now.saturating_duration_since(start) >= Duration::from_secs(1))
@@ -66,6 +91,10 @@ impl ResponseBudget {
         self.recent
             .retain(|_, sent| now.saturating_duration_since(*sent) < Duration::from_secs(1));
         if self.sent >= 8 || self.recent.contains_key(&source) || self.recent.len() >= 256 {
+            #[cfg(test)]
+            if let Some((_, denied)) = &self.observed_window {
+                denied.notify_one();
+            }
             return false;
         }
         self.sent += 1;
@@ -80,7 +109,107 @@ impl RoutedDiscovery {
             pending: Mutex::new(QueryTracker::default()),
             signer,
             replies: Mutex::new(ResponseBudget::default()),
+            #[cfg(test)]
+            trace: std::sync::OnceLock::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_trace(&self) {
+        self.trace.get_or_init(|| {
+            Mutex::new(DiscoveryTrace {
+                started: Instant::now(),
+                omitted: 0,
+                events: std::collections::VecDeque::with_capacity(128),
+            })
+        });
+    }
+
+    // Callers release pending/reply/roster guards before tracing. Visibility
+    // admission may still be held; the trace guard acquires no other lock and
+    // never crosses an await. Snapshots only clone bounded public metadata.
+    #[cfg(test)]
+    fn witness(
+        &self,
+        stage: &'static str,
+        endpoint: SocketAddr,
+        nonce: Option<Nonce>,
+        outcome: impl FnOnce() -> String,
+    ) {
+        if let Some(trace) = self.trace.get() {
+            let outcome = outcome();
+            let mut trace = trace.lock().unwrap();
+            if trace.events.len() == 128 {
+                trace.events.pop_front();
+                trace.omitted += 1;
+            }
+            let elapsed_ms = trace.started.elapsed().as_millis();
+            trace.events.push_back(DiscoveryWitness {
+                elapsed_ms,
+                stage,
+                endpoint,
+                nonce,
+                outcome,
+            });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trace_snapshot(&self) -> (usize, Vec<DiscoveryWitness>) {
+        self.trace.get().map_or_else(
+            || (0, Vec::new()),
+            |trace| {
+                let trace = trace.lock().unwrap();
+                (trace.omitted, trace.events.iter().cloned().collect())
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trace_watermark(&self) -> usize {
+        self.trace.get().map_or(0, |trace| {
+            let trace = trace.lock().unwrap();
+            trace.omitted + trace.events.len()
+        })
+    }
+
+    // No snapshot allocation: a cached peer is readiness only when this call's
+    // own endpoint/nonce also reached the roster with the expected verified binding.
+    #[cfg(test)]
+    pub(crate) fn fresh_certified_probe_since(
+        &self,
+        watermark: usize,
+        endpoint: SocketAddr,
+        user_id: &str,
+        account_id: &str,
+    ) -> bool {
+        let Some(trace) = self.trace.get() else {
+            return false;
+        };
+        let trace = trace.lock().unwrap();
+        if trace.omitted > watermark {
+            return false;
+        }
+        trace
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(index, event)| {
+                trace.omitted + index >= watermark
+                    && event.stage == "query_sent"
+                    && event.endpoint == endpoint
+            })
+            .take(2)
+            .any(|(_, sent)| {
+                sent.nonce.is_some()
+                    && trace.events.iter().enumerate().any(|(index, event)| {
+                        trace.omitted + index >= watermark
+                            && event.stage == "roster_identity"
+                            && event.endpoint == endpoint
+                            && event.nonce == sent.nonce
+                            && event.outcome.split_once(' ') == Some((user_id, account_id))
+                    })
+            })
     }
 
     /// One bounded query to an explicitly supplied candidate endpoint.
@@ -108,6 +237,8 @@ impl RoutedDiscovery {
                     return Ok(());
                 }
                 socket.try_send_to(&query::encode_query(nonce), target)?;
+                #[cfg(test)]
+                self.witness("query_sent", target, Some(nonce), || "ok".into());
                 sent = true;
                 Ok(())
             });
@@ -243,21 +374,52 @@ async fn run_listen_with_routed(
         }
         match tokio::time::timeout(PEER_TTL, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, source))) => {
+                #[cfg(test)]
+                if let Some(routed) = &routed {
+                    routed.witness("received", source, None, || "datagram".into());
+                }
                 if !visibility.accepts_source(source) {
+                    #[cfg(test)]
+                    if let Some(routed) = &routed {
+                        routed.witness("source_rejected", source, None, || "scope".into());
+                    }
                     continue;
                 }
                 if let Some(routed) = &routed {
                     if let Some(nonce) = query::decode_query(&buf[..n]) {
+                        #[cfg(test)]
+                        routed.witness("query_decoded", source, Some(nonce), || "ok".into());
                         let allowed = routed
                             .replies
                             .lock()
                             .expect("reply lock not poisoned")
                             .allow(source.ip(), Instant::now());
-                        if allowed
-                            && let Some(announce) = decode(&current_announce(&self_announce))
-                            && let Some(reply) = (routed.signer)(nonce, &announce)
-                        {
-                            let _ = visibility.send_announce(&socket, &reply, source).await;
+                        #[cfg(test)]
+                        routed.witness("query_quota", source, Some(nonce), || allowed.to_string());
+                        if allowed {
+                            let announce = decode(&current_announce(&self_announce));
+                            #[cfg(test)]
+                            routed.witness("announce_decoded", source, Some(nonce), || {
+                                announce.is_some().to_string()
+                            });
+                            if let Some(announce) = announce {
+                                let reply = (routed.signer)(nonce, &announce);
+                                #[cfg(test)]
+                                routed.witness("response_signed", source, Some(nonce), || {
+                                    reply.is_some().to_string()
+                                });
+                                if let Some(reply) = reply {
+                                    let _sent =
+                                        visibility.send_announce(&socket, &reply, source).await;
+                                    #[cfg(test)]
+                                    routed.witness("response_sent", source, Some(nonce), || {
+                                        match _sent {
+                                            Ok(sent) => sent.to_string(),
+                                            Err(error) => format!("{:?}", error.kind()),
+                                        }
+                                    });
+                                }
+                            }
                         }
                         continue;
                     }
@@ -267,6 +429,13 @@ async fn run_listen_with_routed(
                             .lock()
                             .expect("query lock not poisoned")
                             .accept_with_latency(source.ip(), &buf[..n], Instant::now());
+                        #[cfg(test)]
+                        routed.witness(
+                            "response_accepted",
+                            source,
+                            buf[..n].get(5..21).and_then(|bytes| bytes.try_into().ok()),
+                            || answer.is_some().to_string(),
+                        );
                         if let Some((announce, rtt)) = answer {
                             let outcome = roster
                                 .lock()
@@ -277,6 +446,23 @@ async fn run_listen_with_routed(
                                     &self_user_id,
                                     rtt,
                                 );
+                            #[cfg(test)]
+                            {
+                                let nonce =
+                                    buf[..n].get(5..21).and_then(|bytes| bytes.try_into().ok());
+                                routed.witness("roster_updated", source, nonce, || {
+                                    format!("{outcome:?}")
+                                });
+                                if outcome.accepted() {
+                                    routed.witness("roster_identity", source, nonce, || {
+                                        format!(
+                                            "{} {}",
+                                            announce.public().user_id(),
+                                            announce.account_id().as_deref().unwrap_or("")
+                                        )
+                                    });
+                                }
+                            }
                             if outcome == UpdateOutcome::New {
                                 let bytes = current_announce(&self_announce);
                                 let _ = visibility.send_announce(&socket, &bytes, source).await;
@@ -767,6 +953,42 @@ pub fn spawn_discovery_with_routed(
         routed,
         None,
     )
+    .into_handles()
+}
+
+/// Named producer ownership; public callers retain the historical four-handle order.
+pub(crate) struct DiscoveryTasks {
+    listener: JoinHandle<()>,
+    broadcast: JoinHandle<()>,
+    scan: JoinHandle<()>,
+    rejoin: JoinHandle<()>,
+    #[cfg(test)]
+    first_polls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DiscoveryTasks {
+    pub(crate) fn into_handles(self) -> Vec<JoinHandle<()>> {
+        vec![self.listener, self.broadcast, self.scan, self.rejoin]
+    }
+    #[cfg(test)]
+    pub(crate) fn ambient_ids(&self) -> [tokio::task::Id; 3] {
+        [self.broadcast.id(), self.scan.id(), self.rejoin.id()]
+    }
+    #[cfg(test)]
+    pub(crate) fn ambient_first_polls(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.first_polls.clone()
+    }
+}
+
+#[cfg(test)]
+fn spawn_observed_ambient(
+    future: impl std::future::Future<Output = ()> + Send + 'static,
+    first_polls: Arc<std::sync::atomic::AtomicUsize>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        first_polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        future.await;
+    })
 }
 
 pub(crate) fn spawn_discovery_with_network_changes(
@@ -779,40 +1001,60 @@ pub(crate) fn spawn_discovery_with_network_changes(
     visibility: Arc<DiscoveryVisibility>,
     routed: Option<Arc<RoutedDiscovery>>,
     network_changes: Option<tokio::sync::watch::Sender<u64>>,
-) -> Vec<JoinHandle<()>> {
+) -> DiscoveryTasks {
     let trigger = trigger.unwrap_or_else(|| Arc::new(Notify::new()));
     let target: SocketAddr = (
         crate::transport::net::DISCOVERY_MULTICAST_GROUP,
         discovery_port,
     )
         .into();
-    vec![
-        tokio::spawn(run_listen_with_routed(
-            Arc::clone(&socket),
-            roster,
-            self_user_id,
-            Arc::clone(&announce),
-            discovery_port,
-            Arc::clone(&visibility),
-            routed,
-        )),
-        tokio::spawn(run_broadcast_with_visibility(
-            Arc::clone(&socket),
-            Arc::clone(&announce),
-            target,
-            Duration::from_secs(2),
-            Some(Arc::clone(&trigger)),
-            Arc::clone(&visibility),
-        )),
-        tokio::spawn(run_scan_with_visibility(
-            Arc::clone(&socket),
-            announce,
-            discovery_port,
-            Some(Arc::clone(&trigger)),
-            visibility,
-        )),
-        tokio::spawn(run_rejoin(socket, trigger, network_changes)),
-    ]
+    #[cfg(test)]
+    let first_polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::spawn(run_listen_with_routed(
+        Arc::clone(&socket),
+        roster,
+        self_user_id,
+        Arc::clone(&announce),
+        discovery_port,
+        Arc::clone(&visibility),
+        routed,
+    ));
+    let broadcast = run_broadcast_with_visibility(
+        Arc::clone(&socket),
+        Arc::clone(&announce),
+        target,
+        Duration::from_secs(2),
+        Some(Arc::clone(&trigger)),
+        Arc::clone(&visibility),
+    );
+    #[cfg(test)]
+    let broadcast = spawn_observed_ambient(broadcast, first_polls.clone());
+    #[cfg(not(test))]
+    let broadcast = tokio::spawn(broadcast);
+    let scan = run_scan_with_visibility(
+        Arc::clone(&socket),
+        announce,
+        discovery_port,
+        Some(Arc::clone(&trigger)),
+        visibility,
+    );
+    #[cfg(test)]
+    let scan = spawn_observed_ambient(scan, first_polls.clone());
+    #[cfg(not(test))]
+    let scan = tokio::spawn(scan);
+    let rejoin = run_rejoin(socket, trigger, network_changes);
+    #[cfg(test)]
+    let rejoin = spawn_observed_ambient(rejoin, first_polls.clone());
+    #[cfg(not(test))]
+    let rejoin = tokio::spawn(rejoin);
+    DiscoveryTasks {
+        listener,
+        broadcast,
+        scan,
+        rejoin,
+        #[cfg(test)]
+        first_polls,
+    }
 }
 
 /// IPv6 uses unicast only; the existing IPv4 LAN multicast loop remains separate.
@@ -972,6 +1214,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pinned_gateway_query_recovers_after_another_loopback_client_consumes_reply_budget() {
+        use crate::identity::account::Account;
+        use crate::postoffice::gateway::query_pinned_relay;
+        use futures_util::FutureExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let identity = Arc::new(DeviceIdentity::generate());
+        let account = Account::generate();
+        let announce = Announce::new_post_office_with_account(&identity, &account, "hub", 41001);
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let endpoint = socket.local_addr().unwrap();
+        let replies = Arc::new(AtomicUsize::new(0));
+        let routed = Arc::new(RoutedDiscovery::new({
+            let identity = identity.clone();
+            let replies = replies.clone();
+            Arc::new(move |nonce, announce| {
+                let response = query::encode_response(nonce, announce, &identity);
+                if response.is_some() {
+                    replies.fetch_add(1, Ordering::SeqCst);
+                }
+                response
+            })
+        }));
+        let server = tokio::spawn(run_listen_with_routed(
+            socket,
+            Arc::new(Mutex::new(Roster::default())),
+            identity.user_id(),
+            shared_announce(&announce),
+            endpoint.port(),
+            Arc::new(DiscoveryVisibility::default()),
+            Some(routed.clone()),
+        ));
+        let observed = std::panic::AssertUnwindSafe(async {
+            // Prime with exactly one datagram. A retrying primer could leave
+            // a duplicate nonce queued and falsely satisfy the later witness.
+            let primer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let nonce = uuid::Uuid::new_v4().into_bytes();
+            primer.send_to(&query::encode_query(nonce), endpoint).await.unwrap();
+            let mut bytes = [0u8; 2048];
+            let (len, from) = tokio::time::timeout(
+                Duration::from_secs(4), primer.recv_from(&mut bytes),
+            ).await.expect("the single priming datagram must receive a real reply").unwrap();
+            assert_eq!(from, endpoint);
+            assert_eq!(query::decode_response(&bytes[..len], nonce), Some(announce.clone()),
+                "the first real signed query must consume the pinned per-IP allowance");
+            assert_eq!(replies.load(Ordering::SeqCst), 1);
+            let denied = Arc::new(tokio::sync::Notify::new());
+            {
+                let mut budget = routed.replies.lock().unwrap();
+                let consumed = budget.recent[&endpoint.ip()];
+                budget.observed_window = Some((consumed, denied.clone()));
+            }
+            let expected = identity.user_id();
+            let second = query_pinned_relay(endpoint, &expected);
+            tokio::pin!(second);
+            // Poll the same real query until its datagram is actually rejected
+            // by the consumed per-IP quota. Its own four-second deadline bounds
+            // this observation; no silence interval certifies packet reception.
+            tokio::select! {
+                biased;
+                () = denied.notified() => {}
+                proof = second.as_mut() => panic!(
+                    "the consumed quota must reject the query before completion: {proof:?}"
+                ),
+            }
+            assert_eq!(replies.load(Ordering::SeqCst), 1, "a rejected query must not be signed");
+            // Return to the real clock. The original query must recover by its
+            // own retransmission, with no cancellation, restart or quota reset.
+            routed.replies.lock().unwrap().observed_window = None;
+            let proof = second.await;
+            assert_eq!(proof, Some(announce), "the second pinned gateway query must recover from the quota drop within its existing four-second request budget");
+        }).catch_unwind().await;
+        server.abort();
+        let stopped = server.await;
+        if let Err(panic) = observed {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(
+            stopped.is_ok() || stopped.as_ref().is_err_and(|error| error.is_cancelled()),
+            "the real responder must be joined without a hidden task panic"
+        );
+    }
+
+    #[tokio::test]
     async fn routed_query_discovers_a_peer_without_sending_our_identity_first() {
         routed_query_roundtrip(Duration::ZERO, Duration::from_secs(15)).await;
     }
@@ -984,6 +1310,7 @@ mod tests {
     async fn routed_query_roundtrip(delay: Duration, expected_lease: Duration) {
         let alice = Arc::new(DeviceIdentity::generate());
         let bob = Arc::new(DeviceIdentity::generate());
+        let bob_account = crate::identity::account::Account::generate();
         let a_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let b_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let a_roster = Arc::new(Mutex::new(Roster::default()));
@@ -999,6 +1326,8 @@ mod tests {
                 query::encode_response(nonce, announce, &bob)
             })
         }));
+        a_queries.enable_trace();
+        b_queries.enable_trace();
         let a_task = tokio::spawn(run_listen_with_routed(
             Arc::clone(&a_socket),
             Arc::clone(&a_roster),
@@ -1012,11 +1341,17 @@ mod tests {
             Arc::clone(&b_socket),
             Arc::clone(&b_roster),
             bob.user_id(),
-            shared_announce(&Announce::new(&bob, "Bob", 41002)),
+            shared_announce(&Announce::new_with_account(
+                &bob,
+                &bob_account,
+                "Bob",
+                41002,
+            )),
             47474,
             Arc::new(DiscoveryVisibility::default()),
-            Some(b_queries),
+            Some(Arc::clone(&b_queries)),
         ));
+        let watermark = a_queries.trace_watermark();
         a_queries
             .probe(&a_socket, b_socket.local_addr().unwrap())
             .await
@@ -1041,8 +1376,124 @@ mod tests {
                 expected_lease
             );
         }
+        let endpoint = b_socket.local_addr().unwrap();
+        assert!(a_queries.fresh_certified_probe_since(
+            watermark,
+            endpoint,
+            &bob.user_id(),
+            &bob_account.account_id()
+        ));
+        assert!(!a_queries.fresh_certified_probe_since(
+            watermark,
+            endpoint,
+            "other-user",
+            &bob_account.account_id()
+        ));
+        assert!(!a_queries.fresh_certified_probe_since(
+            watermark,
+            endpoint,
+            &bob.user_id(),
+            "other-account"
+        ));
+        assert!(!a_queries.fresh_certified_probe_since(
+            watermark,
+            a_socket.local_addr().unwrap(),
+            &bob.user_id(),
+            &bob_account.account_id()
+        ));
+        assert!(!a_queries.fresh_certified_probe_since(
+            a_queries.trace_watermark(),
+            endpoint,
+            &bob.user_id(),
+            &bob_account.account_id()
+        ));
+        let (_, source_events) = a_queries.trace_snapshot();
+        assert!(
+            source_events
+                .iter()
+                .any(|event| event.stage == "response_accepted" && event.outcome == "true")
+        );
+        assert!(
+            source_events
+                .iter()
+                .any(|event| event.stage == "roster_updated")
+        );
+        let (_, target_events) = b_queries.trace_snapshot();
+        for stage in [
+            "received",
+            "query_decoded",
+            "query_quota",
+            "announce_decoded",
+            "response_signed",
+            "response_sent",
+        ] {
+            assert!(
+                target_events.iter().any(|event| event.stage == stage),
+                "missing {stage}: {target_events:?}"
+            );
+        }
+        let source = a_socket.local_addr().unwrap();
+        let first = target_events
+            .iter()
+            .find(|event| event.stage == "query_decoded")
+            .unwrap();
+        assert_eq!(first.endpoint, source);
+        assert!(first.nonce.is_some());
+        assert!(
+            target_events
+                .windows(2)
+                .all(|events| events[0].elapsed_ms <= events[1].elapsed_ms)
+        );
+        {
+            let mut budget = b_queries.replies.lock().unwrap();
+            let consumed = budget.recent[&source.ip()];
+            budget.observed_window = Some((consumed, Arc::new(Notify::new())));
+        }
+        a_queries
+            .probe(&a_socket, b_socket.local_addr().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !b_queries
+                .trace_snapshot()
+                .1
+                .iter()
+                .any(|event| event.stage == "query_quota" && event.outcome == "false")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual second UDP query must witness quota rejection");
+        let untraced = RoutedDiscovery::new(Arc::new(|_, _| None));
+        untraced.witness("unused", source, None, || {
+            panic!("disabled tracing must not construct outcome metadata")
+        });
+        assert!(untraced.trace_snapshot().1.is_empty());
+        let before = a_queries.trace_snapshot().1.len();
+        for _ in 0..130 {
+            b_queries.witness("bound_control", source, None, || "fixed".into());
+        }
+        let (omitted, bounded) = b_queries.trace_snapshot();
+        assert_eq!(bounded.len(), 128);
+        assert!(omitted >= 2);
+        assert_eq!(a_queries.trace_snapshot().1.len(), before);
+        for _ in 0..130 {
+            a_queries.witness("omitted_control", source, None, || "fixed".into());
+        }
+        assert!(
+            !a_queries.fresh_certified_probe_since(
+                watermark,
+                endpoint,
+                &bob.user_id(),
+                &bob_account.account_id()
+            ),
+            "omitted proof must remain pending"
+        );
         a_task.abort();
         b_task.abort();
+        assert!(a_task.await.unwrap_err().is_cancelled());
+        assert!(b_task.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]
@@ -1454,6 +1905,9 @@ mod tests {
 
         let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let listen_addr = listener.local_addr().unwrap();
+        // Restrict receives to our listener; ephemeral ports can overlap other
+        // tests' discovery targets when nextest runs them in separate processes.
+        peer_sock.connect(listen_addr).await.unwrap();
         let roster = Arc::new(Mutex::new(Roster::default()));
         let self_id = DeviceIdentity::generate();
         let self_announce = shared_announce(&Announce::new(&self_id, "Self", 1));
@@ -1466,10 +1920,7 @@ mod tests {
         ));
 
         // First sight → expect a unicast reply (our self-announce) back.
-        peer_sock
-            .send_to(&encode(&peer_announce), listen_addr)
-            .await
-            .unwrap();
+        peer_sock.send(&encode(&peer_announce)).await.unwrap();
         let mut buf = vec![0u8; 2048];
         let (n, _src) = tokio::time::timeout(Duration::from_secs(2), peer_sock.recv_from(&mut buf))
             .await
@@ -1478,14 +1929,27 @@ mod tests {
         let reply = decode(&buf[..n]).expect("reply decodes");
         assert_eq!(reply.user_id, self_id.public().user_id());
 
-        // Re-announce (refresh) → NO reply (avoids the 2s reply storm).
-        peer_sock
-            .send_to(&encode(&peer_announce), listen_addr)
+        // Other process-isolated discovery tests can announce to the protocol port,
+        // which the OS may also allocate to this ephemeral socket. Exercise that
+        // interference explicitly: only this fixture's listener may supply replies.
+        let unrelated = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let other_id = DeviceIdentity::generate();
+        unrelated
+            .send_to(
+                &encode(&Announce::new(&other_id, "Other test", 4001)),
+                peer_sock.local_addr().unwrap(),
+            )
             .await
             .unwrap();
+
+        // Re-announce (refresh) → NO reply (avoids the 2s reply storm).
+        peer_sock.send(&encode(&peer_announce)).await.unwrap();
         let second =
             tokio::time::timeout(Duration::from_millis(300), peer_sock.recv_from(&mut buf)).await;
-        assert!(second.is_err(), "refresh must not trigger a reply");
+        assert!(
+            second.is_err(),
+            "refresh must not trigger a reply: {second:?}"
+        );
     }
 
     #[tokio::test]

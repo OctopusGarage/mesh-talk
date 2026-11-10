@@ -29,6 +29,7 @@ test("gallery loads thumbnails after scrolling to them", async ({ page }) => {
 test("slow avatar selection has readable progress with reduced motion", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["players"]);
   await page.emulateMedia({ reducedMotion: "reduce" });
   await enterChat(page);
   await page.getByTestId("open-profile").click();

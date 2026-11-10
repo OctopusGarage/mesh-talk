@@ -1,3 +1,6 @@
+import type { AccountGroupAccessInfo } from "@/lib/types";
+import { captureRuntimeOwner } from "@/store/ownership";
+import { useAccountProfile } from "@/store/accountProfiles";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Bookmark } from "lucide-react";
@@ -45,6 +48,8 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
   const { t } = useTranslation();
   const [profileOpen, setProfileOpen] = useState(false);
   const owner = useAuth((s) => s.user?.id);
+  const sessionGeneration = useAuth((s) => s.generation);
+  const runtimeScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const peers = useChat((s) => s.peers);
   const presence = usePresenceFor(id);
   const status = presenceStatus(presence);
@@ -55,6 +60,8 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
     rosterProjection(peers).contactForAccount(id)?.user_id ?? "";
   const [trustResult, setTrustResult] = useState<{
     owner: string;
+    sessionGeneration: number;
+    runtimeScope: string;
     id: string;
     fingerprint: string;
     verified: boolean;
@@ -62,19 +69,25 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
   const verified =
     trustResult !== null &&
     trustResult.owner === owner &&
+    trustResult.sessionGeneration === sessionGeneration &&
+    trustResult.runtimeScope === runtimeScope &&
     trustResult.id === id &&
     trustResult.fingerprint === fingerprint &&
     trustResult.verified;
   useEffect(() => {
     if (!fingerprint || !owner) return;
+    const lease = captureRuntimeOwner();
     let live = true;
     void chatApi
       .getTrust(owner, id, fingerprint)
       .then(
         (tr) =>
           live &&
+          lease.current() &&
           setTrustResult({
             owner,
+            sessionGeneration,
+            runtimeScope,
             id,
             fingerprint,
             verified: tr.verified && !tr.fingerprint_changed,
@@ -84,8 +97,8 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
     return () => {
       live = false;
     };
-  }, [owner, id, fingerprint]);
-  useEffect(() => setProfileOpen(false), [id]);
+  }, [owner, sessionGeneration, runtimeScope, id, fingerprint]);
+  useEffect(() => setProfileOpen(false), [owner, sessionGeneration, id]);
 
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
@@ -125,10 +138,17 @@ export function ChannelHeader({
   dissolved,
   left,
   pendingInvite,
+  sharedReference = false,
+  previousAccount = false,
+  memberCount,
+  accountAccess,
 }: {
   id: string;
   name: string;
   memberCount: number;
+  sharedReference?: boolean;
+  accountAccess?: AccountGroupAccessInfo | null;
+  previousAccount?: boolean;
   archived: boolean;
   dissolved: boolean;
   left: boolean;
@@ -136,12 +156,32 @@ export function ChannelHeader({
 }) {
   const { t } = useTranslation();
   const presence = usePresenceFor(id);
+  const roleKnown = accountAccess !== undefined;
+  const referenceOnly =
+    sharedReference && (!accountAccess || accountAccess.role === "unknown");
+  const accountMember =
+    accountAccess?.role === "owner" || accountAccess?.role === "member";
+  const execution = accountAccess?.execution.kind;
+  const readiness =
+    !previousAccount && accountMember && execution === "waiting_for_device"
+      ? t("conversation.groupWaitingForDevice", {
+          defaultValue: "Waiting for a linked device",
+        })
+      : !previousAccount && accountMember && execution === "requires_upgrade"
+        ? t("conversation.groupRequiresUpgrade", {
+            defaultValue: "Update a linked device to send",
+          })
+        : !previousAccount && accountMember && execution === "reconciling"
+          ? t("conversation.groupReconciling", {
+              defaultValue: "Updating group access…",
+            })
+          : null;
   return (
     <div className="flex min-w-0 items-center gap-3">
       <div className="relative">
         <AvatarEditMenu
           id={id}
-          ariaLabel={t("avatar.editGroup")}
+          ariaLabel={t("groupMetadata.privatePhoto")}
           category="group"
         >
           <GroupAvatar channelId={id} size={36} title={name} />
@@ -156,19 +196,52 @@ export function ChannelHeader({
         </div>
         <div
           className="text-xs text-muted-foreground"
-          title={t("presence.knownOnlineHint")}
+          data-testid={readiness ? "group-execution-readiness" : undefined}
+          role={readiness ? "status" : undefined}
+          title={
+            referenceOnly || previousAccount
+              ? undefined
+              : t("presence.knownOnlineHint")
+          }
         >
-          {dissolved
-            ? t("conversation.dissolvedChannel")
-            : archived
-              ? t("conversation.archivedChannel")
-              : left
-                ? t("conversation.leftChannel")
-                : pendingInvite
-                  ? t("conversation.pendingInvite")
-                  : groupPresenceLabel(presence, t)}
+          {previousAccount
+            ? t("conversation.previousAccountChannel")
+            : referenceOnly
+              ? `${t("conversation.sharedReference")} · ${t("conversation.members", { count: memberCount })}`
+              : (roleKnown ? accountAccess?.role === "dissolved" : dissolved)
+                ? t("conversation.dissolvedChannel")
+                : !roleKnown && archived
+                  ? t("conversation.archivedChannel")
+                  : (roleKnown ? accountAccess?.role === "left" : left)
+                    ? t("conversation.leftChannel")
+                    : (
+                          roleKnown
+                            ? accountAccess?.role === "invited"
+                            : pendingInvite
+                        )
+                      ? t("conversation.pendingInvite")
+                      : (readiness ?? groupPresenceLabel(presence, t))}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The public About text occupies available header space without crowding actions. */
+export function ConversationBio({ accountId }: { accountId: string }) {
+  const profile = useAccountProfile(accountId);
+  const bio = profile?.bio?.trim();
+  return (
+    <div className="min-w-0 flex-1">
+      {bio && (
+        <p
+          data-testid="conversation-bio"
+          className="truncate text-xs text-muted-foreground"
+          title={bio}
+        >
+          {bio}
+        </p>
+      )}
     </div>
   );
 }

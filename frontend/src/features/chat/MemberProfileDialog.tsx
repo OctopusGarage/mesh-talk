@@ -1,3 +1,5 @@
+import { AccountProfilePanel } from "./AccountProfilePanel";
+import { AccountBindingRecovery } from "./AccountBindingRecovery";
 import { displayIdentity } from "@/lib/displayIdentity";
 import { MessageCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -19,6 +21,7 @@ import {
 import type { MemberProfileTarget } from "./memberProfileDetails";
 import {
   memberDiscoverySources,
+  memberRegistrationOrigins,
   memberProfileDevices,
 } from "./memberProfileDetails";
 
@@ -80,12 +83,16 @@ function MemberProfileContent({
     peers,
   );
   const discoverySources = memberDiscoverySources(presence);
+  const registrationOrigins = memberRegistrationOrigins(presence);
   const name = identity.name;
   const accountId = identity.accountId;
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm" data-testid="member-profile-dialog">
+      <DialogContent
+        className="max-h-[85dvh] max-w-sm overflow-y-auto"
+        data-testid="member-profile-dialog"
+      >
         <DialogHeader>
           <DialogTitle>{t("memberProfile.title")}</DialogTitle>
           <DialogDescription>
@@ -105,6 +112,39 @@ function MemberProfileContent({
             {presenceLabel(presence, t)}
           </p>
         </div>
+
+        {accountId && (
+          <AccountProfilePanel key={accountId} accountId={accountId} />
+        )}
+
+        <section
+          aria-label={t("memberProfile.registrationOrigin")}
+          data-testid="member-registration-origins"
+          className="min-w-0 space-y-2"
+        >
+          <h3 className="text-sm font-medium">
+            {t("memberProfile.registrationOrigin")}
+          </h3>
+          {registrationOrigins.length ? (
+            <ul className="space-y-2 text-sm">
+              {registrationOrigins.map((office) => (
+                <li key={office.user_id} className="[overflow-wrap:anywhere]">
+                  {office.name}
+                  <code className="block select-text text-xs text-muted-foreground">
+                    {office.user_id}
+                  </code>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {t("memberProfile.registrationOriginUnavailable")}
+            </p>
+          )}
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("memberProfile.registrationOriginHint")}
+          </p>
+        </section>
 
         <section
           aria-label={t("memberProfile.discoveredVia")}
@@ -209,19 +249,6 @@ function MemberProfileContent({
               </div>
             </dl>
           )}
-          {accountId && (
-            <div>
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                {t("memberProfile.accountId")}
-              </div>
-              <code
-                data-testid="member-profile-account-id"
-                className="mt-1 block select-text break-all rounded-md bg-muted px-2.5 py-2 text-xs"
-              >
-                {accountId}
-              </code>
-            </div>
-          )}
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
               {t("memberProfile.devices")}
@@ -272,6 +299,26 @@ function MemberProfileContent({
           <p className="text-xs leading-relaxed text-muted-foreground">
             {t("memberProfile.endpointHint")}
           </p>
+        )}
+        {accountId && !target.isSelf && (
+          <AccountBindingRecovery
+            key={accountId}
+            accountId={accountId}
+            onOpenAccount={
+              onMessage
+                ? (currentAccountId) => {
+                    const currentIdentity = displayIdentity({
+                      accountId: currentAccountId,
+                      accounts,
+                      peers,
+                      favorites,
+                    });
+                    onOpenChange(false);
+                    onMessage(currentAccountId, currentIdentity.name);
+                  }
+                : undefined
+            }
+          />
         )}
         {accountId && onMessage && !target.isSelf && (
           <Button
