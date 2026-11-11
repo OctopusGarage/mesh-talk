@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+test("hosted Health executes the shared Ubuntu source owner regressions", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
+  const step = workflow.split(/^      - /m).find(value => value.startsWith("name: Diagnostic and release gate regressions (all platforms)\n"));
+  assert.match(step, /-- node --test .*scripts\/diagnostics\/\*\.test\.mjs scripts\/ci\/ubuntu-apt-source\.test\.mjs/);
+});
+
 test("full health builds frontend before Tauri compilation on a fresh checkout", () => {
   const script = readFileSync(new URL("../check-health.sh", import.meta.url), "utf8");
   assert.ok(script.indexOf("npm run build") < script.indexOf("cargo clippy"), "Tauri generate_context requires actual frontendDist before Clippy/tests");

@@ -147,7 +147,7 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         shell: bash
         run: |
-          node scripts/validation/stage.mjs diagnostics --profile shared --deadline "$MESH_HEALTH_DEADLINE_MS" --result tmp/health-diagnostics.json -- node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/diagnostics/node-test-progress.mjs --test-reporter-destination=target/validation/health-progress.jsonl scripts/diagnostics/*.test.mjs
+          node scripts/validation/stage.mjs diagnostics --profile shared --deadline "$MESH_HEALTH_DEADLINE_MS" --result tmp/health-diagnostics.json -- node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/diagnostics/node-test-progress.mjs --test-reporter-destination=target/validation/health-progress.jsonl scripts/diagnostics/*.test.mjs scripts/ci/ubuntu-apt-source.test.mjs
 
       - name: Preserve diagnostic execution evidence
         if: ${{ steps.scope.outputs.full == 'true' && (always()) }}

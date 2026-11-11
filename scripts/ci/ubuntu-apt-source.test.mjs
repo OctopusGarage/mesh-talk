@@ -112,36 +112,40 @@ test("unrelated sources are a byte-for-byte no-op", async (t) => {
   assert.equal((await stat(path)).ino, original.ino);
 });
 
-test("Ubuntu 22.04 ARM ports retain their architecture-specific signed repository", async (t) => {
-  const root = await fixture(t);
-  await writeFile(
-    join(root, "etc/os-release"),
-    'ID=ubuntu\nVERSION_ID="22.04"\n',
-  );
-  const path = join(root, "etc/apt/sources.list");
-  const text =
-    "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports jammy main universe\ndeb http://ports.ubuntu.com/ubuntu-ports jammy-security main universe\n";
-  await writeFile(path, text);
-  const original = await stat(path);
-  assert.equal(
-    await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
-    1,
-  );
-  assert.equal(
-    await readFile(path, "utf8"),
-    text.replaceAll(
-      "http://ports.ubuntu.com/ubuntu-ports",
-      "https://mirrors.ocf.berkeley.edu/ubuntu-ports",
-    ),
-  );
-  assert.notEqual((await stat(path)).ino, original.ino);
-  const prepared = await stat(path);
-  assert.equal(
-    await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
-    0,
-  );
-  assert.equal((await stat(path)).ino, prepared.ino);
-});
+test(
+  "Ubuntu 22.04 ARM ports retain their architecture-specific signed repository",
+  posixOnly,
+  async (t) => {
+    const root = await fixture(t);
+    await writeFile(
+      join(root, "etc/os-release"),
+      'ID=ubuntu\nVERSION_ID="22.04"\n',
+    );
+    const path = join(root, "etc/apt/sources.list");
+    const text =
+      "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports jammy main universe\ndeb http://ports.ubuntu.com/ubuntu-ports jammy-security main universe\n";
+    await writeFile(path, text);
+    const original = await stat(path);
+    assert.equal(
+      await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+      1,
+    );
+    assert.equal(
+      await readFile(path, "utf8"),
+      text.replaceAll(
+        "http://ports.ubuntu.com/ubuntu-ports",
+        "https://mirrors.ocf.berkeley.edu/ubuntu-ports",
+      ),
+    );
+    assert.notEqual((await stat(path)).ino, original.ino);
+    const prepared = await stat(path);
+    assert.equal(
+      await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+      0,
+    );
+    assert.equal((await stat(path)).ino, prepared.ino);
+  },
+);
 
 test("unsupported Azure URLs fail before any otherwise valid file changes", async (t) => {
   for (const uri of [
