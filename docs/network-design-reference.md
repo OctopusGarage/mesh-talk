@@ -2521,6 +2521,15 @@ The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, 
 
 ### Idle mailbox work and rejected pages
 
+Unchanged discovery heartbeats may reuse intrinsic signature verification from
+an exactly equal announcement already admitted to the bounded live roster. This
+includes the complete certificate and signatures; changed announcements verify
+normally. Current account binding and route/source rules still run, and each
+accepted observation keeps its existing presence semantics. Forgetting or
+evicting the live proof removes this reuse; historical identity alone is not a
+verification cache or current presence evidence.
+
+
 A network-validation transaction reads each mailbox arrival once and passes that
 fresh observation through role qualification. The shared connection guard keeps
 it current; repository owner/epoch validation still precedes lifecycle and cutoff

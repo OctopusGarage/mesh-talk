@@ -1144,6 +1144,13 @@ or permission. Current reads, canonical/content checks and source errors still
 precede reuse. The [repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
 cover unchanged reads, forged signatures, repeated negative results, content
 tampering, retirement, reopen and bounded eviction.
+A live roster may reuse its already-verified announcement only on full value
+identity, including both public keys, every advertised field, certificate and
+signature. Keep current account bindings, route scope and presence updates
+outside that reuse; forgotten/evicted announcements lose the evidence. The
+[roster regressions](../crates/mesh-talk-core/src/discovery/roster.rs) count actual
+certificate checks and exercise tampering, renamed proofs, binding transitions
+and live-proof retirement without adding a separate cache.
 
 Separate cache admission priorities when recomputable work can displace receive
 progress and repeatedly restart unchanged synchronization. Preserve shared hard
