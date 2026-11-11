@@ -517,6 +517,15 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+A successful package-index command can still report failed repositories and use
+cached indexes. Release preparation must reuse the
+[hosted Ubuntu source owner](../scripts/ci/ubuntu-apt-source.mjs), reject any index
+refresh error before installing dependencies, and preserve repository signing and
+architecture. The [release workflow regression](../scripts/diagnostics/release-workflow.test.mjs)
+executes its shell boundaries with preparation/index failures and proves that
+installation does not follow. Fixture success does not establish runner DNS or
+signed hosted release acceptance.
+
 Dependency upgrades can change equivalent CSS serialization without changing the
 interaction contract. Keep assertions narrow enough to reject wrong geometry and
 scale while accepting equivalent omitted zero coordinates. The reset assertion in

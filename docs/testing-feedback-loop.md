@@ -1505,7 +1505,7 @@ running all scenarios. Portable/native scenarios and snapshot assertions remain
 in place. Sharding trades more concurrent runner slots and setup work for shorter
 elapsed time; account concurrency limits can reduce the gain.
 
-Disposable GitHub-hosted Ubuntu CI, mutation, browser and native UI runners
+Disposable GitHub-hosted Ubuntu CI, mutation, browser, native UI and release runners
 prepare their APT sources before dependency installation.
 `scripts/ci/ubuntu-apt-source.mjs` replaces only the exact Azure Ubuntu archive URI
 with the official HTTPS Ubuntu archive, including URI entries in the referenced
@@ -1516,6 +1516,14 @@ mirror-list references and symlinks. It validates all candidate files before
 writing and preserves file ownership and permissions. This avoids a slow
 runner-image mirror consuming the existing job budget; browser workers, retries,
 test inventories and deadlines are unchanged.
+Release builds and both release-verification jobs reuse this preparation before
+APT and run `apt-get update --error-on=any`. A failed repository refresh must stop
+before package installation instead of silently using old indexes and retrying
+each dependency against an unavailable source. The release workflow regression
+executes the actual shell blocks with controlled preparation/index failures and
+proves installation is not admitted. Ubuntu 22.04 ARM ports retain their signed,
+architecture-specific sources; this preparation does not repair runner DNS, which
+still requires successful hosted execution.
 
 The Windows workspace producer runs `scripts/ci/windows-native-deps.mjs` before
 Cargo. It probes installed Perl executables for native `MSWin32` execution and
