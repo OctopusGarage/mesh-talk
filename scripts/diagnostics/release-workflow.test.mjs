@@ -99,6 +99,67 @@ test("Linux release builds retain the Ubuntu 22.04 runtime baseline across archi
     "compiled build scripts and native objects must not cross runner baselines");
 });
 
+test("release and inspection APT preparation stops before install after source or index failure", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-talk-release-apt-"));
+  try {
+    const bin = join(root, "bin");
+    const calls = join(root, "calls.log");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "sudo"), `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$APT_CALLS"
+if [[ "$1" == --preserve-env=* ]]; then
+  exit "$APT_PREPARE_STATUS"
+fi
+if [[ "$1 $2" == 'apt-get update' ]]; then
+  # APT can return success after a transient index failure unless told otherwise.
+  if [[ "$3" == '--error-on=any' ]]; then exit "$APT_UPDATE_STATUS"; fi
+  exit 0
+fi
+if [[ "$1 $2" == 'apt-get install' ]]; then exit 0; fi
+exit 91
+`, { mode: 0o755 });
+    const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
+    for (const [source, job, name] of [
+      [workflow, "build-release", "Install Tauri system dependencies (Linux)"],
+      [workflow, "verify-release", "Install installer metadata tools"],
+      [workflow, "publish-release", "Install installer metadata tools"],
+      [health, "platform", "Native release inspection regression"],
+    ]) {
+      const body = source.split(`  ${job}:\n`)[1]?.split(/^  [\w-]+:\n/m)[0];
+      const step = body?.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
+      assert.ok(step, job);
+      const block = step.split("        run: ")[1];
+      assert.ok(block?.startsWith("|\n"), job);
+      const commands = block.slice(2).replace(/^          /gm, "");
+      const run = (prepareStatus, updateStatus) => {
+        writeFileSync(calls, "");
+        const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", commands], {
+          cwd: fileURLToPath(new URL("../../", import.meta.url)),
+          env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, APT_CALLS: calls, APT_PREPARE_STATUS: String(prepareStatus), APT_UPDATE_STATUS: String(updateStatus) },
+          encoding: "utf8",
+        });
+        assert.ifError(result.error);
+        return { status: result.status, calls: readFileSync(calls, "utf8") };
+      };
+      const indexFailure = run(0, 100);
+      assert.equal(indexFailure.status, 100, `${job}: a partial index failure must fail preparation`);
+      assert.doesNotMatch(indexFailure.calls, /apt-get install/);
+      const sourceFailure = run(19, 0);
+      assert.equal(sourceFailure.status, 19, `${job}: source preparation failure must propagate`);
+      assert.doesNotMatch(sourceFailure.calls, /apt-get (?:update|install)/);
+      const success = run(0, 0);
+      assert.equal(success.status, 0, job);
+      const lines = success.calls.trim().split("\n");
+      assert.equal(lines.length, 3, job);
+      assert.match(lines[0], /^--preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS .* scripts\/ci\/ubuntu-apt-source\.mjs$/);
+      assert.equal(lines[1], "apt-get update --error-on=any");
+      assert.match(lines[2], /^apt-get install -y /);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("release matrix builds native Windows and Linux ARM64 packages", () => {
   assert.match(workflow, /runner: windows-11-(?:vs2026-)?arm[\s\S]*?target: aarch64-pc-windows-msvc/);
   assert.match(workflow, /runner: ubuntu-22\.04-arm[\s\S]*?target: aarch64-unknown-linux-gnu/);

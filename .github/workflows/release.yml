@@ -164,7 +164,8 @@ jobs:
       - name: Install Tauri system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
+          sudo apt-get update --error-on=any
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
@@ -333,7 +334,8 @@ jobs:
           node-version: 22
       - name: Install installer metadata tools
         run: |
-          sudo apt-get update
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
+          sudo apt-get update --error-on=any
           sudo apt-get install -y libimage-exiftool-perl msitools rpm squashfs-tools
       - uses: actions/setup-python@v7
         with:
@@ -453,7 +455,8 @@ jobs:
           run-id: ${{ needs.resolve-publication.outputs.run_id }}
       - name: Install installer metadata tools
         run: |
-          sudo apt-get update
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
+          sudo apt-get update --error-on=any
           sudo apt-get install -y libimage-exiftool-perl msitools rpm squashfs-tools
       - uses: actions/setup-python@v7
         with:

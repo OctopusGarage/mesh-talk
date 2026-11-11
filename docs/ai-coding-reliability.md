@@ -517,6 +517,17 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+A successful package-index command can still report failed repositories and use
+cached indexes. Release preparation must reuse the
+[hosted Ubuntu source owner](../scripts/ci/ubuntu-apt-source.mjs), reject any index
+refresh error before installing dependencies, and preserve repository signing and
+architecture. Any download-mirror change belongs in that owner, with exact origin
+validation and separate normal/ports paths; it must not replace Ubuntu's signing
+authority or disable freshness checks. The [release workflow regression](../scripts/diagnostics/release-workflow.test.mjs)
+executes its shell boundaries with preparation/index failures and proves that
+installation does not follow. Fixture success does not establish runner DNS or
+signed hosted release acceptance.
+
 Dependency upgrades can change equivalent CSS serialization without changing the
 interaction contract. Keep assertions narrow enough to reject wrong geometry and
 scale while accepting equivalent omitted zero coordinates. The reset assertion in
@@ -890,6 +901,14 @@ focused transfer/authority controls own ownership changes; the small two-node
 departure proof owns actual offline pause/relaunch and retry of the original
 signed event and parent cut. Do not chain unrelated controls and reconnection
 requirements onto an already complete invitation scenario.
+
+Desktop archive fixtures must use the same account-owned channel genesis as the
+desktop creation command and assert its owner before seeding content. Legacy
+device-only genesis starts a separately consented background authority migration;
+it cannot stand in for the desktop factory. The
+[cloud archive command regression](../src-tauri/src/google_drive/command_tests.rs)
+owns this production-path precondition and preserves real file/archive/restart
+acceptance; core channel-maintenance tests own legacy migration.
 
 A fixture with a live authoritative identity observer must not simulate account
 replacement by changing only a derived UI store. A later valid backend observation

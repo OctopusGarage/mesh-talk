@@ -125,7 +125,8 @@
         "scripts/diagnostics/release-signing.test.mjs",
         "scripts/diagnostics/release-sevenzip.test.mjs",
         "scripts/diagnostics/release-delta.test.mjs",
-        "scripts/diagnostics/required-checks.test.mjs"
+        "scripts/diagnostics/required-checks.test.mjs",
+        "scripts/ci/ubuntu-apt-source.test.mjs"
       ],
       "escalation": [
         "Native release inspection uses the single pinned, SHA256-verified sevenzip.py tool owner across native producers and both Ubuntu acceptance jobs. Run the genuine plugin/uninstaller NSIS smoke under the existing Linux portable health gate, preserve exact known-size and whole-payload equivalence, and reject decoder BadCmd before acceptance. Bootstrap fixtures do not establish native Windows tool execution or signed six-platform artifact/draft acceptance; those require hosted release evidence. See docs/updates.md#native-release-inspection.",
@@ -143,6 +144,10 @@
           {
             "name": "Linux x64 and ARM64 release builds retain the Ubuntu 22.04 glibc baseline; compiled Cargo caches are isolated by runner identity, and actual public AppImage launch remains required upgrade acceptance evidence.",
             "reference": "docs/updates.md#download-verification-and-installation"
+          },
+          {
+            "name": "Release build, verification and Health installer inspection prepare signed Ubuntu sources through the shared hosted-runner owner and reject any index refresh error before installing dependencies; exact official origins use the registered Berkeley normal/ports mirrors while architecture, suites and Ubuntu signing authority remain unchanged.",
+            "reference": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding"
           },
           {
             "name": "Nightly preflight waits at most four hours for missing or pending exact-source checks; completed unsuccessful checks, scanning alerts and API errors fail immediately. Final publication remains an immediate strict source recheck.",

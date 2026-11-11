@@ -290,7 +290,17 @@ fn registered_cloud_commands_round_trip_real_archive_and_restart_runtime() {
     let (account, device, channel, favorite, attachment, media) =
         tauri::async_runtime::block_on(async {
             let node = source.node.node_handle().await.unwrap();
-            let channel = node.create_channel("Portable 你好", vec![]).await.unwrap();
+            // Match desktop group creation: account authority is part of genesis.
+            // Legacy device-only creation opts into a separate runtime migration.
+            let channel = node
+                .create_account_channel_invited_if("Portable 你好", vec![], |commit| commit())
+                .await
+                .unwrap();
+            assert_eq!(
+                node.channel_owner_account_id(channel),
+                Some(node.account_id()),
+                "the archive fixture must start with desktop account authority"
+            );
             node.send_channel_message(channel, "encrypted cloud fixture 🌍".as_bytes())
                 .await
                 .unwrap();
