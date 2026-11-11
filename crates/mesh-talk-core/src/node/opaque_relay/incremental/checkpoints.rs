@@ -430,8 +430,11 @@ impl Node {
         hot: Option<Receipt>,
     ) -> Result<Receipt, LogError> {
         let (epoch, source) = self.mailbox_local_binding()?;
-        let cache = self.opaque_receive_cache.lock().expect("opaque cache");
-        let runtime = cache.session_epoch();
+        let runtime = self
+            .opaque_receive_cache
+            .lock()
+            .expect("opaque cache")
+            .session_epoch();
         if let Some(receipt) = hot
             && receipt.runtime == runtime
             && receipt_valid(&receipt, conv, epoch, source, runtime)
@@ -439,20 +442,43 @@ impl Node {
             self.observe_mailbox_work(reason::RECEIPT_HOT, None);
             return Ok(receipt);
         }
-        if let Ok(Some(bytes)) = cache.get_checkpoint(key) {
+        // Release the receive/storage owner before consulting lightweight work
+        // evidence in the upload cache; the two cache locks are never nested.
+        let bytes = self
+            .opaque_receive_cache
+            .lock()
+            .expect("opaque cache")
+            .get_checkpoint(key);
+        if let Ok(Some(bytes)) = bytes {
             if let Some(body) = self.open_mailbox_hint(key, &bytes)
                 && let Some(receipt) = receipt_body(&body)
             {
                 let valid = receipt_valid(&receipt, conv, epoch, source, runtime);
                 if valid {
                     let mut receipt = receipt;
-                    // Spent work qualifies only the current hot owner's exact
-                    // optional knowledge. Cold load retains active scan progress
-                    // and ordinary receive/upload proofs, but grants fresh work.
-                    if receipt.repair.as_ref().is_some_and(|repair| !repair.active) {
-                        receipt.repair = None;
-                    } else if let Some(repair) = receipt.repair.as_mut() {
-                        repair.spent.fill(0);
+                    // Heavy-owner eviction is not new work. Only a finished
+                    // attempt recorded by this Node, for this exact signed repair
+                    // and policy, may retain its spent bitmap. Restart, expiry,
+                    // source changes or missing evidence keep normal recovery.
+                    let settled = receipt.runtime == runtime
+                        && receipt.repair.as_ref().is_some_and(|repair| {
+                            self.opaque_upload_cache
+                                .lock()
+                                .expect("upload cache")
+                                .settled_repairs
+                                .contains(
+                                    key,
+                                    self.privacy.generation.load(Ordering::Acquire),
+                                    repair,
+                                    std::time::Instant::now(),
+                                )
+                        });
+                    if !settled {
+                        if receipt.repair.as_ref().is_some_and(|repair| !repair.active) {
+                            receipt.repair = None;
+                        } else if let Some(repair) = receipt.repair.as_mut() {
+                            repair.spent.fill(0);
+                        }
                     }
                     // Validation above rejects old session-only authority before
                     // attaching reusable durable progress to this runtime.
@@ -462,7 +488,11 @@ impl Node {
                 }
             }
             self.observe_mailbox_work(reason::RECEIPT_REJECTED, None);
-            let _ = cache.remove_checkpoint(key);
+            let _ = self
+                .opaque_receive_cache
+                .lock()
+                .expect("opaque cache")
+                .remove_checkpoint(key);
         } else {
             self.observe_mailbox_work(reason::RECEIPT_MISSING, None);
         }
@@ -1090,6 +1120,265 @@ mod tests {
             );
             assert_eq!(node.opaque_upload_cache.lock().unwrap().observed_len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn completed_repair_keeps_quiet_work_across_bounded_owner_eviction() {
+        let root = tempfile::tempdir().unwrap();
+        let relay_root = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let proof = crate::discovery::Announce::new_with_account(
+            &remote,
+            &Account::generate(),
+            "Remote",
+            47475,
+        );
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            root.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let relay = DeviceIdentity::generate();
+        let office = IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(relay_root.path()).unwrap(),
+            &relay_root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let conversation = crate::node::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &remote.public(),
+        );
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let probe = OpaqueMailboxProgress::new(
+            &relay.public(),
+            &remote.public(),
+            Some(conversation),
+            mailbox,
+        );
+        let key = cache_key(&probe).unwrap();
+        let (epoch, source) = node.mailbox_local_binding().unwrap();
+        let runtime = node.opaque_receive_cache.lock().unwrap().session_epoch();
+        let global_epoch = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .destructive_policy_revision()
+            .unwrap();
+        let owner = EventId::new([8; 32]);
+        let cursor = MailboxCursor {
+            store_uuid: [3; 16],
+            conversation: probe.mailbox.id(),
+            epoch: 4,
+            first_seen: Some(10),
+            revision: 8,
+            after: 0,
+            window: Some((20, 9)),
+        };
+        let receipt = Receipt {
+            cursor: Some(cursor.clone()),
+            pending: vec![owner],
+            epoch,
+            source_floor: source,
+            runtime,
+            session_only: false,
+            completed: None,
+            repair: Some(Repair {
+                captured: cursor.clone(),
+                witness: pending_repair_witness(&[owner]).0,
+                active: true,
+                scan: cursor,
+                page: None,
+                rewind: false,
+                focus: None,
+                conversation,
+                local_epoch: 0,
+                global_epoch: Some(global_epoch),
+                owner,
+                spent: [255; 32],
+                scan_complete: false,
+            }),
+        };
+        let sealed = node
+            .seal_mailbox_hint(&key, bincode::serialize(&receipt).unwrap())
+            .unwrap();
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .put_checkpoint(&key, &sealed)
+            .unwrap();
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mut progress = OpaqueMailboxProgress::new(
+            &relay.public(),
+            &remote.public(),
+            Some(conversation),
+            mailbox,
+        );
+        let (mut channel, task) = connection(&node, office.clone(), &relay).await;
+        assert_eq!(
+            node.advance_incremental_mailbox(&mut channel, &mut progress, &|| true)
+                .await
+                .unwrap(),
+            Some(false)
+        );
+        node.hold_mailbox_repair_lease(&mut progress).unwrap();
+        node.finish_mailbox_repair(&mut progress).unwrap();
+        let completed = state(&progress).receipt.clone();
+        let expected = completed.repair.clone().unwrap();
+        assert!(!expected.active);
+        assert_ne!(expected.spent, [0; 32]);
+        drop(progress);
+        drop(channel);
+        assert_eq!(task.await.unwrap(), 0);
+        // Exercise actual fixed-capacity admission eviction rather than clearing
+        // the global cache and manufacturing a new Node runtime.
+        for number in 0..MAX_VIEWS {
+            let retired = {
+                let mut cache = node.opaque_upload_cache.lock().unwrap();
+                let (lease, retired) = cache
+                    .acquire(
+                        &[number as u8],
+                        UploadScope::History,
+                        0,
+                        std::time::Instant::now(),
+                    )
+                    .unwrap();
+                drop(lease);
+                retired
+            };
+            node.retire_mailbox_upload_entry(retired);
+        }
+        assert!(
+            !node
+                .opaque_upload_cache
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&key)
+        );
+        let writes = node.storage.database().successful_write_commits();
+        HINT_OPEN_ATTEMPTS.with(|count| count.set(0));
+        for _ in 0..8 {
+            let loaded = node
+                .load_mailbox_receipt_with_runtime(&key, probe.mailbox.id(), None)
+                .unwrap();
+            assert!(
+                loaded
+                    .repair
+                    .as_ref()
+                    .is_some_and(|repair| !repair.active && repair.spent == expected.spent),
+                "bounded heavy-owner eviction must not repeatedly forget completed same-runtime repair work"
+            );
+        }
+        assert_eq!(node.storage.database().successful_write_commits(), writes);
+        assert_eq!(
+            HINT_OPEN_ATTEMPTS.with(|count| count.get()),
+            8,
+            "scheduling evidence cannot bypass authenticated receipt reads"
+        );
+        let original = node
+            .opaque_receive_cache
+            .lock()
+            .unwrap()
+            .get_checkpoint(&key)
+            .unwrap()
+            .unwrap();
+        for variant in 0..4 {
+            let mut changed = completed.clone();
+            match variant {
+                0 => changed.runtime = changed.runtime.map(|byte| byte ^ 255),
+                1 => changed.repair.as_mut().unwrap().witness[0] ^= 1,
+                2 => changed.epoch += 1,
+                _ => {}
+            }
+            let mut bytes = node
+                .seal_mailbox_hint(&key, bincode::serialize(&changed).unwrap())
+                .unwrap();
+            if variant == 3 {
+                bytes[0] ^= 255;
+            }
+            node.opaque_receive_cache
+                .lock()
+                .unwrap()
+                .put_checkpoint(&key, &bytes)
+                .unwrap();
+            let loaded = node
+                .load_mailbox_receipt_with_runtime(&key, probe.mailbox.id(), None)
+                .unwrap();
+            assert!(
+                loaded.repair.is_none(),
+                "changed or corrupt evidence {variant} must recover normally"
+            );
+            node.opaque_receive_cache
+                .lock()
+                .unwrap()
+                .put_checkpoint(&key, &original)
+                .unwrap();
+            assert!(
+                node.load_mailbox_receipt_with_runtime(&key, probe.mailbox.id(), None)
+                    .unwrap()
+                    .repair
+                    .is_some()
+            );
+        }
+        // A same-generation invalidation can run after authentication, before
+        // warming an empty cold owner. It must fence that stale completion too.
+        let weak = Arc::downgrade(&node);
+        let invalidated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = invalidated.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "mailbox_receipt_before_warm" {
+                weak.upgrade()
+                    .unwrap()
+                    .opaque_upload_cache
+                    .lock()
+                    .unwrap()
+                    .clear_receive_repair_leases();
+                observed.store(true, Ordering::Release);
+            }
+        }));
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mut progress = OpaqueMailboxProgress::new(
+            &relay.public(),
+            &remote.public(),
+            Some(conversation),
+            mailbox,
+        );
+        let (mut channel, task) = connection(&node, office, &relay).await;
+        let result = node
+            .advance_incremental_mailbox(&mut channel, &mut progress, &|| true)
+            .await;
+        *node.account_client_test_hook.lock().unwrap() = None;
+        let retained = node
+            .opaque_upload_cache
+            .lock()
+            .unwrap()
+            .entries
+            .get(&key)
+            .unwrap()
+            .clone();
+        let stale_repair_restored = retained
+            .lock()
+            .unwrap()
+            .receipt
+            .as_ref()
+            .is_some_and(|r| r.repair.is_some());
+        drop(progress);
+        drop(channel);
+        assert_eq!(task.await.unwrap(), 0);
+        assert!(invalidated.load(Ordering::Acquire));
+        assert!(
+            !stale_repair_restored,
+            "cold warming must not restore work cleared after its validation"
+        );
+        assert!(matches!(
+            result,
+            Err(session::SessionError::Store(LogError::StaleCursor))
+        ));
     }
 
     #[tokio::test]

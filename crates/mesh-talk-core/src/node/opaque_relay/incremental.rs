@@ -5,6 +5,7 @@ use crate::node::work_observation::reason;
 mod checkpoints;
 mod confirmation;
 mod controls;
+mod repair_quiet;
 use crate::node::{
     privacy_sync::{HistorySyncStamp, HistoryUpload},
     session::{self, mailbox},
@@ -50,6 +51,7 @@ pub(in crate::node) struct UploadCache {
     // Optional selected-membership absence only; no custody/permission state.
     unselected: VecDeque<UnselectedTarget>,
     quiet_consents: controls::QuietConsentCache,
+    settled_repairs: repair_quiet::QuietRepairCache,
 }
 struct UnselectedTarget {
     scope: Vec<u8>,
@@ -71,6 +73,8 @@ struct UploadEntry {
     repair_declarations: HashSet<EventId>,
     repair_lease: Option<super::super::node::ProfileCompactionLease>,
     repair_generation: u64,
+    // Fence cold reads across explicit same-generation repair invalidation.
+    repair_reset_epoch: u64,
     repair_progress: std::time::Instant,
 }
 impl UploadEntry {
@@ -158,9 +162,11 @@ impl UploadCache {
         self.receive_entries.clear();
         self.unselected.clear();
         self.quiet_consents = Default::default();
+        self.settled_repairs.clear();
     }
 
     pub(in crate::node) fn clear_receive_repair_leases(&mut self) {
+        self.settled_repairs.clear();
         for entry in self.entries.values().chain(self.receive_entries.values()) {
             let mut entry = match entry.try_lock() {
                 Ok(entry) => entry,
@@ -171,6 +177,7 @@ impl UploadCache {
                     panic!("upload entry: {error}");
                 }
             };
+            entry.repair_reset_epoch = entry.repair_reset_epoch.wrapping_add(1);
             entry.repair_lease = None;
             entry.repair_declarations.clear();
             if let Some(receipt) = entry.receipt.as_mut() {
@@ -192,6 +199,7 @@ impl UploadCache {
             if entry.repair_generation != generation
                 || entry.repair_progress.elapsed() > std::time::Duration::from_secs(30)
             {
+                entry.repair_reset_epoch = entry.repair_reset_epoch.wrapping_add(1);
                 entry.repair_lease = None;
                 entry.repair_declarations.clear();
                 if let Some(repair) = entry
@@ -282,6 +290,7 @@ impl UploadCache {
                     repair_declarations: HashSet::new(),
                     repair_lease: None,
                     repair_generation: 0,
+                    repair_reset_epoch: 0,
                     repair_progress: std::time::Instant::now(),
                 })),
             );
@@ -803,6 +812,32 @@ impl Node {
             repair.page = None;
         }
         self.save_mailbox_receipt(p)?;
+        // A completed finite attempt retains only bounded scheduling evidence,
+        // independently of the heavyweight owner and its compaction lease.
+        // Tag with the attempt's captured generation, never a newer policy.
+        if let (Some(generation), Some(repair)) =
+            (state(p).repair_generation, state(p).receipt.repair.as_ref())
+        {
+            let mut cache = self.opaque_upload_cache.lock().expect("upload cache");
+            // Cache -> entry matches admission/retirement order. Contention
+            // declines this optional record instead of blocking either owner.
+            match state(p).lease.0.try_lock() {
+                Ok(entry)
+                    if entry.repair_generation == generation
+                        && entry.repair_lease.is_some()
+                        && entry.receipt.as_ref() == Some(&state(p).receipt) =>
+                {
+                    cache.settled_repairs.remember(
+                        &state(p).key,
+                        generation,
+                        repair,
+                        std::time::Instant::now(),
+                    );
+                }
+                Ok(_) | Err(std::sync::TryLockError::WouldBlock) => {}
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("upload entry"),
+            }
+        }
         let lease = {
             let mut entry = state(p).lease.0.lock().expect("upload entry");
             entry.repair_hints.clear();
@@ -1387,7 +1422,10 @@ impl Node {
                     .acquire(&key, scope, generation, std::time::Instant::now())?
             };
             self.retire_mailbox_upload_entry(retired);
-            let hot = lease.0.lock().expect("upload entry").receipt.clone();
+            let (hot, repair_reset_epoch) = {
+                let entry = lease.0.lock().expect("upload entry");
+                (entry.receipt.clone(), entry.repair_reset_epoch)
+            };
             let receipt =
                 self.load_mailbox_receipt_with_runtime(&key, p.mailbox.id(), hot.clone())?;
             #[cfg(test)]
@@ -1396,7 +1434,7 @@ impl Node {
                 let mut entry = lease.0.lock().expect("upload entry");
                 // Maintenance may rewind a busy owner while durable validation
                 // runs. Never restore the receipt captured before that change.
-                if entry.receipt != hot {
+                if entry.receipt != hot || entry.repair_reset_epoch != repair_reset_epoch {
                     return Err(LogError::StaleCursor.into());
                 }
                 let old_lease = if hot.as_ref().is_some_and(|old| {

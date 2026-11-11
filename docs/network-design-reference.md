@@ -2522,7 +2522,7 @@ A deleted local record or recalled event does not recall already copied data fro
 | Group initial text/sticker seeding        | Small-group threshold five members; larger groups normally seed two peers.                                                                                                                                                                                                                | Authority controls and file manifests retain their separate fanout rules.                                                                                                                                                                                                                                                                                                                                                           |
 | Group recovery                            | At most two active groups, each selecting three peers; coalesced wakes visit up to eight joined channels. Jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                                                                       | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                                                                                                                                                                                                                                                                 |
 | Group control fanout                      | At most four concurrent contacts.                                                                                                                                                                                                                                                         | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                                                                                                                                                                                                                                                          |
-| Participant mailbox preparation           | Four history owners and two receive-only owners; 30-second meaningful-progress protection; 2 MiB repair-ID state per owner (at most 12 MiB).                                                                                                                                              | Receive-only work never prepares history. Busy or contended owners defer admission, while finished, revoked or stalled work remains reclaimable.                                                                                                                                                                                                                                                                                    |
+| Participant mailbox preparation           | Four history owners and two receive-only owners; 30-second meaningful-progress protection; 2 MiB repair-ID state per owner (at most 12 MiB); 64 fixed-expiry completed-work fingerprints with keys of at most 256 bytes.                                                                                                                                              | Receive-only work never prepares history. Busy or contended owners defer admission, while finished, revoked or stalled work remains reclaimable.                                                                                                                                                                                                                                                                                    |
 
 The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `node/opaque_relay/incremental.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `storage/database.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
 
@@ -2841,10 +2841,22 @@ pressure retains bounded FIFO fallback; these hints remain optional evidence.
 A successfully validated cold receipt warms its existing
 bounded upload or receive-only owner even when a new adapter changes no progress.
 Only after validation rejects retired session-only evidence is durable progress
-attached to the current runtime. Cold repair normalization still clears spent
-work and drops inactive repair hints; hot repair progress retains its existing
-lease, generation and expiry checks. Warming does not persist a checkpoint,
-acquire a repair lease or renew progress deadlines.
+attached to the current runtime. Completed finite repair attempts additionally
+retain at most 64 lightweight scheduling fingerprints in the existing upload
+cache: each holds a key of at most 256 bytes, a 32-byte hash, captured privacy
+generation and fixed five-minute expiry. They retain no event, receipt body,
+parent mapping, view or compaction lease. A freshly authenticated receipt from
+the same runtime may preserve its exact inactive spent bitmap after heavy-owner
+eviction only when this evidence still matches. Restart, changed policy or
+repair state, missing evidence and expiry retain cold normalization: clear spent
+work and drop inactive repair hints. Existing pending-witness, remote-window and
+destructive-epoch checks still precede work. Explicit invalidation of all repair
+owners clears these fingerprints; identical observations never renew their deadline.
+Hot repair progress keeps its existing lease and generation checks. Each owner
+also fences cold warming with a reset epoch, including invalidation while its
+receipt is still empty. Recording completed work rechecks the actual lease under
+the same cache-to-entry invalidation order; contention declines the optional hint.
+Warming neither persists a checkpoint nor acquires a lease or renews deadlines.
 Wrapper mappings contain IDs only and have independent 250,000-entry/64-MiB
 limits. Point lookups and unchanged writes do not update cache timestamps or
 rewrite old entries. Every operation still checks the exact publication barrier.

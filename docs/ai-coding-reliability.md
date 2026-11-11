@@ -981,7 +981,10 @@ verify unchanged evidence. Normalize runtime binding only after rejecting retire
 session-only evidence, and preserve cold repair reset and actual lease ownership.
 A busy adapter does not exclude maintenance: compare its captured receipt under
 the same owner guard used to publish warming, so a concurrent repair rewind
-cannot be restored by stale initialization.
+cannot be restored by stale initialization. Equality of two empty values does not
+prove no invalidation occurred: capture and recheck the owner's reset epoch too.
+Optional work evidence must record under the same invalidation order and decline
+when its actual lease or captured generation was retired.
 The [mailbox checkpoint regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental/checkpoints.rs)
 cover fresh adapters without signature reopens, SQL commits or directory syncs,
 retired-runtime rejection and repair progress under its live owner.
@@ -1185,6 +1188,17 @@ Keep the actual mutation guard and capacity recheck; a racing capacity release
 may miss an optional hint until retry, never authorize eviction. The byte-pressure
 regression checks zero `RePrepare` after both refused insertion and refused growth,
 unchanged rows/accounting, and successful admission after capacity is released.
+Eviction of a large work owner is not a source change. When losing its small
+completed-work facts restarts an unchanged scan, retain bounded scheduling
+fingerprints independently of the heavy data. Bind reuse to the exact authenticated
+state, runtime and policy; keep authority checks at use, cap retained metadata and
+preserve a nonrenewable repair deadline. Restart, corruption and missing evidence
+must recover normally. The [mailbox receipt regression](../crates/mesh-talk-core/src/node/opaque_relay/incremental/checkpoints.rs)
+`completed_repair_keeps_quiet_work_across_bounded_owner_eviction` exercises actual
+fixed-capacity admission after a completed repair; the adjacent fingerprint tests
+cover changed inputs, capacity and the original deadline. This evidence never
+restores a compaction lease, cached parent body or permission.
+
 Apply the same rule to terminal preparation: check the live selection, source
 and actual export cursor before entering a write guard. The
 `ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress` regression
