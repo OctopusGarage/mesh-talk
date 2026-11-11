@@ -334,6 +334,16 @@ test("screenshot dismissal observes timely DOM commits and rejects missing or la
     }
     expect(await resources()).toEqual({ observers: 0, timers: 0 });
   }
+  // The portable evidence fixture must capture the real application, rather
+  // than the deliberately empty document used by these observer controls.
+  await page.clock.resume();
+  await enterChat(page);
+  await openBobDm(page);
+  expect(
+    await page.evaluate(() =>
+      Reflect.has(window, "__screenshotObservationResources"),
+    ),
+  ).toBe(false);
 });
 
 for (const [width, height] of [

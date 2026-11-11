@@ -877,13 +877,55 @@ test("unread review exposes failed badge updates and retries the current cleared
   page,
 }) => {
   await enterChat(page);
+  await page.clock.install();
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
   await observeBadge(page);
   await page.evaluate(() => {
     const w = window as unknown as {
       __mockEmit: (event: string, data: unknown) => void;
-      __mockFailNext: (command: string, message: string) => void;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
     };
-    w.__mockFailNext("set_badge", "badge temporarily unavailable");
+    const invoke = w.__TAURI_INTERNALS__.invoke;
+    const fixture = {
+      held: true,
+      trustedRetries: 0,
+      attempts: [] as number[],
+      successes: [] as number[],
+      cleanup: () => {
+        document.removeEventListener("click", release, true);
+        w.__TAURI_INTERNALS__.invoke = invoke;
+      },
+    };
+    const release = (event: MouseEvent) => {
+      const button =
+        event.target instanceof Element ? event.target.closest("button") : null;
+      if (
+        !event.isTrusted ||
+        !button?.closest('[data-testid="unread-badge-error"]') ||
+        button.textContent?.trim() !== "Retry badge update"
+      )
+        return;
+      fixture.trustedRetries++;
+      fixture.held = false;
+    };
+    // Automatic retries keep failing until the actual Retry gesture. Releasing
+    // earlier lets timer/focus recovery remove the button before its click.
+    document.addEventListener("click", release, true);
+    w.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command !== "set_badge") return invoke(command, args);
+      const count = args.count as number;
+      fixture.attempts.push(count);
+      if (fixture.held) throw new Error("badge temporarily unavailable");
+      const result = await invoke(command, args);
+      fixture.successes.push(count);
+      return result;
+    };
+    Reflect.set(window, "__badgeRetryFixture", fixture);
     w.__mockEmit("dm-received", {
       from: "unknown-badge",
       from_name: "Unknown",
@@ -891,18 +933,78 @@ test("unread review exposes failed badge updates and retries the current cleared
       reply_to: null,
     });
   });
-  await page.getByTestId("unread-review-trigger").click();
-  const panel = page.getByRole("dialog", {
-    name: "Unread messages",
-    exact: true,
-  });
-  await expect(panel.getByTestId("unread-badge-error")).toBeVisible();
-  await panel
-    .getByRole("button", { name: "Retry badge update", exact: true })
-    .click();
-  await expect(panel.getByTestId("unread-badge-error")).toHaveCount(0);
-  await panel
-    .getByRole("button", { name: "Mark all as read", exact: true })
-    .click();
-  await expect.poll(() => latestBadgeCount(page)).toBe(0);
+  const snapshot = () =>
+    page.evaluate(() => {
+      const fixture = Reflect.get(window, "__badgeRetryFixture") as {
+        held: boolean;
+        trustedRetries: number;
+        attempts: number[];
+        successes: number[];
+      };
+      return {
+        held: fixture.held,
+        trustedRetries: fixture.trustedRetries,
+        attempts: fixture.attempts,
+        successes: fixture.successes,
+      };
+    });
+  try {
+    await page.getByTestId("unread-review-trigger").click();
+    const panel = page.getByRole("dialog", {
+      name: "Unread messages",
+      exact: true,
+    });
+    const error = panel.getByTestId("unread-badge-error");
+    const retry = panel.getByRole("button", {
+      name: "Retry badge update",
+      exact: true,
+    });
+    await expect(error).toBeVisible();
+    const attemptsBeforeTimer = (await snapshot()).attempts.length;
+    await page.clock.fastForward(1001);
+    await expect
+      .poll(async () => (await snapshot()).attempts.length)
+      .toBeGreaterThan(attemptsBeforeTimer);
+    await expect(error).toBeVisible();
+    // A synthetic Retry must not release the controlled native failure.
+    await retry.evaluate((button) =>
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    expect(await snapshot()).toMatchObject({
+      held: true,
+      trustedRetries: 0,
+      successes: [],
+    });
+    await panel
+      .getByRole("button", {
+        name: "Mark all as read",
+        exact: true,
+      })
+      .click();
+    await expect
+      .poll(async () => {
+        const { attempts } = await snapshot();
+        return attempts[attempts.length - 1];
+      })
+      .toBe(0);
+    await expect(error).toBeVisible();
+    expect(await snapshot()).toMatchObject({
+      held: true,
+      trustedRetries: 0,
+      successes: [],
+    });
+    await retry.click();
+    await expect(error).toHaveCount(0);
+    await expect.poll(async () => (await snapshot()).successes).toEqual([0]);
+    expect(await snapshot()).toMatchObject({ held: false, trustedRetries: 1 });
+    await expect.poll(() => latestBadgeCount(page)).toBe(0);
+  } finally {
+    await page.evaluate(() => {
+      const fixture = Reflect.get(window, "__badgeRetryFixture") as {
+        cleanup: () => void;
+      };
+      fixture.cleanup();
+      Reflect.deleteProperty(window, "__badgeRetryFixture");
+    });
+  }
 });

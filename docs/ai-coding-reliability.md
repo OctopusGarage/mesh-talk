@@ -809,6 +809,14 @@ Its real-browser controls in [screenshot scenarios](../frontend/e2e/screenshot-p
 reject missing and late transitions, retain cleanup checks and preserve the crop,
 clipboard and staging assertions. The canonical browser inventory selects this
 control alongside both Retina viewport journeys.
+An isolated DOM control retires its observers and timers before restoring real
+application content for shared screenshot capture. A passing test on a blank
+document is not meaningful visual evidence; retain the strict PNG rejection.
+A manual-recovery fixture must keep its provider failure active until the real
+recovery gesture. One failed call does not hold an error state while automatic
+timer or focus retries remain live. The [unread badge scenario](../frontend/e2e/unread-badge.spec.ts)
+keeps those retries enabled, rejects synthetic recovery and requires the trusted
+retry to write the current cleared count before retiring its controlled fault.
 
 A bounded positive observer may keep waiting on the owning API's explicit pending
 state. Match only that state; storage, authorization and unexpected failures stay
