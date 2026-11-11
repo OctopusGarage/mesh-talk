@@ -1,7 +1,7 @@
 //! A real short operation prefix leaves a queued suffix that cannot witness new demand.
 use super::selected_same_source_control_latency::{
-    BTrace, ColdControlScope, ControlTestPages, record_b_trace, record_control_frame,
-    result_snapshot,
+    BTrace, ColdControlScope, ControlTestDispatch, ControlTestPages, record_b_trace,
+    record_control_frame, result_snapshot,
 };
 use super::*;
 use crate::node::account_documents::wire::DocumentRequest;
@@ -505,6 +505,42 @@ fn install_owner_group(owner: &Node, external: &Node, group: ConversationId) {
     }
 }
 
+fn queued_background_resume(dispatch: ControlTestDispatch, paid_pair_resume: bool) -> bool {
+    dispatch.resumed
+        && !dispatch.replacement
+        && dispatch.protected
+        && (!dispatch.paired || paid_pair_resume)
+}
+
+#[test]
+fn queued_background_hold_distinguishes_foreground_pair_from_interrupted_resume() {
+    let mut dispatch = ControlTestDispatch {
+        paired: true,
+        protected: true,
+        resumed: true,
+        replacement: false,
+        hint: false,
+    };
+    assert!(
+        !queued_background_resume(dispatch, false),
+        "a resumed foreground pair must not establish the background hold"
+    );
+    assert!(
+        queued_background_resume(dispatch, true),
+        "the exact owed parked pair turn qualifies"
+    );
+    dispatch.paired = false;
+    assert!(
+        queued_background_resume(dispatch, false),
+        "a cross-peer interruption retains protection without a same-source pair"
+    );
+    dispatch.replacement = true;
+    assert!(!queued_background_resume(dispatch, false));
+    dispatch.replacement = false;
+    dispatch.protected = false;
+    assert!(!queued_background_resume(dispatch, true));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newer_terminal_reuses_completed_background_before_stale_foreground_suffix() {
     Box::pin(run_queued_source(true, false)).await;
@@ -696,6 +732,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let resume_tx = Arc::new(Mutex::new(Some(resume_tx)));
     let resumed_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let b_partial = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let paid_a_dispatch = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let b_page_progress = Arc::new(Mutex::new(ProtectedBPageProgress::default()));
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saved_after = Arc::new(Mutex::new(None));
@@ -1011,7 +1048,21 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             })
         }
     }));
+    // `resumed` also describes a same-source foreground replacement. Paired
+    // turns require the scheduler's owed parked credit; an ordinary cross-peer
+    // interrupted resume has no same-source pair and retains its own protection.
+    *reference.account_control_dispatch_test_hook.lock().unwrap() = Some(Arc::new({
+        let exact = a.identity.public();
+        let paid_a_dispatch = paid_a_dispatch.clone();
+        move |peer, paid_resume| {
+            if peer == exact {
+                *paid_a_dispatch.lock().unwrap() = paid_resume.then(tokio::task::id);
+            }
+            Box::pin(async {})
+        }
+    }));
     *a.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let paid_a_dispatch = paid_a_dispatch.clone();
         let expected = reference.identity.public();
         let release = release.clone();
         let first_tx = first_tx.clone();
@@ -1025,6 +1076,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let first_held_task = first_held_task.clone();
         let preparation_read = preparation_read.clone();
         move |peer, frame| {
+            let paid_a_dispatch = paid_a_dispatch.clone();
             let expected = expected.clone();
             let release = release.clone();
             let first_tx = first_tx.clone();
@@ -1114,9 +1166,10 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                     let _ = first.send((page.task, lifetime));
                     let _ = release.acquire().await;
                 } else if b_partial.load(std::sync::atomic::Ordering::Relaxed)
-                    && dispatch.resumed
-                    && !dispatch.replacement
-                    && dispatch.protected
+                    && queued_background_resume(
+                        dispatch,
+                        *paid_a_dispatch.lock().unwrap() == Some(page.task),
+                    )
                 {
                     let resumed = resume_tx.lock().unwrap().take();
                     if let Some(resumed) = resumed {
@@ -1124,10 +1177,15 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                         let _ = resumed.send(());
                         let _ = release.acquire().await;
                     }
-                } else if dispatch.resumed && !dispatch.replacement && dispatch.protected {
+                } else if queued_background_resume(
+                    dispatch,
+                    *paid_a_dispatch.lock().unwrap() == Some(page.task),
+                ) {
                     panic!(
-                        "A cannot resume before B validates its actual partial page; task={:?}",
-                        page.task
+                        "A cannot resume before B validates its actual partial page; task={:?} origin={} paid_pair_resume={}",
+                        page.task,
+                        page.origin,
+                        *paid_a_dispatch.lock().unwrap() == Some(page.task)
                     );
                 }
             })
@@ -1588,6 +1646,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     *a.account_session_test_hook.lock().unwrap() = None;
     *b.account_session_test_hook.lock().unwrap() = None;
     *b.account_client_test_hook.lock().unwrap() = None;
+    *reference.account_control_dispatch_test_hook.lock().unwrap() = None;
     *reference.account_document_read_test_hook.lock().unwrap() = None;
     *reference.account_session_test_hook.lock().unwrap() = None;
     *reference.account_client_test_hook.lock().unwrap() = None;

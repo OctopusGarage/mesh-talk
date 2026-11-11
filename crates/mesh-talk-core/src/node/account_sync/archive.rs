@@ -327,6 +327,16 @@ impl Node {
             .expect("file book mutex")
             .clone()
             .revision()?;
+        // Attachment commits own policy before inspecting these sidecars. Do
+        // not retain a sidecar while waiting for that same policy mutex. The
+        // selected page revalidates this revision with the complete archive key.
+        let policy_revision = {
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "archive_policy_snapshot_begin".into()
+            });
+            self.device_sync_policy_snapshot().1
+        };
         let sent = self.sentlog.lock().expect("sent mutex");
         let received = self.received.lock().expect("received mutex");
         let file = self.received_files.lock().expect("files mutex");
@@ -334,7 +344,7 @@ impl Node {
             sent.revision(),
             received.revision(),
             file.revision(),
-            self.device_sync_policy_snapshot().1,
+            policy_revision,
             self.account_suppression
                 .lock()
                 .expect("suppression mutex")
@@ -850,5 +860,65 @@ impl Node {
             plaintext,
             event_id: row.key.id,
         })))
+    }
+}
+
+#[cfg(test)]
+mod lock_order_tests {
+    use super::*;
+
+    #[test]
+    fn archive_snapshot_does_not_hold_sidecars_while_waiting_for_policy() {
+        let (_directory, source, sibling) = super::super::selection_tests::sibling_nodes();
+        let (arrived, waiting) = std::sync::mpsc::sync_channel(1);
+        *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "archive_policy_snapshot_begin" {
+                let _ = arrived.try_send(());
+            }
+        }));
+        // Attachment commit owns policy before inspecting file sidecars. Hold
+        // exactly that guard, then probe the archive's genuine policy boundary
+        // without ever waiting for another mutex while policy remains held.
+        let policy = source.account_sync_policy.lock().unwrap();
+        let expected_revision = policy.revision();
+        let worker_source = source.clone();
+        let requester = sibling.identity.public();
+        let worker = std::thread::spawn(move || {
+            worker_source.archive_key(&requester, true, true, AccountSyncVersion::V2)
+        });
+        let reached_policy = waiting.recv_timeout(std::time::Duration::from_secs(5));
+        let sent_available = source.sentlog.try_lock().is_ok();
+        let received_available = source.received.try_lock().is_ok();
+        let files_available = source.received_files.try_lock().is_ok();
+        drop(policy);
+        let snapshot = worker.join();
+        *source.account_client_test_hook.lock().unwrap() = None;
+        assert!(
+            reached_policy.is_ok(),
+            "archive reached its real policy boundary"
+        );
+        assert!(
+            sent_available && received_available && files_available,
+            "archive must wait for policy without retaining sent, received or file sidecars: sent={sent_available} received={received_available} files={files_available}"
+        );
+        let snapshot = snapshot
+            .expect("archive worker joins after policy release")
+            .expect("archive snapshot completes after policy release");
+        assert_eq!(snapshot.revisions[3], expected_revision);
+        source
+            .set_device_sync_category(crate::node::SyncCategory::History, false)
+            .unwrap();
+        let changed = source
+            .archive_key(
+                &sibling.identity.public(),
+                true,
+                true,
+                AccountSyncVersion::V2,
+            )
+            .unwrap();
+        assert!(
+            !snapshot.accepts_append_only_change(&changed),
+            "an earlier policy snapshot cannot accept a later policy revision"
+        );
     }
 }

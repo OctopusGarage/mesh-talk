@@ -132,6 +132,7 @@
             "paired_control_new_publication_reuses_completed_background_without_dropping_partial_foreground",
             "paired_control_recycles_parked_completed_background_only_for_genuine_followup",
             "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
+            "queued_background_hold_distinguishes_foreground_pair_from_interrupted_resume",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
             "selected_queued_source_dispatches_while_unrelated_local_maintenance_is_held",
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
@@ -2633,6 +2634,7 @@
           "filters": [
             "node::transcript_repository::tests::",
             "node::delivery_runtime::lock_order_tests::",
+            "node::account_sync::archive::lock_order_tests::",
             "node::account_file_repository::tests::",
             "runtime_metadata_",
             "selected_history_and_archive_wait_for_admitted_recall_before_body_reads",
