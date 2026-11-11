@@ -1139,6 +1139,12 @@ but must preserve current erasure checks and failed durability retries. The
 count real body reads and signatures, retain nonempty signed decisions and test
 read failure/recovery; [delivery-store controls](../crates/mesh-talk-core/src/node/delivery_store_tests.rs)
 cover identical, conflicting, forged, reopened and erased reservations.
+Hot point reads should reuse bounded compiled statements without retaining
+results or weakening source checks. The [event repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
+count actual VM executions for repeated hit/miss reads and keep domain binding,
+new appends and schema failure/recovery observable. Body authentication and
+retirement checks still run after compilation reuse.
+
 Intrinsic signature memos must key every verification input and retain no body
 or permission. Current reads, canonical/content checks and source errors still
 precede reuse. The [repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)

@@ -166,8 +166,8 @@ impl EventRepository {
         id: &EventId,
     ) -> Result<(), LogError> {
         let conv: Option<Vec<u8>> = c
+            .prepare_cached("SELECT conversation FROM retained_events WHERE domain=?1 AND id=?2")?
             .query_row(
-                "SELECT conversation FROM retained_events WHERE domain=?1 AND id=?2",
                 params![self.domain.0.as_slice(), id.as_bytes().as_slice()],
                 |r| r.get(0),
             )

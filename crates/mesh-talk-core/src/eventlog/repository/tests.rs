@@ -29,6 +29,75 @@ pub(super) fn database(dir: &tempfile::TempDir) -> Arc<EncryptedDatabase> {
 }
 
 #[test]
+fn repeated_event_point_reads_reuse_statements_and_keep_current_source_checks() {
+    use rusqlite::StatementStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let domain = EventDomainId([1; 16]);
+    let repository = EventRepository::new(db.clone(), domain).unwrap();
+    let other = EventRepository::new(db.clone(), EventDomainId([2; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let first = event(&identity, 1, vec![], 1, EventKind::Message);
+    let second = event(&identity, 2, vec![first.id], 2, EventKind::Message);
+    repository.append(&first).unwrap();
+    let sql = [
+        "SELECT EXISTS(SELECT 1 FROM retained_events WHERE domain=?1 AND id=?2)".to_owned(),
+        format!(
+            "SELECT {HEADER_COLUMNS},length(body) FROM retained_events WHERE domain=?1 AND id=?2"
+        ),
+        "SELECT body FROM retained_events WHERE domain=?1 AND id=?2".to_owned(),
+        "SELECT conversation FROM retained_events WHERE domain=?1 AND id=?2".to_owned(),
+    ];
+    db.read(|c| {
+        c.flush_prepared_statement_cache();
+        Ok(())
+    })
+    .unwrap();
+    let commits = db.successful_write_commits();
+    for _ in 0..4 {
+        assert!(repository.has(&first.id).unwrap());
+        assert_eq!(repository.get(&first.id).unwrap(), Some(first.clone()));
+        assert!(!repository.has(&second.id).unwrap());
+        assert_eq!(repository.get(&second.id).unwrap(), None);
+    }
+    let runs = db
+        .read(|c| {
+            sql.iter()
+                .map(|sql| Ok(c.prepare_cached(sql)?.get_status(StatementStatus::Run)))
+                .collect::<Result<Vec<_>, LogError>>()
+        })
+        .unwrap();
+    assert_eq!(
+        runs,
+        [8, 8, 4, 16],
+        "unchanged event reads repeatedly discarded their compiled SQL"
+    );
+    assert_eq!(
+        db.successful_write_commits(),
+        commits,
+        "queries must remain read-only"
+    );
+    assert!(!other.has(&first.id).unwrap());
+    assert_eq!(other.get(&first.id).unwrap(), None);
+    repository.append(&second).unwrap();
+    assert!(repository.has(&second.id).unwrap());
+    assert_eq!(repository.get(&second.id).unwrap(), Some(second));
+    db.transaction(|c| {
+        c.execute_batch("ALTER TABLE retained_events RENAME TO held_events")?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(repository.has(&first.id).is_err());
+    assert!(repository.get(&first.id).is_err());
+    db.transaction(|c| {
+        c.execute_batch("ALTER TABLE held_events RENAME TO retained_events")?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(repository.get(&first.id).unwrap(), Some(first));
+}
+
+#[test]
 fn repeated_authenticated_reads_reuse_only_intrinsic_signature_proof() {
     let dir = tempfile::tempdir().unwrap();
     let db = database(&dir);

@@ -363,8 +363,10 @@ impl EventRepository {
 
     fn has_on(&self, c: &Connection, id: &EventId) -> Result<bool, LogError> {
         self.require_visible_id_on(c, id)?;
-        Ok(c.query_row(
+        Ok(c.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM retained_events WHERE domain=?1 AND id=?2)",
+        )?
+        .query_row(
             params![self.domain.0.as_slice(), id.as_bytes().as_slice()],
             |r| r.get(0),
         )?)
@@ -410,7 +412,7 @@ impl EventRepository {
         // copy SQLite and Rust each own encoded bytes; during decode only Rust
         // owns them. This keeps the documented three-copy estimate meaningful.
         let (header, bytes) = {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {HEADER_COLUMNS},length(body) FROM retained_events WHERE domain=?1 AND id=?2"
             ))?;
             let mut rows =
@@ -425,11 +427,12 @@ impl EventRepository {
             #[cfg(test)]
             self.body_fetches
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let bytes: Vec<u8> = c.query_row(
-                "SELECT body FROM retained_events WHERE domain=?1 AND id=?2",
-                params![self.domain.0.as_slice(), id.as_bytes().as_slice()],
-                |row| row.get(0),
-            )?;
+            let bytes: Vec<u8> = c
+                .prepare_cached("SELECT body FROM retained_events WHERE domain=?1 AND id=?2")?
+                .query_row(
+                    params![self.domain.0.as_slice(), id.as_bytes().as_slice()],
+                    |row| row.get(0),
+                )?;
             (header, bytes)
         };
         decode::preflight(&header, &bytes)?;
