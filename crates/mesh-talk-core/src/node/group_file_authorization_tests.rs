@@ -411,6 +411,114 @@ async fn queued_fixture() -> QueuedFixture {
 }
 
 #[tokio::test]
+async fn group_file_full_queue_request_survives_older_discovery_eof() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let (key, job) = node
+        .group_file_delivery
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .next()
+        .map(|(key, job)| (*key, job.clone()))
+        .unwrap();
+    assert!(settle_job(node, &job));
+    // Controlled precondition: this dispatch was already accepted. The actual
+    // HAVE and persistence-failure cuts are covered by the mailbox regression.
+    assert!(
+        node.files
+            .lock()
+            .unwrap()
+            .settle_group_custody(fixture.file, fixture.manifest, &job.recipient, None)
+            .unwrap()
+    );
+    node.group_file_delivery.jobs.lock().unwrap().remove(&key);
+    let recipient = fixture
+        .peers
+        .iter()
+        .find(|peer| peer.public() == job.recipient)
+        .unwrap();
+    let proof = node.historical_author(&job.recipient.ed25519_pub).unwrap();
+    let request = Decision {
+        file: fixture.file,
+        manifest: fixture.manifest,
+        sender: node.identity.public(),
+        recipient: job.recipient.clone(),
+        sender_account: Some(node.account_id()),
+        recipient_account: proof.account_id().unwrap(),
+        decision: ReceiveDecision::Accepted,
+        completion: None,
+    }
+    .event(recipient, 1)
+    .unwrap();
+    let requested_id = request.id;
+    let injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cut = injected.clone();
+    let weak = Arc::downgrade(node);
+    let target = job.recipient.clone();
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, stage| {
+        if stage != "group_file_refill_before_publish" || cut.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let node = weak.upgrade().unwrap();
+        {
+            let mut jobs = node.group_file_delivery.jobs.lock().unwrap();
+            let template = jobs.values().next().unwrap().clone();
+            for number in 0..MAX_GROUP_FILE_JOBS {
+                if jobs.len() == MAX_GROUP_FILE_JOBS {
+                    break;
+                }
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&(number as u64).to_le_bytes());
+                let manifest = EventId::new(bytes);
+                jobs.insert(
+                    (manifest, template.recipient.ed25519_pub),
+                    GroupFileUpload {
+                        manifest,
+                        ..template.clone()
+                    },
+                );
+            }
+            assert_eq!(jobs.len(), MAX_GROUP_FILE_JOBS);
+            assert!(!jobs.contains_key(&key));
+        }
+        // A genuinely authenticated request arrives after this scan's old
+        // source observation, when active work has no remaining capacity.
+        node.accept_file_consent_event(&request, &target).unwrap();
+    }));
+    {
+        let mut scan = node.group_file_delivery.scan.lock().unwrap();
+        scan.cursor = None;
+        scan.source = None;
+        scan.repair_after = None;
+    }
+    node.refill_group_file_delivery().unwrap();
+    assert!(injected.load(Ordering::SeqCst));
+    {
+        let scan = node.group_file_delivery.scan.lock().unwrap();
+        assert!(
+            scan.rescan_requested && scan.repair_after.is_none(),
+            "the older EOF cannot overwrite the full-queue receiver request"
+        );
+    }
+    *node.account_client_test_hook.lock().unwrap() = None;
+    {
+        let mut jobs = node.group_file_delivery.jobs.lock().unwrap();
+        let victim = *jobs.keys().find(|candidate| **candidate != key).unwrap();
+        jobs.remove(&victim);
+    }
+    node.refill_group_file_delivery().unwrap();
+    let jobs = node.group_file_delivery.jobs.lock().unwrap();
+    assert_eq!(
+        jobs[&key].demand,
+        Some(requested_id),
+        "releasing one bounded slot must admit the retained current request"
+    );
+    assert!(jobs.len() <= MAX_GROUP_FILE_JOBS);
+}
+
+#[tokio::test]
 async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
     use super::super::opaque_relay::incremental::RECEIVE_ENTRY_CALLS;
     use crate::eventlog::sync::network::NetworkSyncStore;
@@ -540,8 +648,23 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
         }
     });
     let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER fail_custody_dispatch BEFORE INSERT ON file_book_custody_dispatch BEGIN SELECT RAISE(ABORT,'injected dispatch failure'); END")?;
+            Ok(())
+        }).unwrap();
         RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
-        let earliest_repair = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        node.retry_group_file_delivery().await;
+        assert!(office.durable_have(&mailbox.id(), &final_outer).unwrap(),
+            "the failure cut is after actual durable relay acceptance");
+        assert!(node.group_file_delivery.jobs.lock().unwrap().contains_key(&key),
+            "failed scheduling persistence must retain the real dispatch for retry");
+        assert!(!node.files.lock().unwrap().group_custody_settled(
+            fixture.file, fixture.manifest, &job.recipient, None).unwrap());
+        node.storage.database().transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_custody_dispatch")?;
+            Ok(())
+        }).unwrap();
+        node.group_file_delivery.jobs.lock().unwrap().get_mut(&key).unwrap().retry_after = None;
         node.retry_group_file_delivery().await;
         let publisher_reads = RECEIVE_ENTRY_CALLS.with(std::cell::Cell::get);
         let held_before_approval = office.durable_have(&mailbox.id(), &final_outer).unwrap();
@@ -549,18 +672,19 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
             held_before_approval,
             "the real relay must first hold the final chunk"
         );
-        let repair = node.group_file_delivery.jobs.lock().unwrap()[&key]
-            .retry_after
-            .expect("confirmed custody retains a finite repair deadline");
         assert!(
-            repair >= earliest_repair,
-            "confirmed unchanged custody must not restart inventory every thirty seconds"
+            !node.group_file_delivery.jobs.lock().unwrap().contains_key(&key),
+            "durably accepted group custody must leave the active dispatch queue instead of periodically replenishing a bounded relay"
+        );
+        node.queue_group_file_delivery(fixture.file, fixture.manifest).unwrap();
+        assert!(
+            !node.group_file_delivery.jobs.lock().unwrap().contains_key(&key),
+            "historical refill must preserve settled dispatch across heavy runtime owner eviction"
         );
         node.retry_group_file_delivery().await;
-        assert_eq!(
-            node.group_file_delivery.jobs.lock().unwrap()[&key].retry_after,
-            Some(repair),
-            "an unrelated wake must not renew or consume the quiet custody deadline"
+        assert!(
+            !node.group_file_delivery.jobs.lock().unwrap().contains_key(&key),
+            "an unrelated wake must not recreate a completed dispatch"
         );
         let preserved_receipt = node
             .opaque_receive_cache
@@ -584,29 +708,73 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
         reset_server.send(reset_done).unwrap();
         reset_finished.await.unwrap();
         assert!(!office.durable_have(&mailbox.id(), &final_outer).unwrap());
-        RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
-        for _ in 0..2 {
-            node.group_file_delivery
-                .jobs
-                .lock()
-                .unwrap()
-                .get_mut(&key)
-                .unwrap()
-                .retry_after = None;
-            node.retry_group_file_delivery().await;
-            if office.durable_have(&mailbox.id(), &final_outer).unwrap() {
-                break;
+        node.queue_group_file_delivery(fixture.file, fixture.manifest).unwrap();
+        node.retry_group_file_delivery().await;
+        assert!(!office.durable_have(&mailbox.id(), &final_outer).unwrap(),
+            "loss of a bounded relay cache must not by itself resurrect historical file deposits");
+        let preserved_after_reset = node.opaque_receive_cache.lock().unwrap()
+            .get_checkpoint(&old_receipt_key).unwrap() == Some(old_receipt_bytes.clone());
+        // A genuine signed receiver request travels through the relay, even
+        // when the source and recipient cannot make a direct connection.
+        let requested = Decision {
+            file: fixture.file,
+            manifest: fixture.manifest,
+            sender: node.identity.public(),
+            recipient: job.recipient.clone(),
+            sender_account: Some(node.account_id()),
+            recipient_account: proof.account_id().unwrap(),
+            decision: ReceiveDecision::Accepted,
+            completion: None,
+        }.event(recipient, 1).unwrap();
+        office.ingest(mailbox.wrap(&requested).unwrap()).unwrap();
+        // The replacement deliberately closed pooled sockets. Authenticate a
+        // fresh receive exchange so this demand test does not consume the
+        // separate failed-drain cooldown while probing an old pooled socket.
+        let relay_addr = node.roster.lock().unwrap().get(&relay_public.user_id()).unwrap().addr;
+        let mut receiving = node.privacy_dial(relay_addr, &relay_public).await.unwrap();
+        node.opaque_relay_round(&mut receiving, &job.recipient, None).await.unwrap();
+        node.recycle_sync_channel(receiving);
+        assert_eq!(node.group_file_dispatch_demand(fixture.file, fixture.manifest, &job.recipient).unwrap(),
+            Some(requested.id), "the real receive exchange must import the signed demand");
+        let superseding_request = Decision::open(&requested).unwrap().event(recipient, 2).unwrap();
+        let changed_demand = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let changed = changed_demand.clone();
+        let latest = superseding_request.clone();
+        let target = job.recipient.clone();
+        let weak = Arc::downgrade(node);
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, stage| {
+            if stage == "group_file_dispatch_before_settle" && peer == target
+                && !changed.swap(true, Ordering::SeqCst)
+            {
+                weak.upgrade().unwrap().accept_file_consent_event(&latest, &peer).unwrap();
             }
+        }));
+        RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
+        node.retry_group_file_delivery().await;
+        assert!(changed_demand.load(Ordering::SeqCst), "the real completion race cut must run");
+        assert!(node.files.lock().unwrap().group_custody_settled(
+            fixture.file, fixture.manifest, &job.recipient, Some(requested.id)).unwrap());
+        assert!(!node.files.lock().unwrap().group_custody_settled(
+            fixture.file, fixture.manifest, &job.recipient, Some(superseding_request.id)).unwrap(),
+            "an old completed upload cannot settle a request committed after its captured demand");
+        assert_eq!(node.group_file_delivery.jobs.lock().unwrap()[&key].demand,
+            Some(superseding_request.id), "new demand must survive the old job's retirement");
+        *node.account_client_test_hook.lock().unwrap() = None;
+        for _ in 0..4 {
+            if let Some(pending) = node.group_file_delivery.jobs.lock().unwrap().get_mut(&key) {
+                pending.retry_after = None;
+            }
+            node.retry_group_file_delivery().await;
+            if office.durable_have(&mailbox.id(), &final_outer).unwrap() { break; }
         }
         let replacement_reads = RECEIVE_ENTRY_CALLS.with(std::cell::Cell::get);
         let restored_custody = office.durable_have(&mailbox.id(), &final_outer).unwrap();
-        let preserved_after_reset = node
-            .opaque_receive_cache
-            .lock()
-            .unwrap()
-            .get_checkpoint(&old_receipt_key)
-            .unwrap()
-            == Some(old_receipt_bytes.clone());
+        assert!(!node.group_file_delivery.jobs.lock().unwrap().contains_key(&key),
+            "the requested redeposit must itself settle after actual durable HAVE");
+        node.accept_file_consent_event(&superseding_request, &job.recipient).unwrap();
+        node.queue_group_file_delivery(fixture.file, fixture.manifest).unwrap();
+        assert!(!node.group_file_delivery.jobs.lock().unwrap().contains_key(&key),
+            "replaying the same receiver request cannot reopen its settled dispatch");
         // Exercise the generic immediate group publisher through its owning
         // consumer too, with unrelated incoming work in the same peer mailbox.
         let mut generic_pending = None;
@@ -664,7 +832,7 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
             decision: ReceiveDecision::Declined,
             completion: None,
         }
-        .event(recipient, 1)
+        .event(recipient, 3)
         .unwrap();
         office.ingest(mailbox.wrap(&declined).unwrap()).unwrap();
         RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
@@ -739,7 +907,7 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
     );
     assert!(
         restored_custody,
-        "the replacement relay must actually regain the final chunk; an old completion proof is insufficient"
+        "a fresh receiver request must restore actual final-chunk custody; the old dispatch record is not current custody"
     );
     assert!(
         preserved_after_reset,

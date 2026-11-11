@@ -192,11 +192,13 @@ fn apply_on(c: &Connection, account: &str, record: Record, limit: usize) -> Resu
     Ok(())
 }
 
-// Versioned provenance for durable indexed attachment-policy generations.
+// Distinct provenance for per-file explicit actions versus legacy policy generations.
 // The deployed session column previously held UUIDv4 values or migration NULLs;
 // this marker's version nibble is not 4, so neither can qualify accidentally.
-// Older binaries miss this marker and safely publish a new runtime-bound control.
+// Older binaries miss the action marker and safely publish a fresh signed control.
+#[cfg(test)]
 const DURABLE_POLICY_MARKER: &[u8; 16] = b"MTConsentPolicy1";
+const FILE_ACTION_MARKER: &[u8; 16] = b"MTConsentAction1";
 
 // Intrinsic signature facts only; current SQL ownership, selection and policy
 // remain authoritative. No Event bodies or authorization snapshots are retained.
@@ -490,6 +492,7 @@ impl IndexedFileConsentStore {
             bytes.map(|bytes|self.decode_control(&bytes,id,None)).transpose()
         })
     }
+    #[cfg(test)]
     pub(crate) fn published_generation(&self, id: EventId) -> Result<Option<u64>, LogError> {
         self.source.profile().database().read(|c|{
             let owner=self.check_on(c)?;
@@ -497,10 +500,45 @@ impl IndexedFileConsentStore {
             bytes.map(|bytes|bytes.try_into().map(u64::from_be_bytes).map_err(|_|invalid("invalid consent generation"))).transpose()
         })
     }
+    pub(crate) fn published_action_sequence(&self, id: EventId) -> Result<Option<u64>, LogError> {
+        self.source.profile().database().read(|c| {
+            let owner = self.check_on(c)?;
+            let bytes: Option<Vec<u8>> = c.query_row(
+                "SELECT generation FROM file_consent_published WHERE account=?1 AND manifest=?2 AND session=?3",
+                params![owner.namespace(), id.as_bytes().as_slice(), FILE_ACTION_MARKER.as_slice()], |r| r.get(0),
+            ).optional()?;
+            bytes.map(|bytes| bytes.try_into().map(u64::from_be_bytes).map_err(|_| invalid("invalid consent action sequence"))).transpose()
+        })
+    }
+    /// Action provenance qualifies reuse; the current policy generation separately
+    /// fences publication inside the transaction while the Node policy guard is held.
+    pub(crate) fn publish_control_for_action(
+        &mut self,
+        event: Event,
+        policy_generation: u64,
+        action_sequence: u64,
+    ) -> Result<(), LogError> {
+        let payload =
+            Decision::open(&event).ok_or_else(|| invalid("invalid file consent control"))?;
+        self.check_write()?;
+        self.source.profile().database().transaction(|c| {
+            let owner = self.check_on(c)?;
+            let account = owner.namespace();
+            let current: i64 = c.query_row("SELECT generation FROM attachment_policy_state WHERE account=?1", [&account], |r| r.get(0))?;
+            let current = u64::try_from(current).map_err(|_| invalid("invalid attachment policy generation"))?;
+            if current != policy_generation {
+                return Err(invalid("attachment policy changed before consent publication"));
+            }
+            apply_on(c, &account, Record::Published(event), self.limit)?;
+            c.execute("UPDATE file_consent_published SET session=?3,generation=?4 WHERE account=?1 AND manifest=?2", params![account, payload.manifest.as_bytes().as_slice(), FILE_ACTION_MARKER.as_slice(), action_sequence.to_be_bytes().as_slice()])?;
+            Ok(())
+        })
+    }
     /// `generation` must come from the current owner-checked durable
     /// IndexedAttachmentConsent policy while its guard remains held. The Node
     /// caller also requires exact Decision equality before reusing publication;
     /// this marker must never qualify a legacy launch-local generation.
+    #[cfg(test)]
     pub(crate) fn publish_control(
         &mut self,
         event: Event,
@@ -575,6 +613,15 @@ impl IndexedFileConsentStore {
         id: EventId,
         recipient: &PublicIdentity,
     ) -> Result<Option<Decision>, LogError> {
+        Ok(self
+            .received_decision_snapshot_for(id, recipient)?
+            .map(|(_, decision)| decision))
+    }
+    pub(crate) fn received_decision_snapshot_for(
+        &self,
+        id: EventId,
+        recipient: &PublicIdentity,
+    ) -> Result<Option<(EventId, Decision)>, LogError> {
         self.source.check_barrier()?;
         self.source.profile().database().read(|c| {
             let decoded = self.received_decoded_on(
@@ -589,7 +636,7 @@ impl IndexedFileConsentStore {
             {
                 return Err(invalid("indexed file consent recipient binding changed"));
             }
-            Ok(decoded.map(|(_, decision)| decision))
+            Ok(decoded.map(|(event, decision)| (event.id, decision)))
         })
     }
     pub(crate) fn received_control(&self, id: EventId) -> Result<Option<Event>, LogError> {
@@ -841,6 +888,84 @@ mod tests {
     }
 
     #[test]
+    fn node_consent_exact_repeat_approval_refreshes_only_its_file() {
+        let (directory, node, sender) = consent_offer_fixture(2);
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        node.decide_attachment(offers[0].0, true).unwrap();
+        let before = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        node.decide_attachment(offers[1].0, true).unwrap();
+        node.set_attachment_global_auto(false).unwrap();
+        let unrelated = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(unrelated[0], before[0]);
+        node.decide_attachment(offers[0].0, true).unwrap();
+        let after = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(after[0].seq, before[0].seq + 1);
+        assert_ne!(after[0].id, before[0].id);
+        assert!(Decision::open(&after[0]) == Decision::open(&before[0]));
+        assert_eq!(after[1], unrelated[1]);
+        assert_eq!(
+            node.file_consent_controls(&sender.public(), &offers, false)
+                .unwrap(),
+            after
+        );
+        let proof = node
+            .historical_author(&sender.public().ed25519_pub)
+            .unwrap();
+        let keys = node.identity.secret_bytes();
+        let account_key = node.account.secret_bytes();
+        drop(node);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+            Account::from_secret_bytes(account_key),
+            &proof,
+        );
+        assert_eq!(
+            node.file_consent_controls(&sender.public(), &offers, false)
+                .unwrap(),
+            after
+        );
+    }
+
+    #[test]
+    fn consent_action_publication_rejects_stale_policy_atomically() {
+        let (_directory, node, sender) = consent_offer_fixture(1);
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        let before = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        let generation = node
+            .attachment_consent
+            .lock()
+            .unwrap()
+            .generation()
+            .unwrap();
+        node.set_attachment_global_auto(false).unwrap();
+        let payload = Decision::open(&before[0]).unwrap();
+        let next = payload.event(&node.identity, before[0].seq + 1).unwrap();
+        let mut store = node.file_consent.lock().unwrap();
+        assert!(
+            store
+                .publish_control_for_action(next, generation, 0)
+                .is_err()
+        );
+        assert_eq!(
+            store.published_control(offers[0].1).unwrap(),
+            Some(before[0].clone())
+        );
+        assert_eq!(
+            store.published_action_sequence(offers[0].1).unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn node_consent_controls_reuse_durable_policy_after_reopen() {
         let (directory, node, sender) = consent_offer_fixture(8);
         let proof = node
@@ -908,27 +1033,23 @@ mod tests {
         );
         assert_eq!(database.successful_write_commits(), commits);
 
-        // Returning to the same payload is not permission to reuse a sequence
-        // across an intervening durable policy change.
+        // Unobserved preference changes do not manufacture new receiver demand.
         node.set_attachment_global_auto(false).unwrap();
         node.set_attachment_global_auto(true).unwrap();
-        let changed = node
-            .file_consent_controls(&sender.public(), &offers, false)
-            .unwrap();
-        assert_eq!(changed.len(), expected.len());
-        for (before, after) in expected.iter().zip(&changed) {
-            assert!(Decision::open(before) == Decision::open(after));
-            assert_eq!(after.seq, before.seq + 1);
-            assert_ne!(
-                after.id, before.id,
-                "policy ABA requires fresh signed evidence"
-            );
-        }
+        assert_eq!(
+            node.file_consent_controls(&sender.public(), &offers, false)
+                .unwrap(),
+            expected
+        );
     }
 
     #[test]
     fn node_consent_legacy_generation_refreshes_once_then_reuses() {
-        for legacy in [None, Some(*uuid::Uuid::new_v4().as_bytes())] {
+        for legacy in [
+            None,
+            Some(*uuid::Uuid::new_v4().as_bytes()),
+            Some(*DURABLE_POLICY_MARKER),
+        ] {
             let (_directory, node, sender) = consent_offer_fixture(8);
             let offers = node.file_consent_offers(&sender.public()).unwrap();
             let before = node
@@ -964,7 +1085,7 @@ mod tests {
                 .unwrap();
             assert_eq!(markers.len(), 8);
             assert!(
-                markers.iter().all(|v| v.as_slice() == b"MTConsentPolicy1"),
+                markers.iter().all(|v| v.as_slice() == b"MTConsentAction1"),
                 "only newly published controls qualify for durable-policy reuse"
             );
             assert_ne!(
@@ -1701,12 +1822,17 @@ mod tests {
             .read(|c| Ok(c.total_changes()))
             .unwrap();
         signature_observations::reset();
+        let expected_event = store
+            .received_control_for(decision.manifest, &recipient.public())
+            .unwrap()
+            .unwrap()
+            .id;
         for _ in 0..8 {
             assert!(
                 store
-                    .received_decision_for(decision.manifest, &recipient.public())
+                    .received_decision_snapshot_for(decision.manifest, &recipient.public())
                     .unwrap()
-                    == Some(decision.clone())
+                    == Some((expected_event, decision.clone()))
             );
         }
         assert_eq!(signature_observations::count(), 0);

@@ -241,11 +241,26 @@ impl IndexedAttachmentConsent {
     /// MAX is a scalar aggregate over exact indexed joins; it never constructs
     /// an alias list or a sort proportional to retained file history.
     pub(crate) fn file_decision(&self, file: ConversationId) -> Result<Option<bool>, LogError> {
+        Ok(self
+            .file_decision_snapshot(file)?
+            .map(|(accepted, _)| accepted))
+    }
+    /// The exact durable explicit action selected across equivalent offers.
+    pub(crate) fn file_decision_snapshot(
+        &self,
+        file: ConversationId,
+    ) -> Result<Option<(bool, u64)>, LogError> {
         self.source.profile().database().read(|c|{
             let owner=self.check_on(c)?;
-            Ok(c.query_row("SELECT accepted FROM attachment_offer_decisions WHERE account=?1 AND sequence=(SELECT MAX(d.sequence) FROM file_book_offers o JOIN attachment_offer_decisions d ON d.account=?1 AND d.event=o.event WHERE o.account=?2 AND o.file=?3)",params![owner.namespace(),owner.account().as_slice(),file.as_bytes().as_slice()],|r|r.get(0)).optional()?)
+            let decision: Option<(bool, i64)> = c.query_row("SELECT accepted,sequence FROM attachment_offer_decisions WHERE account=?1 AND sequence=(SELECT MAX(d.sequence) FROM file_book_offers o JOIN attachment_offer_decisions d ON d.account=?1 AND d.event=o.event WHERE o.account=?2 AND o.file=?3)",params![owner.namespace(),owner.account().as_slice(),file.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            decision.map(|(accepted, sequence)| {
+                u64::try_from(sequence)
+                    .map(|sequence| (accepted, sequence))
+                    .map_err(|_| invalid("invalid attachment decision sequence"))
+            }).transpose()
         })
     }
+
     pub(crate) fn set_global_auto(&mut self, auto: bool) -> Result<(), LogError> {
         self.write(Record::Global(auto))
     }

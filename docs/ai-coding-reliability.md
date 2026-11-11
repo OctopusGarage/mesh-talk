@@ -958,6 +958,19 @@ regression reconstructs the exact legacy serializer and exercises that collision
 through actual compaction and parent retirement. Invalidate only the obsolete
 completion qualification; preserve compatible receive cursors and pending work.
 
+Give finite buffer dispatch an explicit settled state. A remote buffer's
+capacity eviction or replacement must not silently become perpetual receiver
+demand for all retained source history. The
+[group-file owner](../crates/mesh-talk-core/src/node/group_file_delivery.rs)
+records actual accepted dispatch against the retained offer, full recipient and
+exact receiver action; the file-book foreign key removes scheduling metadata with
+that offer. A committed new request survives an older upload's completion, and a
+failed settlement commit retains retry. The real mailbox publisher regression
+covers actual HAVE, failed persistence, relay replacement, a new signed request,
+duplicate requests, the completion race and independent incoming traversal.
+Qualify receiver actions per file: an unrelated account policy generation must
+not manufacture new demand, while current policy still fences publication.
+
 Keep UI observations distinct from durable progress: phase/check timestamps
 must not rewrite a reception ledger. An unchanged committed cursor can reuse its
 successful commit only while the exact owner has no dirty durable state; failed

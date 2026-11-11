@@ -376,6 +376,7 @@ impl IndexedFileBook {
             let account = active(c)?;
             super::historical::initialize_on(c)?;
             super::retention::initialize_on(c)?;
+            super::custody_dispatch::initialize_on(c)?;
             super::receiving::initialize_on(c, &account)?;
             // Only the initial account may import the old unnamespaced source.
             // A newly adopted account starts with no offers.
@@ -698,6 +699,315 @@ mod tests {
             )?;
             install_on(c, entry, original)
         }
+    }
+
+    #[test]
+    fn group_custody_dispatch_exact_demand_is_durable_and_read_only_when_settled() {
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(71);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &entry, &original))
+            .unwrap();
+        let file = manifest.file_conv();
+        let recipient = DeviceIdentity::generate().public();
+        let demand = Some(EventId::new([81; 32]));
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..16 {
+            assert!(
+                f.book
+                    .group_custody_settled(file, entry.event_id, &recipient, demand)
+                    .unwrap()
+            );
+            assert!(
+                f.book
+                    .settle_group_custody(file, entry.event_id, &recipient, demand)
+                    .unwrap()
+            );
+        }
+        assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(database.successful_write_commits(), commits);
+        let Fixture {
+            root,
+            device,
+            account,
+            book,
+            records,
+        } = f;
+        drop(book);
+        drop(records);
+        let (book, _) = Fixture::open(root.path(), &device, &account);
+        assert!(
+            book.group_custody_settled(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn group_custody_dispatch_full_binding_cascades_and_rejects_missing_offer() {
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(72);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &entry, &original))
+            .unwrap();
+        let file = manifest.file_conv();
+        let recipient = DeviceIdentity::generate().public();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        let mut other = recipient.clone();
+        other.x25519_pub[0] ^= 1;
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &other, None)
+                .unwrap()
+        );
+        other = recipient.clone();
+        other.ed25519_pub[0] ^= 1;
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &other, None)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(
+                    ConversationId::new([90; 32]),
+                    entry.event_id,
+                    &recipient,
+                    None
+                )
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, EventId::new([91; 32]), &recipient, None)
+                .unwrap()
+        );
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute(
+                    "DELETE FROM file_book_offers WHERE account=?1",
+                    [f.book.account.as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert_eq!(
+            f.book
+                .profile
+                .database()
+                .read(|c| Ok(c.query_row(
+                    "SELECT count(*) FROM file_book_custody_dispatch",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn group_custody_dispatch_failed_write_retries_without_publishing_acceptance() {
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(73);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &entry, &original))
+            .unwrap();
+        let file = manifest.file_conv();
+        let recipient = DeviceIdentity::generate().public();
+        f.book.profile.database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER fail_custody_dispatch BEFORE INSERT ON file_book_custody_dispatch BEGIN SELECT RAISE(ABORT,'injected'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .is_err()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_custody_dispatch")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        let demand = Some(EventId::new([99; 32]));
+        f.book.profile.database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER fail_custody_update BEFORE UPDATE ON file_book_custody_dispatch BEGIN SELECT RAISE(ABORT,'injected'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, demand)
+                .is_err()
+        );
+        assert!(
+            f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_custody_update")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn group_custody_dispatch_account_epoch_and_read_faults_are_not_success() {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(74);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &entry, &original))
+            .unwrap();
+        let file = manifest.file_conv();
+        let recipient = DeviceIdentity::generate().public();
+        f.book
+            .settle_group_custody(file, entry.event_id, &recipient, None)
+            .unwrap();
+        let next = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
+        assert!(matches!(
+            f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None),
+            Err(LogError::StaleCursor)
+        ));
+        let other = IndexedFileBook::open(f.book.profile.clone()).unwrap();
+        assert!(
+            !other
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            !other
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &next.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(matches!(
+            f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None),
+            Err(LogError::StaleCursor)
+        ));
+        let resumed = IndexedFileBook::open(f.book.profile.clone()).unwrap();
+        assert!(
+            resumed
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TABLE file_book_custody_dispatch")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            resumed.group_custody_settled(file, entry.event_id, &recipient, None),
+            Err(LogError::Database(_))
+        ));
+        assert!(matches!(
+            resumed.settle_group_custody(file, entry.event_id, &recipient, None),
+            Err(LogError::Database(_))
+        ));
+        let upgraded = IndexedFileBook::open(f.book.profile.clone()).unwrap();
+        assert!(
+            !upgraded
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
     }
 
     #[test]

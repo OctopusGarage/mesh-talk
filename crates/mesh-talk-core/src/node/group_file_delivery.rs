@@ -55,6 +55,8 @@ struct GroupFileUpload {
     recipient: PublicIdentity,
     retry_after: Option<std::time::Instant>,
     retry_delay: std::time::Duration,
+    // Exact receiver action captured by this dispatch, not current custody.
+    demand: Option<EventId>,
     // Bounded by the existing job count. Cloned retry selections share only
     // exact local outgoing-membership evidence, never remote custody proof.
     authorization_stamp: Arc<Mutex<Option<super::privacy_sync::HistorySyncStamp>>>,
@@ -75,6 +77,8 @@ struct GroupFileScan {
     cursor: Option<i64>,
     source: Option<(u64, u64)>,
     repair_after: Option<std::time::Instant>,
+    // Retained overflow recovery; only the serialized producer consumes it.
+    rescan_requested: bool,
 }
 
 #[derive(Default)]
@@ -305,11 +309,20 @@ impl Node {
 
     /// Rebuild bounded work from the durable group rows, including older sends.
     fn refill_group_file_delivery(&self) -> Result<(), LogError> {
-        let mut scan = *self
-            .group_file_delivery
-            .scan
-            .lock()
-            .expect("group file scan lock");
+        let mut scan = {
+            let mut scan = self
+                .group_file_delivery
+                .scan
+                .lock()
+                .expect("group file scan lock");
+            if scan.rescan_requested {
+                scan.cursor = None;
+                scan.source = None;
+                scan.repair_after = None;
+                scan.rescan_requested = false;
+            }
+            *scan
+        };
         let page = {
             let rows = self.received_files.lock().expect("file rows lock");
             let source = (rows.revision(), rows.rewrite_revision());
@@ -366,11 +379,20 @@ impl Node {
             .next
             .is_none()
             .then(|| std::time::Instant::now() + std::time::Duration::from_secs(60));
-        *self
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "group_file_refill_before_publish".into()
+        });
+        let mut current = self
             .group_file_delivery
             .scan
             .lock()
-            .expect("group file scan lock") = scan;
+            .expect("group file scan lock");
+        // A request rejected by a full active queue may arrive during the SQL
+        // scan. Never overwrite its retained rescan with an older EOF.
+        if !current.rescan_requested {
+            *current = scan;
+        }
         Ok(())
     }
 
@@ -416,6 +438,15 @@ impl Node {
                     break;
                 }
             }
+            let demand = self.group_file_dispatch_demand(file, manifest, &recipient)?;
+            if self
+                .files
+                .lock()
+                .expect("files lock")
+                .group_custody_settled(file, manifest, &recipient, demand)?
+            {
+                continue;
+            }
             let job = GroupFileUpload {
                 channel: original.conversation_id,
                 waiting_dependency: false,
@@ -424,6 +455,7 @@ impl Node {
                 recipient,
                 retry_after: None,
                 retry_delay: std::time::Duration::from_secs(3),
+                demand,
                 authorization_stamp: Arc::new(Mutex::new(None)),
             };
             if !self.group_file_custody_allowed(&job)? {
@@ -442,6 +474,88 @@ impl Node {
             }
         }
         Ok(())
+    }
+
+    fn group_file_dispatch_demand(
+        &self,
+        file: ConversationId,
+        manifest: EventId,
+        recipient: &PublicIdentity,
+    ) -> Result<Option<EventId>, LogError> {
+        Ok(self
+            .file_consent
+            .lock()
+            .expect("file consent lock")
+            .received_decision_snapshot_for(manifest, recipient)?
+            .filter(|(_, decision)| {
+                decision.file == file
+                    && decision.sender == self.identity.public()
+                    && decision.decision == ReceiveDecision::Accepted
+                    && decision.completion.is_none()
+            })
+            .map(|(id, _)| id))
+    }
+
+    /// A committed, authenticated receiver request is retained without entering
+    /// file/history preparation or the network from the receiving callback.
+    pub(super) fn request_group_file_custody(
+        &self,
+        channel: ConversationId,
+        file: ConversationId,
+        manifest: EventId,
+        recipient: &PublicIdentity,
+        demand: EventId,
+    ) {
+        let key = (manifest, recipient.ed25519_pub);
+        let mut jobs = self
+            .group_file_delivery
+            .jobs
+            .lock()
+            .expect("group file jobs lock");
+        if jobs.contains_key(&key) || jobs.len() < MAX_GROUP_FILE_JOBS {
+            jobs.insert(
+                key,
+                GroupFileUpload {
+                    channel,
+                    waiting_dependency: false,
+                    file,
+                    manifest,
+                    recipient: recipient.clone(),
+                    retry_after: None,
+                    retry_delay: std::time::Duration::from_secs(3),
+                    demand: Some(demand),
+                    authorization_stamp: Arc::new(Mutex::new(None)),
+                },
+            );
+        } else {
+            // The signed request is already durable. A retained scan wake is
+            // sufficient recovery when bounded active admission is exhausted.
+            drop(jobs);
+            self.group_file_delivery
+                .scan
+                .lock()
+                .expect("group file scan lock")
+                .rescan_requested = true;
+        }
+        self.group_file_notify.notify_one();
+    }
+
+    fn retire_group_file_dispatch(&self, key: &UploadKey, job: &GroupFileUpload) -> bool {
+        let mut jobs = self
+            .group_file_delivery
+            .jobs
+            .lock()
+            .expect("group file jobs lock");
+        if jobs.get(key).is_some_and(|current| {
+            current.file == job.file
+                && current.recipient == job.recipient
+                && current.demand == job.demand
+        }) {
+            jobs.remove(key);
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn group_file_work_pending(&self) -> bool {
@@ -902,6 +1016,8 @@ impl Node {
                 let retry_delay = {
                     let mut jobs = self.group_file_delivery.jobs.lock().expect("group file jobs lock");
                     let Some(pending) = jobs.get_mut(&key) else { continue; };
+                    if pending.recipient != job.recipient || pending.file != job.file
+                        || pending.demand != job.demand { continue; }
                     let delay = pending.retry_delay;
                     // Register before probing: a concurrent dependency publication
                     // can clear this deadline without losing its wake afterwards.
@@ -910,6 +1026,25 @@ impl Node {
                     pending.retry_delay = (delay * 2).min(std::time::Duration::from_secs(60));
                     delay
                 };
+                let demand = match self.group_file_dispatch_demand(job.file, job.manifest, &job.recipient) {
+                    Ok(demand) => demand,
+                    Err(error) => { log::warn!("Group file demand observation deferred: {error}"); continue; }
+                };
+                {
+                    let mut jobs = self.group_file_delivery.jobs.lock().expect("group file jobs lock");
+                    let Some(pending) = jobs.get_mut(&key) else { continue; };
+                    if pending.recipient != job.recipient || pending.file != job.file
+                        || pending.demand != job.demand { continue; }
+                    pending.demand = demand;
+                }
+                let job = GroupFileUpload { demand, ..job };
+                let settled = self.files.lock().expect("files lock")
+                    .group_custody_settled(job.file, job.manifest, &job.recipient, demand);
+                match settled {
+                    Ok(true) => { self.retire_group_file_dispatch(&key, &job); continue; }
+                    Ok(false) => {}
+                    Err(error) => { log::warn!("Group file dispatch observation deferred: {error}"); continue; }
+                }
                 #[cfg(test)]
                 self.trace_account_client(&job.recipient, || "group_file_dependency_registered".into());
                 let offer = AttemptOffer::new(None);
@@ -921,7 +1056,8 @@ impl Node {
                     Ok(AuthorizationProbe::Denied) => false,
                     Ok(AuthorizationProbe::Preparing) => {
                         self.observe_mailbox_work(super::work_observation::reason::FILE_PREPARING, None);
-                        if let Some(pending) = self.group_file_delivery.jobs.lock().expect("group file jobs lock").get_mut(&key) {
+                        if let Some(pending) = self.group_file_delivery.jobs.lock().expect("group file jobs lock").get_mut(&key)
+                            .filter(|pending| pending.recipient == job.recipient && pending.file == job.file && pending.demand == job.demand) {
                             pending.waiting_dependency = false;
                             pending.retry_after = None;
                             pending.retry_delay = std::time::Duration::from_secs(3);
@@ -934,7 +1070,8 @@ impl Node {
                     }
                     Err(error) => { log::warn!("Group file retry deferred after storage failure: {error}"); continue; }
                 };
-                if let Some(pending) = self.group_file_delivery.jobs.lock().expect("group file jobs lock").get_mut(&key) {
+                if let Some(pending) = self.group_file_delivery.jobs.lock().expect("group file jobs lock").get_mut(&key)
+                    .filter(|pending| pending.recipient == job.recipient && pending.file == job.file && pending.demand == job.demand) {
                     pending.waiting_dependency = false;
                     // Readiness may have consumed the waiting deadline during
                     // the probe. Network work owns a fresh cancellation deadline.
@@ -943,11 +1080,7 @@ impl Node {
                     }
                 }
                 if !allowed {
-                    self.group_file_delivery
-                        .jobs
-                        .lock()
-                        .expect("group file jobs lock")
-                        .remove(&key);
+                    self.retire_group_file_dispatch(&key, &job);
                     continue;
                 }
                 let candidates = {
@@ -1085,18 +1218,23 @@ impl Node {
                         }
                     })
                     .await;
-                if let Some(pending) = self
-                        .group_file_delivery
-                        .jobs
-                        .lock()
-                        .expect("group file jobs lock")
-                        .get_mut(&key)
+                if held.load(Ordering::Relaxed) {
+                    #[cfg(test)]
+                    self.trace_account_client(&job.recipient, || "group_file_dispatch_before_settle".into());
+                    let settled = self.files.lock().expect("files lock")
+                        .settle_group_custody(job.file, job.manifest, &job.recipient, demand);
+                    match settled {
+                        Ok(true) => { self.retire_group_file_dispatch(&key, &job); continue; }
+                        Ok(false) => {}
+                        Err(error) => log::warn!("Group file dispatch settlement deferred: {error}"),
+                    }
+                }
+                if let Some(pending) = self.group_file_delivery.jobs.lock()
+                    .expect("group file jobs lock").get_mut(&key)
+                    .filter(|pending| pending.file == job.file && pending.recipient == job.recipient
+                        && pending.demand == job.demand)
                 {
-                    let delay = if held.load(Ordering::Relaxed) {
-                        pending.retry_delay = std::time::Duration::from_secs(3);
-                        super::delivery_runtime::QUIET_REPAIR_INTERVAL
-                    } else { retry_delay };
-                    pending.retry_after = Some(std::time::Instant::now() + delay);
+                    pending.retry_after = Some(std::time::Instant::now() + retry_delay);
                 }
             }
         })

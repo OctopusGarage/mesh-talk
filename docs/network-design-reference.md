@@ -1021,10 +1021,33 @@ Its active index holds at most 10,000 jobs;
 bounded rotating scans of durable source rows refill it, including pre-upgrade
 sends and restarts. A pass launches at most two recipient jobs and races at most
 two relay exchanges at once under the existing whole-file deadline. Rotation
-advances at launch, failed paths do not pin later recipients, and exact durable
-chunk custody parks redundant inventory work until a five-minute repair. The index
-contains outgoing group files, not historical private consent controls. Due jobs
-and unfinished authorization preparation retain the producer's short cadence.
+advances at launch and failed paths do not pin later recipients. A completed
+upload followed by actual durable final-chunk HAVE settles that custody dispatch.
+The file-book owner persists the exact retained offer, full recipient signing and
+key-agreement identity, and captured receiver request token before removing its
+matching active job. Historical scans and relay eviction do not recreate the
+same dispatch. This records past acceptance, without asserting present custody,
+recipient delivery or verified local save. The scheduling row cascades with its
+retained offer; reads and identical settlements perform no writes, and a failed
+commit retains the existing retry. An older completion cannot remove a newer
+receiver request queued during its upload.
+
+A fresh signed Accepted control without completion requests another bounded
+custody dispatch. Receiver publication qualifies reuse with the effective
+per-file explicit-action sequence, using a versioned local marker; repeating an
+explicit approval refreshes that file's control, while unrelated file actions and
+unchanged polls/restarts preserve it. Current policy is still recomputed and its
+global generation separately fences atomic publication. The direct missing-file
+download owner remains independent and can resume an already Accepted download
+without another approval. A post office provides bounded store-and-forward
+storage: after eviction, historical files wait for receiver demand or an
+available direct source instead of perpetual sender-owned replenishment. This
+intentionally gives up unsolicited periodic re-deposits as an offline recovery
+opportunity; it does not claim equivalent offline availability after eviction.
+
+The active index contains outgoing group files, not historical private consent
+controls. Due jobs and unfinished authorization preparation retain the producer's
+short cadence.
 Network failures and unavailable routes back off from three to sixty seconds;
 launch reserves a deadline before any await, and completed attempts measure their
 delay from completion. The outgoing producer retains the earliest future retry
@@ -1032,7 +1055,10 @@ wake. Cooling jobs perform no repeated offer authorization. Completed discovery
 rests for sixty seconds, reopening immediately on changed file rows. Ordinary
 appends preserve unfinished ordinal scans; destructive rewrites restart them.
 Periodic repair still revisits eligibility changes without a new file row,
-including membership, consent and proof recovery. Failed preparation, failed scans
+including membership, consent and proof recovery for unsettled dispatches. Fresh
+receiver requests enqueue bounded metadata work after their own ledger commit;
+active-queue overflow retains a rescan which an older EOF cannot overwrite.
+Failed preparation, failed scans
 and full capacity retain unfinished work while independent queued jobs advance.
 Successful unchanged pull reconciliation also uses a five-minute repair deadline;
 changed route or policy inputs still admit work immediately. These quiet deadlines
@@ -2522,7 +2548,7 @@ A deleted local record or recalled event does not recall already copied data fro
 | Group initial text/sticker seeding        | Small-group threshold five members; larger groups normally seed two peers.                                                                                                                                                                                                                | Authority controls and file manifests retain their separate fanout rules.                                                                                                                                                                                                                                                                                                                                                           |
 | Group recovery                            | At most two active groups, each selecting three peers; coalesced wakes visit up to eight joined channels. Jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                                                                       | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                                                                                                                                                                                                                                                                 |
 | Group control fanout                      | At most four concurrent contacts.                                                                                                                                                                                                                                                         | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                                                                                                                                                                                                                                                          |
-| Participant mailbox preparation           | Four history owners and two receive-only owners; 30-second meaningful-progress protection; 2 MiB repair-ID state per owner (at most 12 MiB); 64 fixed-expiry completed-work fingerprints with keys of at most 256 bytes.                                                                                                                                              | Receive-only work never prepares history. Busy or contended owners defer admission, while finished, revoked or stalled work remains reclaimable.                                                                                                                                                                                                                                                                                    |
+| Participant mailbox preparation           | Four history owners and two receive-only owners; 30-second meaningful-progress protection; 2 MiB repair-ID state per owner (at most 12 MiB); 64 fixed-expiry completed-work fingerprints with keys of at most 256 bytes.                                                                  | Receive-only work never prepares history. Busy or contended owners defer admission, while finished, revoked or stalled work remains reclaimable.                                                                                                                                                                                                                                                                                    |
 
 The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `node/opaque_relay/incremental.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `storage/database.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
 
@@ -2535,7 +2561,6 @@ normally. Current account binding and route/source rules still run, and each
 accepted observation keeps its existing presence semantics. Forgetting or
 evicting the live proof removes this reuse; historical identity alone is not a
 verification cache or current presence evidence.
-
 
 A network-validation transaction reads each mailbox arrival once and passes that
 fresh observation through role qualification. The shared connection guard keeps

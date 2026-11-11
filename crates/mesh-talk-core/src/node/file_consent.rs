@@ -275,11 +275,6 @@ impl Node {
             else {
                 continue;
             };
-            let decision = if automatic {
-                ReceiveDecision::Accepted
-            } else {
-                self.consent_for_file_account(self.equivalent_offer_decision(file)?, &account)?
-            };
             let delivery = self.delivery.lock().expect("delivery lock not poisoned");
             if self
                 .delivery_suspended
@@ -292,6 +287,18 @@ impl Node {
                 .lock()
                 .expect("consent lock not poisoned");
             let generation = policy.generation()?;
+            let explicit = policy.file_decision_snapshot(file)?;
+            let action_sequence = explicit.map_or(0, |(_, sequence)| sequence);
+            let decision = if automatic {
+                ReceiveDecision::Accepted
+            } else {
+                match explicit.map(|(accepted, _)| accepted) {
+                    Some(true) => ReceiveDecision::Accepted,
+                    Some(false) => ReceiveDecision::Declined,
+                    None if policy.preference(&account)? => ReceiveDecision::Accepted,
+                    None => ReceiveDecision::Pending,
+                }
+            };
             let mut store = self
                 .file_consent
                 .lock()
@@ -320,7 +327,7 @@ impl Node {
                     completion,
                 };
                 let previous = store.published_control_with_decision(manifest)?;
-                let previous_generation = store.published_generation(manifest)?;
+                let previous_action = store.published_action_sequence(manifest)?;
                 if decision == ReceiveDecision::Pending && previous.is_none() && !include_pending {
                     controls.push(ConsentControlOutcome::PendingNoPublishedControl(
                         file, manifest,
@@ -328,7 +335,7 @@ impl Node {
                     continue;
                 }
                 let event = if let Some((event, _)) = previous.as_ref().filter(|(_, decision)| {
-                    previous_generation == Some(generation) && *decision == payload
+                    previous_action == Some(action_sequence) && *decision == payload
                 }) {
                     event.clone()
                 } else {
@@ -338,7 +345,7 @@ impl Node {
                             LogError::Serialization("file consent revision exhausted".into())
                         })?;
                     let event = payload.event(&self.identity, revision)?;
-                    store.publish_control(event.clone(), generation)?;
+                    store.publish_control_for_action(event.clone(), generation, action_sequence)?;
                     event
                 };
                 controls.push(ConsentControlOutcome::Prepared(event));
@@ -415,6 +422,15 @@ impl Node {
             if accepted {
                 self.file_pull_notify.notify_one();
                 self.note_file_change();
+                if payload.decision == ReceiveDecision::Accepted && payload.completion.is_none() {
+                    self.request_group_file_custody(
+                        original.conversation_id,
+                        payload.file,
+                        payload.manifest,
+                        peer,
+                        event.id,
+                    );
+                }
             }
             return Ok(true);
         }
