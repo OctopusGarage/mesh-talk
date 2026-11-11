@@ -545,6 +545,18 @@ impl IndexedFileConsentStore {
             decision_on(c,&account,id)?.map(|(value,_)|decision_value(value)).transpose()
         })
     }
+    fn received_decoded_on(
+        &self,
+        c: &Connection,
+        account: &str,
+        id: EventId,
+        recipient: &[u8; 32],
+    ) -> Result<Option<(Event, Decision)>, LogError> {
+        let bytes:Option<Vec<u8>>=c.query_row("SELECT CASE WHEN length(body)<=2048 THEN body ELSE NULL END FROM file_consent_received WHERE account=?1 AND manifest=?2 AND recipient=?3",params![account,id.as_bytes().as_slice(),recipient.as_slice()],|r|r.get(0)).optional()?;
+        bytes
+            .map(|bytes| self.decode_control(&bytes, id, Some(recipient)))
+            .transpose()
+    }
     fn received_on(
         &self,
         c: &Connection,
@@ -552,13 +564,33 @@ impl IndexedFileConsentStore {
         id: EventId,
         recipient: &[u8; 32],
     ) -> Result<Option<Event>, LogError> {
-        let bytes:Option<Vec<u8>>=c.query_row("SELECT CASE WHEN length(body)<=2048 THEN body ELSE NULL END FROM file_consent_received WHERE account=?1 AND manifest=?2 AND recipient=?3",params![account,id.as_bytes().as_slice(),recipient.as_slice()],|r|r.get(0)).optional()?;
-        bytes
-            .map(|bytes| {
-                self.decode_control(&bytes, id, Some(recipient))
-                    .map(|(event, _)| event)
-            })
-            .transpose()
+        Ok(self
+            .received_decoded_on(c, account, id, recipient)?
+            .map(|(event, _)| event))
+    }
+    /// Reuse intrinsic verification from this exact selected row. This is not
+    /// a cached policy grant: every call still checks publication and ownership.
+    pub(crate) fn received_decision_for(
+        &self,
+        id: EventId,
+        recipient: &PublicIdentity,
+    ) -> Result<Option<Decision>, LogError> {
+        self.source.check_barrier()?;
+        self.source.profile().database().read(|c| {
+            let decoded = self.received_decoded_on(
+                c,
+                &self.check_on(c)?.namespace(),
+                id,
+                &recipient.ed25519_pub,
+            )?;
+            if decoded
+                .as_ref()
+                .is_some_and(|(_, decision)| decision.recipient != *recipient)
+            {
+                return Err(invalid("indexed file consent recipient binding changed"));
+            }
+            Ok(decoded.map(|(_, decision)| decision))
+        })
     }
     pub(crate) fn received_control(&self, id: EventId) -> Result<Option<Event>, LogError> {
         self.source.check_barrier()?;
@@ -570,6 +602,7 @@ impl IndexedFileConsentStore {
             }
         })
     }
+    #[cfg(test)]
     pub(crate) fn received_control_for(
         &self,
         id: EventId,
@@ -1644,6 +1677,123 @@ mod tests {
             Some(ReceiveDecision::Declined)
         );
     }
+    #[test]
+    fn selected_received_decision_reuses_proof_but_observes_replacement_and_failure() {
+        use crate::node::file_consent::signature_observations;
+        let directory = tempfile::tempdir().unwrap();
+        let mut store =
+            IndexedFileConsentStore::open(&directory.path().join("controls"), "pw").unwrap();
+        let recipient = DeviceIdentity::generate();
+        let mut decision = payload(&recipient, 1);
+        store
+            .receive_control(decision.event(&recipient, 1).unwrap())
+            .unwrap();
+        assert!(
+            store
+                .received_decision_for(decision.manifest, &recipient.public())
+                .unwrap()
+                == Some(decision.clone())
+        );
+        let changes = store
+            .source
+            .profile()
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap();
+        signature_observations::reset();
+        for _ in 0..8 {
+            assert!(
+                store
+                    .received_decision_for(decision.manifest, &recipient.public())
+                    .unwrap()
+                    == Some(decision.clone())
+            );
+        }
+        assert_eq!(signature_observations::count(), 0);
+        assert_eq!(
+            store
+                .source
+                .profile()
+                .database()
+                .read(|c| Ok(c.total_changes()))
+                .unwrap(),
+            changes
+        );
+        let mut wrong_binding = recipient.public();
+        wrong_binding.x25519_pub[0] ^= 1;
+        assert!(
+            store
+                .received_decision_for(decision.manifest, &wrong_binding)
+                .is_err()
+        );
+        assert!(
+            store
+                .received_decision_for(decision.manifest, &DeviceIdentity::generate().public())
+                .unwrap()
+                .is_none()
+        );
+        decision.decision = ReceiveDecision::Declined;
+        let current = decision.event(&recipient, 2).unwrap();
+        store.receive_control(current.clone()).unwrap();
+        assert!(
+            store
+                .received_decision_for(decision.manifest, &recipient.public())
+                .unwrap()
+                == Some(decision.clone())
+        );
+        let mut forged = current.clone();
+        forged.sig[0] ^= 1;
+        let forged_body = body(&forged).unwrap();
+        store
+            .source
+            .profile()
+            .database()
+            .transaction(|c| {
+                c.execute("UPDATE file_consent_received SET body=?1", [forged_body])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            store
+                .received_decision_for(decision.manifest, &recipient.public())
+                .is_err(),
+            "warm proof cannot hide changed or corrupt selected bytes"
+        );
+        store
+            .source
+            .profile()
+            .database()
+            .transaction(|c| {
+                c.execute(
+                    "UPDATE file_consent_received SET body=?1",
+                    [body(&current)?],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            store
+                .received_decision_for(decision.manifest, &recipient.public())
+                .unwrap()
+                == Some(decision.clone())
+        );
+        store
+            .source
+            .profile()
+            .database()
+            .transaction(|c| {
+                c.execute("DELETE FROM file_consent_received", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            store
+                .received_decision_for(decision.manifest, &recipient.public())
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn indexed_verified_control_memo_is_bounded_and_rechecks_requested_identity() {
         use crate::node::file_consent::signature_observations;

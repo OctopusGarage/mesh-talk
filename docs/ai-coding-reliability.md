@@ -1137,7 +1137,10 @@ equality with an owner-validated durable record can reuse intrinsic verification
 but must preserve current erasure checks and failed durability retries. The
 [group-file controls](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
 count real body reads and signatures, retain nonempty signed decisions and test
-read failure/recovery; [delivery-store controls](../crates/mesh-talk-core/src/node/delivery_store_tests.rs)
+read failure/recovery. Return the already-authenticated decoded value to callers
+instead of discarding it and reopening its signed event; the warm terminal
+recipient regression counts real consent signature calls across repeated queue
+reconstruction. [Delivery-store controls](../crates/mesh-talk-core/src/node/delivery_store_tests.rs)
 cover identical, conflicting, forged, reopened and erased reservations.
 Hot point reads should reuse bounded compiled statements without retaining
 results or weakening source checks. The [event repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
@@ -1170,6 +1173,12 @@ Keep the actual mutation guard and capacity recheck; a racing capacity release
 may miss an optional hint until retry, never authorize eviction. The byte-pressure
 regression checks zero `RePrepare` after both refused insertion and refused growth,
 unchanged rows/accounting, and successful admission after capacity is released.
+Apply the same rule to terminal preparation: check the live selection, source
+and actual export cursor before entering a write guard. The
+`ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress` regression
+checks zero `RePrepare` for both upload and direct-network consumers, alongside
+zero commits/body reads and rejection after authority changes. A no-op SQL UPDATE
+is insufficient when installing its guard invalidates unrelated read plans.
 
 Reuse compiled static SQL through the existing bounded connection cache rather
 than caching authorization results. Every execution must still bind the current

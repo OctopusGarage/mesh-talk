@@ -39,6 +39,20 @@ fn ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress() {
     let database = node.storage.database();
     let changes = database.read(|c| Ok(c.total_changes())).unwrap();
     let commits = database.successful_write_commits();
+    let reprepare = |reset| {
+        database
+            .read(|c| {
+                let mut statement = c.prepare_cached("SELECT count(*) FROM retained_events")?;
+                let _: i64 = statement.query_row([], |r| r.get(0))?;
+                Ok(if reset {
+                    statement.reset_status(rusqlite::StatementStatus::RePrepare)
+                } else {
+                    statement.get_status(rusqlite::StatementStatus::RePrepare)
+                })
+            })
+            .unwrap()
+    };
+    reprepare(true);
     let bodies = node
         .log
         .lock()
@@ -76,6 +90,11 @@ fn ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress() {
             break;
         }
     }
+    assert_eq!(
+        reprepare(false),
+        0,
+        "completed preparation must not enter a guarded write transaction and expire cached reads"
+    );
     assert_eq!(actual, expected);
     assert_eq!(
         node.log
@@ -119,6 +138,7 @@ fn ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress() {
     assert!(export_ready);
     let direct_changes = database.read(|c| Ok(c.total_changes())).unwrap();
     let direct_commits = database.successful_write_commits();
+    reprepare(true);
     for _ in 0..8 {
         let step = NetworkSyncStore::prepare_export_step(
             &*store,
@@ -135,6 +155,11 @@ fn ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress() {
         );
         assert_eq!(database.successful_write_commits(), direct_commits);
     }
+    assert_eq!(
+        reprepare(false),
+        0,
+        "direct terminal preparation must preserve cached read plans too"
+    );
     // Ready is a work fact, never permission to bypass current authority.
     node.privacy.generation.fetch_add(1, Ordering::SeqCst);
     assert!(matches!(

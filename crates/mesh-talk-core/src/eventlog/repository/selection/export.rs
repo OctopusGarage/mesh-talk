@@ -51,6 +51,26 @@ impl EventRepository {
     ) -> Result<PreparationStep, LogError> {
         budget.validate()?;
         budget.rows_for_bytes(64)?;
+        // Completed preparation is observation, not derived work. Installing
+        // the write authorizer even for a no-op expires every cached SQL VM.
+        // Validate the live selection/source and its actual cursor under the
+        // same database lock; a missing cursor remains a storage error.
+        let complete = self.database.read(|c| {
+            self.require_selection_on(c, selection)?;
+            self.validate_network_on(c, view)?;
+            let mut statement = c.prepare_cached(
+                "SELECT NOT EXISTS(SELECT 1 FROM participant_work.participant_sync_rows r WHERE r.view=w.view AND r.rank>w.rank) FROM participant_work.participant_sync_export_work w WHERE w.view=?1",
+            )?;
+            Ok(statement.query_row([selection.id.as_slice()], |r| r.get::<_, bool>(0))?)
+        })?;
+        if complete {
+            return Ok(PreparationStep {
+                ready: true,
+                ..PreparationStep::default()
+            });
+        }
+        // Another owner may change state after the preflight; the write path
+        // independently revalidates and rereads progress before publishing it.
         self.database.selection_work_transaction(|c| {
             self.require_selection_on(c,selection)?;self.validate_network_on(c,view)?;
             let (mut after,mut edge_after,mut sibling_closed,mut own_closed):(i64,Option<Vec<u8>>,bool,bool)=c.query_row("SELECT rank,parent_after,sibling_closed,own_closed FROM participant_work.participant_sync_export_work WHERE view=?1",[selection.id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;

@@ -1,5 +1,7 @@
 //! Consent-gated group attachments over the existing recipient-encrypted mailboxes.
-use super::{Node, ReceiveDecision, delivery_store::FileCard, file_consent::Decision};
+#[cfg(test)]
+use super::file_consent::Decision;
+use super::{Node, ReceiveDecision, delivery_store::FileCard};
 use crate::{
     discovery::Announce,
     eventlog::{ConversationId, Event, EventId, EventKind, LogError},
@@ -529,9 +531,7 @@ impl Node {
             .file_consent
             .lock()
             .expect("file consent lock")
-            .received_control_for(job.manifest, &job.recipient)?
-            .as_ref()
-            .and_then(Decision::open)
+            .received_decision_for(job.manifest, &job.recipient)?
             .is_none_or(|decision| {
                 decision.file == job.file
                     && decision.sender == self.identity.public()

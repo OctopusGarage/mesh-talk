@@ -1031,6 +1031,7 @@ async fn group_file_refused_and_completed_cold_recipients_skip_outgoing_preparat
             .database()
             .read(|c| Ok(c.total_changes()))
             .unwrap();
+        crate::node::file_consent::signature_observations::reset();
         for _ in 0..2 {
             node.queue_group_file_delivery(fixture.file, fixture.manifest)
                 .expect(
@@ -1046,6 +1047,11 @@ async fn group_file_refused_and_completed_cold_recipients_skip_outgoing_preparat
                 "terminal recipients must not recreate source-history selections"
             );
         }
+        assert_eq!(
+            crate::node::file_consent::signature_observations::count(),
+            0,
+            "warm terminal controls must reuse the store's authenticated decision instead of verifying it again"
+        );
         assert_eq!(
             node.storage
                 .database()
