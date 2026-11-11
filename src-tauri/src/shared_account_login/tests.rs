@@ -13,14 +13,14 @@ struct Fixture {
 
 impl Fixture {
     async fn new(name: &str, raw_password: &str) -> Self {
-        Self::create(name, raw_password, true).await
+        Self::create(name, raw_password).await
     }
 
     async fn local(name: &str, raw_password: &str) -> Self {
-        Self::create(name, raw_password, false).await
+        Self::create(name, raw_password).await
     }
 
-    async fn create(name: &str, raw_password: &str, discoverable: bool) -> Self {
+    async fn create(name: &str, raw_password: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         let auth = AuthService::new(Arc::new(IdentityManager::new(FileManager::new(
             root.path().to_owned(),
@@ -34,7 +34,7 @@ impl Fixture {
         let authority =
             RuntimeAuthority::request(app.session().clone(), lease.clone(), node.clone()).unwrap();
         let permit = authority.begin().await.unwrap();
-        let runtime = start(root.path(), lease.owner(), name, raw_password, discoverable).await;
+        let runtime = start(root.path(), lease.owner(), name, raw_password).await;
         assert!(permit.install(runtime).await);
         let admission = RuntimeAdmission::capture_lease(&app, &node, &lease).unwrap();
         Self {
@@ -285,27 +285,14 @@ async fn native_login_persistence_keeps_auth_order_after_cancellation_and_rechec
     }
 }
 
-async fn start(
-    root: &Path,
-    owner: &str,
-    name: &str,
-    password: &str,
-    discoverable: bool,
-) -> NodeRuntime {
-    // Local credential/lifecycle tests do not probe discovery. Let the OS bind
-    // their port atomically instead of racing other tests after a reservation.
-    let port = if discoverable {
-        let reserve = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        reserve.local_addr().unwrap().port()
-    } else {
-        0
-    };
+async fn start(root: &Path, owner: &str, name: &str, password: &str) -> NodeRuntime {
+    // Bind once: the runtime retains the OS-assigned discovery endpoint.
     NodeRuntime::start(
         root,
         owner,
         name,
         password,
-        port,
+        0,
         |_| {},
         |_| {},
         |_| {},
@@ -578,7 +565,6 @@ async fn v4_pairing_adopts_login_preserving_storage_device_and_encrypted_history
         &before.user.user_id,
         "Messi10",
         " target-password ",
-        true,
     )
     .await;
     assert_eq!(restarted.user_id(), device);

@@ -56,6 +56,10 @@ their TCP port. Signed discovery advertises the applicable TCP port;
 port numbers and VPN membership never establish identity or authority. Raw CLI
 custom-port overrides remain available for isolated tests and explicit endpoints,
 not automatic managed discovery. See [routed setup](routed-network-discovery.md).
+For an OS-assigned discovery port (`0`), participant preparation retains the
+actual IPv4 socket port and uses it for the optional IPv6 socket, runtime endpoint
+reporting and discovery producers. Test callers bind atomically through this
+owner rather than reserving, releasing and rebinding a reusable UDP port.
 
 ### Architectural overview
 

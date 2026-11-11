@@ -416,6 +416,14 @@ on subsequent projection readiness, and a generic mutation retry can repeat work
 that already committed. The [local erasure owner](../crates/mesh-talk-core/src/node/lifecycle.rs)
 checks a real pending archived projection, unrelated DM/unknown targets,
 suppression failure without erasure, and retained suppression after reopen.
+Do not attach unrelated global projection work to a narrow mutation. Text
+erasure has no file keys to revoke; a full file-book reconciliation can fail on
+unrelated reads or concurrent acceptance after suppression already committed.
+The `owned_read_failure_text_erasure_does_not_reconcile_unrelated_files`
+regression in [delivery tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+qualifies the real read failure, verifies text removal and suppression, and
+retains the unrelated live file. File erasure still revokes its keys before
+physical removal, and reconciliation still rejects stale revisions.
 
 Keep inspection affordances separate from mutation permissions, and propagate
 the containing view's restrictions into nested inspectors. Opening a reader must
@@ -759,6 +767,13 @@ clocks at the actual boundary. Prefer an observable progress assertion to an
 arbitrary sleep or a test that checks only that a timeout helper was called.
 Verify successful behavior, failure, cleanup and replacement through the same
 production owner; a mock that bypasses the problematic lock proves little.
+Install response holds before admitting background producers, and observe the
+actual held handler before publishing the state that must remain unavailable.
+Arming after launch cannot stop an earlier request that already passed the hook
+from reading later state. The exact-peer hostname hold in
+`channel_custody_converges_while_directory_is_held` in
+[account document tests](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
+preserves that ordering while measuring independent custody progress.
 
 The group-inventory held-peer fixture rejects a real authenticated setup
 exchange before admitting its independent publication measurement. Snapshot
@@ -872,6 +887,13 @@ outer deadline when a synchronous lock cycle cannot be safely unwound. An async
 timeout inside the blocked thread is not sufficient. Avoid port-selection races
 and process-global fixtures that assume serial execution; respect the repository's
 test environment and resource controls.
+For an ephemeral UDP endpoint, let the real socket owner bind port zero and
+report the selected port. A released reservation is not ownership; reusable
+discovery sockets can silently share the selected port with another runtime.
+Participant preparation owns the actual IPv4/IPv6 port, and
+`runtime_zero_discovery_port_owns_a_reachable_assigned_endpoint` in
+[routed runtime tests](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs)
+requires distinct assigned endpoints and a real signed discovery response.
 
 Intentional cancellation and output-limit controls need an independent process
 owner. Inheriting the real runner's owner marker can terminate the enclosing

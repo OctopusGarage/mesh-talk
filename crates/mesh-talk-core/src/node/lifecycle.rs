@@ -129,7 +129,12 @@ impl Node {
             .replace(delivery.control_ids());
         // Once erasure facts commit, revoke file keys even if physical row
         // removal later fails and needs a retry.
-        self.reseed_live_file_book(&delivery)?;
+        // Text erasure has no file keys to revoke. Reconciling unrelated live
+        // offers here can fail on concurrent file acceptance (StaleCursor) or
+        // unrelated storage reads after the suppression fact already committed.
+        if !file_ids.is_empty() {
+            self.reseed_live_file_book(&delivery)?;
+        }
         let mut removed = 0;
         for kind in [
             super::transcript_repository::RECEIVED,
