@@ -1413,7 +1413,7 @@
         "guide": "docs/post-office-federation.md",
         "invariants": [
           {
-            "name": "Unchanged mailbox metadata probes reuse persistent indexes and digests without exporting ciphertext; bounded responses clone only their causal page; rejected inner events are deferred only within a bounded mailbox operation and retried by a later operation",
+            "name": "Unchanged mailbox metadata probes reuse persistent indexes and digests without exporting ciphertext; network validation reads arrival once within its guarded transaction while retaining current owner, lifecycle, cutoff and storage checks; bounded responses clone only their causal page; rejected inner events are deferred only within a bounded mailbox operation and retried by a later operation",
             "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
           },
           {

@@ -229,6 +229,16 @@ impl IndexedRelayState {
         conversation: &ConversationId,
     ) -> Result<Option<MailboxMetadata>, LogError> {
         let arrival = self.arrival_on(c, conversation)?;
+        self.mailbox_with_arrival_on(c, conversation, arrival)
+    }
+    // Reuse only inside the caller's current connection transaction. This does
+    // not cache arrival state across operations or skip retained-role checks.
+    fn mailbox_with_arrival_on(
+        &self,
+        c: &Connection,
+        conversation: &ConversationId,
+        arrival: Option<ArrivalState>,
+    ) -> Result<Option<MailboxMetadata>, LogError> {
         let retained = self
             .repository
             .conversation_charge_on(c, conversation)?

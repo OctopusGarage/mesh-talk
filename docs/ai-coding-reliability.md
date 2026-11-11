@@ -1169,6 +1169,14 @@ actual VM reuse, read-only metadata, changed bindings, append/deletion and schem
 recovery without loading bodies. Intrinsic document memos similarly exclude
 receipt-derived publication authority even when the signed payload is unchanged.
 
+Within one connection transaction, reuse a fresh observation through its owning
+role helpers instead of querying the same row again. Retain validation order,
+owner/lifecycle/cutoff checks and storage failures; do not extend the observation
+past the guard or across an await. The post-office
+`network_validation_reads_arrival_once_without_weakening_current_checks`
+regression counts actual SQL executions for absent and populated mailboxes and
+checks current source failure/recovery and changed-arrival invalidation.
+
 Suppress unchanged producers before entering those verified reads. A publication
 gate must cover every effective input owner, retain the selected pre-work stamp
 through bounded pages and leave newer changes dirty. Sparse integrity repair and

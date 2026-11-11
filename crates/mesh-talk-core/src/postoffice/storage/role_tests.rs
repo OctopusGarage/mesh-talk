@@ -579,6 +579,85 @@ mod policy_tests;
 mod maintenance_tests;
 
 #[test]
+fn network_validation_reads_arrival_once_without_weakening_current_checks() {
+    use rusqlite::StatementStatus;
+    const ARRIVAL: &str = "SELECT first_seen,touched,pending FROM relay_mailboxes WHERE domain=?1 AND conversation=?2";
+    for populated in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let profile = open(&root, &identity);
+        let state = relay(profile.clone());
+        let e = event(&identity, 1, vec![]);
+        if populated {
+            state.record(&e, 10, None).unwrap();
+        }
+        let view = state.network_view_at(&e.conversation_id, 10).unwrap();
+        let before = profile
+            .database()
+            .read(|c| {
+                c.prepare_cached(ARRIVAL)?
+                    .reset_status(StatementStatus::Run);
+                Ok(c.total_changes())
+            })
+            .unwrap();
+        state.network_validate_at(&view, 10).unwrap();
+        let (runs, changes) = profile
+            .database()
+            .read(|c| {
+                Ok((
+                    c.prepare_cached(ARRIVAL)?.get_status(StatementStatus::Run),
+                    c.total_changes(),
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            runs, 1,
+            "one transaction must observe each arrival only once (populated={populated})"
+        );
+        assert_eq!(changes, before, "network validation must remain read-only");
+        profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch(
+                    "ALTER TABLE relay_mailboxes RENAME TO unavailable_relay_mailboxes",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            state.network_validate_at(&view, 10).is_err(),
+            "a previous read cannot hide current storage failure"
+        );
+        profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch(
+                    "ALTER TABLE unavailable_relay_mailboxes RENAME TO relay_mailboxes",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        state.network_validate_at(&view, 10).unwrap();
+        if populated {
+            profile
+                .database()
+                .transaction(|c| {
+                    c.execute(
+                        "UPDATE relay_mailboxes SET first_seen=?1",
+                        [11u64.to_be_bytes().as_slice()],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(matches!(
+                state.network_validate_at(&view, 10),
+                Err(LogError::StaleCursor)
+            ));
+        }
+    }
+}
+
+#[test]
 fn network_views_bind_unknown_and_expiry_without_collecting_or_false_custody() {
     use crate::eventlog::sync::network::IdPageBudget;
     let root = tempfile::tempdir().unwrap();

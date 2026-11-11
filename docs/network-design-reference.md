@@ -2521,6 +2521,12 @@ The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, 
 
 ### Idle mailbox work and rejected pages
 
+A network-validation transaction reads each mailbox arrival once and passes that
+fresh observation through role qualification. The shared connection guard keeps
+it current; repository owner/epoch validation still precedes lifecycle and cutoff
+interpretation. Retained/arrival consistency, missing-mailbox semantics and source
+failures remain checked on every operation. No observation survives the guard.
+
 Post offices answer capability and whole-mailbox fingerprint probes through the
 persistent event log's indexed metadata and cached digest. A probe for unchanged
 mail must not export or clone ciphertext history. Appends, retention rewrites and
