@@ -1,0 +1,9 @@
+为什么是draft, https://github.com/OctopusGarage/mesh-talk/releases#release-untagged-3227714d1297dd27a9aa ,analyze
+
+---
+
+continue to fix
+
+---
+
+commit push and merge verify
