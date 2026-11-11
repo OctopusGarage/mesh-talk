@@ -1514,6 +1514,11 @@ may never repeat an already completed transition. Arm blocking test gates after
 bootstrap so observation cannot create a setup dependency cycle. The selected-source
 and queued-source controls in `node/account_group/tests/` retain the real page,
 live-child and settlement predicates rather than substituting aggregate status.
+An inbound-only source cannot converge a bidirectional union digest through
+one-way reads. Keep the required receiver owners live during preparation, or
+finish symmetric repair after all initial publications before measuring. Bind
+partial-page proof to the measured publication, exact live request and validated
+completion; startup pages cannot satisfy a later phase's continuation condition.
 
 A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck

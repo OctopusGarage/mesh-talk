@@ -104,7 +104,16 @@ pub(in crate::node) fn publish_legacy_control_page_for_test(
     node: &Node,
     count: u8,
 ) -> Vec<AccountDocumentKey> {
-    let keys = (1..=count)
+    publish_legacy_control_page_before_notify_for_test(node, count, |_| {})
+}
+
+#[cfg(test)]
+pub(in crate::node) fn publish_legacy_control_page_before_notify_for_test(
+    node: &Node,
+    count: u8,
+    before_notify: impl FnOnce(&[AccountDocumentKey]),
+) -> Vec<AccountDocumentKey> {
+    let keys: Vec<_> = (1..=count)
         .map(|value| {
             seed_legacy_control_page_for_test(
                 node,
@@ -112,6 +121,7 @@ pub(in crate::node) fn publish_legacy_control_page_for_test(
             )
         })
         .collect();
+    before_notify(&keys);
     node.documents_changed();
     keys
 }
