@@ -1150,7 +1150,13 @@ progress and repeatedly restart unchanged synchronization. Preserve shared hard
 budgets and plan eviction before mutation when a class may refuse admission. The
 [checkpoint pressure regressions](../crates/mesh-talk-core/src/node/opaque_receive_cache/checkpoints.rs)
 check receiver retention and atomic refusal under count/byte pressure; the signed
-cold-receipt loopback regression checks recovery without new writes.
+cold-receipt loopback regression checks recovery without new writes. Reject
+impossible optional cache admission before entering a guarded write transaction:
+changing a SQLite authorizer expires prepared queries even when no rows change.
+Keep the actual mutation guard and capacity recheck; a racing capacity release
+may miss an optional hint until retry, never authorize eviction. The byte-pressure
+regression checks zero `RePrepare` after both refused insertion and refused growth,
+unchanged rows/accounting, and successful admission after capacity is released.
 
 Reuse compiled static SQL through the existing bounded connection cache rather
 than caching authorization results. Every execution must still bind the current

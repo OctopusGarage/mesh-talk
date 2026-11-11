@@ -98,19 +98,38 @@ impl Bucket {
             return Err(invalid("opaque cache blob limit"));
         }
         let profile = cache.checkpoint_profile()?;
-        let unchanged = profile.database().read(|c| {
-            c.query_row(
-                &format!(
-                    "SELECT EXISTS(SELECT 1 FROM {} WHERE key=?1 AND value=?2)",
-                    self.table
-                ),
-                params![key, value],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(LogError::from)
+        let preflight = profile.database().read(|c| {
+            let existing: Option<(i64, bool)> = c.prepare_cached(&format!(
+                "SELECT length(key)+length(value),value=?2 FROM {} WHERE key=?1", self.table
+            ))?.query_row(params![key, value], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if matches!(existing, Some((_, true))) {
+                return Ok(Some(true));
+            }
+            if self.table == CHECKPOINTS.table && key.ends_with(HISTORY_PUBLICATION_KEY_SUFFIX) {
+                let (records, bytes) = self.usage(c)?;
+                let previous = existing.map_or(0, |(charge, _)| charge);
+                if previous < 0 || previous > bytes {
+                    return Err(invalid("invalid opaque cache record charge"));
+                }
+                let charge = (key.len() + value.len()) as i64;
+                if records + i64::from(existing.is_none()) > self.entries
+                    || bytes - previous + charge > self.bytes
+                {
+                    // At most 512 metadata rows; never fetch cached blobs. If all
+                    // publication victims together cannot make room, installing
+                    // a write authorizer would only expire unrelated SQL plans.
+                    let (protected_records, protected_bytes): (i64, i64) = c.prepare_cached(
+                        "SELECT count(*),coalesce(sum(length(key)+length(value)),0) FROM opaque_checkpoints WHERE substr(key,-?1)<>?2"
+                    )?.query_row(params![HISTORY_PUBLICATION_KEY_SUFFIX.len() as i64, HISTORY_PUBLICATION_KEY_SUFFIX], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                    if protected_records + 1 > self.entries || protected_bytes + charge > self.bytes {
+                        return Ok(Some(false));
+                    }
+                }
+            }
+            Ok(None)
         })?;
-        if unchanged {
-            return Ok(true);
+        if let Some(result) = preflight {
+            return Ok(result);
         }
         // Validate the published barrier before entering the SQL guard. The
         // transaction still checks the exact value again; this preflight does
@@ -716,9 +735,28 @@ mod tests {
         let before=profile.database().read(|c| {
             Ok((c.total_changes(),c.query_row("SELECT records,bytes FROM opaque_checkpoint_usage WHERE bucket='opaque_checkpoints'", [], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?))
         }).unwrap();
+        let warmed_read = || {
+            profile.database().read(|c| {
+                let mut statement = c.prepare_cached("SELECT records FROM opaque_checkpoint_usage WHERE bucket='opaque_checkpoints'")?;
+                let records: i64 = statement.query_row([], |r| r.get(0))?;
+                Ok((records, statement.reset_status(rusqlite::StatementStatus::RePrepare)))
+            }).unwrap()
+        };
+        assert_eq!(warmed_read().0, 512);
         assert!(
             !cache.put_checkpoint(&publication_key(2), &value).unwrap(),
             "publication must decline when its own victims cannot release enough bytes"
+        );
+        assert_eq!(
+            warmed_read().1,
+            0,
+            "a refused optional hint must not invalidate unrelated prepared reads"
+        );
+        assert!(!cache.put_checkpoint(&publication_key(1), &value).unwrap());
+        assert_eq!(
+            warmed_read().1,
+            0,
+            "refused growth must also preserve prepared reads"
         );
         let after=profile.database().read(|c| {
             Ok((c.total_changes(),c.query_row("SELECT records,bytes FROM opaque_checkpoint_usage WHERE bucket='opaque_checkpoints'", [], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?))
@@ -734,6 +772,12 @@ mod tests {
         assert!(cache.get_checkpoint(&publication_key(2)).unwrap().is_none());
         assert_eq!(
             cache.get_checkpoint(&0u64.to_be_bytes()).unwrap(),
+            Some(value.clone())
+        );
+        cache.remove_checkpoint(&0u64.to_be_bytes()).unwrap();
+        assert!(cache.put_checkpoint(&publication_key(2), &value).unwrap());
+        assert_eq!(
+            cache.get_checkpoint(&publication_key(2)).unwrap(),
             Some(value)
         );
     }

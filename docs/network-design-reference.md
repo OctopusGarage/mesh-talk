@@ -2811,7 +2811,10 @@ normal synchronization. At most 512 checkpoints use 8 MiB; each
 blob is limited to 16 KiB. History-publication hints cannot evict receive
 checkpoints: receiver admission first reclaims publication hints, while publication
 admission declines if its own class cannot release enough count or bytes. Victims
-are planned before deletion so refusal preserves rows and accounting. Receiver-only
+are planned before deletion so refusal preserves rows and accounting. An impossible
+publication admission returns from a read-only capacity preflight; actual mutation
+still rechecks under its guarded transaction. A concurrent capacity release permits
+a later optional retry without invalidating receive progress. Receiver-only
 pressure retains bounded FIFO fallback; these hints remain optional evidence.
 A successfully validated cold receipt warms its existing
 bounded upload or receive-only owner even when a new adapter changes no progress.
