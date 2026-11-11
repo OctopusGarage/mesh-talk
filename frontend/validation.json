@@ -666,7 +666,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Selected reaction queries share one physical native read, retain a bounded summary prefix, and preserve history/read progress while projections are pending.",
+            "name": "Selected reaction queries share one physical native read, retain a bounded summary prefix, and preserve history/read progress while projections are pending. Complete summaries remain accessible through the message context menu, including read-only contexts, without inline actions for empty or loading projections.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
