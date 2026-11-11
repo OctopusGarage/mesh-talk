@@ -226,7 +226,7 @@ impl TranscriptRepository {
         self.profile.database().read(|c| {
             let host=if conversation.is_some(){" AND conversation=?2"}else{" AND ?2 IS NULL"};
             let file_filter=if file.is_some(){" AND file_conversation=?5"}else{" AND ?5 IS NULL"};
-            let mut statement=c.prepare(&format!("SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1{host}{file_filter} AND ordinal>?3 ORDER BY ordinal LIMIT ?4"))?;
+            let mut statement=c.prepare_cached(&format!("SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1{host}{file_filter} AND ordinal>?3 ORDER BY ordinal LIMIT ?4"))?;
             let mut rows=statement.query(params![self.kind,conversation.map(|id|id.as_bytes().as_slice()),after.unwrap_or(0),sql_limit,file.map(|id|id.as_bytes().as_slice())])?;
             let (rows,more)=admit(&mut rows,limit,false)?;
             let next=if more{rows.last().map(|h|h.ordinal)}else{None};

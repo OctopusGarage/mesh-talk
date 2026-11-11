@@ -1150,7 +1150,10 @@ than caching authorization results. Every execution must still bind the current
 parameters and perform the original source, account and lifetime checks. Warming
 a statement must not freeze a read snapshot, retain old bindings or suppress an
 absence or storage error. Exercise changed parameters and retired owners after
-warming the actual production queries. Intrinsic document memos similarly exclude
+warming the actual production queries. The transcript
+`warm_metadata_reads_reuse_statements_and_observe_current_rows` regression checks
+actual VM reuse, read-only metadata, changed bindings, append/deletion and schema
+recovery without loading bodies. Intrinsic document memos similarly exclude
 receipt-derived publication authority even when the signed payload is unchanged.
 
 Suppress unchanged producers before entering those verified reads. A publication

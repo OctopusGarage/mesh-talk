@@ -402,7 +402,7 @@ impl TranscriptRepository {
         let query = format!(
             "SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND row_key=?2{host} ORDER BY ordinal LIMIT 1"
         );
-        let mut statement = c.prepare(&query)?;
+        let mut statement = c.prepare_cached(&query)?;
         let mut rows = statement.query(params![
             kind,
             key,
