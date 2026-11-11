@@ -801,6 +801,14 @@ A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck
 the actual condition on a transition, retaining the original deadline and bounded
 fallback. A snapshot taken after timeout is diagnostic evidence, not success.
+Screenshot dismissal acceptance uses a browser-local MutationObserver under its
+original five-second monotonic deadline, instead of driver-side count polling.
+The [screenshot confirmation observer](../frontend/e2e/helpers/screenshot-confirmation.ts)
+records actual timely DOM commits even when the driver consumes the result later.
+Its real-browser controls in [screenshot scenarios](../frontend/e2e/screenshot-portable.spec.ts)
+reject missing and late transitions, retain cleanup checks and preserve the crop,
+clipboard and staging assertions. The canonical browser inventory selects this
+control alongside both Retina viewport journeys.
 
 A bounded positive observer may keep waiting on the owning API's explicit pending
 state. Match only that state; storage, authorization and unexpected failures stay
@@ -871,6 +879,13 @@ separate real-protocol tests own full-page durability and replay. Qualify reques
 liveness before its cancellation trigger and the actual resumed owner before
 admission. A cancellation-triggering publication need not leave the old request
 alive after the publisher returns.
+The queued A-side paired hold must bind the scheduler's actual `paid_resume`
+dispatch to its exact live child task. Same-source foreground replacements can also carry
+the resumed/protected trace labels; those labels cannot certify a paid parked
+turn or trigger its before-B ordering assertion. Retain the classifier's negative
+foreground control and the real queued Noise scenarios under core-account-group
+validation. A cross-peer interrupted unpaired continuation retains its distinct
+live/resumed/protected admission proof; it does not spend paired resume credit.
 
 Browser device options express intent; they do not observe native input state.
 Establish the required device mode through the browser's supported emulation

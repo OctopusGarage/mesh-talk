@@ -432,6 +432,7 @@
     {
       "id": "frontend-screenshot-submission",
       "paths": [
+        "frontend/e2e/helpers/screenshot-confirmation.ts",
         "frontend/src/features/chat/ScreenshotEditor.tsx",
         "frontend/src/features/chat/ScreenshotEditor.test.ts",
         "frontend/src/features/chat/Composer.tsx",
@@ -2575,6 +2576,7 @@
     {
       "id": "frontend-screenshot-submission-acceptance",
       "paths": [
+        "frontend/e2e/helpers/screenshot-confirmation.ts",
         "frontend/src/features/chat/ScreenshotEditor.tsx",
         "frontend/src/features/chat/ScreenshotEditor.test.ts",
         "frontend/src/features/chat/Composer.tsx",

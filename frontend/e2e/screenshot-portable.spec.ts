@@ -1,5 +1,6 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, openBobDm, revealComposerTools } from "./helpers/session";
+import { waitForScreenshotEditorDismissal } from "./helpers/screenshot-confirmation";
 
 // Successful portable scenarios retain evidence in the full Chromium run.
 test.use({ trace: "on" });
@@ -253,6 +254,88 @@ test("unavailable capture is disabled and failed send preserves staged screensho
   ).toHaveCount(0);
 });
 
+test("screenshot dismissal observes timely DOM commits and rejects missing or late transitions", async ({
+  page,
+}) => {
+  const clockStart = new Date("2030-01-01T00:00:00Z");
+  await page.clock.install({ time: clockStart });
+  await page.clock.pauseAt(new Date(clockStart.getTime() + 1000));
+  await page.evaluate(() => {
+    const resources = { observers: 0, timers: new Set<number>() };
+    Reflect.set(window, "__screenshotObservationResources", resources);
+    const NativeObserver = window.MutationObserver;
+    window.MutationObserver = class extends NativeObserver {
+      private observing = false;
+      override observe(target: Node, options?: MutationObserverInit) {
+        if (!this.observing) resources.observers++;
+        this.observing = true;
+        super.observe(target, options);
+      }
+      override disconnect() {
+        if (this.observing) resources.observers--;
+        this.observing = false;
+        super.disconnect();
+      }
+    };
+    const set = window.setTimeout.bind(window);
+    const clear = window.clearTimeout.bind(window);
+    window.setTimeout = ((
+      handler: TimerHandler,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      const timer = set(() => {
+        resources.timers.delete(timer);
+        if (typeof handler === "function") handler(...args);
+      }, delay);
+      resources.timers.add(timer);
+      return timer;
+    }) as typeof window.setTimeout;
+    window.clearTimeout = (timer) => {
+      if (typeof timer === "number") resources.timers.delete(timer);
+      clear(timer);
+    };
+  });
+  const resources = () =>
+    page.evaluate(() => {
+      const state = Reflect.get(window, "__screenshotObservationResources") as {
+        observers: number;
+        timers: Set<number>;
+      };
+      return { observers: state.observers, timers: state.timers.size };
+    });
+  for (const transition of ["timely", "missing", "late"] as const) {
+    await page.setContent('<div data-testid="screenshot-editor"></div>');
+    const observation = page.evaluate(waitForScreenshotEditorDismissal).then(
+      (elapsedMs) => ({ ok: true as const, elapsedMs }),
+      (error: unknown) => ({ ok: false as const, error: String(error) }),
+    );
+    expect(await resources()).toEqual({ observers: 1, timers: 1 });
+    if (transition === "timely") {
+      await page.clock.fastForward(4900);
+      await page.evaluate(() => {
+        document.querySelector('[data-testid="screenshot-editor"]')!.remove();
+      });
+      // Consume the result after its deadline: the witnessed commit, rather
+      // than the driver's eventual response, determines acceptance.
+      await page.clock.fastForward(500);
+      const result = await observation;
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.elapsedMs).toBeLessThan(5000);
+    } else {
+      await page.clock.fastForward(5001);
+      if (transition === "late")
+        await page.evaluate(() => {
+          document.querySelector('[data-testid="screenshot-editor"]')!.remove();
+        });
+      const result = await observation;
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("exceeded 5000ms");
+    }
+    expect(await resources()).toEqual({ observers: 0, timers: 0 });
+  }
+});
+
 for (const [width, height] of [
   [1280, 720],
   [760, 620],
@@ -311,6 +394,9 @@ for (const [width, height] of [
     await page.getByRole("button", { name: "Select a new area" }).click();
     await page.getByTestId("screenshot-editor").focus();
     await page.keyboard.press("Enter");
+    // Observe the DOM commit continuously inside the original assertion budget;
+    // periodic driver samples can miss a dismissal just before its deadline.
+    await page.evaluate(waitForScreenshotEditorDismissal);
     await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
     await expect(page.getByTestId("composer-pending-image")).toBeVisible();
     await expect(
