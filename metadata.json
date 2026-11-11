@@ -1,0 +1,46 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M74DMP64WRD6MYN5F6QF0DSH",
+  "strategy": "manual-commit",
+  "branch": "fix/text-erasure-file-reconciliation",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "crates/mesh-talk-core/src/node/participant_runtime.rs",
+    "crates/mesh-talk-core/src/node/runtime_routed_tests.rs",
+    "crates/mesh-talk-core/validation.json",
+    "docs/ai-coding-reliability.md",
+    "docs/network-design-reference.md",
+    "src-tauri/src/shared_account_login/tests.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 291041,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 31073792,
+    "output_tokens": 21209,
+    "api_call_count": 167,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 15,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 15,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
