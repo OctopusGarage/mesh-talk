@@ -135,7 +135,8 @@ jobs:
       - name: Native release inspection regression
         if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         run: |
-          sudo apt-get update
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
+          sudo apt-get update --error-on=any
           sudo apt-get install -y nsis
 
       - name: Verify native NSIS payload equivalence

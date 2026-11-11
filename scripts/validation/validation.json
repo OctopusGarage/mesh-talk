@@ -146,7 +146,7 @@
             "reference": "docs/updates.md#download-verification-and-installation"
           },
           {
-            "name": "Release build and verification jobs prepare signed Ubuntu sources through the shared hosted-runner owner and reject any index refresh error before installing dependencies; ARM ports and repository trust remain unchanged.",
+            "name": "Release build, verification and Health installer inspection prepare signed Ubuntu sources through the shared hosted-runner owner and reject any index refresh error before installing dependencies; exact official origins use the registered Berkeley normal/ports mirrors while architecture, suites and Ubuntu signing authority remain unchanged.",
             "reference": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding"
           },
           {

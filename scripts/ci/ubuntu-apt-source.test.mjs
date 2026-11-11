@@ -44,7 +44,7 @@ async function fixture(t) {
 }
 
 test(
-  "hosted Ubuntu changes only the Azure archive URI and preserves signed repository configuration",
+  "hosted Ubuntu changes known archive and security URIs and preserves signed repository configuration",
   posixOnly,
   async (t) => {
     const root = await fixture(t);
@@ -57,7 +57,7 @@ test(
     );
     assert.equal(
       await readFile(path, "utf8"),
-      `Types: deb\nURIs: https://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates noble-backports\nComponents: main restricted universe multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\nTypes: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\nComponents: main restricted universe multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n`,
+      `Types: deb\nURIs: https://mirrors.ocf.berkeley.edu/ubuntu/\nSuites: noble noble-updates noble-backports\nComponents: main restricted universe multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\nTypes: deb\nURIs: https://mirrors.ocf.berkeley.edu/ubuntu/\nSuites: noble-security\nComponents: main restricted universe multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n`,
     );
     assert.equal((await stat(path)).mode & 0o777, 0o640);
     assert.equal(
@@ -88,20 +88,20 @@ test(
     );
     assert.equal(
       await readFile(list, "utf8"),
-      "# deb http://azure.archive.ubuntu.com/ubuntu noble main\r\ndeb [arch=amd64 signed-by=/keys/ubuntu.gpg] https://archive.ubuntu.com/ubuntu noble main # retain\r\ndeb http://security.ubuntu.com/ubuntu noble-security main\r\ndeb https://azure.archive.ubuntu.com.example/ubuntu noble main\r\n",
+      "# deb http://azure.archive.ubuntu.com/ubuntu noble main\r\ndeb [arch=amd64 signed-by=/keys/ubuntu.gpg] https://mirrors.ocf.berkeley.edu/ubuntu noble main # retain\r\ndeb https://mirrors.ocf.berkeley.edu/ubuntu noble-security main\r\ndeb https://azure.archive.ubuntu.com.example/ubuntu noble main\r\n",
     );
     assert.equal(
       await readFile(sources, "utf8"),
-      "Types: deb\nURIs: https://mirror.example/ubuntu\n https://archive.ubuntu.com/ubuntu\nSuites: noble\nSigned-By:\n -----BEGIN PGP PUBLIC KEY BLOCK-----\n http://azure.archive.ubuntu.com/ubuntu\n -----END PGP PUBLIC KEY BLOCK-----\n",
+      "Types: deb\nURIs: https://mirror.example/ubuntu\n https://mirrors.ocf.berkeley.edu/ubuntu\nSuites: noble\nSigned-By:\n -----BEGIN PGP PUBLIC KEY BLOCK-----\n http://azure.archive.ubuntu.com/ubuntu\n -----END PGP PUBLIC KEY BLOCK-----\n",
     );
   },
 );
 
-test("non-Azure sources are a byte-for-byte no-op", async (t) => {
+test("unrelated sources are a byte-for-byte no-op", async (t) => {
   const root = await fixture(t);
   const path = join(root, "etc/apt/sources.list.d/ubuntu.sources");
   const text =
-    "Types: deb\nURIs: https://archive.ubuntu.com/ubuntu/ https://mirror.example/ubuntu\nSuites: noble\nSigned-By: /keys/ubuntu.gpg\n";
+    "Types: deb\nURIs: https://other.example/ubuntu/ https://mirror.example/ubuntu\nSuites: noble\nSigned-By: /keys/ubuntu.gpg\n";
   await writeFile(path, text);
   const original = await stat(path);
   assert.equal(
@@ -114,14 +114,33 @@ test("non-Azure sources are a byte-for-byte no-op", async (t) => {
 
 test("Ubuntu 22.04 ARM ports retain their architecture-specific signed repository", async (t) => {
   const root = await fixture(t);
-  await writeFile(join(root, "etc/os-release"), 'ID=ubuntu\nVERSION_ID="22.04"\n');
+  await writeFile(
+    join(root, "etc/os-release"),
+    'ID=ubuntu\nVERSION_ID="22.04"\n',
+  );
   const path = join(root, "etc/apt/sources.list");
-  const text = "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports jammy main universe\ndeb http://ports.ubuntu.com/ubuntu-ports jammy-security main universe\n";
+  const text =
+    "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports jammy main universe\ndeb http://ports.ubuntu.com/ubuntu-ports jammy-security main universe\n";
   await writeFile(path, text);
   const original = await stat(path);
-  assert.equal(await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }), 0);
-  assert.equal(await readFile(path, "utf8"), text);
-  assert.equal((await stat(path)).ino, original.ino);
+  assert.equal(
+    await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+    1,
+  );
+  assert.equal(
+    await readFile(path, "utf8"),
+    text.replaceAll(
+      "http://ports.ubuntu.com/ubuntu-ports",
+      "https://mirrors.ocf.berkeley.edu/ubuntu-ports",
+    ),
+  );
+  assert.notEqual((await stat(path)).ino, original.ino);
+  const prepared = await stat(path);
+  assert.equal(
+    await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+    0,
+  );
+  assert.equal((await stat(path)).ino, prepared.ino);
 });
 
 test("unsupported Azure URLs fail before any otherwise valid file changes", async (t) => {
@@ -172,7 +191,6 @@ test("non-hosted, non-Linux and non-Ubuntu contexts reject without writes", asyn
   assert.equal(await readFile(path, "utf8"), original);
 });
 
-
 test(
   "a symlinked APT source cannot redirect a privileged replacement",
   posixOnly,
@@ -194,16 +212,16 @@ test("pure deb822 rewriting preserves folded URIs and every signed configuration
   const original =
     "# azure.archive.ubuntu.com stays a comment\r\nTypes: deb deb-src\r\nURIs: http://azure.archive.ubuntu.com/ubuntu/ https://mirror.example/ubuntu\r\n https://azure.archive.ubuntu.com/ubuntu\r\nSuites: noble noble-updates\r\nComponents: main universe\r\nSigned-By:\r\n -----BEGIN PGP PUBLIC KEY BLOCK-----\r\n http://azure.archive.ubuntu.com/ubuntu\r\n -----END PGP PUBLIC KEY BLOCK-----\r\n\r\nURIs: http://security.ubuntu.com/ubuntu\r\nSuites: noble-security\r\n";
   const expected =
-    "# azure.archive.ubuntu.com stays a comment\r\nTypes: deb deb-src\r\nURIs: https://archive.ubuntu.com/ubuntu/ https://mirror.example/ubuntu\r\n https://archive.ubuntu.com/ubuntu\r\nSuites: noble noble-updates\r\nComponents: main universe\r\nSigned-By:\r\n -----BEGIN PGP PUBLIC KEY BLOCK-----\r\n http://azure.archive.ubuntu.com/ubuntu\r\n -----END PGP PUBLIC KEY BLOCK-----\r\n\r\nURIs: http://security.ubuntu.com/ubuntu\r\nSuites: noble-security\r\n";
+    "# azure.archive.ubuntu.com stays a comment\r\nTypes: deb deb-src\r\nURIs: https://mirrors.ocf.berkeley.edu/ubuntu/ https://mirror.example/ubuntu\r\n https://mirrors.ocf.berkeley.edu/ubuntu\r\nSuites: noble noble-updates\r\nComponents: main universe\r\nSigned-By:\r\n -----BEGIN PGP PUBLIC KEY BLOCK-----\r\n http://azure.archive.ubuntu.com/ubuntu\r\n -----END PGP PUBLIC KEY BLOCK-----\r\n\r\nURIs: https://mirrors.ocf.berkeley.edu/ubuntu\r\nSuites: noble-security\r\n";
   assert.equal(rewriteUbuntuAptSource(original, true), expected);
   assert.equal(rewriteUbuntuAptSource(expected, true), expected);
 });
 
-test("pure legacy rewriting preserves options, non-Azure origins and comment URLs", () => {
+test("pure legacy rewriting preserves options, unrelated origins and comment URLs", () => {
   const original =
     "deb [arch=amd64 signed-by=/keys/ubuntu.gpg] http://azure.archive.ubuntu.com/ubuntu noble main # http://azure.archive.ubuntu.com/ubuntu\ndeb-src https://azure.archive.ubuntu.com/ubuntu/ noble universe\ndeb http://security.ubuntu.com/ubuntu noble-security main\ndeb https://azure.archive.ubuntu.com.example/ubuntu noble main\n";
   const expected =
-    "deb [arch=amd64 signed-by=/keys/ubuntu.gpg] https://archive.ubuntu.com/ubuntu noble main # http://azure.archive.ubuntu.com/ubuntu\ndeb-src https://archive.ubuntu.com/ubuntu/ noble universe\ndeb http://security.ubuntu.com/ubuntu noble-security main\ndeb https://azure.archive.ubuntu.com.example/ubuntu noble main\n";
+    "deb [arch=amd64 signed-by=/keys/ubuntu.gpg] https://mirrors.ocf.berkeley.edu/ubuntu noble main # http://azure.archive.ubuntu.com/ubuntu\ndeb-src https://mirrors.ocf.berkeley.edu/ubuntu/ noble universe\ndeb https://mirrors.ocf.berkeley.edu/ubuntu noble-security main\ndeb https://azure.archive.ubuntu.com.example/ubuntu noble main\n";
   assert.equal(rewriteUbuntuAptSource(original, false), expected);
   assert.equal(rewriteUbuntuAptSource(expected, false), expected);
 });
@@ -246,7 +264,7 @@ test("the actual CLI rejects a non-GitHub context before accessing host APT sour
 });
 
 test(
-  "the runner's referenced local mirror list replaces only its Azure URI and keeps priorities",
+  "the runner's referenced local mirror list replaces Ubuntu origins and keeps priorities",
   posixOnly,
   async (t) => {
     const root = await fixture(t);
@@ -270,7 +288,7 @@ test(
     );
     assert.equal(
       await readFile(mirror, "utf8"),
-      "https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://archive.ubuntu.com/ubuntu/\tpriority:2\nhttp://security.ubuntu.com/ubuntu/\tpriority:3\n\n",
+      "https://mirrors.ocf.berkeley.edu/ubuntu/\tpriority:1\nhttps://mirrors.ocf.berkeley.edu/ubuntu/\tpriority:2\nhttps://mirrors.ocf.berkeley.edu/ubuntu/\tpriority:3\n\n",
     );
     assert.equal(await readFile(source, "utf8"), signed);
     assert.equal(
@@ -285,11 +303,11 @@ test(
   },
 );
 
-test("pure mirror-list rewriting preserves priority annotations, comments, security and other origins", () => {
+test("pure mirror-list rewriting preserves priority annotations, comments, security suites and other origins", () => {
   const input =
     "# http://azure.archive.ubuntu.com/ubuntu\nhttp://azure.archive.ubuntu.com/ubuntu/\tpriority:1 arch:amd64\nhttps://archive.ubuntu.com/ubuntu/\tpriority:2\nhttp://security.ubuntu.com/ubuntu/\tpriority:3\nhttps://mirror.example/ubuntu\tpriority:4\n";
   const expected =
-    "# http://azure.archive.ubuntu.com/ubuntu\nhttps://archive.ubuntu.com/ubuntu/\tpriority:1 arch:amd64\nhttps://archive.ubuntu.com/ubuntu/\tpriority:2\nhttp://security.ubuntu.com/ubuntu/\tpriority:3\nhttps://mirror.example/ubuntu\tpriority:4\n";
+    "# http://azure.archive.ubuntu.com/ubuntu\nhttps://mirrors.ocf.berkeley.edu/ubuntu/\tpriority:1 arch:amd64\nhttps://mirrors.ocf.berkeley.edu/ubuntu/\tpriority:2\nhttps://mirrors.ocf.berkeley.edu/ubuntu/\tpriority:3\nhttps://mirror.example/ubuntu\tpriority:4\n";
   assert.equal(rewriteUbuntuAptMirrorList(input), expected);
   assert.equal(rewriteUbuntuAptMirrorList(expected), expected);
 });
@@ -398,5 +416,72 @@ test("invalid URI tokens reject in source fields and mirror lists", () => {
       () => rewriteUbuntuAptMirrorList(`${uri}\n`),
       /Unsupported APT URI/,
     );
+  }
+});
+
+test("all exact Ubuntu archive origins use the independent signed normal or ports mirror", () => {
+  for (const [host, path] of [
+    ["azure.archive.ubuntu.com", "ubuntu"],
+    ["archive.ubuntu.com", "ubuntu"],
+    ["security.ubuntu.com", "ubuntu"],
+    ["ports.ubuntu.com", "ubuntu-ports"],
+  ]) {
+    for (const scheme of ["http", "https"]) {
+      for (const slash of ["", "/"]) {
+        const uri = `${scheme}://${host}/${path}${slash}`;
+        const destination = `https://mirrors.ocf.berkeley.edu/${path}${slash}`;
+        const source = `deb [arch=arm64 signed-by=/keys/ubuntu.gpg] ${uri} jammy-security main universe # ${uri}\n`;
+        assert.equal(
+          rewriteUbuntuAptSource(source, false),
+          source.replace(uri, destination),
+        );
+        const deb822 = `Types: deb deb-src\nURIs: ${uri}\nSuites: resolute resolute-security\nArchitectures: arm64\nComponents: main universe\nSigned-By: /keys/ubuntu.gpg\n`;
+        assert.equal(
+          rewriteUbuntuAptSource(deb822, true),
+          deb822.replace(uri, destination),
+        );
+        assert.equal(
+          rewriteUbuntuAptMirrorList(`${uri}\tpriority:1 arch:arm64\n`),
+          `${destination}\tpriority:1 arch:arm64\n`,
+        );
+      }
+    }
+  }
+});
+
+test("every malformed known Ubuntu origin rejects before any source is replaced", async (t) => {
+  for (const [host, path] of [
+    ["azure.archive.ubuntu.com", "ubuntu"],
+    ["archive.ubuntu.com", "ubuntu"],
+    ["security.ubuntu.com", "ubuntu"],
+    ["ports.ubuntu.com", "ubuntu-ports"],
+  ]) {
+    for (const uri of [
+      `HTTP://${host.toUpperCase()}/${path}`,
+      `ftp://${host}/${path}`,
+      `http://${host}:80/${path}`,
+      `https://user@${host}/${path}`,
+      `https://${host}/${path}/dists`,
+      `https://${host}/${path}?x=1`,
+      `https://${host}/${path}#fragment`,
+      `https://${host}/${path === "ubuntu" ? "ubuntu-ports" : "ubuntu"}`,
+    ]) {
+      const root = await fixture(t);
+      const first = join(root, "etc/apt/sources.list");
+      const last = join(root, "etc/apt/sources.list.d/z.sources");
+      const original =
+        "deb http://azure.archive.ubuntu.com/ubuntu noble main\n";
+      await writeFile(first, original);
+      await writeFile(last, `URIs: ${uri}\nSuites: noble\n`);
+      await assert.rejects(
+        prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+        /Unsupported .*APT URI/,
+      );
+      assert.equal(await readFile(first, "utf8"), original);
+      assert.equal(
+        await readFile(last, "utf8"),
+        `URIs: ${uri}\nSuites: noble\n`,
+      );
+    }
   }
 });

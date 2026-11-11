@@ -1507,23 +1507,30 @@ elapsed time; account concurrency limits can reduce the gain.
 
 Disposable GitHub-hosted Ubuntu CI, mutation, browser, native UI and release runners
 prepare their APT sources before dependency installation.
-`scripts/ci/ubuntu-apt-source.mjs` replaces only the exact Azure Ubuntu archive URI
-with the official HTTPS Ubuntu archive, including URI entries in the referenced
-`/etc/apt/apt-mirrors.txt` runner mirror list. It preserves suites, components,
-signing keys, security repositories, other origins and mirror priorities. The
-helper rejects other host environments, unsupported Azure URIs, unrecognized
+`scripts/ci/ubuntu-apt-source.mjs` maps exact HTTP/HTTPS Ubuntu Azure, archive and
+security `/ubuntu` origins to `https://mirrors.ocf.berkeley.edu/ubuntu`, and maps
+the exact Ubuntu ports origin to that mirror's separate `/ubuntu-ports` archive.
+Berkeley's normal and ports mirrors are listed in Ubuntu's
+[official mirror inventory](https://launchpad.net/ubuntu/+archivemirrors).
+The mapping includes URI entries in the referenced `/etc/apt/apt-mirrors.txt`
+runner mirror list. It preserves suites (including security), components,
+architecture filters, signing keys, other origins and mirror priorities. The
+helper rejects other host environments, unsupported known-origin URIs, unrecognized
 mirror-list references and symlinks. It validates all candidate files before
-writing and preserves file ownership and permissions. This avoids a slow
-runner-image mirror consuming the existing job budget; browser workers, retries,
+writing and preserves file ownership and permissions. The independent mirror DNS
+avoids the affected Ubuntu hostname namespace; browser workers, retries,
 test inventories and deadlines are unchanged.
-Release builds and both release-verification jobs reuse this preparation before
-APT and run `apt-get update --error-on=any`. A failed repository refresh must stop
+Native CI producers/consumers, mutation jobs, release builds, both release
+verification jobs and Health's native installer inspection reuse this preparation
+before APT and run
+`apt-get update --error-on=any`. A failed repository refresh must stop
 before package installation instead of silently using old indexes and retrying
 each dependency against an unavailable source. The release workflow regression
 executes the actual shell blocks with controlled preparation/index failures and
 proves installation is not admitted. Ubuntu 22.04 ARM ports retain their signed,
-architecture-specific sources; this preparation does not repair runner DNS, which
-still requires successful hosted execution.
+architecture-specific repository path. Mirror availability, replication freshness
+and actual signed dependency installation still require successful hosted
+execution; local HTTP success or fixture checks cannot establish that acceptance.
 
 The Windows workspace producer runs `scripts/ci/windows-native-deps.mjs` before
 Cargo. It probes installed Perl executables for native `MSWin32` execution and

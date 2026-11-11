@@ -78,7 +78,7 @@ jobs:
       - name: Linux native webview dependencies
         if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         run: |
-          sudo apt-get update
+          sudo apt-get update --error-on=any
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev xvfb openbox dbus-x11 xdotool fonts-noto-cjk fonts-noto-color-emoji
       - name: Install frontend dependencies
         if: ${{ steps.scope.outputs.full == 'true' }}

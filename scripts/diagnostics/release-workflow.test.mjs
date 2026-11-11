@@ -99,7 +99,7 @@ test("Linux release builds retain the Ubuntu 22.04 runtime baseline across archi
     "compiled build scripts and native objects must not cross runner baselines");
 });
 
-test("release APT preparation stops before install after source or index failure", { skip: process.platform === "win32" }, () => {
+test("release and inspection APT preparation stops before install after source or index failure", { skip: process.platform === "win32" }, () => {
   const root = mkdtempSync(join(tmpdir(), "mesh-talk-release-apt-"));
   try {
     const bin = join(root, "bin");
@@ -118,9 +118,14 @@ fi
 if [[ "$1 $2" == 'apt-get install' ]]; then exit 0; fi
 exit 91
 `, { mode: 0o755 });
-    for (const job of ["build-release", "verify-release", "publish-release"]) {
-      const body = workflow.split(`  ${job}:\n`)[1]?.split(/^  [\w-]+:\n/m)[0];
-      const name = job === "build-release" ? "Install Tauri system dependencies (Linux)" : "Install installer metadata tools";
+    const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
+    for (const [source, job, name] of [
+      [workflow, "build-release", "Install Tauri system dependencies (Linux)"],
+      [workflow, "verify-release", "Install installer metadata tools"],
+      [workflow, "publish-release", "Install installer metadata tools"],
+      [health, "platform", "Native release inspection regression"],
+    ]) {
+      const body = source.split(`  ${job}:\n`)[1]?.split(/^  [\w-]+:\n/m)[0];
       const step = body?.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
       assert.ok(step, job);
       const block = step.split("        run: ")[1];
