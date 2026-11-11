@@ -2634,6 +2634,7 @@
           "filters": [
             "node::transcript_repository::tests::",
             "node::delivery_runtime::lock_order_tests::",
+            "node::account_sync::archive::lock_order_tests::",
             "node::account_file_repository::tests::",
             "runtime_metadata_",
             "selected_history_and_archive_wait_for_admitted_recall_before_body_reads",

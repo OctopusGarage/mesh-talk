@@ -86,6 +86,15 @@ otherwise hold sent while waiting for received. The real recovery regression
 [recovery owner](../crates/mesh-talk-core/src/node/delivery_runtime.rs) holds sent,
 probes received at the actual acquisition boundary, then releases contention and
 joins the worker before asserting replay and progress.
+Archive revision snapshots must read and release device-sync policy before
+acquiring plaintext sidecars. Attachment commit holds delivery and policy while
+checking the live received-file card; an archive holding received files while
+waiting for policy creates a cycle and can also block erasure behind delivery.
+Keep archive-key revalidation after indexing and page selection so a changed
+policy still invalidates the export. The regression belongs to the
+[account archive owner](../crates/mesh-talk-core/src/node/account_sync/archive.rs)
+and must qualify progress while the competing policy/sidecar boundary is held,
+then release and join both owners before asserting the outcome.
 Avoid invoking arbitrary callbacks while guarded. Where a commit callback must
 run inside an authority guard, keep that contract narrow and inspect its complete
 call chain. Queue presentation without retaining a guard needed by the UI;
