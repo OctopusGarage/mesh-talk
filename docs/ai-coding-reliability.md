@@ -95,6 +95,16 @@ policy still invalidates the export. The regression belongs to the
 [account archive owner](../crates/mesh-talk-core/src/node/account_sync/archive.rs)
 and must qualify progress while the competing policy/sidecar boundary is held,
 then release and join both owners before asserting the outcome.
+The same boundary applies to file-proof revisions: identity import holds the
+proof store while validating received-file rows. Archive snapshots must read and
+release proof metadata before taking sidecars, and retain proof revision in the
+final archive-key validation. Its separate held-proof regression qualifies the
+actual archive path; policy-only coverage does not establish this lock order.
+Do not build a revision array from chained mutex temporaries: guards can survive
+until the entire array statement ends. Snapshot each value in a completed
+statement before acquiring the next metadata lock. The archive's held-identity
+control must also prove suppression is free, preserving the identity-then-
+suppression order used by file-row visibility checks.
 Avoid invoking arbitrary callbacks while guarded. Where a commit callback must
 run inside an authority guard, keep that contract narrow and inspect its complete
 call chain. Queue presentation without retaining a guard needed by the UI;
