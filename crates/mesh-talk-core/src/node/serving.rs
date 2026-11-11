@@ -1123,7 +1123,7 @@ impl Node {
             self.retry_group_file_delivery()
         );
     }
-    async fn pull_pending_files_direct(&self) {
+    pub(super) async fn pull_pending_files_direct(&self) {
         let result: Result<(), NodeError> = async {
             use futures_util::stream::{self, StreamExt};
             let Ok(_pull) = self.file_pull_gate.try_lock() else {

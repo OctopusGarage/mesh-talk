@@ -1124,6 +1124,13 @@ still run on every use. The [account-group access regression](../crates/mesh-tal
 counts actual proof construction and checks isolation across different accounts
 using the same device.
 
+Separate background work classes when one class's continuation can restart
+another class's failed work. A shared notification or retry clock can defeat
+otherwise correct backoff. Keep each producer's retained wake, meaningful
+invalidation subscriptions and cancellation owner explicit. The
+`isolated_file_lane_` regressions check that outgoing queue admission neither
+wakes receive repair nor shortens its sparse deadline.
+
 Batch limits do not bound repeated expensive validation within each row. Trace
 the complete consumer path, including helpers that repeat another public query.
 Request-local reuse may retain intrinsic certificate verification under a bounded
@@ -1153,6 +1160,11 @@ or permission. Current reads, canonical/content checks and source errors still
 precede reuse. The [repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
 cover unchanged reads, forged signatures, repeated negative results, content
 tampering, retirement, reopen and bounded eviction.
+A selected peer-directory record may reuse the exact proof verified at admission
+or authenticated replay; recheck current linked-account bindings before returning
+an unchanged result. The peer-directory regression
+`identical_selected_proofs_reuse_verification_but_keep_linked_binding_checks`
+counts certificate verification and covers changed bytes, linking and reopen.
 A live roster may reuse its already-verified announcement only on full value
 identity, including both public keys, every advertised field, certificate and
 signature. Keep current account bindings, route scope and presence updates

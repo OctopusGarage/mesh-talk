@@ -510,11 +510,21 @@ impl PeerDirectory {
     }
 
     fn record_bound(&mut self, announce: &Announce, accept_account_change: bool) -> io::Result<()> {
-        if !valid(announce) {
+        // Records enter through verification or authenticated storage replay.
+        // Full equality reuses only that intrinsic proof, never current binding.
+        let identical = self
+            .records
+            .binary_search_by(|a| a.user_id.cmp(&announce.user_id))
+            .ok()
+            .is_some_and(|i| self.records[i] == *announce);
+        if !identical && !valid(announce) {
             return Err(RecordRejection::InvalidPresence.error());
         }
         if self.linked_binding(&announce.user_id).is_some() && !self.accepts_binding(announce) {
             return Err(RecordRejection::LinkedBindingConflict.error());
+        }
+        if identical {
+            return Ok(());
         }
         let mut next = self.records.clone();
         match next.binary_search_by(|a| a.user_id.cmp(&announce.user_id)) {
@@ -664,6 +674,58 @@ impl PeerDirectory {
 mod tests {
     use super::*;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[test]
+    fn identical_selected_proofs_reuse_verification_but_keep_linked_binding_checks() {
+        use crate::identity::account::certificate_observations;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("proofs");
+        let identity = DeviceIdentity::generate();
+        let first_account = Account::generate();
+        let first = Announce::new_with_account(&identity, &first_account, "Peer", 1234);
+        let mut directory = PeerDirectory::open(&path, "pw").unwrap();
+        directory.record(&first).unwrap();
+        let revision = directory.revision();
+        let durable = fs::read(&path).unwrap();
+        certificate_observations::reset();
+        for _ in 0..8 {
+            directory.record(&first).unwrap();
+        }
+        assert_eq!(
+            certificate_observations::count(),
+            0,
+            "selected identical verified proofs must not repeat certificate verification"
+        );
+        assert_eq!(directory.revision(), revision);
+        assert_eq!(fs::read(&path).unwrap(), durable);
+        let mut forged = first.clone();
+        forged.name.push('!');
+        assert!(directory.record(&forged).is_err());
+        let second_account = Account::generate();
+        directory
+            .authorize_linked_device(
+                crate::node::account_devices::AccountDevice {
+                    public: identity.public(),
+                    certificate: second_account.certify(&identity.public().ed25519_pub),
+                },
+                &second_account.account_id(),
+            )
+            .unwrap();
+        let error = directory.record(&first).unwrap_err();
+        assert_eq!(
+            rejection_code(&error),
+            "linked_binding_conflict",
+            "intrinsic proof reuse must not bypass a newly committed account binding"
+        );
+        let second = Announce::new_with_account(&identity, &second_account, "Peer", 1234);
+        directory.record(&second).unwrap();
+        let mut reopened = PeerDirectory::open(&path, "pw").unwrap();
+        certificate_observations::reset();
+        for _ in 0..8 {
+            reopened.record(&second).unwrap();
+        }
+        assert_eq!(certificate_observations::count(), 0);
+    }
 
     #[test]
     fn transition_requires_existing_full_identity_pin_and_atomic_persistence() {

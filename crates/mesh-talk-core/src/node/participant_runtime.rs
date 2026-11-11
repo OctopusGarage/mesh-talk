@@ -77,11 +77,36 @@ impl Node {
         peers: &mut Vec<FilePullPeer>,
         wait: Duration,
     ) -> bool {
+        self.wait_for_attachment_work(
+            &self.file_pull_notify,
+            network,
+            roster,
+            available,
+            channels,
+            peers,
+            wait,
+        )
+        .await
+    }
+
+    // Both lanes observe the same meaningful route/policy events but consume
+    // independent retained notifications; neither owns the other's retry clock.
+    #[allow(clippy::too_many_arguments)]
+    async fn wait_for_attachment_work(
+        &self,
+        notify: &Notify,
+        network: &mut tokio::sync::watch::Receiver<u64>,
+        roster: &mut tokio::sync::watch::Receiver<u64>,
+        available: &mut tokio::sync::watch::Receiver<u64>,
+        channels: &mut tokio::sync::broadcast::Receiver<crate::eventlog::ConversationId>,
+        peers: &mut Vec<FilePullPeer>,
+        wait: Duration,
+    ) -> bool {
         let deadline = tokio::time::Instant::now() + wait;
         let mut channels_open = true;
         loop {
             tokio::select! {
-                _ = self.file_pull_notify.notified() => return true,
+                _ = notify.notified() => return true,
                 _ = network.changed() => return true,
                 _ = available.changed() => return true,
                 event = channels.recv(), if channels_open => {
@@ -105,6 +130,20 @@ impl Node {
             }
         }
     }
+    pub(super) fn group_file_schedule(&self) -> (Duration, bool) {
+        let pending = self.group_file_work_pending();
+        let wait = Duration::from_secs(if pending {
+            FILE_PULL_INTERVAL_SECS
+        } else {
+            FILE_REPAIR_INTERVAL_SECS
+        });
+        (
+            self.group_file_retry_delay()
+                .map_or(wait, |retry| wait.min(retry)),
+            pending,
+        )
+    }
+
     /// Observe retained work after a pull before scheduling this producer's wait.
     pub(super) fn file_pull_schedule(&self, delay: Duration) -> (Duration, bool) {
         let (downloading, preparing) = {
@@ -122,7 +161,6 @@ impl Node {
             (downloading, preparing)
         };
         let local = preparing
-            || self.group_file_work_pending()
             || self.pending_channel_file().is_some()
             || self.media_maintenance_pending().unwrap_or_else(|error| {
                 log::warn!("media scheduling observation failed: {error}");
@@ -139,9 +177,6 @@ impl Node {
         } else {
             delay.max(Duration::from_secs(FILE_REPAIR_INTERVAL_SECS))
         };
-        let wait = self
-            .group_file_retry_delay()
-            .map_or(wait, |retry| wait.min(retry));
         (wait, pending)
     }
 }
@@ -314,7 +349,7 @@ impl PreparedParticipant {
                         log::warn!("file receive worker failed: {error}");
                     }
                     tokio::select! {
-                        _ = node.pull_pending_files() => {},
+                        _ = node.pull_pending_files_direct() => {},
                         _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },
                     }
                     let (wait, _pending) = node.file_pull_schedule(delay);
@@ -324,6 +359,35 @@ impl PreparedParticipant {
                     } else {
                         (delay * 2).min(Duration::from_secs(FILE_REPAIR_INTERVAL_SECS))
                     };
+                }
+            }));
+        }
+
+        {
+            let node = Arc::clone(&node);
+            tasks.push(tokio::spawn(async move {
+                let mut network = node.network_changes.subscribe();
+                let mut roster = node.subscribe_roster_changes();
+                let mut available = node.subscribe_sibling_availability();
+                let mut channels = node.subscribe_channel_changes();
+                let mut files = node.subscribe_file_changes();
+                let mut peers = node.file_pull_peers();
+                loop {
+                    if node.runtime_work.is_closed() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = node.retry_group_file_delivery() => {},
+                        _ = network.changed() => continue,
+                    }
+                    let (wait, _) = node.group_file_schedule();
+                    tokio::select! {
+                        _ = node.wait_for_attachment_work(
+                            &node.group_file_notify, &mut network, &mut roster,
+                            &mut available, &mut channels, &mut peers, wait,
+                        ) => {},
+                        _ = files.changed() => {},
+                    }
                 }
             }));
         }

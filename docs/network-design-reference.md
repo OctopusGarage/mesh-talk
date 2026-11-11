@@ -1009,8 +1009,15 @@ otherwise valid group-history cards remain visible and proof reservation retries
 when that proof becomes available. Relay custody never substitutes for a saved,
 integrity-checked recipient completion.
 
-`node/group_file_delivery.rs` extends the existing attachment producer rather
-than adding a transport or daemon. Its active index holds at most 10,000 jobs;
+`node/group_file_delivery.rs` owns outgoing custody under the participant runtime.
+Receive/download/media repair and outgoing custody use independently paced
+producers with separate retained notifications and retry clocks. Outgoing queue
+admission or authorization preparation must not restart a blocked receive scan
+or chunk download. Both observe meaningful network, route, availability and group
+changes; outgoing custody also observes committed file changes. Existing gates,
+transport limits and participant stop/join ownership remain authoritative. The
+public one-shot `pull_pending_files` API still performs both directions.
+Its active index holds at most 10,000 jobs;
 bounded rotating scans of durable source rows refill it, including pre-upgrade
 sends and restarts. A pass launches at most two recipient jobs and races at most
 two relay exchanges at once under the existing whole-file deadline. Rotation
@@ -1020,7 +1027,7 @@ contains outgoing group files, not historical private consent controls. Due jobs
 and unfinished authorization preparation retain the producer's short cadence.
 Network failures and unavailable routes back off from three to sixty seconds;
 launch reserves a deadline before any await, and completed attempts measure their
-delay from completion. The existing producer retains the earliest future retry
+delay from completion. The outgoing producer retains the earliest future retry
 wake. Cooling jobs perform no repeated offer authorization. Completed discovery
 rests for sixty seconds, reopening immediately on changed file rows. Ordinary
 appends preserve unfinished ordinal scans; destructive rewrites restart them.

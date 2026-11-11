@@ -1359,7 +1359,7 @@ async fn group_file_unfinished_discovery_keeps_short_cadence_until_eof() {
         node.group_file_work_pending(),
         "unfinished discovery retains short cadence despite cooled jobs"
     );
-    let (wait, _) = node.file_pull_schedule(std::time::Duration::from_secs(60));
+    let (wait, _) = node.group_file_schedule();
     assert!(
         wait <= std::time::Duration::from_secs(3),
         "the producer must shorten its current idle wait after discovering unfinished work: {wait:?}"
@@ -1377,7 +1377,7 @@ async fn group_file_unfinished_discovery_keeps_short_cadence_until_eof() {
         !node.group_file_work_pending(),
         "completed discovery and cooled jobs permit idle cadence"
     );
-    let (wait, pending) = node.file_pull_schedule(std::time::Duration::from_secs(60));
+    let (wait, pending) = node.group_file_schedule();
     assert!(!pending);
     assert_eq!(
         wait,
@@ -1392,7 +1392,7 @@ async fn group_file_unfinished_discovery_keeps_short_cadence_until_eof() {
         .next()
         .unwrap()
         .retry_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
-    let (wait, _) = node.file_pull_schedule(std::time::Duration::from_secs(60));
+    let (wait, _) = node.group_file_schedule();
     assert!(
         wait > std::time::Duration::ZERO && wait <= std::time::Duration::from_secs(10),
         "a retained future retry bounds the current idle wait"
@@ -2015,5 +2015,100 @@ async fn group_file_dependency_wake_matches_complete_recipient_and_channel() {
         jobs.iter()
             .filter(|(other, _)| **other != key)
             .all(|(_, job)| job.waiting_dependency && job.retry_after.is_some())
+    );
+}
+
+#[tokio::test]
+async fn isolated_file_lane_group_pending_preserves_receive_backoff() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    for _ in 0..16 {
+        node.retry_file_receives();
+        let generation = node
+            .attachment_consent
+            .lock()
+            .unwrap()
+            .generation()
+            .unwrap();
+        node.files
+            .lock()
+            .unwrap()
+            .discover_downloads(generation)
+            .unwrap();
+        node.maintain_media().unwrap();
+        if !node
+            .files
+            .lock()
+            .unwrap()
+            .download_preparation_pending()
+            .unwrap()
+            && !node.media_maintenance_pending().unwrap()
+        {
+            break;
+        }
+    }
+    assert!(
+        !node
+            .files
+            .lock()
+            .unwrap()
+            .download_preparation_pending()
+            .unwrap()
+    );
+    assert!(!node.media_maintenance_pending().unwrap());
+    assert!(
+        node.group_file_work_pending(),
+        "fixture retains outgoing work"
+    );
+    let (wait, _) = node.file_pull_schedule(std::time::Duration::from_secs(300));
+    assert!(
+        wait >= std::time::Duration::from_secs(300),
+        "outgoing group preparation must not force receive/download retries: {wait:?}"
+    );
+}
+
+#[tokio::test]
+async fn isolated_file_lane_group_notifications_do_not_wake_receives() {
+    use futures_util::FutureExt;
+    use std::time::Duration;
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    while node.file_pull_notify.notified().now_or_never().is_some() {}
+    while node.group_file_notify.notified().now_or_never().is_some() {}
+    node.group_file_delivery.jobs.lock().unwrap().clear();
+    for _ in 0..64 {
+        match node.queue_group_file_delivery(fixture.file, fixture.manifest) {
+            Ok(()) | Err(LogError::StaleCursor) => {}
+            Err(error) => panic!("unexpected queue error: {error}"),
+        }
+        if !node.group_file_delivery.jobs.lock().unwrap().is_empty() {
+            break;
+        }
+    }
+    assert!(!node.group_file_delivery.jobs.lock().unwrap().is_empty());
+    assert!(
+        node.group_file_notify.notified().now_or_never().is_some(),
+        "outgoing custody must retain a wake for its own producer"
+    );
+    let mut network = node.network_changes.subscribe();
+    let mut roster = node.subscribe_roster_changes();
+    let mut available = node.subscribe_sibling_availability();
+    let mut channels = node.subscribe_channel_changes();
+    let mut peers = node.file_pull_peers();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(30),
+            node.wait_for_file_pull(
+                &mut network,
+                &mut roster,
+                &mut available,
+                &mut channels,
+                &mut peers,
+                Duration::from_secs(300)
+            )
+        )
+        .await
+        .is_err(),
+        "queuing outgoing custody must not wake the receiving producer"
     );
 }

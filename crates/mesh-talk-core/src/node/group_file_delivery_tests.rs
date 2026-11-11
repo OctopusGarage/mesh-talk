@@ -763,3 +763,83 @@ async fn offline_group_file_is_deposited_before_consent_and_received_after_sende
     .await
     .expect("offline group file custody and later receipt must make bounded progress");
 }
+
+#[tokio::test]
+async fn participant_outgoing_custody_runs_without_manual_pull_or_incoming_work() {
+    use crate::node::{ParticipantConfig, PreparedParticipant};
+    let f = GroupRelayFixture::new().await;
+    let path = f.directory.path().join("runtime-custody.bin");
+    std::fs::write(&path, vec![19; crate::file::CHUNK_SIZE + 31]).unwrap();
+    let (_, file) =
+        f.a.enqueue_file_channel_progress_expiring_if(
+            f.group,
+            &path,
+            crate::file::FileKind::File,
+            |_| {},
+            None,
+            |commit| commit(),
+        )
+        .await
+        .unwrap();
+    f.a.await_channel_metadata(f.group).await.unwrap();
+    let final_chunk =
+        f.a.log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .into_iter()
+            .last()
+            .unwrap();
+    let outer =
+        crate::postoffice::opaque::RelayMailbox::federated(&f.a.identity, &f.b.identity.public())
+            .unwrap()
+            .wrap(&final_chunk)
+            .unwrap()
+            .id;
+    assert!(
+        !f.ps.lock().unwrap().has(&outer),
+        "fixture must owe actual relay custody"
+    );
+    // The relay fixture has no discovery daemon. Refresh only its identical
+    // availability proof; these renewals must not act as file-work notifications.
+    let heartbeat = {
+        let node = f.a.clone();
+        let proof = f.pproof.clone();
+        tokio::spawn(async move {
+            loop {
+                node.roster.lock().unwrap().update(
+                    &proof,
+                    "127.0.0.1".parse().unwrap(),
+                    &node.user_id(),
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        })
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let running = PreparedParticipant::prepare(
+        f.a.clone(),
+        listener,
+        Arc::new(crate::discovery::DiscoveryVisibility::new(false)),
+        ParticipantConfig {
+            discovery_port: 0,
+            candidate_source: None,
+        },
+    )
+    .unwrap()
+    .launch("Runtime custody sender");
+    let delivered = tokio::time::timeout(Duration::from_secs(30), async {
+        while !f.ps.lock().unwrap().has(&outer) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    heartbeat.abort();
+    let _ = heartbeat.await;
+    running.stop().await;
+    assert!(
+        delivered.is_ok(),
+        "the owned outgoing producer must deposit the exact final chunk without any manual file pull"
+    );
+}

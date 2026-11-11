@@ -434,6 +434,8 @@ pub struct Node {
     pub(super) group_file_sharing: super::network_cost::GroupFileSharingPolicy,
     /// Coalesced hint for the durable download work owned by `files`.
     pub(in crate::node) file_pull_notify: tokio::sync::Notify,
+    /// Outgoing custody preparation never wakes receive/download repair.
+    pub(in crate::node) group_file_notify: tokio::sync::Notify,
     pub(in crate::node) file_pull_cursor: std::sync::atomic::AtomicUsize,
     pub(in crate::node) file_pull_gate: tokio::sync::Mutex<()>,
     pub(super) group_file_delivery: super::group_file_delivery::GroupFileDelivery,
@@ -1370,6 +1372,7 @@ impl Node {
             manifest_scopes,
             group_file_sharing: Default::default(),
             file_pull_notify: tokio::sync::Notify::new(),
+            group_file_notify: tokio::sync::Notify::new(),
             file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),
             file_pull_gate: tokio::sync::Mutex::new(()),
             group_file_delivery: Default::default(),

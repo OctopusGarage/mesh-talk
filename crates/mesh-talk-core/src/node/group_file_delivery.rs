@@ -438,7 +438,7 @@ impl Node {
                 jobs.insert(key, job);
                 // A later recipient may still be pending. Publish this wake
                 // at insertion instead of losing it on that early return.
-                self.file_pull_notify.notify_one();
+                self.group_file_notify.notify_one();
             }
         }
         Ok(())
@@ -670,7 +670,7 @@ impl Node {
             });
             // Once per admitted cold view, not once per Pending turn: this
             // wakes an idle worker without creating a self-notification loop.
-            self.file_pull_notify.notify_one();
+            self.group_file_notify.notify_one();
         }
         let view = views.get_mut(&key).expect("installed authorization view");
         view.used = std::time::Instant::now();
@@ -809,7 +809,7 @@ impl Node {
             changed
         };
         if changed {
-            self.file_pull_notify.notify_one();
+            self.group_file_notify.notify_one();
         }
     }
 
