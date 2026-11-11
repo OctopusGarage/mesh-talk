@@ -1,6 +1,7 @@
 import { test, expect } from "./tauri-mock";
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import type { Page } from "@playwright/test";
 import { revealComposerTools, seedThemeBeforeLoad } from "./helpers/session";
@@ -110,7 +111,34 @@ test("removing a sticker ZIP preserves sent image bytes and label", async ({
   const manifest = JSON.parse(new TextDecoder().decode(files["manifest.json"]));
   manifest.id = "imported-noto";
   manifest.name = "Imported Noto";
-  files["manifest.json"] = strToU8(JSON.stringify(manifest));
+  const sticker = manifest.stickers.find(
+    (entry: { id: string; label: string; file: string }) =>
+      entry.id === "1f602",
+  );
+  if (!sticker) throw new Error("Missing Joy sticker fixture");
+  // Removal needs one real animated asset. The installation and panel scenarios
+  // above retain the complete 40-item archive and inventory assertions.
+  manifest.stickers = [sticker];
+  const bytes = files[sticker.file];
+  const archive = zipSync({
+    "manifest.json": strToU8(JSON.stringify(manifest)),
+    [sticker.file]: bytes,
+  });
+  const expectedDigest = createHash("sha256").update(bytes).digest("hex");
+  const sentImageDigest = () =>
+    page
+      .getByTestId("message-sticker")
+      .last()
+      .evaluate(async (image) => {
+        const response = await fetch((image as HTMLImageElement).src);
+        const digest = await crypto.subtle.digest(
+          "SHA-256",
+          await response.arrayBuffer(),
+        );
+        return Array.from(new Uint8Array(digest), (byte) =>
+          byte.toString(16).padStart(2, "0"),
+        ).join("");
+      });
   await enterBobDm(page);
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
@@ -123,9 +151,9 @@ test("removing a sticker ZIP preserves sent image bytes and label", async ({
   await manager.locator('input[type="file"]').setInputFiles({
     name: "imported-noto.zip",
     mimeType: "application/zip",
-    buffer: Buffer.from(zipSync(files)),
+    buffer: Buffer.from(archive),
   });
-  // This validates every image in a large archive before committing it.
+  // Keep the real ZIP import/validation and account-scoped persistence path.
   await expect(remove).toBeVisible({
     timeout: 30_000,
   });
@@ -135,6 +163,7 @@ test("removing a sticker ZIP preserves sent image bytes and label", async ({
     "src",
     /^blob:/,
   );
+  expect(await sentImageDigest()).toBe(expectedDigest);
 
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
@@ -150,16 +179,15 @@ test("removing a sticker ZIP preserves sent image bytes and label", async ({
     "src",
     /^blob:/,
   );
+  expect(await sentImageDigest()).toBe(expectedDigest);
   await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
     "alt",
-    `[${manifest.stickers.find((sticker: { id: string }) => sticker.id === "1f602").label}]`,
+    `[${sticker.label}]`,
   );
   await expect(
     page.getByTestId(`conversation-row-${BOB.account}`),
-  ).toContainText(
-    `[${manifest.stickers.find((sticker: { id: string }) => sticker.id === "1f602").label}]`,
-  );
-  await page.reload();
+  ).toContainText(`[${sticker.label}]`);
+  // enterBobDm performs the cold navigation that verifies persisted removal.
   await enterBobDm(page);
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();

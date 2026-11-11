@@ -895,6 +895,15 @@ foreground control and the real queued Noise scenarios under core-account-group
 validation. A cross-peer interrupted unpaired continuation retains its distinct
 live/resumed/protected admission proof; it does not spend paired resume credit.
 
+Keep browser lifecycle fixtures at the smallest valid corpus that exercises their
+contract, with separate inventory coverage for full archives. The
+[sticker removal fixture](../frontend/e2e/stickers.spec.ts) imports one unchanged
+animated asset through the real ZIP path, verifies its sent bytes before and
+after removal, and checks persisted removal after one cold navigation. Its
+installation and panel scenarios retain the complete pack. Avoid a redundant
+reload immediately before a helper that already navigates; preserve the scenario
+deadline and the persistence assertion.
+
 Browser device options express intent; they do not observe native input state.
 Establish the required device mode through the browser's supported emulation
 owner, then verify actual media queries and touch capabilities before measuring
