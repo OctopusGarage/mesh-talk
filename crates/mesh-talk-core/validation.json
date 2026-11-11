@@ -581,6 +581,7 @@
             "node::account_sync::selection_tests::foreign_public_profile_documents_cross_certified_loopback_with_profile_consent",
             "node::account_sync::personal_replay_tests::",
             "node::lifecycle::personal_scope_tests::",
+            "node::delivery_runtime_tests::owned_read_failure_text_erasure_does_not_reconcile_unrelated_files",
             "late_group_clear_preserves_only_fresh_lifetime_ancestry",
             "known_role_digest_does_not_block_a_new_terminal_result_behind_repeated_role_headers",
             "terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows",

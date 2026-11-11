@@ -10562,6 +10562,60 @@ async fn owned_scope_sender_fixture(
 }
 
 #[tokio::test]
+async fn owned_read_failure_text_erasure_does_not_reconcile_unrelated_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let (sender, _, file, _) = owned_scope_sender_fixture(directory.path(), false).await;
+    let unreadable = sender.files.lock().unwrap().manifest_events(file)[0];
+    let conversation = ConversationId::new([94; 32]);
+    let target = EventId::new([95; 32]);
+    sender
+        .received
+        .lock()
+        .unwrap()
+        .record(conversation, sender.user_id(), 1, b"erase text", target)
+        .unwrap();
+    sender.log.lock().unwrap().fail_read_for(Some(unreadable));
+    // Qualify the real unrelated failure before testing the mutation boundary.
+    assert!(matches!(
+        sender.reseed_live_file_book(&sender.delivery.lock().unwrap()),
+        Err(NodeError::Log(LogError::Io(_)))
+    ));
+    assert_eq!(
+        sender.delete_message(conversation, target, true).unwrap(),
+        1
+    );
+    assert!(
+        sender
+            .received
+            .lock()
+            .unwrap()
+            .entries(&conversation)
+            .is_empty()
+    );
+    assert!(
+        sender
+            .account_suppression
+            .lock()
+            .unwrap()
+            .contains(conversation, target)
+            .unwrap()
+    );
+    assert!(
+        sender
+            .files
+            .lock()
+            .unwrap()
+            .manifest(file)
+            .unwrap()
+            .is_some()
+    );
+    sender.log.lock().unwrap().fail_read_for(None);
+    sender
+        .reseed_live_file_book(&sender.delivery.lock().unwrap())
+        .unwrap();
+}
+
+#[tokio::test]
 async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
     let directory = tempfile::tempdir().unwrap();
     let (sender, target, file, _) = owned_scope_sender_fixture(directory.path(), false).await;

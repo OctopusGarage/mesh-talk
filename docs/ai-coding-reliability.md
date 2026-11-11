@@ -416,6 +416,14 @@ on subsequent projection readiness, and a generic mutation retry can repeat work
 that already committed. The [local erasure owner](../crates/mesh-talk-core/src/node/lifecycle.rs)
 checks a real pending archived projection, unrelated DM/unknown targets,
 suppression failure without erasure, and retained suppression after reopen.
+Do not attach unrelated global projection work to a narrow mutation. Text
+erasure has no file keys to revoke; a full file-book reconciliation can fail on
+unrelated reads or concurrent acceptance after suppression already committed.
+The `owned_read_failure_text_erasure_does_not_reconcile_unrelated_files`
+regression in [delivery tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+qualifies the real read failure, verifies text removal and suppression, and
+retains the unrelated live file. File erasure still revokes its keys before
+physical removal, and reconciliation still rejects stale revisions.
 
 Keep inspection affordances separate from mutation permissions, and propagate
 the containing view's restrictions into nested inspectors. Opening a reader must
