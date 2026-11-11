@@ -2808,7 +2808,12 @@ cannot regain completion qualification when a later classified counter has the
 same numeric value. Checkpoint decoding, receive cursors and pending retries keep
 their existing representation; old outgoing completion proofs requalify through
 normal synchronization. At most 512 checkpoints use 8 MiB; each
-blob is limited to 16 KiB. A successfully validated cold receipt warms its existing
+blob is limited to 16 KiB. History-publication hints cannot evict receive
+checkpoints: receiver admission first reclaims publication hints, while publication
+admission declines if its own class cannot release enough count or bytes. Victims
+are planned before deletion so refusal preserves rows and accounting. Receiver-only
+pressure retains bounded FIFO fallback; these hints remain optional evidence.
+A successfully validated cold receipt warms its existing
 bounded upload or receive-only owner even when a new adapter changes no progress.
 Only after validation rejects retired session-only evidence is durable progress
 attached to the current runtime. Cold repair normalization still clears spent

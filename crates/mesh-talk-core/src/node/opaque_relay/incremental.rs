@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
+// Local hint namespace; it distinguishes rebuildable publication progress from
+// receive checkpoints without changing their deployed key bytes.
+pub(in crate::node) const HISTORY_PUBLICATION_KEY_SUFFIX: &[u8] = b"\0history-publication-v1";
+
 const MAX_VIEWS: usize = 4;
 const MAX_RECEIVE_OWNERS: usize = 2;
 const UNFINISHED_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -459,7 +463,7 @@ fn cache_key(p: &OpaqueMailboxProgress) -> Result<Vec<u8>, session::SessionError
     if p.intent == MailboxIntent::HistoryPublication {
         // Local hint namespace only: leave every old duplex cursor, pending
         // repair and runtime binding untouched. The wire mailbox is unchanged.
-        key.extend_from_slice(b"\0history-publication-v1");
+        key.extend_from_slice(HISTORY_PUBLICATION_KEY_SUFFIX);
     }
     Ok(key)
 }

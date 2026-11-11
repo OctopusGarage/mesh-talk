@@ -1,6 +1,7 @@
 //! Optional opaque protocol checkpoints and authenticated wrapper-ID hints.
 //! Callers own envelope authentication and exact protocol-key construction.
 use super::*;
+use crate::node::opaque_relay::incremental::HISTORY_PUBLICATION_KEY_SUFFIX;
 use rusqlite::OptionalExtension;
 
 const MAX_KEY: usize = 256;
@@ -125,6 +126,33 @@ impl Bucket {
             if previous < 0 || previous > bytes { return Err(invalid("invalid opaque cache record charge")); }
             bytes -= previous;
             let added = i64::from(existing.is_none());
+            if self.table == CHECKPOINTS.table && (records+added > self.entries || bytes+charge > self.bytes) {
+                let publication = key.ends_with(HISTORY_PUBLICATION_KEY_SUFFIX);
+                // Plan before deleting. A publication can lack enough eligible
+                // victims; declining its optional write must leave both existing
+                // rows and usage counters untouched. Read at most 512 headers.
+                let victims = {
+                    let mut statement = c.prepare_cached("SELECT sequence,length(key)+length(value) FROM opaque_checkpoints WHERE key<>?1 AND (?2=0 OR substr(key,-?3)=?4) ORDER BY (substr(key,-?3)=?4) DESC,sequence LIMIT ?5")?;
+                    let mut rows = statement.query(params![key,publication,HISTORY_PUBLICATION_KEY_SUFFIX.len() as i64,HISTORY_PUBLICATION_KEY_SUFFIX,self.entries])?;
+                    let mut victims = Vec::new();
+                    while records+added > self.entries || bytes+charge > self.bytes {
+                        let Some(row) = rows.next()? else {
+                            if publication { return Ok(false); }
+                            return Err(invalid("inconsistent opaque cache capacity"));
+                        };
+                        let sequence: i64 = row.get(0)?;
+                        let charged: i64 = row.get(1)?;
+                        if records <= 0 || charged < 0 || charged > bytes { return Err(invalid("invalid opaque cache eviction charge")); }
+                        records -= 1;
+                        bytes -= charged;
+                        victims.push(sequence);
+                    }
+                    victims
+                };
+                for sequence in victims {
+                    c.execute("DELETE FROM opaque_checkpoints WHERE sequence=?1", [sequence])?;
+                }
+            }
             while records+added > self.entries || bytes+charge > self.bytes {
                 let oldest: Option<(i64,i64)> = c.query_row(&format!("SELECT sequence,length(key)+length(value) FROM {} WHERE key<>?1 ORDER BY sequence LIMIT 1",self.table), [key], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
                 let Some((sequence,charged)) = oldest else { return Err(invalid("inconsistent opaque cache capacity")); };
@@ -632,6 +660,81 @@ mod tests {
         assert_eq!(
             cache.get_checkpoint(&1u64.to_be_bytes()).unwrap(),
             Some(b"v".to_vec())
+        );
+    }
+
+    fn publication_key(sequence: u64) -> Vec<u8> {
+        let mut key = sequence.to_be_bytes().to_vec();
+        key.extend_from_slice(HISTORY_PUBLICATION_KEY_SUFFIX);
+        key
+    }
+
+    #[test]
+    fn publication_checkpoint_pressure_preserves_receive_progress_with_fixed_capacity() {
+        let (_root, profile, _device, _account, cache) = fixture();
+        assert!(cache.put_checkpoint(b"receive", b"cursor").unwrap());
+        for n in 0..520 {
+            assert!(
+                cache
+                    .put_checkpoint(&publication_key(n), b"publication")
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            cache.get_checkpoint(b"receive").unwrap(),
+            Some(b"cursor".to_vec()),
+            "rebuildable publication hints must not evict receive progress"
+        );
+        assert!(cache.get_checkpoint(&publication_key(0)).unwrap().is_none());
+        assert!(
+            cache
+                .get_checkpoint(&publication_key(519))
+                .unwrap()
+                .is_some()
+        );
+        let (count, bytes) = profile.database().read(|c| {
+            Ok(c.query_row("SELECT records,bytes FROM opaque_checkpoint_usage WHERE bucket='opaque_checkpoints'", [], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?)
+        }).unwrap();
+        assert_eq!(count, 512);
+        assert!(bytes <= 8 * 1024 * 1024);
+        let changes = profile.database().read(|c| Ok(c.total_changes())).unwrap();
+        assert!(cache.put_checkpoint(b"receive", b"cursor").unwrap());
+        assert_eq!(
+            profile.database().read(|c| Ok(c.total_changes())).unwrap(),
+            changes
+        );
+    }
+
+    #[test]
+    fn publication_checkpoint_refusal_preserves_rows_and_usage_under_byte_pressure() {
+        let (_root, profile, _device, _account, cache) = fixture();
+        let value = vec![7; 16384];
+        for n in 0u64..511 {
+            assert!(cache.put_checkpoint(&n.to_be_bytes(), &value).unwrap());
+        }
+        assert!(cache.put_checkpoint(&publication_key(1), b"small").unwrap());
+        let before=profile.database().read(|c| {
+            Ok((c.total_changes(),c.query_row("SELECT records,bytes FROM opaque_checkpoint_usage WHERE bucket='opaque_checkpoints'", [], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?))
+        }).unwrap();
+        assert!(
+            !cache.put_checkpoint(&publication_key(2), &value).unwrap(),
+            "publication must decline when its own victims cannot release enough bytes"
+        );
+        let after=profile.database().read(|c| {
+            Ok((c.total_changes(),c.query_row("SELECT records,bytes FROM opaque_checkpoint_usage WHERE bucket='opaque_checkpoints'", [], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?))
+        }).unwrap();
+        assert_eq!(
+            after, before,
+            "refusal must not partially evict or change accounting"
+        );
+        assert_eq!(
+            cache.get_checkpoint(&publication_key(1)).unwrap(),
+            Some(b"small".to_vec())
+        );
+        assert!(cache.get_checkpoint(&publication_key(2)).unwrap().is_none());
+        assert_eq!(
+            cache.get_checkpoint(&0u64.to_be_bytes()).unwrap(),
+            Some(value)
         );
     }
 

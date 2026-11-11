@@ -1145,6 +1145,13 @@ precede reuse. The [repository regressions](../crates/mesh-talk-core/src/eventlo
 cover unchanged reads, forged signatures, repeated negative results, content
 tampering, retirement, reopen and bounded eviction.
 
+Separate cache admission priorities when recomputable work can displace receive
+progress and repeatedly restart unchanged synchronization. Preserve shared hard
+budgets and plan eviction before mutation when a class may refuse admission. The
+[checkpoint pressure regressions](../crates/mesh-talk-core/src/node/opaque_receive_cache/checkpoints.rs)
+check receiver retention and atomic refusal under count/byte pressure; the signed
+cold-receipt loopback regression checks recovery without new writes.
+
 Reuse compiled static SQL through the existing bounded connection cache rather
 than caching authorization results. Every execution must still bind the current
 parameters and perform the original source, account and lifetime checks. Warming

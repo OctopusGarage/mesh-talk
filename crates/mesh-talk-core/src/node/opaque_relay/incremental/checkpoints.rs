@@ -1021,6 +1021,19 @@ mod tests {
         let (receipt, key, _) =
             completed_round(&node, office.clone(), &relay, &remote, conversation).await;
         assert!(receipt.completed.is_some());
+        // Outgoing per-file checkpoint churn must not discard this signed
+        // receiver cursor and force a fresh reconciliation over the same Noise lane.
+        for n in 0u64..520 {
+            let mut publication = n.to_be_bytes().to_vec();
+            publication.extend_from_slice(HISTORY_PUBLICATION_KEY_SUFFIX);
+            assert!(
+                node.opaque_receive_cache
+                    .lock()
+                    .unwrap()
+                    .put_checkpoint(&publication, b"optional publication memo")
+                    .unwrap()
+            );
+        }
         node.opaque_upload_cache.lock().unwrap().clear();
         let checkpoint = node
             .opaque_receive_cache
