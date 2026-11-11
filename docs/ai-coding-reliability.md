@@ -767,6 +767,13 @@ clocks at the actual boundary. Prefer an observable progress assertion to an
 arbitrary sleep or a test that checks only that a timeout helper was called.
 Verify successful behavior, failure, cleanup and replacement through the same
 production owner; a mock that bypasses the problematic lock proves little.
+Install response holds before admitting background producers, and observe the
+actual held handler before publishing the state that must remain unavailable.
+Arming after launch cannot stop an earlier request that already passed the hook
+from reading later state. The exact-peer hostname hold in
+`channel_custody_converges_while_directory_is_held` in
+[account document tests](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
+preserves that ordering while measuring independent custody progress.
 
 The group-inventory held-peer fixture rejects a real authenticated setup
 exchange before admitting its independent publication measurement. Snapshot
@@ -880,6 +887,13 @@ outer deadline when a synchronous lock cycle cannot be safely unwound. An async
 timeout inside the blocked thread is not sufficient. Avoid port-selection races
 and process-global fixtures that assume serial execution; respect the repository's
 test environment and resource controls.
+For an ephemeral UDP endpoint, let the real socket owner bind port zero and
+report the selected port. A released reservation is not ownership; reusable
+discovery sockets can silently share the selected port with another runtime.
+Participant preparation owns the actual IPv4/IPv6 port, and
+`runtime_zero_discovery_port_owns_a_reachable_assigned_endpoint` in
+[routed runtime tests](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs)
+requires distinct assigned endpoints and a real signed discovery response.
 
 Intentional cancellation and output-limit controls need an independent process
 owner. Inheriting the real runner's owner marker can terminate the enclosing

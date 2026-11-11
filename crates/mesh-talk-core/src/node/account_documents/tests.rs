@@ -1520,21 +1520,17 @@ async fn channel_custody_converges_while_directory_is_held() {
     let (arrived, held) = oneshot::channel();
     let arrived = Arc::new(Mutex::new(Some(arrived)));
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let exact_sibling = sibling.identity.public();
     *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let release = release.clone();
         let active = active.clone();
-        let armed = armed.clone();
         move |peer, frame| {
             let release = release.clone();
             let arrived = arrived.clone();
             let active = active.clone();
-            let armed = armed.clone();
             let exact_sibling = exact_sibling.clone();
             Box::pin(async move {
-                if armed.load(std::sync::atomic::Ordering::SeqCst)
-                    && peer == exact_sibling
+                if peer == exact_sibling
                     && matches!(frame, AccountHistoryFrame::DocumentsRequest { ref body } if wire::DocumentRequest::decode(body).is_some_and(|request| request.domain == AccountDocumentDomain::DeviceHostname))
                 {
                     struct Active(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -1585,7 +1581,10 @@ async fn channel_custody_converges_while_directory_is_held() {
             .await,
         ));
     }
-    // All routes, observers and response holds precede protocol admission.
+    // Hold every hostname request before protocol admission. Arming after
+    // launch lets an earlier request pass the hook, then read the new hostname
+    // while a later request is held. Channel preparation above pulls only the
+    // inventory/control domains and has joined its providers before this point.
     for host in hosts.iter_mut().flatten() {
         host.launch();
     }
@@ -1594,9 +1593,8 @@ async fn channel_custody_converges_while_directory_is_held() {
         // frames to the external member through the normal public owner now.
         source.distribute_channel(channel, &[external.identity.public()]).await;
         let keys = custody_channel_keys(&source, channel);
-        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(30), held).await.expect("the initial authenticated hostname request must enter the directory hold before publication").unwrap();
         source.set_device_hostname(Some("held-directory-update")).unwrap();
-        tokio::time::timeout(Duration::from_secs(30), held).await.expect("real authenticated hostname refresh must enter the directory hold after cold prerequisites").unwrap();
         assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0, "the actual authenticated directory handler must still be held");
         assert!(!custody_linked_routes_ready(&source, &sibling), "the old aggregate predicate still includes the held unrelated directory lane");
         assert!(!release.is_closed());
@@ -1675,6 +1673,7 @@ async fn channel_custody_converges_while_directory_is_held() {
         assert!(external.channel_history(channel, 10).unwrap().iter().any(|row| row.id == event), "the external member must retain the exact fresh event");
         assert!(!sibling.channel_custody_observations(channel, event).is_empty(), "fresh external custody must arrive as an actual account-private document");
         assert!(!release.is_closed());
+        assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0, "the authenticated directory handler must remain held through fresh custody convergence");
         assert_ne!(sibling.device_hostnames().unwrap().get(&source.user_id()).map(String::as_str), Some("held-directory-update"), "fresh custody must not depend on importing the held directory update");
     }).catch_unwind().await;
     release.close();
