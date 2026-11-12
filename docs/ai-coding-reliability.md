@@ -1265,7 +1265,12 @@ The [local publication regressions](../crates/mesh-talk-core/src/node/account_sy
 count actual body reads and cover profile/proof/control changes, in-flight
 invalidation, failed writes and timer-driven recovery without periodic peer polls.
 Comparing unchanged publication after loading its encrypted old payload is still
-repeated work. Ordinary/legacy operation publishers qualify at most 128 runtime
+repeated work. Delivery retries must evaluate the durable reference and current
+retry deadlines before hydrating the event body. The real direct-custody
+regression in [delivery runtime tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+observes actual retry completion, then requires unchanged repository body-read
+counters while custody is parked; new demand and real recipient receipts remain
+prompt. Ordinary/legacy operation publishers qualify at most 128 runtime
 metadata/projection pairs under the exact verified own-head hash, with a
 nonrenewable five-minute repair deadline. Settled ordinary Text/Sticker/File
 results can qualify before body materialization only with complete current journal,

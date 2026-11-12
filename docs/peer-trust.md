@@ -163,6 +163,13 @@ logs retain their existing append behavior.
 Existing bounded control deadlines and runtime cancellation apply. A new revision,
 including an avatar clear, is eligible without a reconnect; disappearing peers
 lose their publication cache and receive the current profile when they return.
+Unchanged failed publications, including preparation failures, back off from five
+seconds to five minutes after completion. Profile revisions, full peer identity,
+effective recipient and eligible-relay routes, genuine availability revival and applicable policy/network
+changes allow prompt attempts; identical presence heartbeats do not reset the
+wait. Completion belongs to the exact selected target instance, so an older
+attempt cannot settle replacement work. The existing three-second metadata poll
+still discovers changes; it does not authorize repeated expensive exchanges.
 
 See [account and device identity](ARCHITECTURE.md), [module ownership](module-boundaries.md),
 [backup recovery](backup-recovery.md) and [contact verification](help/topics/verify-contact.md).

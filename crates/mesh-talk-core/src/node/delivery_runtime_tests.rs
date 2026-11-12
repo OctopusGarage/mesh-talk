@@ -812,10 +812,32 @@ async fn unchanged_direct_custody_does_not_keep_destination_retry_hot() {
         }
         let first = queries.load(Ordering::SeqCst);
         let received = incoming.recv().await.unwrap();
+        // Positive HAVE precedes completion; observe the actual owner before
+        // counting reads in the settled window.
+        while !sender.account_delivery_observations(&recipient.account_id(), &[id])[0]
+            .2
+            .is_some_and(|hint| hint.kind == DeliveryObservationKind::RetryScheduled)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let bodies_before = sender
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
         // Cross the existing fifteen-second failure ceiling: a short window
         // cannot distinguish an unchanged success from failure backoff.
         tokio::time::sleep(Duration::from_secs(20)).await;
         let repeated = queries.load(Ordering::SeqCst) - first;
+        let bodies_after = sender
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
         let pending = sender.delivery_status(id);
         let second_id = sender
             .enqueue_to_account(
@@ -845,12 +867,26 @@ async fn unchanged_direct_custody_does_not_keep_destination_retry_hot() {
             second_id,
             second_received,
             second_pending,
+            bodies_before,
+            bodies_after,
         )
     })
     .await;
     tasks.shutdown().await;
-    let (repeated, pending, received_id, second_id, second_received, second_pending) =
-        result.unwrap();
+    let (
+        repeated,
+        pending,
+        received_id,
+        second_id,
+        second_received,
+        second_pending,
+        bodies_before,
+        bodies_after,
+    ) = result.unwrap();
+    assert_eq!(
+        bodies_after, bodies_before,
+        "a quiet destination must not hydrate event bodies before retry admission"
+    );
     assert_eq!(pending, Some(DeliveryStatus::Awaiting));
     assert_eq!(received_id, Some(id));
     assert_eq!(

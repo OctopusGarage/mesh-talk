@@ -2465,27 +2465,10 @@ impl Node {
                     let next = destination_capacity
                         .then(|| store.next_destination(destination_cursor))
                         .flatten();
-                    let destination = if let Some((id, reference)) = next {
-                        let event = node
-                            .log
-                            .lock()
-                            .expect("log lock not poisoned")
-                            .get(&reference.event_id)?;
-                        let Some(event) = event else {
-                            return Ok::<_, crate::eventlog::LogError>(None);
-                        };
-                        Some((
-                            id,
-                            DeliveryDestination {
-                                device: reference.device,
-                                account: reference.account,
-                                event,
-                                receipt_eligible: reference.receipt_eligible,
-                            },
-                        ))
-                    } else {
-                        None
-                    };
+                    // Scheduling needs only the durable reference. Loading its
+                    // ciphertext here would hydrate every parked destination on
+                    // each scan before the owner checks its retry deadline.
+                    let destination = next;
                     let receipt = if receipt_capacity {
                         store
                             .retry_receipts_after(receipt_cursor, 1)
@@ -2496,7 +2479,7 @@ impl Node {
                         None
                     };
                     let (files, cursor) = file_scan.read(&store);
-                    Ok(Some((destination, receipt, files, cursor)))
+                    Ok::<_, crate::eventlog::LogError>(Some((destination, receipt, files, cursor)))
                 })
                 .await
                 .map(|value| value.into_inner());
@@ -2519,7 +2502,7 @@ impl Node {
             };
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
-                let key = ControlWork::Destination(destination.event.id);
+                let key = ControlWork::Destination(destination.event_id);
                 let routes = self.control_routes(&destination.device);
                 let input = routes.retry_routes();
                 if active
@@ -2539,7 +2522,7 @@ impl Node {
                     )
                     && quiet_destinations.ready(
                         &(
-                            destination.event.id,
+                            destination.event_id,
                             destination.device.ed25519_pub,
                             destination.device.x25519_pub,
                         ),
@@ -2547,6 +2530,43 @@ impl Node {
                         std::time::Instant::now(),
                     )
                 {
+                    let Some(work) = self.runtime_work.admit() else {
+                        return;
+                    };
+                    let reading = self.clone();
+                    let payload = work
+                        .spawn_blocking(move || {
+                            let event = reading
+                                .log
+                                .lock()
+                                .expect("log lock not poisoned")
+                                .get(&destination.event_id)?;
+                            Ok::<_, crate::eventlog::LogError>(event.map(|event| {
+                                DeliveryDestination {
+                                    device: destination.device,
+                                    account: destination.account,
+                                    event,
+                                    receipt_eligible: destination.receipt_eligible,
+                                }
+                            }))
+                        })
+                        .await;
+                    let destination = match payload {
+                        Ok(payload) => match payload.into_inner() {
+                            Ok(Some(destination)) => destination,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                log::warn!("delivery payload read deferred: {error}");
+                                diagnostic.warn_if_due();
+                                continue;
+                            }
+                        },
+                        Err(error) => {
+                            log::warn!("delivery payload worker failed: {error}");
+                            diagnostic.warn_if_due();
+                            continue;
+                        }
+                    };
                     let Some(work) = self.runtime_work.admit() else {
                         return;
                     };
