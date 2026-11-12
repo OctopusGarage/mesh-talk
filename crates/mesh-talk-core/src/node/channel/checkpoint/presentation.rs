@@ -73,7 +73,24 @@ impl ChannelCheckpointStore {
         // account/source/count qualification; this conveys no channel admission.
         let prepared = (|| -> Result<bool, LogError> {
             let Some(source) = self.source_binding(channel)? else {
-                return Ok(false);
+                // An absent source has no demand only when no checkpoint or
+                // cleanup owner exists. Recheck it; never cache the absence.
+                // Keep this query off the ordinary prepared-channel path.
+                return self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            c.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM event_conversations WHERE domain=?1 AND conversation=?2)
+                 AND NOT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?2)
+                 AND NOT EXISTS(SELECT 1 FROM channel_current WHERE channel=?2)
+                 AND NOT EXISTS(SELECT 1 FROM channel_projection_work WHERE channel=?2)
+                 AND NOT EXISTS(SELECT 1 FROM channel_retired_work WHERE channel=?2)
+                 AND NOT EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2)
+                 AND NOT EXISTS(SELECT 1 FROM channel_book_work WHERE channel=?2)
+                 AND NOT EXISTS(SELECT 1 FROM channel_dirty WHERE channel=?2)",
+                params![b"MeshPartEventsV1".as_slice(), channel.as_bytes().as_slice()],
+                |row| row.get::<_, bool>(0),
+            ).map_err(Into::into)
+        });
             };
             let (stamp, replica) = self.presentation_stamps(&source)?;
             self.profile.database().read(|c| {

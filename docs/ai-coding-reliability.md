@@ -840,7 +840,10 @@ The nonlocal-demand regressions in the
 [checkpoint tests](../crates/mesh-talk-core/src/node/channel/checkpoint/tests.rs)
 cover unchanged read-only demand, a later signed membership, stale sources and
 retired participant generations. Absence of a current row or a partially prepared
-reducer is not equivalent negative evidence.
+reducer is not equivalent negative evidence. A never-created source can be
+quiet only after checking that no pending, projected or retirement owner needs
+work. Keep this absence check off the ordinary prepared-source path; recheck it
+on each demand and retain the normal committed-source discovery recovery.
 
 ## R06: Exact authority and stale completions
 
@@ -1314,6 +1317,13 @@ check receiver retention and atomic refusal under count/byte pressure; the signe
 cold-receipt loopback regression checks recovery without new writes. Reject
 impossible optional cache admission before entering a guarded write transaction:
 changing a SQLite authorizer expires prepared queries even when no rows change.
+Derived TEMP receive hints must also use the existing closed transport-hint
+transaction owner: ordinary `total_changes` notifications would wake the source
+consumer for its own cache updates. Read exact unchanged, bounded pages before
+installing that authorizer. The
+[receive-cache regressions](../crates/mesh-talk-core/src/node/opaque_receive_cache.rs)
+check source-watch silence, real append/retirement wakes, session recovery and
+unchanged cached-statement plans.
 Keep the actual mutation guard and capacity recheck; a racing capacity release
 may miss an optional hint until retry, never authorize eviction. The byte-pressure
 regression checks zero `RePrepare` after both refused insertion and refused growth,

@@ -350,7 +350,24 @@ impl OpaqueReceiveCache {
             if page.is_empty() {
                 break;
             }
-            let result = profile.database().transaction(|c| {
+            // Once old-session cleanup is complete, a bounded exact read can
+            // avoid a no-op transaction and authorizer-induced SQL reprepare.
+            // A miss or read failure retains the original transactional recheck.
+            if self.session_cleaned {
+                let unchanged = profile.database().read(|c| {
+                    let mut statement = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM temp.opaque_runtime_session_hints WHERE mailbox=?1 AND outer_id=?2 AND session=?3 AND inner_id IS ?4)")?;
+                    for (outer, inner) in &page {
+                        if !statement.query_row(params![mailbox.as_bytes().as_slice(), outer.as_bytes().as_slice(), self.session.as_slice(), inner.as_ref().map(|id| id.as_bytes().as_slice())], |row| row.get::<_, bool>(0))? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                });
+                if matches!(unchanged, Ok(true)) {
+                    continue;
+                }
+            }
+            let result = profile.database().transport_hint_transaction(|c| {
                 // Retire a bounded batch of another run's optional hints.
                 let removed = if self.session_cleaned { 0 } else {
                     c.execute("DELETE FROM temp.opaque_runtime_session_hints WHERE (mailbox,outer_id) IN (SELECT mailbox,outer_id FROM temp.opaque_runtime_session_hints WHERE session<?1 UNION ALL SELECT mailbox,outer_id FROM temp.opaque_runtime_session_hints WHERE session>?1 LIMIT 128)", [self.session.as_slice()])?
@@ -450,6 +467,129 @@ mod tests {
             .unwrap();
         }
         log.sync().unwrap();
+    }
+
+    #[test]
+    fn temp_session_progress_does_not_wake_source_but_admitted_history_still_does() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events");
+        let device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let owner = profile(root.path(), &device, &account);
+        let mut log = PersistentEventLog::open_profile(owner.clone(), "pw").unwrap();
+        let mailbox = ConversationId::new([1; 32]);
+        let mut old = OpaqueReceiveCache::open(
+            owner.clone(),
+            &path,
+            "pw",
+            &device.public(),
+            &account.account_id(),
+        );
+        old.remember_session(mailbox, &[id(1)]);
+        drop(old);
+        let mut cache = OpaqueReceiveCache::open(
+            owner.clone(),
+            &path,
+            "pw",
+            &device.public(),
+            &account.account_id(),
+        );
+        let mut source = owner.database().subscribe_source_changes();
+        let stamp = owner.database().work_hint_stamp().unwrap();
+        cache.remember_session(mailbox, &[id(2)]);
+        assert_eq!(cache.seen(mailbox, &log).unwrap(), HashSet::from([id(2)]));
+        assert!(
+            !source.has_changed().unwrap(),
+            "TEMP session progress/retired-session cleanup must not manufacture source changes"
+        );
+        assert_eq!(owner.database().work_hint_stamp().unwrap(), stamp);
+        // First cleanup removed another session, so one further turn must
+        // establish actual zero-cleanup completion before the read-only gate.
+        cache.remember_session(mailbox, &[id(2)]);
+        assert!(cache.session_cleaned);
+        assert!(!source.has_changed().unwrap());
+        let admitted = event(&device);
+        let inner = admitted.id;
+        log.append_durable(admitted).unwrap();
+        assert!(
+            source.has_changed().unwrap(),
+            "real admitted history must retain source notification"
+        );
+        let _ = *source.borrow_and_update();
+        cache.remember_progress(mailbox, std::iter::once((id(2), Some(inner))));
+        assert!(
+            !source.has_changed().unwrap(),
+            "changed TEMP inner binding remains derived progress"
+        );
+        assert!(cache.seen(mailbox, &log).unwrap().contains(&id(2)));
+        log.drop_conversation(&mailbox).unwrap();
+        assert!(
+            source.has_changed().unwrap(),
+            "real source retirement must still wake observers"
+        );
+        assert!(
+            cache.seen(mailbox, &log).unwrap().is_empty(),
+            "a TEMP hint cannot invent retained inner history"
+        );
+    }
+
+    #[test]
+    fn unchanged_cleaned_session_progress_preserves_cached_statement_and_row_counts() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events");
+        let device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let owner = profile(root.path(), &device, &account);
+        let mut cache = OpaqueReceiveCache::open(
+            owner.clone(),
+            &path,
+            "pw",
+            &device.public(),
+            &account.account_id(),
+        );
+        let mailbox = ConversationId::new([1; 32]);
+        cache.remember_session(mailbox, &[id(2)]);
+        assert!(cache.session_cleaned);
+        let counters = || {
+            owner
+                .database()
+                .read(|c| {
+                    let mut statement = c.prepare_cached(
+                        "SELECT records FROM temp.opaque_runtime_session_usage WHERE singleton=1",
+                    )?;
+                    let records: i64 = statement.query_row([], |row| row.get(0))?;
+                    Ok((
+                        c.total_changes(),
+                        statement.get_status(rusqlite::StatementStatus::RePrepare),
+                        records,
+                    ))
+                })
+                .unwrap()
+        };
+        let before = counters();
+        let source = owner.database().subscribe_source_changes();
+        for _ in 0..16 {
+            cache.remember_session(mailbox, &[id(2)]);
+        }
+        let after = counters();
+        assert_eq!(
+            after, before,
+            "an unchanged cleaned page must neither mutate rows nor expire/reprepare cached SQL"
+        );
+        assert!(!source.has_changed().unwrap());
+        // A changed value must reach the guarded transaction and remain
+        // observable to the preflight on the next call.
+        cache.remember_progress(mailbox, std::iter::once((id(2), Some(id(55)))));
+        assert_eq!(owner.database().read(|c| Ok(c.query_row(
+            "SELECT inner_id FROM temp.opaque_runtime_session_hints WHERE mailbox=?1 AND outer_id=?2 AND session=?3",
+            params![mailbox.as_bytes().as_slice(), id(2).as_bytes().as_slice(), cache.session.as_slice()],
+            |row| row.get::<_, Vec<u8>>(0))?)).unwrap(), id(55).as_bytes().to_vec());
+        let changed = counters();
+        assert!(changed.0 > after.0);
+        assert!(
+            changed.1 > after.1,
+            "genuine hint mutation must still install the closed transaction guard"
+        );
     }
 
     #[test]

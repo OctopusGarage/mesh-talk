@@ -3317,3 +3317,127 @@ fn nonlocal_metadata_gate_preserves_stale_source_and_owner_recovery() {
         "retired owner must not suppress or recreate replacement work"
     );
 }
+
+#[test]
+fn absent_conversation_metadata_demand_is_read_only_and_later_membership_recovers() {
+    let fixture = Fixture::new(0);
+    let channel = ConversationId::new([84; 32]);
+    let store = &fixture.store;
+    let db = store.profile.database();
+    let repository = fixture.log.repository().unwrap();
+    assert!(repository.metadata(&channel).unwrap().is_none());
+    assert!(store.current_state(channel).unwrap().is_none());
+    let before = db.read(|c| Ok(c.total_changes())).unwrap();
+    for _ in 0..8 {
+        store.queue_metadata_runtime(channel).unwrap();
+        store.finish_runtime(channel, None).unwrap();
+    }
+    assert_eq!(
+        db.read(|c| Ok(c.total_changes())).unwrap(),
+        before,
+        "absent source and absent checkpoint must not recreate and delete metadata demand"
+    );
+
+    // The negative scheduling read cannot consume existing receiver ownership.
+    store.queue_runtime(channel).unwrap();
+    store.queue_metadata_runtime(channel).unwrap();
+    assert!(
+        db.read(|c| Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+            [channel.as_bytes().as_slice()],
+            |r| r.get::<_, bool>(0),
+        )?))
+        .unwrap()
+    );
+    store.finish_runtime(channel, None).unwrap();
+
+    // A later signed append owns its normal source wake. The source scanner
+    // commits dirty demand, receiver demand and its ordinal together.
+    let mut changes = db.subscribe_source_changes();
+    let _ = *changes.borrow_and_update();
+    let genesis = Event::new(
+        &fixture.sender,
+        channel,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "new retained source".into(),
+            members: vec![fixture.sender.public(), fixture.me.public()],
+            epoch: 0,
+            owner: fixture.sender.user_id(),
+        }
+        .encode(),
+    );
+    repository.append(&genesis).unwrap();
+    assert!(
+        changes.has_changed().unwrap(),
+        "real append must preserve the source invalidation"
+    );
+    for _ in 0..128 {
+        if !store.discover_step(repository).unwrap() {
+            break;
+        }
+    }
+    assert!(
+        db.read(|c| Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+            [channel.as_bytes().as_slice()],
+            |r| r.get::<_, bool>(0),
+        )?))
+        .unwrap(),
+        "source discovery must recover demand after the earlier empty read"
+    );
+    for _ in 0..128 {
+        if store
+            .project_step(repository, &fixture.me, channel)
+            .unwrap()
+        {
+            assert!(store.current_state(channel).unwrap().is_some());
+            return;
+        }
+    }
+    panic!("new membership source did not project");
+}
+
+#[test]
+fn absent_metadata_gate_preserves_retirement_cleanup_and_retired_owner_errors() {
+    let fixture = Fixture::new(0);
+    fixture.project();
+    let store = &fixture.store;
+    let db = store.profile.database();
+    store.finish_runtime(fixture.channel, None).unwrap();
+    fixture
+        .log
+        .repository()
+        .unwrap()
+        .drop_conversation(&fixture.channel)
+        .unwrap();
+    store.queue_metadata_runtime(fixture.channel).unwrap();
+    assert!(
+        db.read(|c| Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+            [fixture.channel.as_bytes().as_slice()],
+            |r| r.get::<_, bool>(0),
+        )?))
+        .unwrap(),
+        "retired source/checkpoint is cleanup, not an absent never-created conversation"
+    );
+    let absent = ConversationId::new([85; 32]);
+    db.transaction(|c| {
+        c.execute(
+            "UPDATE participant_event_ownership SET generation=generation+1 WHERE singleton=1",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let before = db.read(|c| Ok(c.total_changes())).unwrap();
+    assert!(matches!(
+        store.queue_metadata_runtime(absent),
+        Err(LogError::StaleCursor)
+    ));
+    assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), before);
+}
