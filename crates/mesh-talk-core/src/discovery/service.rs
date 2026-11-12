@@ -607,6 +607,9 @@ const SCAN_MAX_INTERVAL: Duration = Duration::from_secs(10);
 const SCAN_SWEEP_BUDGET: Duration = Duration::from_secs(2);
 const SCAN_MAX_TARGETS: usize = 512;
 const SCAN_PACKET_SPACING: Duration = Duration::from_millis(2);
+const SCAN_QUIET_INTERVAL: Duration = Duration::from_secs(300);
+const KNOWN_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+const KNOWN_READY_BATCH: usize = 64;
 
 /// Unicast-UDP /24 scan fallback (the analog of LocalSend's HTTP /24 scan, adapted
 /// to our fixed UDP discovery port). For each local non-loopback IPv4 interface,
@@ -638,6 +641,18 @@ async fn run_scan_with_visibility(
     trigger: Option<Arc<Notify>>,
     visibility: Arc<DiscoveryVisibility>,
 ) {
+    run_scan_with_roster(socket, announce, discovery_port, trigger, visibility, None).await;
+}
+
+async fn run_scan_with_roster(
+    socket: Arc<UdpSocket>,
+    announce: SharedAnnounce,
+    discovery_port: u16,
+    trigger: Option<Arc<Notify>>,
+    visibility: Arc<DiscoveryVisibility>,
+    roster: Option<Arc<Mutex<Roster>>>,
+) {
+    let mut visibility_changes = visibility.subscribe_changes();
     let mut cursor = 0usize;
     let started = tokio::time::Instant::now();
     for delay in SCAN_STARTUP_DELAYS_SECS {
@@ -646,11 +661,14 @@ async fn run_scan_with_visibility(
             if let Some(notify) = &trigger {
                 tokio::select! {
                     _ = tokio::time::sleep_until(deadline) => break,
-                    _ = notify.notified() => {}
+                    _ = notify.notified() => {},
+                    changed = visibility_changes.changed() => { if changed.is_err() { return; } }
                 }
             } else {
-                tokio::time::sleep_until(deadline).await;
-                break;
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    changed = visibility_changes.changed() => { if changed.is_err() { return; } }
+                }
             }
             let bytes = current_announce(&announce);
             scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility, &mut cursor)
@@ -659,6 +677,67 @@ async fn run_scan_with_visibility(
         let bytes = current_announce(&announce);
         scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility, &mut cursor).await;
     }
+    if let Some(roster) = roster {
+        let mut full_at = tokio::time::Instant::now() + SCAN_QUIET_INTERVAL;
+        let mut known_at = tokio::time::Instant::now();
+        let mut known_cursor = 0usize;
+        let mut known_remaining = 0usize;
+        loop {
+            let triggered = match &trigger {
+                Some(notify) => tokio::select! {
+                    _ = tokio::time::sleep_until(full_at.min(known_at)) => false,
+                    _ = notify.notified() => true,
+                    changed = visibility_changes.changed() => { if changed.is_err() { return; } true },
+                },
+                None => tokio::select! {
+                    _ = tokio::time::sleep_until(full_at.min(known_at)) => false,
+                    changed = visibility_changes.changed() => { if changed.is_err() { return; } true },
+                },
+            };
+            if triggered || tokio::time::Instant::now() >= full_at {
+                let bytes = current_announce(&announce);
+                scan_once_with_visibility(
+                    &socket,
+                    &bytes,
+                    discovery_port,
+                    &visibility,
+                    &mut cursor,
+                )
+                .await;
+                full_at = tokio::time::Instant::now() + SCAN_QUIET_INTERVAL;
+            }
+            if tokio::time::Instant::now() >= known_at {
+                let complete = if visibility.is_public().await {
+                    let targets = known_discovery_targets(
+                        &roster.lock().expect("roster mutex"),
+                        discovery_port,
+                    );
+                    let bytes = current_announce(&announce);
+                    send_known_keepalives(
+                        &socket,
+                        &bytes,
+                        &targets,
+                        &visibility,
+                        &mut known_cursor,
+                        &mut known_remaining,
+                    )
+                    .await
+                } else {
+                    true
+                };
+                // A timed-out batch retains its fair cursor and resumes without
+                // another five-second delay. No child outlives this producer.
+                known_at = tokio::time::Instant::now()
+                    + if complete {
+                        KNOWN_KEEPALIVE_INTERVAL
+                    } else {
+                        Duration::from_millis(10)
+                    };
+            }
+        }
+    }
+    // Standalone run_scan has no roster owner. Preserve its historical fallback
+    // cadence; every production desktop/headless spawn supplies the existing roster.
     let mut idle_sweeps = 0u32;
     loop {
         let ceiling = SCAN_STEADY_INTERVAL
@@ -687,6 +766,71 @@ async fn run_scan_with_visibility(
         let bytes = current_announce(&announce);
         scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility, &mut cursor).await;
     }
+}
+
+// Roster cardinality and per-peer routes are bounded by their existing owner.
+// Use observed direct discovery IPs, never advertised TCP ports, gateway routes,
+// post-office introductions, private authenticated routes or arbitrary history.
+fn known_discovery_targets(roster: &Roster, port: u16) -> Vec<SocketAddr> {
+    roster
+        .peers()
+        .into_iter()
+        .flat_map(|peer| peer.routes)
+        .filter(|route| {
+            matches!(
+                route.source,
+                crate::discovery::roster::RouteSource::Lan
+                    | crate::discovery::roster::RouteSource::Discovery
+            )
+        })
+        .filter_map(|route| match route.addr.ip() {
+            IpAddr::V4(ip) => Some(SocketAddr::new(ip.into(), port)),
+            IpAddr::V6(_) => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+async fn send_known_keepalives(
+    socket: &UdpSocket,
+    bytes: &[u8],
+    targets: &[SocketAddr],
+    visibility: &DiscoveryVisibility,
+    cursor: &mut usize,
+    remaining: &mut usize,
+) -> bool {
+    if targets.is_empty() {
+        *cursor = 0;
+        *remaining = 0;
+        return true;
+    }
+    let start = *cursor % targets.len();
+    if *remaining == 0 || *remaining > targets.len() {
+        *remaining = targets.len();
+    }
+    let count = *remaining;
+    let mut visited = 0;
+    let _ = tokio::time::timeout(SCAN_SWEEP_BUDGET, async {
+        for offset in 0..count {
+            if offset != 0 && offset % KNOWN_READY_BATCH == 0 {
+                tokio::task::yield_now().await;
+            }
+            let target = targets[(start + offset) % targets.len()];
+            visited += 1;
+            if matches!(
+                visibility.send_announce(socket, bytes, target).await,
+                Ok(false)
+            ) && !visibility.is_public().await
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    *cursor = start.wrapping_add(visited);
+    *remaining = remaining.saturating_sub(visited);
+    *remaining == 0
 }
 
 /// The set of /24 hosts to scan for a given own address: `x.y.z.1..=254` minus
@@ -737,6 +881,9 @@ async fn scan_once_with_visibility(
     visibility: &DiscoveryVisibility,
     cursor: &mut usize,
 ) {
+    if !visibility.is_public().await {
+        return;
+    }
     let interfaces = if visibility.physical_lan_only() {
         visibility.physical_ipv4_addrs()
     } else {
@@ -1012,7 +1159,7 @@ pub(crate) fn spawn_discovery_with_network_changes(
     let first_polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let listener = tokio::spawn(run_listen_with_routed(
         Arc::clone(&socket),
-        roster,
+        roster.clone(),
         self_user_id,
         Arc::clone(&announce),
         discovery_port,
@@ -1031,12 +1178,13 @@ pub(crate) fn spawn_discovery_with_network_changes(
     let broadcast = spawn_observed_ambient(broadcast, first_polls.clone());
     #[cfg(not(test))]
     let broadcast = tokio::spawn(broadcast);
-    let scan = run_scan_with_visibility(
+    let scan = run_scan_with_roster(
         Arc::clone(&socket),
         announce,
         discovery_port,
         Some(Arc::clone(&trigger)),
         visibility,
+        Some(roster),
     );
     #[cfg(test)]
     let scan = spawn_observed_ambient(scan, first_polls.clone());
@@ -1084,6 +1232,347 @@ mod privacy_tests;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn idle_discovery_keeps_known_unicast_lease_without_repeating_subnet_inventory() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let producer = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let discovery_port = receiver.local_addr().unwrap().port();
+        let identity = DeviceIdentity::generate();
+        let remote = DeviceIdentity::generate();
+        // TCP listener ports are deliberately unrelated to the UDP discovery port.
+        let own = Announce::new(&identity, "producer", 54321);
+        let peer = Announce::new(&remote, "receiver", 54322);
+        let roster = Arc::new(Mutex::new(Roster::default()));
+        roster
+            .lock()
+            .unwrap()
+            .update(&peer, "127.0.0.1".parse().unwrap(), &identity.user_id());
+        let received = Arc::new(Mutex::new(Roster::default()));
+        received
+            .lock()
+            .unwrap()
+            .update(&own, "127.0.0.1".parse().unwrap(), &remote.user_id());
+        let peer_socket = receiver.clone();
+        let producer_address = producer.local_addr().unwrap();
+        let heartbeat_bytes = encode(&peer);
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                peer_socket
+                    .send_to(&heartbeat_bytes, producer_address)
+                    .await
+                    .unwrap();
+            }
+        });
+        let listening = tokio::spawn(run_listen(
+            receiver.clone(),
+            received.clone(),
+            remote.user_id(),
+            shared_announce(&peer),
+            producer.local_addr().unwrap().port(),
+        ));
+        let inventories = Arc::new(AtomicUsize::new(0));
+        let visibility = Arc::new(DiscoveryVisibility::with_inventory(true, {
+            let inventories = inventories.clone();
+            move || {
+                inventories.fetch_add(1, Ordering::SeqCst);
+                vec![crate::discovery::scope::LanInterface {
+                    address: "127.0.0.2".parse().unwrap(),
+                    prefix: 24,
+                    index: None,
+                }]
+            }
+        }));
+        visibility.set_physical_lan_only(true).await;
+        let trigger = Arc::new(Notify::new());
+        let mut handles = spawn_discovery_with_routed(
+            producer,
+            roster,
+            shared_announce(&own),
+            identity.user_id(),
+            discovery_port,
+            Some(trigger.clone()),
+            visibility.clone(),
+            None,
+        );
+        // Interface-owner behavior has its own real notification tests. Keep
+        // this injected inventory stable independently of the host's adapters.
+        handles[3].abort();
+        let result = async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let baseline = inventories.load(Ordering::SeqCst);
+            let first_seen = received
+                .lock()
+                .unwrap()
+                .get(&identity.user_id())
+                .unwrap()
+                .last_seen;
+            // Roster public leases use std::Instant, so this proof uses wall
+            // time rather than a paused Tokio clock that cannot expire them.
+            tokio::time::sleep(Duration::from_secs(16)).await;
+            let observed = received
+                .lock()
+                .unwrap()
+                .get(&identity.user_id())
+                .unwrap()
+                .clone();
+            assert!(
+                observed.last_seen > first_seen,
+                "known discovery IP must receive keepalives"
+            );
+            assert!(
+                observed.presence_deadline(Instant::now()).is_some(),
+                "unicast-only public presence must remain current beyond its fifteen-second lease"
+            );
+            let extra = inventories.load(Ordering::SeqCst) - baseline;
+            assert!(
+                extra < 64,
+                "settled known peers must not enumerate/filter/send a full subnet every few seconds: {extra} inventory evaluations"
+            );
+            let before_trigger = inventories.load(Ordering::SeqCst);
+            trigger.notify_waiters();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while inventories.load(Ordering::SeqCst) < before_trigger + 200 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("manual/interface rescan trigger must bypass sparse fallback");
+            visibility.set_public(false).await;
+            let private_inventory = inventories.load(Ordering::SeqCst);
+            trigger.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                inventories.load(Ordering::SeqCst),
+                private_inventory,
+                "withdrawn visibility gates even triggered inventory work"
+            );
+            visibility.set_public(true).await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while inventories.load(Ordering::SeqCst) == private_inventory {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("restored visibility permits the next rescan immediately");
+            // Reuse the passive fixture's UDP listener for a newly joining
+            // identity. Its own startup scan must discover the settled producer.
+            listening.abort();
+            heartbeat.abort();
+            let late = DeviceIdentity::generate();
+            let late_proof = Announce::new(&late, "late joining device", 54323);
+            let late_roster = Arc::new(Mutex::new(Roster::default()));
+            handles.push(tokio::spawn(run_listen(
+                receiver.clone(),
+                late_roster.clone(),
+                late.user_id(),
+                shared_announce(&late_proof),
+                producer_address.port(),
+            )));
+            handles.push(tokio::spawn(run_scan_with_visibility(
+                receiver.clone(),
+                shared_announce(&late_proof),
+                producer_address.port(),
+                None,
+                visibility.clone(),
+            )));
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if late_roster
+                        .lock()
+                        .unwrap()
+                        .get(&identity.user_id())
+                        .is_some()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("late startup scan plus first-sight reply discovers a settled identity");
+        };
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
+        heartbeat.abort();
+        listening.abort();
+        let _ = heartbeat.await;
+        let _ = listening.await;
+        for handle in &handles {
+            handle.abort();
+        }
+        for handle in handles.drain(..) {
+            let _ = handle.await;
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_discovery_hidden_scan_does_not_enumerate_interfaces() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let inventories = Arc::new(AtomicUsize::new(0));
+        let visibility = Arc::new(DiscoveryVisibility::with_inventory(false, {
+            let inventories = inventories.clone();
+            move || {
+                inventories.fetch_add(1, Ordering::SeqCst);
+                vec![crate::discovery::scope::LanInterface {
+                    address: "127.0.0.2".parse().unwrap(),
+                    prefix: 24,
+                    index: None,
+                }]
+            }
+        }));
+        visibility.set_physical_lan_only(true).await;
+        let identity = DeviceIdentity::generate();
+        let worker = tokio::spawn(run_scan_with_visibility(
+            socket,
+            shared_announce(&Announce::new(&identity, "hidden", 54321)),
+            47474,
+            None,
+            visibility,
+        ));
+        let result = async {
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(2)).await;
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                inventories.load(Ordering::SeqCst),
+                0,
+                "hidden scan must gate before interface inventory and target construction"
+            );
+        };
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
+        worker.abort();
+        let _ = worker.await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_discovery_restoration_with_empty_roster_wakes_unknown_scan() {
+        let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visibility = Arc::new(DiscoveryVisibility::with_inventory(false, || {
+            vec![crate::discovery::scope::LanInterface {
+                address: "127.0.0.2".parse().unwrap(),
+                prefix: 24,
+                index: None,
+            }]
+        }));
+        visibility.set_physical_lan_only(true).await;
+        let identity = DeviceIdentity::generate();
+        let own = Announce::new(&identity, "restored", 54321);
+        let worker = tokio::spawn(run_scan_with_roster(
+            sender,
+            shared_announce(&own),
+            receiver.local_addr().unwrap().port(),
+            None,
+            visibility.clone(),
+            Some(Arc::new(Mutex::new(Roster::default()))),
+        ));
+        let result = async {
+            tokio::task::yield_now().await;
+            for _ in 0..9 {
+                tokio::time::advance(Duration::from_secs(1)).await;
+                for _ in 0..16 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            visibility.set_public(true).await;
+            let mut bytes = [0; 2048];
+            let (len, _) = tokio::time::timeout(
+                Duration::from_secs(1),
+                receiver.recv_from(&mut bytes),
+            )
+            .await
+            .expect(
+                "visibility restoration must not wait for three-hundred-second unknown-host repair",
+            )
+            .unwrap();
+            assert_eq!(decode(&bytes[..len]), Some(own));
+        };
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
+        worker.abort();
+        let _ = worker.await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_discovery_known_ready_batches_reach_tail_beyond_subnet_budget() {
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        // Maximum retained roster1024 x eight routes. The tail is well beyond
+        // the512unknown-target cap and cannot wait behind2ms-per-packet pacing.
+        let mut targets =
+            vec!["127.0.0.2:9".parse().unwrap(); crate::discovery::roster::MAX_PEERS * 8 - 64];
+        targets.extend(std::iter::repeat_n(receiver.local_addr().unwrap(), 64));
+        let mut cursor = 0;
+        let mut remaining = 0;
+        assert!(
+            send_known_keepalives(
+                &sender,
+                b"known",
+                &targets,
+                &DiscoveryVisibility::default(),
+                &mut cursor,
+                &mut remaining
+            )
+            .await
+        );
+        assert_eq!(cursor, targets.len());
+        assert_eq!(remaining, 0);
+        let mut bytes = [0; 32];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut bytes))
+            .await
+            .expect("bounded ready batches must reach known tail without another timer period")
+            .unwrap();
+        assert_eq!(&bytes[..len], b"known");
+    }
+
+    #[test]
+    fn idle_discovery_known_targets_use_udp_port_and_exclude_gateway_introductions() {
+        let mut roster = Roster::default();
+        let direct = Announce::new(&DeviceIdentity::generate(), "direct", 54321);
+        roster.update(&direct, "127.0.0.1".parse().unwrap(), "self");
+        let gateway = Announce::new_post_office_with_account(
+            &DeviceIdentity::generate(),
+            &crate::identity::account::Account::generate(),
+            "gateway only",
+            54322,
+        );
+        assert!(
+            roster
+                .update_gateway(&gateway, "127.0.0.2".parse().unwrap(), 54322, "self")
+                .accepted()
+        );
+        let introduced = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &crate::identity::account::Account::generate(),
+            "introduced only",
+            54323,
+        );
+        assert!(
+            roster
+                .update_relayed(&introduced, "127.0.0.3:54324".parse().unwrap(), "self")
+                .accepted()
+        );
+        assert_eq!(
+            known_discovery_targets(&roster, 47475),
+            vec!["127.0.0.1:47475".parse().unwrap()]
+        );
+    }
+
     #[tokio::test]
     async fn fallback_scan_paces_datagrams_instead_of_bursting_a_subnet() {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();

@@ -2070,6 +2070,7 @@ impl Node {
         mut channel: Option<SecureChannel<TcpStream>>,
     ) -> bool {
         if !self.relay_receive_allowed(&po.public) || !self.relay_retry_due(&po.public) {
+            self.observe_mailbox_work(super::work_observation::reason::DRAIN_RECEIVE_GATE, None);
             return false;
         }
         let relay_id = po.public.user_id();
@@ -2104,6 +2105,10 @@ impl Node {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(error) => {
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::DRAIN_GROUP_LOOKUP_FAILED,
+                            None,
+                        );
                         log::warn!("relay group membership lookup deferred: {error}");
                         success = false;
                         continue;
@@ -2125,11 +2130,31 @@ impl Node {
                     .await
                     .map(|_| ())
             };
-            if !matches!(
+            let result =
                 tokio::time::timeout(super::delivery_runtime::RELAY_EXCHANGE_TIMEOUT, attempt)
-                    .await,
-                Ok(Ok(()))
-            ) {
+                    .await;
+            let reason = match &result {
+                Ok(Ok(())) => None,
+                Ok(Err(super::session::SessionError::NoProgress)) => {
+                    Some(super::work_observation::reason::DRAIN_NO_PROGRESS)
+                }
+                Ok(Err(super::session::SessionError::Transport(_))) => {
+                    Some(super::work_observation::reason::DRAIN_TRANSPORT_FAILED)
+                }
+                Ok(Err(super::session::SessionError::Store(_))) => {
+                    Some(super::work_observation::reason::DRAIN_STORE_FAILED)
+                }
+                Ok(Err(
+                    super::session::SessionError::Serialization(_)
+                    | super::session::SessionError::UnexpectedMessage
+                    | super::session::SessionError::ResourceUnavailable,
+                )) => Some(super::work_observation::reason::DRAIN_PROTOCOL_FAILED),
+                Err(_) => Some(super::work_observation::reason::DRAIN_TIMEOUT),
+            };
+            if let Some(reason) = reason {
+                self.observe_mailbox_work(reason, None);
+            }
+            if !matches!(result, Ok(Ok(()))) {
                 success = false;
                 channel = None;
                 break;

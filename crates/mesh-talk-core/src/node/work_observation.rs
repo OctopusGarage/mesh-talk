@@ -26,20 +26,37 @@ const ROWS: usize = 64;
 
 const RECENT_IDS: usize = 4096;
 
-#[derive(Default)]
 struct ChurnObservation {
     counts: [u64; 32],
     queries: [u64; 28],
+    receive: [u64; 34],
     recent: HashSet<(ConversationId, EventId)>,
     fifo: VecDeque<(ConversationId, EventId)>,
     repeats: u64,
+}
+
+impl Default for ChurnObservation {
+    fn default() -> Self {
+        Self {
+            counts: [0; 32],
+            queries: [0; 28],
+            receive: [0; 34],
+            recent: HashSet::new(),
+            fifo: VecDeque::new(),
+            repeats: 0,
+        }
+    }
 }
 
 impl ChurnObservation {
     fn record(&mut self, class: usize, outer: Option<(ConversationId, EventId)>) {
         if let Some(count) = self.counts.get_mut(class) {
             *count = count.saturating_add(1);
-        } else if let Some(count) = self.queries.get_mut(class - 32) {
+        } else if class < 60 {
+            if let Some(count) = self.queries.get_mut(class - 32) {
+                *count = count.saturating_add(1);
+            }
+        } else if let Some(count) = self.receive.get_mut(class - 60) {
             *count = count.saturating_add(1);
         }
         if let Some(key) = outer {
@@ -106,6 +123,40 @@ impl OrderWorkObserver {
 
 // Static slots only; the output order is documented beside the summary.
 pub(in crate::node) mod reason {
+    pub const RECEIVE_DRAIN_START: usize = 60;
+    pub const RECEIVE_DRAIN_SUCCESS: usize = 61;
+    pub const RECEIVE_DRAIN_FAILED: usize = 62;
+    pub const RECEIVE_DRAIN_EMPTY: usize = 63;
+    pub const RECEIVE_NEGOTIATE_SUPPORTED: usize = 64;
+    pub const RECEIVE_NEGOTIATE_LEGACY: usize = 65;
+    pub const RECEIVE_NEGOTIATE_ERROR: usize = 66;
+    pub const RECEIVE_SCOPE_LIMIT: usize = 67;
+    pub const RECEIVE_REARM_OK: usize = 68;
+    pub const RECEIVE_REARM_ERROR: usize = 69;
+    pub const RECEIVE_WAIT_CHANGED: usize = 70;
+    pub const RECEIVE_WAIT_EQUAL: usize = 71;
+    pub const RECEIVE_WAIT_ERROR: usize = 72;
+    pub const RECEIVE_DRAIN_DIRTY: usize = 73;
+    pub const RECEIVE_SOURCE_WAKE: usize = 74;
+    pub const RECEIVE_NETWORK_RESTART: usize = 75;
+    pub const RECEIVE_POLICY_RESTART: usize = 76;
+    pub const RECEIVE_TOPOLOGY_CANCEL: usize = 77;
+    pub const RECEIVE_EXPLICIT_RESTART: usize = 78;
+    pub const RECEIVE_WATCH_ABORT: usize = 79;
+    pub const DRAIN_RECEIVE_GATE: usize = 80;
+    pub const DRAIN_GROUP_LOOKUP_FAILED: usize = 81;
+    pub const DRAIN_NO_PROGRESS: usize = 82;
+    pub const DRAIN_TRANSPORT_FAILED: usize = 83;
+    pub const DRAIN_STORE_FAILED: usize = 84;
+    pub const DRAIN_PROTOCOL_FAILED: usize = 85;
+    pub const DRAIN_TIMEOUT: usize = 86;
+    pub const CHANNEL_SYNC_OK_ZERO: usize = 87;
+    pub const CHANNEL_SYNC_OK_APPLIED: usize = 88;
+    pub const CHANNEL_SYNC_NO_PROGRESS: usize = 89;
+    pub const CHANNEL_SYNC_TRANSPORT_FAILED: usize = 90;
+    pub const CHANNEL_SYNC_TIMEOUT: usize = 91;
+    pub const CHANNEL_SYNC_STORE_FAILED: usize = 92;
+    pub const CHANNEL_SYNC_PROTOCOL_FAILED: usize = 93;
     pub const QUERY_STAMP_UNKNOWN: usize = 32;
     pub const QUERY_META_HIT: usize = 33;
     pub const QUERY_META_MISS: usize = 34;
@@ -204,9 +255,17 @@ impl Node {
         let age_ms = observer.started.elapsed().as_millis();
         let counts = observer.churn.counts;
         let queries = observer.churn.queries;
+        let receive = observer.churn.receive;
         let repeats = observer.churn.repeats;
         let recent = observer.churn.recent.len();
         drop(observer);
+        emit_info(
+            log::logger(),
+            format_args!(
+                "receive_work best_effort=true counts={:?} labels=drain_start,drain_success,drain_failed,drain_empty,negotiate_supported,negotiate_legacy,negotiate_error,scope_limit,rearm_ok,rearm_error,wait_changed,wait_equal,wait_error,drain_dirty,source_wake,network_restart,policy_restart,topology_cancel,explicit_restart,watch_abort,drain_receive_gate,drain_group_lookup_failed,drain_no_progress,drain_transport_failed,drain_store_failed,drain_protocol_or_resource_failed,drain_timeout,channel_sync_ok_zero,channel_sync_ok_applied,channel_sync_no_progress,channel_sync_transport_failed,channel_sync_timeout,channel_sync_store_failed,channel_sync_protocol_or_resource_failed age_ms={}",
+                receive, age_ms
+            ),
+        );
         if let Some(pages) = crate::storage::database::observe_page_writes() {
             emit_info(log::logger(), format_args!("{pages}"));
         }
@@ -431,6 +490,27 @@ mod tests {
         };
         emit_info(&disabled, format_args!("sql-page-work {}", 8));
         assert!(disabled.rows.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn receive_observation_has_independent_bounded_saturating_slots() {
+        let mut observation = ChurnObservation::default();
+        observation.record(reason::OUTER, None);
+        observation.record(reason::QUERY_META_HIT, None);
+        observation.record(reason::RECEIVE_DRAIN_START, None);
+        observation.record(reason::RECEIVE_WATCH_ABORT, None);
+        observation.record(reason::CHANNEL_SYNC_PROTOCOL_FAILED, None);
+        observation.record(100, None);
+        observation.record(usize::MAX, None);
+        assert_eq!(observation.counts[0], 1);
+        assert_eq!(observation.queries[1], 1);
+        assert_eq!(observation.receive[0], 1);
+        assert_eq!(observation.receive[19], 1);
+        assert_eq!(observation.receive[33], 1);
+        assert_eq!(observation.receive.iter().sum::<u64>(), 3);
+        observation.receive[0] = u64::MAX;
+        observation.record(reason::RECEIVE_DRAIN_START, None);
+        assert_eq!(observation.receive[0], u64::MAX);
     }
 
     #[test]

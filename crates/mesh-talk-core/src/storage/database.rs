@@ -14,6 +14,9 @@ use std::{
 use zeroize::Zeroizing;
 
 mod observation;
+pub(crate) use observation::ReadinessReason;
+#[cfg(test)]
+pub(crate) use observation::with_work_observation_for_test;
 mod query_scratch;
 mod selection_work;
 mod work_clock;
@@ -338,6 +341,19 @@ impl EncryptedDatabase {
     }
     pub(crate) fn work_observation_enabled(&self) -> bool {
         self.write_observer.is_some()
+    }
+    pub(crate) fn observe_readiness(&self, mask: u16) {
+        if let Some(observer) = &self.write_observer
+            && let Some(snapshot) = observation::record_readiness(observer, mask)
+        {
+            log::info!("{snapshot}");
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn readiness_counts_for_test(&self) -> Option<[u64; 16]> {
+        self.write_observer
+            .as_ref()
+            .map(|observer| observer.lock().unwrap().readiness_for_test())
     }
 
     pub(crate) fn physical_stats(&self) -> Result<PhysicalStats, LogError> {

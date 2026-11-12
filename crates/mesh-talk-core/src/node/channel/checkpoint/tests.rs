@@ -11,20 +11,20 @@ use crate::{
     storage::profile::ProfileStorageLease,
 };
 
-struct Fixture {
+pub(super) struct Fixture {
     _directory: tempfile::TempDir,
-    me: DeviceIdentity,
+    pub(super) me: DeviceIdentity,
     sender: DeviceIdentity,
     account: Account,
-    store: ChannelCheckpointStore,
-    log: PersistentEventLog,
+    pub(super) store: ChannelCheckpointStore,
+    pub(super) log: PersistentEventLog,
     received: ReceivedStore,
-    channel: ConversationId,
+    pub(super) channel: ConversationId,
     genesis: EventId,
     messages: Vec<Event>,
 }
 impl Fixture {
-    fn new(count: usize) -> Self {
+    pub(super) fn new(count: usize) -> Self {
         Self::with_ciphertext(count, |_, bytes| bytes)
     }
     fn with_ciphertext(count: usize, transform: impl FnMut(usize, Vec<u8>) -> Vec<u8>) -> Self {
@@ -133,7 +133,7 @@ impl Fixture {
             messages,
         }
     }
-    fn project(&self) {
+    pub(super) fn project(&self) {
         // Projection now admits one canonical header per turn. The receive-gap
         // fixture intentionally exceeds MAX_SKIP, so setup's progress guard
         // must scale with its signed rows rather than assuming batched replay.

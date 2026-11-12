@@ -1,5 +1,6 @@
 //! Participant-owned mailbox watches; hints invalidate, existing drains ingest.
 use super::*;
+use crate::node::work_observation::reason as work;
 use crate::postoffice::{MailboxWatchToken, opaque::RelayMailbox};
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 
@@ -82,11 +83,13 @@ impl Node {
         try_watch: bool,
         mut watch: Option<Watch>,
     ) -> Completion {
+        self.observe_mailbox_work(work::RECEIVE_DRAIN_START, None);
         if self.cached_peer_snapshot_async().await.is_err() {
             log::warn!("verified discovery cache update failed");
         }
         let peers = self.post_office_drain_peers();
         if peers.is_empty() {
+            self.observe_mailbox_work(work::RECEIVE_DRAIN_EMPTY, None);
             return Completion::Drain {
                 result: None,
                 watch: None,
@@ -116,14 +119,22 @@ impl Node {
                 )
                 .await;
                 match observed {
-                    Ok(Ok((Some(current), _))) => watch = Some(current),
+                    Ok(Ok((Some(current), _))) => {
+                        self.observe_mailbox_work(work::RECEIVE_NEGOTIATE_SUPPORTED, None);
+                        watch = Some(current);
+                    }
                     Ok(Ok((None, channel))) => {
+                        self.observe_mailbox_work(work::RECEIVE_NEGOTIATE_LEGACY, None);
                         legacy_channel = channel;
                         retry_watch = Some(WATCH_REPAIR);
                     }
-                    _ => retry_watch = Some(Duration::from_secs(30)),
+                    _ => {
+                        self.observe_mailbox_work(work::RECEIVE_NEGOTIATE_ERROR, None);
+                        retry_watch = Some(Duration::from_secs(30));
+                    }
                 }
             } else {
+                self.observe_mailbox_work(work::RECEIVE_SCOPE_LIMIT, None);
                 retry_watch = Some(WATCH_REPAIR);
             }
         }
@@ -141,6 +152,7 @@ impl Node {
                 .drain_one_post_office_with_channel(po, &peers, legacy_channel.take())
                 .await
             {
+                self.observe_mailbox_work(work::RECEIVE_DRAIN_FAILED, None);
                 return Completion::Drain {
                     result: Some(false),
                     watch: None,
@@ -163,10 +175,17 @@ impl Node {
             )
             .await;
             match rearmed {
-                Ok(Ok(current)) => watch = Some(current),
-                _ => retry_watch = Some(Duration::from_secs(30)),
+                Ok(Ok(current)) => {
+                    self.observe_mailbox_work(work::RECEIVE_REARM_OK, None);
+                    watch = Some(current);
+                }
+                _ => {
+                    self.observe_mailbox_work(work::RECEIVE_REARM_ERROR, None);
+                    retry_watch = Some(Duration::from_secs(30));
+                }
             }
         }
+        self.observe_mailbox_work(work::RECEIVE_DRAIN_SUCCESS, None);
         Completion::Drain {
             result: Some(true),
             watch,
@@ -250,6 +269,7 @@ impl Node {
                 tokio::select! {
                     finished = attempts.next(), if !attempts.is_empty() => {
                         if let Some((key, result)) = finished {
+                            let was_watching = watching.contains(&key);
                             active.retain(|k| k != &key);
                             watching.retain(|k| k != &key);
                             cancellations.retain(|(k,_)| k != &key);
@@ -257,7 +277,10 @@ impl Node {
                                 Ok(Completion::Drain { result, mut watch, retry_watch: delay }) => {
                                     let follow_up = dirty.contains(&key);
                                     dirty.retain(|k| k != &key);
-                                    if follow_up { watch = None; }
+                                    if follow_up {
+                                        self.observe_mailbox_work(work::RECEIVE_DRAIN_DIRTY, None);
+                                        watch = None;
+                                    }
                                     schedule.completed(key.clone(), result, tokio::time::Instant::now());
                                     if follow_up { schedule.due.retain(|(k,_)| k != &key); }
                                     if let Some(delay) = delay {
@@ -268,10 +291,19 @@ impl Node {
                                         watching.push(key.clone());
                                         let (abort, registration) = futures_util::future::AbortHandle::new_pair();
                                         cancellations.push((key.clone(), abort));
+                                        let node = &self;
                                         attempts.push(async move {
                                             let wait = async {
-                                                let tokens = tokio::time::timeout(WATCH_REPAIR+Duration::from_secs(10), super::super::session::mailbox_watch::wait(&mut channel, &tokens)).await.ok()?.ok()?;
-                                                Some((channel, tokens))
+                                                match tokio::time::timeout(WATCH_REPAIR+Duration::from_secs(10), super::super::session::mailbox_watch::wait(&mut channel, &tokens)).await {
+                                                    Ok(Ok(next)) => {
+                                                        node.observe_mailbox_work(if next == tokens { work::RECEIVE_WAIT_EQUAL } else { work::RECEIVE_WAIT_CHANGED }, None);
+                                                        Some((channel, next))
+                                                    },
+                                                    _ => {
+                                                        node.observe_mailbox_work(work::RECEIVE_WAIT_ERROR, None);
+                                                        None
+                                                    },
+                                                }
                                             };
                                             let result = futures_util::future::Abortable::new(wait, registration).await.map(Completion::Watch);
                                             (key, result)
@@ -288,6 +320,7 @@ impl Node {
                                     }
                                 }
                                 Err(_) => {
+                                    if was_watching { self.observe_mailbox_work(work::RECEIVE_WATCH_ABORT, None); }
                                     if dirty.contains(&key) {
                                         dirty.retain(|k| k != &key);
                                         schedule.due.retain(|(k,_)| k != &key);
@@ -297,8 +330,12 @@ impl Node {
                         }
                     }
                     _ = tokio::time::sleep_until(wake) => {}
-                    _ = self.post_office_receive_notify.notified() => break,
+                    _ = self.post_office_receive_notify.notified() => {
+                        self.observe_mailbox_work(work::RECEIVE_EXPLICIT_RESTART, None);
+                        break;
+                    },
                     _ = source.changed() => {
+                        self.observe_mailbox_work(work::RECEIVE_SOURCE_WAKE, None);
                         // A source update invalidates quietness, not valid work.
                         // Keep actual drains alive and coalesce one follow-up.
                         for key in active.iter().chain(watching.iter()) {
@@ -310,7 +347,10 @@ impl Node {
                         ready.clear();
                         schedule.due.clear();
                     },
-                    _ = network.changed() => break,
+                    _ = network.changed() => {
+                        self.observe_mailbox_work(work::RECEIVE_NETWORK_RESTART, None);
+                        break;
+                    },
                     _ = roster.changed() => {}
                 }
                 if generation
@@ -319,6 +359,7 @@ impl Node {
                         .generation
                         .load(std::sync::atomic::Ordering::SeqCst)
                 {
+                    self.observe_mailbox_work(work::RECEIVE_POLICY_RESTART, None);
                     break;
                 }
                 candidates = self.post_office_drain_candidates();
@@ -328,6 +369,7 @@ impl Node {
                     .collect::<Vec<_>>();
                 for (key, abort) in &cancellations {
                     if !current.contains(key) {
+                        self.observe_mailbox_work(work::RECEIVE_TOPOLOGY_CANCEL, None);
                         abort.abort();
                     }
                 }

@@ -3557,6 +3557,10 @@ impl Node {
                 });
                 let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
                     let Ok(mut conn) = node.privacy_sync_dial(peer.addr, &peer.public).await else {
+                        node.observe_mailbox_work(
+                            super::work_observation::reason::CHANNEL_SYNC_TRANSPORT_FAILED,
+                            None,
+                        );
                         return None;
                     };
                     #[cfg(test)]
@@ -3568,6 +3572,10 @@ impl Node {
                     let sharing = match node.shares_replica(&channel) {
                         Ok(sharing) => sharing,
                         Err(error) => {
+                            node.observe_mailbox_work(
+                                super::work_observation::reason::CHANNEL_SYNC_STORE_FAILED,
+                                None,
+                            );
                             log::warn!("channel replica export deferred: {error}");
                             return None;
                         }
@@ -3581,7 +3589,29 @@ impl Node {
                     node.trace_account_client(&peer.public, || {
                         format!("channel_recovery_sync_begin channel={channel:?}")
                     });
-                    let report = match request_round(&mut conn, &store, channel).await {
+                    let round = request_round(&mut conn, &store, channel).await;
+                    let reason = match &round {
+                        Ok(report) if report.applied > 0 => {
+                            super::work_observation::reason::CHANNEL_SYNC_OK_APPLIED
+                        }
+                        Ok(_) => super::work_observation::reason::CHANNEL_SYNC_OK_ZERO,
+                        Err(super::session::SessionError::NoProgress) => {
+                            super::work_observation::reason::CHANNEL_SYNC_NO_PROGRESS
+                        }
+                        Err(super::session::SessionError::Transport(_)) => {
+                            super::work_observation::reason::CHANNEL_SYNC_TRANSPORT_FAILED
+                        }
+                        Err(super::session::SessionError::Store(_)) => {
+                            super::work_observation::reason::CHANNEL_SYNC_STORE_FAILED
+                        }
+                        Err(
+                            super::session::SessionError::Serialization(_)
+                            | super::session::SessionError::UnexpectedMessage
+                            | super::session::SessionError::ResourceUnavailable,
+                        ) => super::work_observation::reason::CHANNEL_SYNC_PROTOCOL_FAILED,
+                    };
+                    node.observe_mailbox_work(reason, None);
+                    let report = match round {
                         Ok(report) => report,
                         Err(error) => {
                             log::warn!("channel recovery exchange deferred: {error}");
@@ -3604,6 +3634,12 @@ impl Node {
                     Some((report.applied, report.rejected.is_empty()))
                 })
                 .await;
+                if result.is_err() {
+                    node.observe_mailbox_work(
+                        super::work_observation::reason::CHANNEL_SYNC_TIMEOUT,
+                        None,
+                    );
+                }
                 #[cfg(test)]
                 node.trace_account_client(&peer.public, || {
                     let outcome = match &result {

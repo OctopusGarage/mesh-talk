@@ -47,6 +47,7 @@ fn decode(bytes: &[u8]) -> Result<Presentation, LogError> {
         .deserialize(bytes)
         .map_err(|e| invalid(&e.to_string()))
 }
+
 impl ChannelCheckpointStore {
     /// Avoid recreating completed metadata demand. This is only a scheduling
     /// hint: callers still run canonical, presentation and plaintext admission.
@@ -81,11 +82,103 @@ impl ChannelCheckpointStore {
                 ).map_err(Into::into)
             })
         })();
+        if self.profile.database().work_observation_enabled()
+            && matches!(&prepared, Ok(false) | Err(LogError::StaleCursor))
+        {
+            use crate::storage::database::ReadinessReason as Reason;
+            let mut mask = if matches!(&prepared, Err(LogError::StaleCursor)) {
+                Reason::Stale.mask()
+            } else {
+                0
+            };
+            // Best-effort explanation only; failure cannot affect the original
+            // scheduling decision or turn this observation into admission.
+            mask |= self
+                .metadata_readiness_mask(channel)
+                .unwrap_or_else(|_| Reason::Unavailable.mask());
+            self.profile.database().observe_readiness(mask);
+        }
         match prepared {
             Ok(true) => Ok(()),
             Ok(false) | Err(LogError::StaleCursor) => self.queue_runtime(channel),
             Err(error) => Err(error),
         }
+    }
+    fn metadata_readiness_mask(&self, channel: ConversationId) -> Result<u16, LogError> {
+        use crate::storage::database::ReadinessReason as Reason;
+        let base = self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            c.query_row(
+                "SELECT
+                NOT EXISTS(SELECT 1 FROM channel_current WHERE channel=?2),
+                EXISTS(SELECT 1 FROM channel_current WHERE channel=?2 AND owner_account<>?3),
+                EXISTS(SELECT 1 FROM channel_current p JOIN event_order_current o ON o.domain=?1 AND o.conversation=p.channel AND o.order_kind=0 WHERE p.channel=?2 AND p.source_job<>o.job),
+                EXISTS(SELECT 1 FROM channel_current p JOIN event_order_current o ON o.domain=?1 AND o.conversation=p.channel AND o.order_kind=0 WHERE p.channel=?2 AND p.source_revision<>o.source_revision),
+                EXISTS(SELECT 1 FROM channel_current p JOIN event_conversations e ON e.domain=?1 AND e.conversation=p.channel WHERE p.channel=?2 AND p.next_rank<>e.event_count),
+                NOT EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2),
+                EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2 AND owner_account<>?3),
+                EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2 AND generation<>?4),
+                EXISTS(SELECT 1 FROM channel_book_metadata m JOIN event_order_current o ON o.domain=?1 AND o.conversation=m.channel AND o.order_kind=0 WHERE m.channel=?2 AND m.job<>o.job),
+                NOT EXISTS(SELECT 1 FROM event_conversations WHERE domain=?1 AND conversation=?2)",
+                params![b"MeshPartEventsV1".as_slice(),channel.as_bytes().as_slice(),self.account.as_slice(),self.generation],
+                |r| {
+                    let reasons = [Reason::CurrentAbsent, Reason::CurrentAccount, Reason::CurrentJob,
+                        Reason::CurrentRevision, Reason::CurrentRank, Reason::MetadataAbsent,
+                        Reason::MetadataAccount, Reason::MetadataGeneration, Reason::MetadataJob,
+                        Reason::ConversationAbsent];
+                    let mut mask = 0;
+                    for (index, reason) in reasons.into_iter().enumerate() {
+                        if r.get::<_, bool>(index)? { mask |= reason.mask(); }
+                    }
+                    Ok(mask)
+                },
+            ).map_err(Into::into)
+        })?;
+        let source = match self.source_binding(channel) {
+            Ok(Some(source)) => source,
+            Ok(None) => return Ok(base | Reason::SourceAbsent.mask()),
+            Err(LogError::StaleCursor) => return Ok(base | Reason::Stale.mask()),
+            Err(_) => return Ok(base | Reason::Unavailable.mask()),
+        };
+        let (stamp, replica) = match self.presentation_stamps(&source) {
+            Ok(stamps) => stamps,
+            Err(LogError::StaleCursor) => return Ok(base | Reason::Stale.mask()),
+            Err(_) => return Ok(base | Reason::Unavailable.mask()),
+        };
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            self.check_source_on(c, &source)?;
+            let mask = c.query_row(
+                "SELECT
+                NOT EXISTS(SELECT 1 FROM channel_current WHERE channel=?2),
+                EXISTS(SELECT 1 FROM channel_current WHERE channel=?2 AND owner_account<>?3),
+                EXISTS(SELECT 1 FROM channel_current WHERE channel=?2 AND source_job<>?4),
+                EXISTS(SELECT 1 FROM channel_current WHERE channel=?2 AND source_revision<>?5),
+                EXISTS(SELECT 1 FROM channel_current p JOIN event_conversations e ON e.domain=?1 AND e.conversation=p.channel WHERE p.channel=?2 AND p.next_rank<>e.event_count),
+                NOT EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2),
+                EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2 AND owner_account<>?3),
+                EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2 AND generation<>?6),
+                EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2 AND job<>?4),
+                EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2 AND stamp<>?7),
+                EXISTS(SELECT 1 FROM channel_book_metadata WHERE channel=?2 AND replica_stamp<>?8),
+                NOT EXISTS(SELECT 1 FROM event_conversations WHERE domain=?1 AND conversation=?2)",
+                params![b"MeshPartEventsV1".as_slice(),channel.as_bytes().as_slice(),self.account.as_slice(),source.job.as_slice(),source.revision,self.generation,stamp,replica],
+                |r| {
+                    let reasons = [Reason::CurrentAbsent, Reason::CurrentAccount, Reason::CurrentJob,
+                        Reason::CurrentRevision, Reason::CurrentRank, Reason::MetadataAbsent,
+                        Reason::MetadataAccount, Reason::MetadataGeneration, Reason::MetadataJob,
+                        Reason::MetadataStamp, Reason::MetadataReplica, Reason::ConversationAbsent];
+                    let mut mask = 0;
+                    for (index, reason) in reasons.into_iter().enumerate() {
+                        if r.get::<_, bool>(index)? { mask |= reason.mask(); }
+                    }
+                    Ok(mask)
+                },
+            )?;
+            // The source can change between the original decision and this
+            // diagnostic snapshot. An all-matching snapshot is not a repair.
+            Ok(if mask | base == 0 { Reason::PredicateMoved.mask() } else { mask | base })
+        })
     }
     pub(in crate::node) fn prepared_history_policy(
         &self,
@@ -200,5 +293,105 @@ pub(super) fn install(
     }
     if presentation.transferred {
         book.transferred.insert((channel, own.to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    use crate::eventlog::sync::network::PreparationBudget;
+    use crate::storage::database::{ReadinessReason as Reason, with_work_observation_for_test};
+    fn prepare(fixture: &super::super::tests::Fixture) {
+        fixture.project();
+        for _ in 0..128 {
+            if fixture
+                .store
+                .prepare_presentation_step(
+                    fixture.log.repository().unwrap(),
+                    &fixture.me,
+                    fixture.channel,
+                    PreparationBudget::default(),
+                )
+                .unwrap()
+                .ready
+            {
+                return;
+            }
+        }
+        panic!("presentation fixture did not complete");
+    }
+
+    #[test]
+    fn readiness_diagnostics_preserve_real_queue_decisions_with_and_without_observation() {
+        for enabled in [false, true] {
+            let fixture =
+                with_work_observation_for_test(enabled, || super::super::tests::Fixture::new(0));
+            prepare(&fixture);
+            let store = &fixture.store;
+            let db = store.profile.database();
+            store.finish_runtime(fixture.channel, None).unwrap();
+            db.transaction(|c| {
+                c.execute(
+                    "DELETE FROM channel_book_metadata WHERE channel=?1",
+                    [fixture.channel.as_bytes().as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            let mask = store.metadata_readiness_mask(fixture.channel).unwrap();
+            assert_ne!(mask & Reason::MetadataAbsent.mask(), 0);
+            assert_eq!(mask & Reason::CurrentAbsent.mask(), 0);
+            let before = db.read(|c| Ok(c.total_changes())).unwrap();
+            store.queue_metadata_runtime(fixture.channel).unwrap();
+            assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), before + 1);
+            assert!(store.next_runtime(None).unwrap().is_some());
+            let counts = db.readiness_counts_for_test();
+            assert_eq!(counts.is_some(), enabled);
+            if let Some(counts) = counts {
+                assert!(counts[Reason::MetadataAbsent as usize] > 0);
+            }
+            store.finish_runtime(fixture.channel, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn readiness_masks_distinguish_current_and_metadata_mismatch_fields() {
+        let fixture = super::super::tests::Fixture::new(0);
+        prepare(&fixture);
+        let store = &fixture.store;
+        let db = store.profile.database();
+        db.transaction(|c| {
+            c.execute("UPDATE channel_current SET next_rank=next_rank+1 WHERE channel=?1", params![fixture.channel.as_bytes().as_slice()])?;
+            c.execute("UPDATE channel_book_metadata SET owner_account=?2,generation=generation+1,job=?3,stamp=stamp+1,replica_stamp=replica_stamp+1 WHERE channel=?1", params![fixture.channel.as_bytes().as_slice(),[0xffu8;32].as_slice(),[0xffu8;16].as_slice()])?;
+            Ok(())
+        }).unwrap();
+        let mask = store.metadata_readiness_mask(fixture.channel).unwrap();
+        for reason in [
+            Reason::CurrentRank,
+            Reason::MetadataAccount,
+            Reason::MetadataGeneration,
+            Reason::MetadataJob,
+            Reason::MetadataStamp,
+            Reason::MetadataReplica,
+        ] {
+            assert_ne!(mask & reason.mask(), 0);
+        }
+        assert_eq!(
+            mask & (Reason::CurrentAbsent.mask() | Reason::MetadataAbsent.mask()),
+            0
+        );
+        db.transaction(|c| {
+            c.execute("UPDATE channel_current SET owner_account=?2,source_job=?3,source_revision=source_revision+1 WHERE channel=?1", params![fixture.channel.as_bytes().as_slice(),[0xffu8;32].as_slice(),[0xffu8;16].as_slice()])?;
+            Ok(())
+        }).unwrap();
+        let mask = store.metadata_readiness_mask(fixture.channel).unwrap();
+        for reason in [
+            Reason::CurrentAccount,
+            Reason::CurrentJob,
+            Reason::CurrentRevision,
+            Reason::SourceAbsent,
+        ] {
+            assert_ne!(mask & reason.mask(), 0);
+        }
     }
 }

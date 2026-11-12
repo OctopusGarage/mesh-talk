@@ -1146,6 +1146,12 @@ Independent expiry/recheck clocks must not admit the full scan. Actual-owner
 quiet, continuation and recovery controls live in the
 [channel custody tests](../crates/mesh-talk-core/src/node/channels.rs).
 
+Separate known-peer lease renewal from unknown-host discovery. Sparse subnet
+recovery must not expire established peers, miss visibility restoration or truncate
+a large known-target tail. Gate hidden producers before OS inventory work and
+retain per-send disclosure checks. Real UDP and target-budget controls belong to
+the [discovery owner](../crates/mesh-talk-core/src/discovery/service.rs).
+
 Trace every consumer of a scheduling projection: relay-control retries, file
 continuations, profile publication, account access and receive maintenance must
 share canonical endpoint semantics. Equal projections preserve owners, completion

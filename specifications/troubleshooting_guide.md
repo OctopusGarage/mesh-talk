@@ -20,6 +20,7 @@ bridges have different reachability requirements.
 ### Peers Not Being Discovered
 
 **Symptoms:**
+
 - You can't see other users on the network
 - Other users can't see you
 - No peers appear in the contact list
@@ -65,13 +66,16 @@ bridges have different reachability requirements.
 ### Partial Discovery
 
 **Symptoms:**
+
 - Some peers are discovered, but not all
 - Inconsistent peer visibility
 
 **Solutions:**
+
 1. **Timing Issues**
    - Mesh-Talk re-announces over multicast every 2 seconds (with a startup burst)
-   - Wait ~10-15 seconds for all peers to appear
+   - Normally wait ~10-15 seconds for startup discovery. If the startup probes were
+     lost, use **Rescan** or allow up to five minutes for background subnet recovery.
    - Restart the application if peers still don't appear
 
 2. **Network Load**
@@ -83,12 +87,15 @@ bridges have different reachability requirements.
 ### TCP Port Conflicts
 
 **Symptoms:**
+
 - Error message: "Failed to bind to port"
 - Error message: "Address already in use"
 - Application fails to start
 
 **Solutions:**
+
 1. **Use a Different Port** (headless node)
+
    ```bash
    ./mesh-talk-node --keystore ~/.mesh-talk/node.keystore --password 'your-password' \
      --name "YourName" --port 7001
@@ -113,11 +120,13 @@ bridges have different reachability requirements.
 ### Connection Refused Errors
 
 **Symptoms:**
+
 - Error message: "Connection refused"
 - Unable to send messages to specific peers
 - Peers appear offline
 
 **Solutions:**
+
 1. **Verify Peer Status**
    - Ensure the peer application is running
    - Confirm that a LAN peer is reachable locally, or that the configured routed
@@ -140,11 +149,13 @@ bridges have different reachability requirements.
 ### Messages Not Sending
 
 **Symptoms:**
+
 - Messages appear to send but don't reach recipients
 - Error messages about failed delivery
 - Messages stay in "sending" status
 
 **Solutions:**
+
 1. **Check Peer Connections**
    - Verify that peers are online and connected
    - Restart the application to reestablish connections
@@ -160,11 +171,13 @@ bridges have different reachability requirements.
 ### Messages Not Receiving
 
 **Symptoms:**
+
 - No incoming messages despite peers being online
 - Delayed message delivery
 - Messages arrive out of order
 
 **Solutions:**
+
 1. **Verify Listening Port**
    - Ensure the application is listening on the correct port
    - Check the startup messages for port information
@@ -185,11 +198,13 @@ bridges have different reachability requirements.
 ### macOS Issues
 
 **Symptoms:**
+
 - Application blocked by Gatekeeper
 - Permission denied errors
 - Network discovery not working
 
 **Solutions:**
+
 1. **Gatekeeper Bypass**
    - Right-click the application and select "Open"
    - Or disable Gatekeeper temporarily:
@@ -208,11 +223,13 @@ bridges have different reachability requirements.
 ### Windows Issues
 
 **Symptoms:**
+
 - SmartScreen warnings
 - Missing WebView2 Runtime
 - Network discovery problems
 
 **Solutions:**
+
 1. **WebView2 Installation**
    - Download and install WebView2 from Microsoft's website
    - Or use the installer that includes WebView2
@@ -228,11 +245,13 @@ bridges have different reachability requirements.
 ### Linux Issues
 
 **Symptoms:**
+
 - Missing dependencies
 - AppImage not running
 - Desktop integration problems
 
 **Solutions:**
+
 1. **Install Dependencies**
    - For Debian/Ubuntu:
      ```bash
@@ -300,12 +319,15 @@ not needed.
 ### Rust Compilation Errors
 
 **Symptoms:**
+
 - Compilation fails with error messages
 - Missing dependencies
 - Version conflicts
 
 **Solutions:**
+
 1. **Update Rust Toolchain**
+
    ```bash
    rustup update
    ```
@@ -323,18 +345,22 @@ not needed.
 ### Node.js/NPM Issues
 
 **Symptoms:**
+
 - Frontend build failures
 - Missing npm packages
 - Version compatibility issues
 
 **Solutions:**
+
 1. **Update Node.js**
    - Ensure you're using Node.js 22 or higher
+
    ```bash
    node --version
    ```
 
 2. **Reinstall Dependencies**
+
    ```bash
    cd frontend
    rm -rf node_modules
@@ -351,11 +377,13 @@ not needed.
 ### High CPU Usage
 
 **Symptoms:**
+
 - Application consumes excessive CPU resources
 - System slowdown
 - Fan running loudly
 
 **Solutions:**
+
 1. **Reduce Network Activity**
    - Limit the number of simultaneous connections
    - Reduce message frequency
@@ -373,11 +401,13 @@ not needed.
 ### High Memory Usage
 
 **Symptoms:**
+
 - Application memory usage keeps growing
 - System running low on memory
 - Application becomes unresponsive
 
 **Solutions:**
+
 1. **Message Cache**
    - Mesh-Talk caches messages for performance
    - Restart the application to clear the cache
@@ -411,12 +441,14 @@ RUST_LOG=trace ./mesh-talk-node --keystore ~/.mesh-talk/node.keystore \
 ### Network Diagnostics
 
 1. **Check UDP Multicast Announces**
+
    ```bash
    # Listen for discovery packets on the multicast port
    sudo tcpdump -i any udp port 47474
    ```
 
 2. **Check TCP Connections**
+
    ```bash
    # List active TCP connections
    netstat -an | grep ESTABLISHED
@@ -437,6 +469,7 @@ Mesh-Talk anchors its data and configuration under the home directory:
 
 Per-account encrypted stores live under `~/.mesh-talk/accounts/<user_id>/`. Check these
 directories for:
+
 - Encrypted data stores (event logs, device/account keystores, ratchet + sender-key state)
 - Per-account history and config (`config_store`)
 - Log files

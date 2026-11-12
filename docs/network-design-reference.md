@@ -45,6 +45,18 @@ runtime. Network-namespace handoff acceptance and its limits are maintained in
 [routed discovery](routed-network-discovery.md#network-changes-and-recovery).
 Physical Wi-Fi/hotspot latency remains a separate hardware acceptance boundary.
 
+Production LAN discovery separates known-peer presence from unknown-host recovery.
+Startup scans at 1, 3 and 7 seconds, manual rescans, interface changes and visibility
+restoration retain prompt discovery. Thereafter, directly discovered IPv4 peers
+receive announcements on the discovery UDP port every five seconds; bounded ready
+batches retain fair continuation without subnet-scan packet pacing. Gateway and
+post-office introductions are not direct keepalive targets. Unknown-host subnet
+scans rotate on a 300-second fallback. If every startup packet is lost, first-contact
+repair can therefore take up to that fallback; a manual rescan remains immediate.
+The standalone low-level `run_scan` API has no roster owner and retains its legacy
+cadence. Every production desktop and headless discovery spawn supplies its roster.
+Visibility is checked before inventory work and again at each admitted send.
+
 ### Managed discovery ports
 
 Desktop discovery uses UDP 47474. Every managed post office uses dedicated UDP
