@@ -343,6 +343,11 @@ mod tests {
             .lock()
             .unwrap()
             .update(&announce, address, &node.user_id());
+        node.roster.lock().unwrap().update(
+            &announce,
+            "127.0.0.2".parse().unwrap(),
+            &node.user_id(),
+        );
         let turns = Arc::new(AtomicUsize::new(0));
         let idle = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed = Arc::new(AtomicUsize::new(0));
@@ -402,6 +407,26 @@ mod tests {
             before,
             "fresh-to-fresh discovery must not restart local publication/operation maintenance"
         );
+
+        for index in 0..4 {
+            let next_observation = observed.load(Ordering::Acquire) + 1;
+            let address = if index % 2 == 0 {
+                "127.0.0.2"
+            } else {
+                "127.0.0.1"
+            };
+            node.roster.lock().unwrap().update(
+                &announce,
+                address.parse().unwrap(),
+                &node.user_id(),
+            );
+            drive_to_idle(&mut owner, &idle, &observed, next_observation).await;
+            assert_eq!(
+                turns.load(Ordering::Acquire),
+                before,
+                "alternating already-known routes must not admit account maintenance"
+            );
+        }
 
         let moved = Announce::new(&peer, "Unrelated online peer", 21213);
         let next_observation = observed.load(Ordering::Acquire) + 1;

@@ -11981,7 +11981,7 @@ async fn modern_relay_receive_fixture(rearm_gap: bool) {
     let (b, mut inbox) = node(bd.path(), bob, ba, &ap);
     b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
     let relay = DeviceIdentity::generate();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
     let proof = Announce::new_post_office(&relay, "Modern", listener.local_addr().unwrap().port());
     let office = IndexedPostOffice::open_with_lease(
         ProfileStorageLease::acquire(rd.path()).unwrap(),
@@ -12016,6 +12016,17 @@ async fn modern_relay_receive_fixture(rearm_gap: bool) {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             &participant.user_id(),
         );
+    }
+    // Both signed observations refer to the same listener and provenance.
+    // Establish both usable routes before measuring unchanged work.
+    for ip in ["127.0.0.1", "127.0.0.2"] {
+        let socket = std::net::SocketAddr::new(ip.parse().unwrap(), proof.tcp_port);
+        let channel = b.privacy_sync_dial(socket, &proof.public()).await.unwrap();
+        drop(channel);
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&proof, ip.parse().unwrap(), &b.user_id());
     }
     let gap_event = if rearm_gap {
         let id = a
@@ -12076,12 +12087,62 @@ async fn modern_relay_receive_fixture(rearm_gap: bool) {
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
     let quiet = prepared.load(Ordering::SeqCst);
+    let canonical_routes = |peer: &crate::discovery::roster::PeerRecord| {
+        let mut routes: Vec<_> = peer
+            .routes
+            .iter()
+            .map(|r| (r.addr, r.source as u8))
+            .collect();
+        routes.sort_unstable();
+        routes
+    };
+    let initial = b
+        .roster
+        .lock()
+        .unwrap()
+        .get(&proof.user_id)
+        .unwrap()
+        .clone();
+    let routes = canonical_routes(&initial);
+    let mut preferred = initial.addr;
+    for index in 0..12 {
+        let ip = if index % 2 == 0 {
+            "127.0.0.1"
+        } else {
+            "127.0.0.2"
+        };
+        let peer = {
+            let mut roster = b.roster.lock().unwrap();
+            roster.update(&proof, ip.parse().unwrap(), &b.user_id());
+            roster.get(&proof.user_id).unwrap().clone()
+        };
+        assert_ne!(
+            peer.addr, preferred,
+            "known-route observations must exercise preferred flips"
+        );
+        assert_eq!(canonical_routes(&peer), routes);
+        preferred = peer.addr;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     tokio::time::sleep(Duration::from_secs(7)).await;
     assert_eq!(
         prepared.load(Ordering::SeqCst),
         quiet,
         "unchanged modern mailbox must not repeat consent preparation"
     );
+    b.roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.3".parse().unwrap(), &b.user_id());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while prepared.load(Ordering::SeqCst) == quiet {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a genuinely new endpoint must invalidate the parked watch");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let quiet = prepared.load(Ordering::SeqCst);
     // Exercise the same source notifier repeatedly through committed product
     // writes, then prove its dirty followup drains stop when writes stop.
     for index in 0..12 {

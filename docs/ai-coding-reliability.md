@@ -1127,6 +1127,13 @@ while preserving fresh reads and authority checks. The
 [contact policy tests](../src-tauri/src/contact_policy.rs) own size, corrupt-file,
 failed-read and persistence semantics; native I/O traces qualify the read-call cost.
 
+Remote rejection does not itself invalidate qualified local preparation. An
+existing bounded cache may retain it after a completed protocol outcome, with
+current source and authority checks on reuse; this never certifies remote
+acceptance. Best-effort hint maintenance must not replace the original failure.
+The [paged-session regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+own rejection, source/privacy invalidation and transport/cancellation cleanup.
+
 Coalescing must preserve semantic scope as well as queue size. Reusing a value
 must not claim a new read observation or suppress a pending result for another
 resource; retain independent publication order for peers and account metadata.

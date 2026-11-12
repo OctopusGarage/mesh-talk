@@ -2877,15 +2877,12 @@ impl Node {
                 .into_iter()
                 .map(|peer| {
                     let online = peer.presence_deadline(now).is_some_and(|at| at > now);
-                    let mut routes: Vec<_> = peer.routes.iter().map(|route| route.addr).collect();
-                    routes.sort_unstable();
-                    routes.dedup();
+                    let routes = peer.scheduling_endpoints();
                     (
                         peer.public,
                         peer.account_id,
                         peer.name,
                         peer.post_office,
-                        peer.addr,
                         routes,
                         online,
                     )

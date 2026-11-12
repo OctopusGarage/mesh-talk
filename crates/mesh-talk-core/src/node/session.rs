@@ -941,6 +941,10 @@ impl SyncProgress {
             && !made_progress
             && !remote_have.iter().any(|id| self.previous_push.contains(id))
         {
+            // The peer did not accept our push. Preserve only qualified local
+            // preparation, never remote acceptance; cache failure cannot replace
+            // the protocol outcome. I/O failures/cancellation still drop the view.
+            drop(backend.retain_custody_view(outgoing_view));
             return Err(SessionError::NoProgress);
         }
         let more_to_push = !followups.is_empty();
@@ -985,10 +989,13 @@ impl SyncProgress {
 
         let complete = !made_progress && !more_to_push;
         if !complete && round + 1 == MAX_SYNC_ROUNDS {
+            // All followups completed; the bounded-round failure also leaves
+            // unchanged local preparation reusable without claiming delivery.
+            drop(backend.retain_custody_view(outgoing_view));
             return Err(SessionError::NoProgress);
         }
-        // Retain only after every followup was sent successfully. Changed
-        // source/policy rejects retention; failures/cancellation drop the lease.
+        // Retain after every followup was sent successfully. Changed
+        // source/policy rejects retention; I/O failures/cancellation drop the lease.
         // Repeated queries reuse preparation without retaining historical bodies.
         drop(backend.retain_custody_view(outgoing_view)?);
         Ok(complete)

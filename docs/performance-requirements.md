@@ -62,6 +62,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    runtime order where possible; retain durable pending/completion evidence and
    an explicit capacity fallback. Rechecking blocked work must not itself renew
    durable tickets indefinitely.
+   Compare canonical endpoint sets rather than preferred-route order. Renewing
+   an already-known route must not restart synchronization; actual topology,
+   role, account and privacy changes retain their invalidations.
    Advance semantic revisions only when their authoritative value changes.
    Replacing an identical binding map is not invalidation; actual removal and
    later restoration must each invalidate their preceding observation.

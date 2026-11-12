@@ -24,8 +24,7 @@ pub(super) struct FilePullPeer {
     public: crate::identity::device::PublicIdentity,
     account: Option<String>,
     post_office: bool,
-    preferred: std::net::SocketAddr,
-    routes: Vec<(std::net::SocketAddr, crate::discovery::roster::RouteSource)>,
+    routes: crate::discovery::roster::SchedulingEndpoints,
     fresh_until: Option<std::time::Instant>,
 }
 impl FilePullPeer {
@@ -33,7 +32,6 @@ impl FilePullPeer {
         self.public != next.public
             || self.account != next.account
             || self.post_office != next.post_office
-            || self.preferred != next.preferred
             || self.routes != next.routes
             || (self.fresh_until.is_none_or(|at| at <= now)
                 && next.fresh_until.is_some_and(|at| at > now))
@@ -48,17 +46,11 @@ impl Node {
             .into_iter()
             .map(|peer| {
                 let fresh_until = peer.presence_deadline(now);
-                let mut routes: Vec<_> = peer
-                    .routes
-                    .iter()
-                    .map(|route| (route.addr, route.source))
-                    .collect();
-                routes.sort_unstable_by_key(|route| (route.0, route.1 as u8));
+                let routes = peer.scheduling_endpoints();
                 FilePullPeer {
                     public: peer.public,
                     account: peer.account_id,
                     post_office: peer.post_office,
-                    preferred: peer.addr,
                     routes,
                     fresh_until,
                 }

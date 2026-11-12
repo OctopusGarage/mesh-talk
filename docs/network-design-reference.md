@@ -3479,6 +3479,15 @@ not requeue themselves. Targeted turns rotate across pending group identities
 in batches of at most eight and rotate selected peers independently of periodic
 fallback turns; two active groups and three selected peers remain the bounds.
 
+Background scheduling compares canonical endpoint/provenance sets, with a
+distinct legacy fallback when no route describes the explicit address. Renewals
+may reorder preferred dialing without creating work. Mailbox work identity also
+binds public identity, account, role and privacy generation; physical transport
+and session authentication remain keyed by the actual endpoint. Local prepared
+selections may survive a completed no-progress outcome under their existing
+bounded source/authority-qualified cache, without changing rejection or custody.
+Transport errors and cancellation still release operation-owned preparation.
+
 Durable state is authoritative. Notifications schedule reconciliation; they never
 serve as delivery proof, replace signed membership, or transfer plaintext authority.
 Per-domain coalescing watches retain only the newest generation. Desktop host

@@ -109,7 +109,27 @@ pub struct PeerRecord {
     pub last_seen: Instant,
 }
 
+/// Scheduling projection only: route provenance is retained, freshness/order are not.
+/// The fallback remains distinct instead of inventing provenance for legacy records.
+pub(crate) type SchedulingEndpoints = (Vec<(SocketAddr, u8)>, Option<SocketAddr>);
+
 impl PeerRecord {
+    pub(crate) fn scheduling_endpoints(&self) -> SchedulingEndpoints {
+        let canonical = |mut addr: SocketAddr| {
+            addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
+            addr
+        };
+        let mut routes: Vec<_> = self
+            .routes
+            .iter()
+            .map(|route| (canonical(route.addr), route.source as u8))
+            .collect();
+        routes.sort_unstable();
+        routes.dedup();
+        let preferred = canonical(self.addr);
+        let fallback = (!routes.iter().any(|(addr, _)| *addr == preferred)).then_some(preferred);
+        (routes, fallback)
+    }
     /// Fresh public observations, independently of preferred route or TCP success.
     /// The third value is the remaining monotonic lifetime in seconds.
     pub fn presence_evidence(&self, now: Instant) -> Vec<(RouteSource, u64, u64)> {

@@ -2744,6 +2744,101 @@ async fn requester_have_selection_reuse_loopback() {
     }
 }
 
+/// A completed rejection is not acceptance, but does not invalidate an unchanged
+/// local SQL selection. Repeated attempts must still exchange Have and fail.
+#[tokio::test]
+async fn requester_no_progress_reuses_only_local_preparation_loopback() {
+    use crate::discovery::Announce;
+    use crate::identity::account::Account;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = Arc::new(DeviceIdentity::generate());
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(), DeviceIdentity::generate(), Account::generate(), &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::conversation::dm_conversation_id(
+            &node.identity.public(), &peer.public(),
+        );
+        let event = Event::new(&node.identity, conversation, 1, vec![], 1, 0,
+            EventKind::Message, vec![7; 128]);
+        let id = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        while !node.log.lock().unwrap().repository().unwrap()
+            .prepare_kind_metadata_step(crate::eventlog::sync::network::PreparationBudget::default())
+            .unwrap().ready {}
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TABLE test_no_progress_counts(views INTEGER, rows INTEGER);
+                INSERT INTO test_no_progress_counts VALUES(0,0);
+                CREATE TEMP TRIGGER test_no_progress_admission AFTER INSERT ON participant_work.participant_sync_views
+                BEGIN UPDATE test_no_progress_counts SET views=views+1; END;
+                CREATE TEMP TRIGGER test_no_progress_row AFTER INSERT ON participant_work.participant_sync_rows
+                BEGIN UPDATE test_no_progress_counts SET rows=rows+1; END;")?;
+            Ok(())
+        }).unwrap();
+        let store = node.sync_store(&proof.public());
+        // Both completed failure exits must preserve the derived local plan.
+        for max_round in [false, false, true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = peer.clone();
+            let task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut channel = SecureChannel::accept(stream, &peer).await.unwrap();
+                for round in 0..if max_round { 1 } else { 2 } {
+                    assert!(matches!(decode(&channel.recv().await.unwrap()).unwrap(), SyncWire::Request(_)));
+                    let have = recv_have(&mut channel, true, conversation).await.unwrap();
+                    assert_eq!(have, vec![id]);
+                    channel.send(&encode(&SyncWire::Response(SyncResponse {
+                        conversation, events: vec![], have: vec![],
+                    })).unwrap()).await.unwrap();
+                    channel.send(&encode(&SyncWire::RespHave(HaveChunk {
+                        conversation, ids: vec![], more: false,
+                    })).unwrap()).await.unwrap();
+                    if round == 0 {
+                        let SyncWire::Followup(followup) = decode(&channel.recv().await.unwrap()).unwrap() else {
+                            panic!("expected unaccepted push");
+                        };
+                        assert_eq!(followup.events.iter().map(|e| e.id).collect::<Vec<_>>(), vec![id]);
+                    }
+                }
+                assert!(channel.recv().await.is_err(), "NoProgress must close without another push");
+            });
+            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let mut channel = SecureChannel::connect(stream, &node.identity, Some(&proof.public())).await.unwrap();
+            let mut progress = SyncProgress { started: true,
+                rounds: if max_round { MAX_SYNC_ROUNDS - 1 } else { 0 }, ..Default::default() };
+            if !max_round {
+                assert!(!progress.step_burst_paged(&mut channel, &store, conversation, 1).await.unwrap());
+            }
+            assert!(matches!(progress.step_burst_paged(&mut channel, &store, conversation, 1).await,
+                Err(SessionError::NoProgress)));
+            assert_eq!(progress.remote_have_count(), Some(0), "retained preparation must not invent acceptance");
+            drop(channel);
+            task.await.unwrap();
+            let counts = node.storage.database().read(|c| {
+                Ok(c.query_row("SELECT views, rows FROM test_no_progress_counts", [],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?)
+            }).unwrap();
+            assert_eq!(counts, (1, 1), "completed NoProgress discarded unchanged local preparation");
+        }
+        // Failed delivery cannot turn preparation into authority: changing the
+        // local source or privacy generation still rejects the retained plan.
+        let added = Event::new(&node.identity, conversation, 2, vec![id], 2, 0,
+            EventKind::Message, vec![8; 128]);
+        node.log.lock().unwrap().append_durable(added).unwrap();
+        assert!(NetworkSyncStore::take_custody_view(&mut *store.lock().unwrap(), &conversation).unwrap().is_none(),
+            "source append must invalidate NoProgress preparation");
+        let backend = PagedNetworkBackend(&store, None);
+        let view = backend::open_prepared_view(&backend, &conversation).await.unwrap();
+        assert!(backend.retain_custody_view(view).unwrap().is_none());
+        node.privacy.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(NetworkSyncStore::take_custody_view(&mut *store.lock().unwrap(), &conversation).unwrap().is_none(),
+            "privacy replacement must invalidate NoProgress preparation");
+    }).await.expect("NoProgress retention scenario timed out");
+}
+
 #[test]
 fn unsupported_selection_reuse_stays_conservative() {
     let (_dir, store, _, conversation) = tiny_fixture();

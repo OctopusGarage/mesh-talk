@@ -111,7 +111,30 @@ impl ChannelPlaintextRetry {
 
 const POST_OFFICE_DRAIN_INTERVAL: Duration = Duration::from_secs(3);
 const MAX_DRAIN_DUE_ENTRIES: usize = 256;
-type DrainKey = super::session_pool::PeerEndpointKey;
+// Work identity only. Physical sessions remain keyed by their exact dial endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DrainKey {
+    identity: crate::identity::device::PublicIdentity,
+    endpoints: crate::discovery::roster::SchedulingEndpoints,
+    account: Option<String>,
+    post_office: bool,
+    generation: u64,
+}
+
+impl Node {
+    fn drain_key(&self, peer: &PeerRecord) -> DrainKey {
+        DrainKey {
+            identity: peer.public.clone(),
+            endpoints: peer.scheduling_endpoints(),
+            account: peer.account_id.clone(),
+            post_office: peer.post_office,
+            generation: self
+                .privacy
+                .generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+}
 
 #[derive(Default)]
 struct PostOfficeDrainSchedule {
@@ -2681,7 +2704,7 @@ mod post_office_drain_schedule_tests {
                 let mut roster = crate::discovery::Roster::default();
                 roster.update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
                 let peer = roster.peers().into_iter().next().unwrap();
-                (node.peer_endpoint_key(peer.addr, &peer.public), peer)
+                (node.drain_key(&peer), peer)
             })
             .collect()
     }
@@ -2700,6 +2723,46 @@ mod post_office_drain_schedule_tests {
             &peer,
         )
         .0
+    }
+
+    #[test]
+    fn drain_work_identity_ignores_preference_but_preserves_endpoint_and_authority_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = node(dir.path());
+        let mut peer = candidates(&node, 1).remove(0).1;
+        let mut second = peer.routes[0].clone();
+        second.addr.set_ip("127.0.0.2".parse().unwrap());
+        peer.routes.push(second);
+        let original = node.drain_key(&peer);
+        peer.routes.reverse();
+        peer.addr = peer.routes[0].addr;
+        assert_eq!(node.drain_key(&peer), original);
+        let mut changed = peer.clone();
+        changed.routes.pop();
+        changed.addr = changed.routes[0].addr;
+        assert_ne!(node.drain_key(&changed), original);
+        changed = peer.clone();
+        changed.routes[0].source = crate::discovery::roster::RouteSource::Gateway;
+        assert_ne!(node.drain_key(&changed), original);
+        changed = peer.clone();
+        changed.account_id = Some("replacement".into());
+        assert_ne!(node.drain_key(&changed), original);
+        changed = peer.clone();
+        changed.post_office = false;
+        assert_ne!(node.drain_key(&changed), original);
+        changed = peer.clone();
+        changed.routes.clear();
+        let legacy = node.drain_key(&changed);
+        changed.addr.set_port(2);
+        assert_ne!(
+            node.drain_key(&changed),
+            legacy,
+            "legacy preferred-only records retain their endpoint"
+        );
+        node.privacy
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(node.drain_key(&peer), original);
     }
 
     #[test]

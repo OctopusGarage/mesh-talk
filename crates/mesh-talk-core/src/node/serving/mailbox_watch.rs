@@ -28,7 +28,7 @@ impl Node {
         let waiting = candidates
             .iter()
             .filter(|peer| {
-                let key = self.peer_endpoint_key(peer.addr, &peer.public);
+                let key = self.drain_key(peer);
                 !active.contains(&key) && !watching.contains(&key)
             })
             .map(|peer| peer.public.user_id())
@@ -203,7 +203,7 @@ impl Node {
                     .filter(|po| {
                         self.relay_receive_allowed(&po.public) && self.relay_retry_due(&po.public)
                     })
-                    .map(|po| (self.peer_endpoint_key(po.addr, &po.public), po.clone()))
+                    .map(|po| (self.drain_key(po), po.clone()))
                     .filter(|(key, _)| !watching.contains(key))
                     .collect::<Vec<_>>();
                 while let Some(index) =
@@ -217,9 +217,7 @@ impl Node {
                     let try_watch = candidates
                         .iter()
                         .take(super::super::session_pool::MAX_WATCH_CONNECTIONS)
-                        .any(|candidate| {
-                            self.peer_endpoint_key(candidate.addr, &candidate.public) == key
-                        })
+                        .any(|candidate| self.drain_key(candidate) == key)
                         && !retry_watch
                             .iter()
                             .any(|(k, at)| k == &key && *at > tokio::time::Instant::now());
@@ -326,7 +324,7 @@ impl Node {
                 candidates = self.post_office_drain_candidates();
                 let current = candidates
                     .iter()
-                    .map(|po| self.peer_endpoint_key(po.addr, &po.public))
+                    .map(|po| self.drain_key(po))
                     .collect::<Vec<_>>();
                 for (key, abort) in &cancellations {
                     if !current.contains(key) {
@@ -383,7 +381,7 @@ mod tests {
         let candidates = node.post_office_drain_candidates();
         assert_eq!(candidates.len(), 1);
         let now = tokio::time::Instant::now();
-        let key = node.peer_endpoint_key(candidates[0].addr, &candidates[0].public);
+        let key = node.drain_key(&candidates[0]);
         assert_eq!(
             node.parked_receive_deadline(&candidates, &[], &[key], now),
             now + WATCH_REPAIR

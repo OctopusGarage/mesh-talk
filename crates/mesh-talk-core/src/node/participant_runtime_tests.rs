@@ -274,13 +274,14 @@ async fn file_producer_ignores_presence_renewal_but_wakes_for_new_route() {
     let _ = node.file_pull_notify.notified().now_or_never();
     let peer = DeviceIdentity::generate();
     let announce = Announce::new(&peer, "synthetic peer", 12345);
-    let update = |announce: &Announce| {
+    let update = |announce: &Announce, ip: &str| {
         node.roster
             .lock()
             .unwrap()
-            .update(announce, "127.0.0.1".parse().unwrap(), &node.user_id());
+            .update(announce, ip.parse().unwrap(), &node.user_id());
     };
-    update(&announce);
+    update(&announce, "127.0.0.1");
+    update(&announce, "127.0.0.2");
     let mut network = node.network_changes.subscribe();
     let mut roster = node.subscribe_roster_changes();
     let mut available = node.subscribe_sibling_availability();
@@ -300,8 +301,15 @@ async fn file_producer_ignores_presence_renewal_but_wakes_for_new_route() {
             .await
             .is_err()
     );
-    for _ in 0..4 {
-        update(&announce);
+    for index in 0..4 {
+        update(
+            &announce,
+            if index % 2 == 0 {
+                "127.0.0.1"
+            } else {
+                "127.0.0.2"
+            },
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), &mut waiting)
                 .await
@@ -309,7 +317,7 @@ async fn file_producer_ignores_presence_renewal_but_wakes_for_new_route() {
             "unchanged presence must not restart storage and file authorization work"
         );
     }
-    update(&Announce::new(&peer, "synthetic peer", 12346));
+    update(&Announce::new(&peer, "synthetic peer", 12346), "127.0.0.1");
     assert!(
         tokio::time::timeout(Duration::from_secs(1), &mut waiting)
             .await
