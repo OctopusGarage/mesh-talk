@@ -68,6 +68,9 @@ impl ChannelCheckpointStore {
         if queued {
             return Ok(());
         }
+        // A complete current projection can prove the local device never joined.
+        // That path intentionally has no presentation. Reuse only its exact
+        // account/source/count qualification; this conveys no channel admission.
         let prepared = (|| -> Result<bool, LogError> {
             let Some(source) = self.source_binding(channel)? else {
                 return Ok(false);
@@ -76,7 +79,7 @@ impl ChannelCheckpointStore {
             self.profile.database().read(|c| {
                 self.check_source_on(c, &source)?;
                 c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM channel_current p JOIN event_conversations e ON e.domain=?1 AND e.conversation=p.channel JOIN channel_book_metadata m ON m.channel=p.channel WHERE p.channel=?2 AND p.owner_account=?3 AND p.source_job=?4 AND p.source_revision=?5 AND p.next_rank=e.event_count AND m.owner_account=?3 AND m.generation=?6 AND m.job=?4 AND m.stamp=?7 AND m.replica_stamp=?8)",
+                    "SELECT EXISTS(SELECT 1 FROM channel_current p JOIN event_conversations e ON e.domain=?1 AND e.conversation=p.channel LEFT JOIN channel_book_metadata m ON m.channel=p.channel WHERE p.channel=?2 AND p.owner_account=?3 AND p.source_job=?4 AND p.source_revision=?5 AND p.next_rank=e.event_count AND (p.known_local=0 OR (m.owner_account=?3 AND m.generation=?6 AND m.job=?4 AND m.stamp=?7 AND m.replica_stamp=?8)))",
                     params![b"MeshPartEventsV1".as_slice(),channel.as_bytes().as_slice(),self.account.as_slice(),source.job.as_slice(),source.revision,self.generation,stamp,replica],
                     |r| r.get(0),
                 ).map_err(Into::into)

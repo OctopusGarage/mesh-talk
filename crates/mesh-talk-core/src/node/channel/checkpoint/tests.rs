@@ -33,7 +33,15 @@ impl Fixture {
     fn with_payload_size(
         count: usize,
         body_len: usize,
+        transform: impl FnMut(usize, Vec<u8>) -> Vec<u8>,
+    ) -> Self {
+        Self::with_payload_size_membership(count, body_len, transform, true)
+    }
+    fn with_payload_size_membership(
+        count: usize,
+        body_len: usize,
         mut transform: impl FnMut(usize, Vec<u8>) -> Vec<u8>,
+        include_local: bool,
     ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let me = DeviceIdentity::generate();
@@ -63,7 +71,11 @@ impl Fixture {
         let channel = ConversationId::new([17; 32]);
         let meta = ChannelMeta {
             name: "checkpoint".into(),
-            members: vec![sender.public(), me.public()],
+            members: if include_local {
+                vec![sender.public(), me.public()]
+            } else {
+                vec![sender.public()]
+            },
             epoch: 0,
             owner: sender.public().user_id(),
         };
@@ -3181,5 +3193,127 @@ fn runtime_scheduling_keeps_work_hints_and_quiet_cached_plans_but_reopen_invalid
         db.work_hint_stamp().unwrap(),
         before_reopen,
         "runtime owner/source changes remain conservative fences"
+    );
+}
+
+#[test]
+fn completed_nonlocal_metadata_demand_stays_read_only_until_membership_changes() {
+    let fixture = Fixture::with_payload_size_membership(0, 0, |_, bytes| bytes, false);
+    fixture.project();
+    let store = &fixture.store;
+    let db = store.profile.database();
+    assert!(store.current_state(fixture.channel).unwrap().is_none());
+    assert!(store.source_binding(fixture.channel).unwrap().is_some());
+    let known: bool = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT known_local FROM channel_current WHERE channel=?1",
+                [fixture.channel.as_bytes().as_slice()],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(
+        !known,
+        "the signed fixture must establish real negative local membership"
+    );
+    store.finish_runtime(fixture.channel, None).unwrap();
+    let before = db.read(|c| Ok(c.total_changes())).unwrap();
+    for _ in 0..8 {
+        store.queue_metadata_runtime(fixture.channel).unwrap();
+        store.finish_runtime(fixture.channel, None).unwrap();
+    }
+    assert_eq!(
+        db.read(|c| Ok(c.total_changes())).unwrap(),
+        before,
+        "completed nonlocal projection must not recreate and delete metadata demand"
+    );
+    assert!(store.current_state(fixture.channel).unwrap().is_none());
+
+    let membership = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        3,
+        fixture.log.heads(&fixture.channel).unwrap(),
+        3,
+        3,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "now a local member".into(),
+            members: vec![fixture.sender.public(), fixture.me.public()],
+            epoch: 1,
+            owner: fixture.sender.user_id(),
+        }
+        .encode(),
+    );
+    fixture
+        .log
+        .repository()
+        .unwrap()
+        .append(&membership)
+        .unwrap();
+    store.queue_metadata_runtime(fixture.channel).unwrap();
+    assert!(
+        store.next_runtime(None).unwrap().is_some(),
+        "a new signed membership must invalidate negative scheduling evidence"
+    );
+    fixture.project();
+    assert!(store.current_state(fixture.channel).unwrap().is_some());
+    for _ in 0..128 {
+        if store
+            .prepare_presentation_step(
+                fixture.log.repository().unwrap(),
+                &fixture.me,
+                fixture.channel,
+                crate::eventlog::sync::network::PreparationBudget::default(),
+            )
+            .unwrap()
+            .ready
+        {
+            store.finish_runtime(fixture.channel, None).unwrap();
+            return;
+        }
+    }
+    panic!("new local membership presentation did not complete");
+}
+
+#[test]
+fn nonlocal_metadata_gate_preserves_stale_source_and_owner_recovery() {
+    let fixture = Fixture::with_payload_size_membership(0, 0, |_, bytes| bytes, false);
+    fixture.project();
+    let store = &fixture.store;
+    let db = store.profile.database();
+    store.finish_runtime(fixture.channel, None).unwrap();
+    db.transaction(|c| {
+        c.execute(
+            "UPDATE channel_current SET source_revision=source_revision+1 WHERE channel=?1",
+            [fixture.channel.as_bytes().as_slice()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    store.queue_metadata_runtime(fixture.channel).unwrap();
+    assert!(
+        store.next_runtime(None).unwrap().is_some(),
+        "a stale source must retain repair demand instead of claiming negative readiness"
+    );
+    store.finish_runtime(fixture.channel, None).unwrap();
+    db.transaction(|c| {
+        c.execute(
+            "UPDATE participant_event_ownership SET generation=generation+1 WHERE singleton=1",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let before = db.read(|c| Ok(c.total_changes())).unwrap();
+    assert!(matches!(
+        store.queue_metadata_runtime(fixture.channel),
+        Err(LogError::StaleCursor)
+    ));
+    assert_eq!(
+        db.read(|c| Ok(c.total_changes())).unwrap(),
+        before,
+        "retired owner must not suppress or recreate replacement work"
     );
 }

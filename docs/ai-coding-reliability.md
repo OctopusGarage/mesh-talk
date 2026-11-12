@@ -829,6 +829,19 @@ shared [retry owner](../crates/mesh-talk-core/src/node/delivery_retry.rs) cover
 unrelated wakes, cancelled reservations, replacement attempts, completed-step
 progress and capacity churn without retaining file payloads in cooldown hints.
 
+A scheduling readiness predicate must represent completed negative results as
+well as materialized positive output. A completely projected, current-source
+channel can prove that the local device never joined and therefore intentionally
+has no presentation row. Requiring that row recreates demand on every unchanged
+observation. Reuse the existing account/source/full-count evidence at the
+[metadata demand owner](../crates/mesh-talk-core/src/node/channel/checkpoint/presentation.rs);
+keep current membership and plaintext admission at their original consumers.
+The nonlocal-demand regressions in the
+[checkpoint tests](../crates/mesh-talk-core/src/node/channel/checkpoint/tests.rs)
+cover unchanged read-only demand, a later signed membership, stale sources and
+retired participant generations. Absence of a current row or a partially prepared
+reducer is not equivalent negative evidence.
+
 ## R06: Exact authority and stale completions
 
 When projecting account roles into device-shaped display fields, derive the
@@ -1404,7 +1417,6 @@ a same-color SVG disappear even though its paths render correctly. The
 and [theme alpha regression](../frontend/scripts/theme-alpha.test.mjs) preserve
 HSL transparency through the real CSS pipeline; native light/dark computed-style
 and visual checks remain separate acceptance evidence.
-
 
 A successful package-index command can still report failed repositories and use
 cached indexes. Release preparation must reuse the
