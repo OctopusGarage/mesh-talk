@@ -424,6 +424,7 @@ it("keeps repeated roster pages out of document and full group refreshes", async
     expect(commands).not.toContain("get_account_documents");
     expect(commands).not.toContain("owner_personal_conversation_states");
     expect(commands).toContain("list_peers");
+    expect(commands).not.toContain("list_accounts");
     expect(changes).toEqual(["roster", "roster", "roster"]);
     kinds = undefined;
     invoke.mockClear();
@@ -450,6 +451,221 @@ it("keeps repeated roster pages out of document and full group refreshes", async
     unsubscribe();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  }
+});
+
+it("reuses account reads for unchanged heartbeat facts and retries failed changes", async () => {
+  vi.useFakeTimers();
+  let peers = [
+    {
+      user_id: "a",
+      account_id: "friend",
+      name: "Friend",
+      post_office: false,
+      addr: "old",
+    },
+    {
+      user_id: "b",
+      account_id: "friend",
+      name: "Other",
+      post_office: false,
+      addr: "other",
+    },
+  ];
+  let fail = false;
+  let names = ["Initial"];
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_peers")
+      return Promise.resolve(peers.map((peer) => ({ ...peer })));
+    if (command === "list_accounts")
+      return fail
+        ? Promise.reject(new Error("read failed"))
+        : Promise.resolve([{ account_id: "friend", names, device_count: 2 }]);
+    return Promise.resolve([]);
+  });
+  const count = () =>
+    invoke.mock.calls.filter(([command]) => command === "list_accounts").length;
+  const heartbeat = async () => {
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    let before = count();
+    peers = peers.reverse().map((peer) => ({ ...peer, addr: "new" }));
+    await heartbeat();
+    await heartbeat();
+    expect(count()).toBe(before);
+    expect(useChat.getState().peers[0].addr).toBe("new");
+    for (const patch of [
+      { name: "Renamed" },
+      { user_id: "replacement" },
+      { account_id: "rebound" },
+      { post_office: true },
+    ]) {
+      peers = peers.map((peer, index) =>
+        index === 0 ? { ...peer, ...patch } : peer,
+      );
+      await heartbeat();
+      expect(count()).toBe(++before);
+    }
+    peers = peers.slice(1);
+    fail = true;
+    await heartbeat();
+    expect(count()).toBe(++before);
+    fail = false;
+    names = ["Recovered"];
+    await heartbeat();
+    expect(count()).toBe(++before);
+    expect(useChat.getState().accounts[0].names).toEqual(names);
+    await heartbeat();
+    expect(count()).toBe(before);
+    names = ["Offline profile update"];
+    await useChat.getState().refreshRoster();
+    expect(count()).toBe(++before);
+    expect(useChat.getState().accounts[0].names).toEqual(names);
+    useChat.setState((state) => ({ identityEpoch: state.identityEpoch + 1 }));
+    await heartbeat();
+    expect(count()).toBe(++before);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("ignores held account reads after runtime replacement without qualifying the replacement baseline", async () => {
+  vi.useFakeTimers();
+  let hold = false;
+  let finish!: (rows: unknown) => void;
+  let name = "Initial";
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_peers")
+      return Promise.resolve([
+        { user_id: "peer", account_id: "friend", name, post_office: false },
+      ]);
+    if (command === "list_accounts") {
+      if (hold) {
+        hold = false;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      }
+      return Promise.resolve([
+        { account_id: "friend", names: [name], device_count: 1 },
+      ]);
+    }
+    return Promise.resolve([]);
+  });
+  const heartbeat = async () => {
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    hold = true;
+    name = "Retired";
+    await heartbeat();
+    expect(finish).toBeDefined();
+    useChat.setState((state) => ({ identityEpoch: state.identityEpoch + 1 }));
+    name = "Replacement";
+    await heartbeat();
+    expect(useChat.getState().accounts[0].names).toEqual(["Replacement"]);
+    finish([{ account_id: "friend", names: ["Retired"], device_count: 1 }]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().accounts[0].names).toEqual(["Replacement"]);
+    const reads = invoke.mock.calls.filter(
+      ([command]) => command === "list_accounts",
+    ).length;
+    await heartbeat();
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "list_accounts"),
+    ).toHaveLength(reads);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("publishes held full account metadata after a newer heartbeat reuses the account roster", async () => {
+  vi.useFakeTimers();
+  let hold = false;
+  let addr = "old-route";
+  let finish!: (rows: unknown) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_peers")
+      return Promise.resolve([
+        {
+          user_id: "peer",
+          account_id: "friend",
+          name: "Friend",
+          post_office: false,
+          addr,
+        },
+      ]);
+    if (command === "list_accounts") {
+      if (hold)
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      return Promise.resolve([
+        { account_id: "friend", names: ["Old profile"], device_count: 1 },
+      ]);
+    }
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    hold = true;
+    const full = useChat.getState().refreshRoster();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(finish).toBeDefined();
+    addr = "new-route";
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().peers[0].addr).toBe("new-route");
+    finish([{ account_id: "friend", names: ["New profile"], device_count: 1 }]);
+    await full;
+    expect(useChat.getState().accounts[0].names).toEqual(["New profile"]);
+    expect(useChat.getState().peers[0].addr).toBe("new-route");
+  } finally {
+    stop();
+    vi.useRealTimers();
   }
 });
 
@@ -516,6 +732,19 @@ it("preserves fresh presence while a held full refresh still applies personal an
     ).toBe(true);
     expect(useChat.getState().historyBaselines).toContain("account:myacct");
     expect(useChat.getState().historyRevision).toBe(2);
+    const accountReads = invoke.mock.calls.filter(
+      ([command]) => command === "list_accounts",
+    ).length;
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "list_accounts"),
+    ).toHaveLength(accountReads);
   } finally {
     stop();
     vi.useRealTimers();

@@ -1282,7 +1282,8 @@ impl HiddenContactsState {
             return Err("Hidden contacts file is too large".into());
         }
         let snapshot: HiddenContactsSnapshot =
-            serde_json::from_reader(file).map_err(|_| "Invalid hidden contacts file")?;
+            serde_json::from_reader(std::io::BufReader::new(file))
+                .map_err(|_| "Invalid hidden contacts file")?;
         let mut accounts = HashSet::new();
         if snapshot.owner != owner
             || snapshot.contacts.len() + snapshot.deleted.len() > MAX_CONTACTS

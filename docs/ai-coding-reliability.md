@@ -1119,8 +1119,18 @@ existing frame, file, count, depth and byte limits. Preserve exact account/devic
 bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
 do not remove backpressure to make a benchmark look faster.
-Coalescing must preserve semantic scope as well as queue size. Retain bounded
-invalidation domains through pending-page ACKs; do not turn a roster pulse,
+
+Check read granularity as well as file size: streaming JSON parsers can turn
+each byte into an OS read. Use bounded buffering for files, as required by the
+[serde_json reader contract](https://docs.rs/serde_json/latest/serde_json/fn.from_reader.html),
+while preserving fresh reads and authority checks. The
+[contact policy tests](../src-tauri/src/contact_policy.rs) own size, corrupt-file,
+failed-read and persistence semantics; native I/O traces qualify the read-call cost.
+
+Coalescing must preserve semantic scope as well as queue size. Reusing a value
+must not claim a new read observation or suppress a pending result for another
+resource; retain independent publication order for peers and account metadata.
+Retain bounded invalidation domains through pending-page ACKs; do not turn a roster pulse,
 progress update or empty read into a global refresh. The native reception gate
 and registered IPC tests, together with the [chat consumer](../frontend/src/store/chat.test.ts),
 exercise quiet pages and changes arriving during acknowledgement.

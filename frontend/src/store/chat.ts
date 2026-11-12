@@ -701,6 +701,22 @@ let rosterObservationSequence = 0;
 let publishedRosterObservation = 0;
 let publishedIdentityObservation = 0;
 
+// Qualification for skipping a descriptive account read, never an authority cache.
+let publishedAccountRoster: {
+  projection: string;
+  observation: number;
+  current(): boolean;
+} | null = null;
+function accountRosterProjection(peers: PeerInfo[]): string {
+  return JSON.stringify(
+    peers
+      .map(({ user_id, account_id, name, post_office }) =>
+        JSON.stringify([user_id, account_id, name, post_office]),
+      )
+      .sort(),
+  );
+}
+
 async function refreshRosterSnapshot(
   rawSet: Set,
   get: Get,
@@ -761,9 +777,26 @@ async function refreshRosterSnapshot(
             : null,
         }));
     }
-    const [observedPeers, listedAccounts, personal] = await Promise.all([
-      readWithDeadline(() => chat.listPeers()),
-      readWithDeadline(() => chat.listAccounts()),
+    if (!publishedAccountRoster?.current()) publishedAccountRoster = null;
+    // Keep full reads concurrent. Heartbeats first inspect cheap discovery facts;
+    // route-only changes still publish peers without rereading account history/policy.
+    const observedPeers = presenceOnly
+      ? await readWithDeadline(() => chat.listPeers())
+      : null;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
+    const reuseAccounts =
+      presenceOnly &&
+      publishedAccountRoster?.current() &&
+      publishedAccountRoster.projection ===
+        accountRosterProjection(observedPeers!);
+    const [peersSnapshot, listedAccounts, personal] = await Promise.all([
+      observedPeers === null
+        ? readWithDeadline(() => chat.listPeers())
+        : Promise.resolve(observedPeers),
+      reuseAccounts
+        ? Promise.resolve(null)
+        : readWithDeadline(() => chat.listAccounts()),
       presenceOnly
         ? Promise.resolve(null)
         : readWithDeadline(() =>
@@ -782,9 +815,17 @@ async function refreshRosterSnapshot(
     // were read. Keep any newer published presence while still applying those
     // personal documents and continuing the full history reconciliation.
     const publishObservation = observation >= publishedRosterObservation;
-    const peers = publishObservation ? observedPeers : get().peers;
+    // Reusing accounts only observes presence. It must not supersede a pending
+    // full account read of durable metadata independent of discovery facts.
+    const publishAccounts =
+      listedAccounts !== null &&
+      (!publishedAccountRoster?.current() ||
+        observation >= publishedAccountRoster.observation);
+    const peers = publishObservation ? peersSnapshot : get().peers;
     const accounts = (
-      publishObservation ? listedAccounts : get().accounts
+      publishAccounts && listedAccounts !== null
+        ? listedAccounts
+        : get().accounts
     ).filter((account) => {
       const personal =
         get().personalConversationStates[`account:${account.account_id}`];
@@ -799,6 +840,12 @@ async function refreshRosterSnapshot(
     // Polling returns fresh arrays even when discovery has not changed. Preserve
     // the previous references so sidebar subscribers do not redraw every tick.
     if (publishObservation) publishedRosterObservation = observation;
+    if (publishAccounts)
+      publishedAccountRoster = {
+        projection: accountRosterProjection(peersSnapshot),
+        observation,
+        current: lease.current,
+      };
     const previous = get();
     const rosterChanged =
       JSON.stringify([previous.peers, previous.accounts]) !==
@@ -904,6 +951,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   setError: (msg) => rawSet({ error: msg }),
 
   resetForLock: () => {
+    publishedAccountRoster = null;
     setPushStateSupport(null);
     lastUnknownSenderRefresh = 0;
     rawSet((state) => ({

@@ -98,7 +98,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Gate unchanged producers using complete input revisions; acknowledge the
    selected revisions, retain failed work and schedule sparse integrity repair.
    Separate volatile evidence from stable projections: refresh presence without
-   rehydrating group history; validate a complete reply before caching its token.
+   rehydrating group history or rereading account rosters. Qualify reuse only after
+   successful current publication within the runtime owner; failures remain retryable.
+   Validate a complete reply before caching its token.
    Apply already-authoritative metadata exclusions before body reads, including
    inventory rows that a physical local group would later discard.
 
