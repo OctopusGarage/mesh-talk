@@ -1,0 +1,17 @@
+[Image #1] 为什么在mac 旧版本的，图标显示都这么奇怪了，感觉不兼容的感觉
+
+---
+
+macOS 旧版本
+
+---
+
+你ssh mac2015 to see
+
+---
+
+continue to fix and verify
+
+---
+
+commit and push
