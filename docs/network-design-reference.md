@@ -480,7 +480,12 @@ exact immutable recipient destination; `retry_scheduled` means that worker
 completed and the existing retry scheduler recorded its next eligible turn.
 Neither state establishes transport success, relay custody, recipient presence,
 delivery failure or a recipient receipt. The scheduler shares pacing across a
-peer's lane, so the observation does not promise a message-specific retry delay.
+peer's failure lane, so the observation does not promise a message-specific retry
+delay. Positive custody without recipient confirmation keeps the destination
+Awaiting and qualifies only that exact event/device for sparse five-minute
+reconciliation. Its bounded quiet hint must not suppress another already-queued
+event for the peer. New demand and changed route/policy inputs retain prompt
+admission; hint eviction permits extra checking without changing delivery truth.
 The worker can additionally attach an optional recovery reason to a completed
 attempt. `post_office_disabled` means no eligible direct peer was known and local
 post-office sending was disabled; `no_known_route` means neither an eligible

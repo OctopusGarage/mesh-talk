@@ -398,6 +398,12 @@ a quiet cursor. Sparse integrity repair rotates one bounded page; only new deman
 may drain the available backlog, as checked by
 [local maintenance](../crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs).
 
+Keep retry scope equal to the observed success scope: one destination's custody
+cannot quiet a peer's other queued destinations. The
+[delivery runtime](../crates/mesh-talk-core/src/node/delivery_runtime.rs) owns
+peer failure pacing separately from bounded exact-destination quiet hints;
+its real relay-replacement regression keeps both prequeued events eligible.
+
 Local admission pressure is a deferral, not remote failure or successful
 progress. Preserve learned failures while releasing only the exact reservation;
 only actual success or changed routes/authority may clear that evidence. The
@@ -1617,6 +1623,13 @@ one-way reads. Keep the required receiver owners live during preparation, or
 finish symmetric repair after all initial publications before measuring. Bind
 partial-page proof to the measured publication, exact live request and validated
 completion; startup pages cannot satisfy a later phase's continuation condition.
+
+Negative idle assertions must consume startup JoinSet results and retained wakes,
+then invalidate the old idle marker when the target event is observed. Await the
+owner's new idle boundary before counting admitted work; a retired worker or one
+cooperative poll cannot certify that its parent handled the event. The
+[account maintenance owner tests](../crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs)
+exercise the actual roster observation and post-event scheduling boundary.
 
 A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck

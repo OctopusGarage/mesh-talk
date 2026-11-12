@@ -689,7 +689,13 @@ async fn unchanged_direct_custody_does_not_keep_destination_retry_hot() {
     let sender_account = Account::generate();
     let recipient_account = Account::generate();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let sender_proof = Announce::new_with_account(&sender_identity, &sender_account, "sender", 9);
+    let sender_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sender_proof = Announce::new_with_account(
+        &sender_identity,
+        &sender_account,
+        "sender",
+        sender_listener.local_addr().unwrap().port(),
+    );
     let recipient_proof = Announce::new_with_account(
         &recipient_identity,
         &recipient_account,
@@ -716,6 +722,45 @@ async fn unchanged_direct_custody_does_not_keep_destination_retry_hot() {
     let control_seen = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
     let mut tasks = tokio::task::JoinSet::new();
+    // Discovery presence expires after fifteen seconds and is part of the
+    // retry route stamp. Keep this twenty-second unchanged-route observation
+    // supplied with the same valid signed heartbeat, as a live peer would be.
+    assert!(recipient_proof.valid_presence());
+    let observed = sender.clone();
+    let heartbeat = recipient_proof.clone();
+    tasks.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            observed.roster.lock().unwrap().update(
+                &heartbeat,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &observed.user_id(),
+            );
+        }
+    });
+    // Actual receiver-originated receipts must remain prompt while the sender
+    // parks unchanged custody. A synthetic local wake is not a remote receipt.
+    let inbound = sender.clone();
+    tasks.spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = sender_listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let inbound = inbound.clone();
+                    connections.spawn(async move {
+                        if let Ok(channel) = inbound.privacy_accept(stream).await {
+                            inbound.serve_connection(channel).await;
+                        }
+                    });
+                }
+                result = connections.join_next(), if !connections.is_empty() => {
+                    result.unwrap().unwrap();
+                }
+            }
+        }
+    });
     let receiver = recipient.clone();
     let counted = queries.clone();
     let seen = control_seen.clone();
@@ -761,13 +806,15 @@ async fn unchanged_direct_custody_does_not_keep_destination_retry_hot() {
         .await
         .unwrap();
     tasks.spawn(sender.clone().run_delivery_loop());
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
         while queries.load(Ordering::SeqCst) == 0 || !control_seen.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let first = queries.load(Ordering::SeqCst);
         let received = incoming.recv().await.unwrap();
-        tokio::time::sleep(Duration::from_secs(8)).await;
+        // Cross the existing fifteen-second failure ceiling: a short window
+        // cannot distinguish an unchanged success from failure backoff.
+        tokio::time::sleep(Duration::from_secs(20)).await;
         let repeated = queries.load(Ordering::SeqCst) - first;
         let pending = sender.delivery_status(id);
         let second_id = sender
@@ -785,7 +832,7 @@ async fn unchanged_direct_custody_does_not_keep_destination_retry_hot() {
             .and_then(|message| message.message_id);
         let second_pending = sender.delivery_status(second_id);
         release.store(true, Ordering::SeqCst);
-        sender.delivery_notify.notify_one();
+        tasks.spawn(recipient.clone().run_delivery_loop());
         while sender.delivery_status(id) != Some(DeliveryStatus::Delivered)
             || sender.delivery_status(second_id) != Some(DeliveryStatus::Delivered)
         {
@@ -813,10 +860,434 @@ async fn unchanged_direct_custody_does_not_keep_destination_retry_hot() {
     );
     assert_eq!(second_pending, Some(DeliveryStatus::Awaiting));
     assert!(incoming.try_recv().is_err());
-    assert!(
-        repeated <= 3,
-        "unchanged positively confirmed durable custody kept the retry lane hot: {repeated} additional positive queries in 8 seconds"
+    assert_eq!(
+        repeated, 0,
+        "unchanged durable custody must remain quiet beyond the failure retry ceiling"
     );
+}
+
+#[tokio::test]
+async fn failed_changed_route_does_not_revive_an_older_exact_custody_quiet_hint() {
+    use futures_util::FutureExt;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let sender_root = tempfile::tempdir().unwrap();
+    let receiver_root = tempfile::tempdir().unwrap();
+    let sender_identity = DeviceIdentity::generate();
+    let receiver_identity = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let receiver_account = Account::generate();
+    let a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a_address = a.local_addr().unwrap();
+    let b_address = b.local_addr().unwrap();
+    let a_proof = Announce::new_with_account(
+        &receiver_identity,
+        &receiver_account,
+        "Receiver",
+        a_address.port(),
+    );
+    let b_proof = Announce::new_with_account(
+        &receiver_identity,
+        &receiver_account,
+        "Receiver",
+        b_address.port(),
+    );
+    let own = Announce::new_with_account(&sender_identity, &sender_account, "Sender", 9);
+    let (sender, _) = node(
+        sender_root.path(),
+        sender_identity,
+        sender_account,
+        &a_proof,
+    );
+    let (receiver, _) = node(
+        receiver_root.path(),
+        receiver_identity,
+        receiver_account,
+        &own,
+    );
+    let account = receiver.account_id();
+    let control = super::delivery_receipt::delivery_conversation_id(
+        &sender.identity.public(),
+        &receiver.identity.public(),
+    );
+    let positive = Arc::new(AtomicUsize::new(0));
+    let control_seen = Arc::new(AtomicBool::new(false));
+    let b_accepted = Arc::new(AtomicUsize::new(0));
+    let seen = positive.clone();
+    let controls = control_seen.clone();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = a.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let receiver = receiver.clone();
+                    let seen = seen.clone();
+                    let controls = controls.clone();
+                    connections.spawn(async move {
+                        let Ok(mut channel) = receiver.privacy_accept(stream).await else { return; };
+                        let store = Mutex::new(DeferredReceiptStore {
+                            inner: receiver.sync_store(channel.peer_identity()).into_inner().unwrap(),
+                            control,
+                            control_seen: controls,
+                            custody_queries: Some(seen),
+                            release_receipts: None,
+                        });
+                        while let Ok(super::session::Served::Handled(conversation)) =
+                            super::session::serve_one(&mut channel, &store).await
+                        {
+                            receiver.emit_new_messages(conversation);
+                            if conversation == control {
+                                // Retire the old pooled connection after its
+                                // real control response, so B must use B's socket.
+                                break;
+                            }
+                        }
+                    });
+                }
+                result = connections.join_next(), if !connections.is_empty() => {
+                    result.unwrap().unwrap();
+                }
+                _ = &mut stopped => break,
+            }
+        }
+        connections.shutdown().await;
+    });
+    let mut tasks = tokio::task::JoinSet::new();
+    let rejected = b_accepted.clone();
+    tasks.spawn(async move {
+        while let Ok((stream, _)) = b.accept().await {
+            rejected.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    let result =
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(15), async {
+            let id = sender
+                .enqueue_to_account(&account, b"route-qualified custody", None)
+                .await
+                .unwrap();
+            let demand = sender.delivery_demand_generation.load(Ordering::Acquire);
+            let policy = sender.privacy.generation.load(Ordering::Acquire);
+            tasks.spawn(sender.clone().run_delivery_loop());
+            let finished = || {
+                sender.account_delivery_observations(&account, &[id])[0]
+                    .2
+                    .is_some_and(|hint| hint.kind == DeliveryObservationKind::RetryScheduled)
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while positive.load(Ordering::SeqCst) == 0
+                    || !control_seen.load(Ordering::SeqCst)
+                    || !finished()
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("A must complete actual custody before route replacement");
+            let first = positive.load(Ordering::SeqCst);
+            let replace = |proof: &Announce, address: std::net::SocketAddr| {
+                let mut roster = sender.roster.lock().unwrap();
+                // Withdraw the exact prior endpoint, including authenticated route
+                // evidence, then install the same identity's signed replacement.
+                roster.forget(&proof.public());
+                roster.update(proof, address.ip(), &sender.user_id());
+                let peer = roster.get(&proof.user_id).unwrap();
+                assert_eq!(
+                    peer.routes.len(),
+                    1,
+                    "the exact endpoint set must replace, not accumulate"
+                );
+                assert_eq!(peer.routes[0].addr, address);
+                assert!(!peer.presence_evidence(std::time::Instant::now()).is_empty());
+            };
+            replace(&b_proof, b_address);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while b_accepted.load(Ordering::SeqCst) == 0 || !finished() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("B must fail a real admitted exchange and publish its completion");
+            assert_eq!(
+                positive.load(Ordering::SeqCst),
+                first,
+                "the failed B attempt must not reuse A's custody exchange"
+            );
+            replace(&a_proof, a_address);
+            let recovered = tokio::time::timeout(Duration::from_secs(3), async {
+                while positive.load(Ordering::SeqCst) == first {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok();
+            assert_eq!(
+                sender.delivery_demand_generation.load(Ordering::Acquire),
+                demand
+            );
+            assert_eq!(sender.privacy.generation.load(Ordering::Acquire), policy);
+            assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+            recovered
+        }))
+        .catch_unwind()
+        .await;
+    tasks.shutdown().await;
+    let _ = stop.send(());
+    serving.await.unwrap();
+    assert!(
+        result
+            .expect("route reversal fixture setup")
+            .expect("route reversal fixture deadline"),
+        "returning to A after B's real failure must not revive A's old five-minute quiet hint"
+    );
+}
+
+#[tokio::test]
+async fn confirmed_relay_custody_does_not_park_another_prequeued_destination() {
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    use crate::postoffice::{IndexedPostOffice, opaque::RelayMailbox};
+    use crate::storage::profile::ProfileStorageLease;
+    use futures_util::FutureExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let root = tempfile::tempdir().unwrap();
+    let original_root = tempfile::tempdir().unwrap();
+    let replacement_root = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let account = Account::generate();
+    // Own the unavailable endpoint: every direct dial is accepted and closed,
+    // rather than depending on an unreserved port or a stalled handshake.
+    let unavailable = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_with_account(
+        &recipient,
+        &account,
+        "Offline recipient",
+        unavailable.local_addr().unwrap().port(),
+    );
+    let peer = recipient.public();
+    let (sender, _) = node(
+        root.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    sender.set_bridge_discovery_enabled(false);
+    let relay = DeviceIdentity::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_address = listener.local_addr().unwrap();
+    let announce = Announce::new_post_office_with_account(
+        &relay,
+        &Account::generate(),
+        "Relay",
+        relay_address.port(),
+    );
+    sender.roster.lock().unwrap().update(
+        &announce,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let first = sender
+        .enqueue_to_account(&account.account_id(), b"first prequeued target", None)
+        .await
+        .unwrap();
+    let second = sender
+        .enqueue_to_account(&account.account_id(), b"second prequeued target", None)
+        .await
+        .unwrap();
+    let events = {
+        let delivery = sender.delivery.lock().unwrap();
+        [first, second].map(|id| {
+            let message = delivery.message(id).unwrap();
+            assert_eq!(message.destinations.len(), 1);
+            assert_eq!(message.destinations[0].device, peer);
+            message.destinations[0].event.clone()
+        })
+    };
+    let conversation = events[0].conversation_id;
+    assert_eq!(events[1].conversation_id, conversation);
+    let mailbox = RelayMailbox::new(&sender.identity, &peer, &relay.public()).unwrap();
+    let mailbox_id = mailbox.id();
+    let outers = events
+        .each_ref()
+        .map(|event| mailbox.wrap(event).unwrap().id);
+    let open = |root: &Path| {
+        IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(root).unwrap(),
+            &root.join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap()
+    };
+    let original = open(original_root.path());
+    let replacement = open(replacement_root.path());
+    let served = Arc::new(Mutex::new(original.clone()));
+    let positive = Arc::new(AtomicUsize::new(0));
+    let served_store = served.clone();
+    let seen = positive.clone();
+    let relay_public = relay.public();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let keys = relay.secret_bytes();
+                    let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                    let announce = announce.clone();
+                    let store = served_store.clone();
+                    let seen = seen.clone();
+                    connections.spawn(async move {
+                        let Ok(mut channel) = crate::transport::SecureChannel::accept_with_presence(
+                            stream, &identity, Some(&announce), |_| true,
+                        ).await else { return; };
+                        let budget = super::session::RemoteHaveBudget::default();
+                        let mut authorized = None;
+                        while let Ok(bytes) = channel.recv().await {
+                            let held = super::session::durable_have_query_for_test(&bytes)
+                                .filter(|(scope, _)| *scope == mailbox_id)
+                                .and_then(|(_, id)| outers.iter().position(|outer| *outer == id))
+                                .filter(|index| store.lock().unwrap()
+                                    .durable_have(&mailbox_id, &outers[*index]).unwrap());
+                            if super::session::mailbox::serve(
+                                &mut channel, store.as_ref(), &bytes, &budget, &mut authorized,
+                            ).await.is_err() { break; }
+                            if let Some(index) = held {
+                                seen.fetch_or(1 << index, Ordering::SeqCst);
+                            }
+                        }
+                    });
+                }
+                result = connections.join_next(), if !connections.is_empty() => {
+                    result.unwrap().unwrap();
+                }
+                _ = &mut stopped => break,
+            }
+        }
+        connections.shutdown().await;
+    });
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move {
+        while let Ok((stream, _)) = unavailable.accept().await {
+            drop(stream);
+        }
+    });
+    let result =
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(20), async {
+            // Both durable destinations exist before any automatic delivery owner.
+            // Settle the real source publication through Noise against the old store.
+            let mut channel = sender
+                .privacy_dial(relay_address, &relay_public)
+                .await
+                .unwrap();
+            let published = sender
+                .opaque_history_publication_round_for(&mut channel, &peer, conversation, None)
+                .await
+                .unwrap();
+            drop(channel);
+            for (event, outer) in events.iter().zip(outers) {
+                assert!(published.contains(&(event.id, outer)));
+                assert!(original.durable_have(&mailbox_id, &outer).unwrap());
+            }
+            let source_stamp = sender
+                .sync_store(&peer)
+                .lock()
+                .unwrap()
+                .history_sync_stamp(&conversation)
+                .unwrap()
+                .expect("settled known source");
+            let demand = sender.delivery_demand_generation.load(Ordering::Acquire);
+            *served.lock().unwrap() = replacement.clone();
+            positive.store(0, Ordering::SeqCst);
+            for outer in outers {
+                assert!(!replacement.durable_have(&mailbox_id, &outer).unwrap());
+            }
+            assert_eq!(
+                sender.delivery_status(first),
+                Some(DeliveryStatus::Awaiting)
+            );
+            assert_eq!(
+                sender.delivery_status(second),
+                Some(DeliveryStatus::Awaiting)
+            );
+            tasks.spawn(sender.clone().run_delivery_loop());
+            let first_custody = tokio::time::timeout(Duration::from_secs(5), async {
+                while positive.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            // No enqueue, policy mutation or route replacement may rescue B. The
+            // same source cut lets exact confirmation repair only its selected event.
+            let both_custody = if first_custody.is_ok() {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while positive.load(Ordering::SeqCst) != 3 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok()
+            } else {
+                false
+            };
+            let current_stamp = sender
+                .sync_store(&peer)
+                .lock()
+                .unwrap()
+                .history_sync_stamp(&conversation)
+                .unwrap();
+            (
+                first_custody.is_ok(),
+                both_custody,
+                source_stamp,
+                current_stamp,
+                demand,
+                sender.delivery_demand_generation.load(Ordering::Acquire),
+            )
+        }))
+        .catch_unwind()
+        .await;
+    tasks.shutdown().await;
+    let _ = stop.send(());
+    server.await.unwrap();
+    let (first_held, both_held, before, after, demand, current_demand) = result
+        .expect("two prequeued destinations fixture setup")
+        .expect("two prequeued destinations fixture deadline");
+    assert!(
+        first_held,
+        "setup must reach actual repaired target custody"
+    );
+    assert_eq!(
+        after.as_ref(),
+        Some(&before),
+        "source must remain unchanged"
+    );
+    assert_eq!(
+        current_demand, demand,
+        "no new demand may bypass the quiet key"
+    );
+    assert_eq!(
+        sender.delivery_status(first),
+        Some(DeliveryStatus::Awaiting)
+    );
+    assert_eq!(
+        sender.delivery_status(second),
+        Some(DeliveryStatus::Awaiting)
+    );
+    assert!(
+        both_held,
+        "one positive event must not park another prequeued destination: positive HAVE mask={}",
+        positive.load(Ordering::SeqCst)
+    );
+    for outer in outers {
+        assert!(replacement.durable_have(&mailbox_id, &outer).unwrap());
+    }
 }
 
 #[tokio::test]

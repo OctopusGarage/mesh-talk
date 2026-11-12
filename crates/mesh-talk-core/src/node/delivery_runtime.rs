@@ -2351,6 +2351,9 @@ impl Node {
         let mut active: std::collections::HashMap<ControlWork, ControlRoutes> =
             std::collections::HashMap::new();
         let mut retries = super::delivery_retry::RetrySchedule::default();
+        // Custody qualifies one exact destination, whereas failures pace the
+        // peer lane. One held event must not park another queued event.
+        let mut quiet_destinations = super::delivery_retry::RetrySchedule::default();
         let mut network = self.network_changes.subscribe();
         loop {
             tokio::select! {
@@ -2378,6 +2381,7 @@ impl Node {
                     control_owners.clear();
                     active.clear();
                     retries.clear();
+                    quiet_destinations.clear();
                     self.channel_recovery_notify.notify_one();
                     self.account_sync_notify.notify_one();
                     self.bridge_notify.notify_one();
@@ -2396,7 +2400,19 @@ impl Node {
                                     };
                                     self.observe_mailbox_work(reason, None);
                                 }
-                                progress.schedule(&mut retries, key.retry_key(&routes.peer), routes.retry_routes(), std::time::Instant::now());
+                                let now = std::time::Instant::now();
+                                let input = routes.retry_routes();
+                                if let (Reconciliation::Quiet, ControlWork::Destination(event)) = (progress, &key) {
+                                    quiet_destinations.settled(
+                                        (*event, routes.peer.ed25519_pub, routes.peer.x25519_pub),
+                                        input.clone(), QUIET_REPAIR_INTERVAL, now,
+                                    );
+                                    // Release the peer after its ordinary short
+                                    // pacing turn; only this event owns quietness.
+                                    retries.settled(key.retry_key(&routes.peer), input, Duration::from_millis(500), now);
+                                } else {
+                                    progress.schedule(&mut retries, key.retry_key(&routes.peer), input, now);
+                                }
                                 if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
                             }
                             if persistence_failed {
@@ -2505,6 +2521,7 @@ impl Node {
                 destination_cursor = Some(id);
                 let key = ControlWork::Destination(destination.event.id);
                 let routes = self.control_routes(&destination.device);
+                let input = routes.retry_routes();
                 if active
                     .keys()
                     .filter(|key| matches!(key, ControlWork::Destination(_)))
@@ -2517,13 +2534,30 @@ impl Node {
                     })
                     && retries.ready(
                         &key.retry_key(&destination.device),
-                        &routes.retry_routes(),
+                        &input,
+                        std::time::Instant::now(),
+                    )
+                    && quiet_destinations.ready(
+                        &(
+                            destination.event.id,
+                            destination.device.ed25519_pub,
+                            destination.device.x25519_pub,
+                        ),
+                        &input,
                         std::time::Instant::now(),
                     )
                 {
                     let Some(work) = self.runtime_work.admit() else {
                         return;
                     };
+                    // This attempt supersedes any earlier quiet observation,
+                    // including when it later fails or is cancelled. Returning
+                    // to an older route input must not revive the old hint.
+                    quiet_destinations.forget(&(
+                        destination.event.id,
+                        destination.device.ed25519_pub,
+                        destination.device.x25519_pub,
+                    ));
                     let node = self.clone();
                     // Capture the exact admitted attempt before spawning. A
                     // cancelled task may never be polled; it still owns cleanup,
@@ -2562,13 +2596,21 @@ impl Node {
                         } else {
                             (false, false)
                         };
+                        let reconciliation = if failed {
+                            Reconciliation::Deferred
+                        } else if advanced {
+                            Reconciliation::Advanced
+                        } else if progress {
+                            // Positive custody with an unchanged queue is an
+                            // observed success, not a failed delivery attempt.
+                            // Keep Awaiting until the recipient's real receipt;
+                            // new demand and changed routes retain their wakes.
+                            Reconciliation::Quiet
+                        } else {
+                            Reconciliation::Deferred
+                        };
                         let observation = attempt.token.take().map(|token| (token, reason));
-                        (
-                            key,
-                            failed,
-                            Reconciliation::from_progress(advanced),
-                            observation,
-                        )
+                        (key, failed, reconciliation, observation)
                     }));
                     control_owners.insert(owner, task);
                 }

@@ -310,6 +310,224 @@ pub(super) fn observe_fanout_turn(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn unchanged_roster_heartbeat_does_not_admit_local_maintenance() {
+        use crate::discovery::{Announce, Roster};
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (files, _) = mpsc::unbounded_channel();
+        let node = Node::open_with_account(
+            DeviceIdentity::generate(),
+            Account::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            files,
+            &dir.path().join("events"),
+            &dir.path().join("sent"),
+            "pw",
+        )
+        .unwrap();
+        let peer = DeviceIdentity::generate();
+        let announce = Announce::new(&peer, "Unrelated online peer", 21212);
+        let address = "127.0.0.1".parse().unwrap();
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&announce, address, &node.user_id());
+        let turns = Arc::new(AtomicUsize::new(0));
+        let idle = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let turns = turns.clone();
+            let idle = idle.clone();
+            let observed = observed.clone();
+            move |_, phase| {
+                if phase.starts_with("operation_owner phase=legacy_publication_end ") {
+                    turns.fetch_add(1, Ordering::AcqRel);
+                }
+                if let Some(state) = phase.strip_prefix("account_owner_local_state idle=") {
+                    idle.store(state == "true", Ordering::Release);
+                }
+                if phase == "account_owner_roster_observed" {
+                    // A previous idle marker cannot certify the cycle which
+                    // has only just consumed this new roster observation.
+                    idle.store(false, Ordering::Release);
+                    observed.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+        }));
+        async fn drive_to_idle(
+            owner: &mut std::pin::Pin<Box<impl std::future::Future<Output = ()>>>,
+            idle: &std::sync::atomic::AtomicBool,
+            observed: &AtomicUsize,
+            minimum: usize,
+        ) {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                futures_util::future::poll_fn(|cx| {
+                    assert!(owner.as_mut().poll(cx).is_pending());
+                    if idle.load(Ordering::Acquire) && observed.load(Ordering::Acquire) >= minimum {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        // Observe the actual parent's idle state: retirement of blocking work
+        // alone does not consume its JoinSet result or a retained startup wake.
+        let mut owner = Box::pin(node.clone().run_account_history_loop_with_tick(None));
+        drive_to_idle(&mut owner, &idle, &observed, 0).await;
+        let before = turns.load(Ordering::Acquire);
+        assert!(before > 0);
+        let next_observation = observed.load(Ordering::Acquire) + 1;
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&announce, address, &node.user_id());
+        drive_to_idle(&mut owner, &idle, &observed, next_observation).await;
+        assert_eq!(
+            turns.load(Ordering::Acquire),
+            before,
+            "fresh-to-fresh discovery must not restart local publication/operation maintenance"
+        );
+
+        let moved = Announce::new(&peer, "Unrelated online peer", 21213);
+        let next_observation = observed.load(Ordering::Acquire) + 1;
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&moved, address, &node.user_id());
+        drive_to_idle(&mut owner, &idle, &observed, next_observation).await;
+        let moved_turns = turns.load(Ordering::Acquire);
+        assert!(
+            moved_turns > before,
+            "an authenticated endpoint change must still admit local recovery"
+        );
+        let renamed = Announce::new(&peer, "Changed signed name", 21213);
+        let next_observation = observed.load(Ordering::Acquire) + 1;
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&renamed, address, &node.user_id());
+        drive_to_idle(&mut owner, &idle, &observed, next_observation).await;
+        assert!(
+            turns.load(Ordering::Acquire) > moved_turns,
+            "changed signed metadata must wake without new route retry credit"
+        );
+
+        // A gateway's signed listening port is distinct from the actual local
+        // gateway endpoint. Conflicted history is excluded by the real roster,
+        // leaving this valid signed change observable only in the live proof.
+        let gateway_device = DeviceIdentity::generate();
+        let first_account = Account::generate();
+        let next_account = Account::generate();
+        let first_proof = Announce::new_post_office_with_account(
+            &gateway_device,
+            &first_account,
+            "Gateway peer",
+            23232,
+        );
+        let live_proof = Announce::new_post_office_with_account(
+            &gateway_device,
+            &next_account,
+            "Gateway peer",
+            23232,
+        );
+        let changed_proof = Announce::new_post_office_with_account(
+            &gateway_device,
+            &next_account,
+            "Gateway peer",
+            23233,
+        );
+        assert!(first_proof.verify() && live_proof.verify() && changed_proof.verify());
+        let next_observation = observed.load(Ordering::Acquire) + 1;
+        {
+            let mut roster = node.roster.lock().unwrap();
+            assert!(
+                roster
+                    .update_gateway(&first_proof, address, 24242, &node.user_id())
+                    .accepted()
+            );
+            assert!(
+                roster
+                    .update_gateway(&live_proof, address, 24242, &node.user_id())
+                    .accepted()
+            );
+            assert!(
+                roster
+                    .historical_announcement(&gateway_device.public())
+                    .is_none()
+            );
+            assert_eq!(
+                roster.announcement(&gateway_device.public()),
+                Some(&live_proof)
+            );
+        }
+        drive_to_idle(&mut owner, &idle, &observed, next_observation).await;
+        let gateway_turns = turns.load(Ordering::Acquire);
+        let next_observation = observed.load(Ordering::Acquire) + 1;
+        {
+            let mut roster = node.roster.lock().unwrap();
+            let before = roster.get(&gateway_device.user_id()).unwrap().clone();
+            assert!(
+                roster
+                    .update_gateway(&changed_proof, address, 24242, &node.user_id())
+                    .accepted()
+            );
+            let after = roster.get(&gateway_device.user_id()).unwrap();
+            assert_eq!(before.public, after.public);
+            assert_eq!(before.account_id, after.account_id);
+            assert_eq!(before.name, after.name);
+            assert_eq!(before.post_office, after.post_office);
+            assert_eq!(before.addr, after.addr);
+            assert_eq!(
+                before
+                    .routes
+                    .iter()
+                    .map(|route| route.addr)
+                    .collect::<Vec<_>>(),
+                after
+                    .routes
+                    .iter()
+                    .map(|route| route.addr)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(before.presence_deadline(std::time::Instant::now()), None);
+            assert_eq!(after.presence_deadline(std::time::Instant::now()), None);
+            assert!(
+                roster
+                    .historical_announcement(&gateway_device.public())
+                    .is_none()
+            );
+            assert_eq!(
+                roster.announcement(&gateway_device.public()),
+                Some(&changed_proof)
+            );
+        }
+        drive_to_idle(&mut owner, &idle, &observed, next_observation).await;
+        assert!(
+            turns.load(Ordering::Acquire) > gateway_turns,
+            "a changed live signed proof must wake even when history and projected routes cannot expose it"
+        );
+        drop(owner);
+        node.runtime_work.close();
+        tokio::time::timeout(Duration::from_secs(30), node.runtime_work.drain())
+            .await
+            .unwrap();
+    }
+
     async fn settle_publication(node: &Arc<Node>, mut state: LocalMaintenance) -> LocalMaintenance {
         tokio::time::timeout(Duration::from_secs(30), async {
             let mut quiet = 0;

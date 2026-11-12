@@ -6,6 +6,7 @@ use std::time::Instant;
 
 type Identity = wake::WakeIdentity;
 pub(super) type Scope = (u64, u64, u64);
+const EVIDENCE_TTL: Duration = Duration::from_secs(60);
 struct Evidence {
     scope: Scope,
     until: Instant,
@@ -83,7 +84,7 @@ impl Node {
                 identity,
                 Evidence {
                     scope,
-                    until: now + Duration::from_secs(60),
+                    until: now + EVIDENCE_TTL,
                 },
             );
         }
@@ -227,6 +228,122 @@ mod tests {
         assert_eq!(status.phase, SyncPhase::Offline);
         assert_eq!(status.pending_attachments, 9);
         assert!(status.error.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn continuous_same_endpoint_heartbeats_do_not_restart_history_after_original_lease() {
+        use futures_util::FutureExt;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        let (_dir, source, receiver) = super::super::selection_tests::sibling_nodes();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let announce = source.signed_announce("source", address.port());
+        receiver
+            .roster
+            .lock()
+            .unwrap()
+            .update_routed(&announce, address.ip(), &receiver.user_id());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(AtomicUsize::new(0));
+        let idle = Arc::new(AtomicBool::new(false));
+        *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let attempts = attempts.clone();
+            let observed = observed.clone();
+            let idle = idle.clone();
+            move |_, phase| {
+                if phase.starts_with("history_begin ") {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                }
+                if phase == "account_owner_roster_observed" {
+                    idle.store(false, Ordering::SeqCst);
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+                if let Some(state) = phase.strip_prefix("account_owner_local_state idle=") {
+                    idle.store(state == "true", Ordering::SeqCst);
+                }
+            }
+        }));
+        let server = tokio::spawn(source.clone().run_accept_loop(listener));
+        let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
+        // Keep fixture retirement outside assertions, including failed setup.
+        let result = std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if idle.load(Ordering::SeqCst)
+                        && receiver.device_sync_status().iter().any(|status| {
+                            status.device_id == source.user_id()
+                                && status.phase == SyncPhase::UpToDate
+                                && status.document_phase == SyncPhase::UpToDate
+                        })
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("actual startup history/documents and local owner must settle");
+            let before = attempts.load(Ordering::SeqCst);
+            assert!(before > 0, "the real sibling history worker must have run");
+            let original_deadline = receiver
+                .sibling_availability_deadline(&source.identity.public())
+                .expect("the real source is available before measurement");
+            let window = EVIDENCE_TTL.max(crate::discovery::roster::PUBLIC_PRESENCE_TTL)
+                + Duration::from_secs(5);
+            let end = Instant::now() + window;
+            let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Cross the original real std::Instant deadline while every actual
+            // roster observation keeps the source continuously available.
+            loop {
+                heartbeat.tick().await;
+                assert!(
+                    receiver.sibling_sync_available(&source.identity.public()),
+                    "this control must not contain a genuine availability lapse"
+                );
+                let next = observed.load(Ordering::SeqCst) + 1;
+                assert!(
+                    receiver
+                        .roster
+                        .lock()
+                        .unwrap()
+                        .update_routed(&announce, address.ip(), &receiver.user_id(),)
+                        .accepted()
+                );
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while observed.load(Ordering::SeqCst) < next || !idle.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("the owner must consume this heartbeat before the assertion");
+                assert_eq!(
+                    attempts.load(Ordering::SeqCst),
+                    before,
+                    "continuous identical presence must not manufacture reconnect history work"
+                );
+                assert!(
+                    !worker.is_finished(),
+                    "the account owner must remain running"
+                );
+                if Instant::now() >= end {
+                    break;
+                }
+            }
+            assert!(Instant::now() > original_deadline);
+            assert!(receiver.sibling_sync_available(&source.identity.public()));
+        })
+        .catch_unwind()
+        .await;
+        worker.abort();
+        server.abort();
+        let _ = worker.await;
+        let _ = server.await;
+        *receiver.account_client_test_hook.lock().unwrap() = None;
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

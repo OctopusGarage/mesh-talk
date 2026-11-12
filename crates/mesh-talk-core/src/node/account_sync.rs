@@ -2858,7 +2858,53 @@ impl Node {
             )
         };
         observe_fanout_routes(&mut fanout_routes);
-        let mut online_routes = HashMap::new();
+        // Hash only roster-owned semantic inputs. Local publication can change
+        // document/source revisions and must not make the next heartbeat dirty.
+        // This is work admission, never an authorization or delivery proof.
+        let observe_roster_work = || {
+            let (mut proofs, mut live, peers) = {
+                let roster = self.roster.lock().expect("roster lock");
+                (
+                    roster.historical_announcements(),
+                    roster.announcements(),
+                    roster.peers(),
+                )
+            };
+            proofs.sort_by_key(|proof| proof.user_id.clone());
+            live.sort_by_key(|proof| proof.user_id.clone());
+            let now = std::time::Instant::now();
+            let mut peers: Vec<_> = peers
+                .into_iter()
+                .map(|peer| {
+                    let online = peer.presence_deadline(now).is_some_and(|at| at > now);
+                    let mut routes: Vec<_> = peer.routes.iter().map(|route| route.addr).collect();
+                    routes.sort_unstable();
+                    routes.dedup();
+                    (
+                        peer.public,
+                        peer.account_id,
+                        peer.name,
+                        peer.post_office,
+                        peer.addr,
+                        routes,
+                        online,
+                    )
+                })
+                .collect();
+            peers.sort_by_key(|peer| (peer.0.ed25519_pub, peer.0.x25519_pub));
+            bincode::serialize(&(proofs, live, peers))
+                .ok()
+                .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)))
+        };
+        let mut roster_projection = observe_roster_work();
+        let mut online_routes: HashMap<
+            wake::WakeIdentity,
+            (
+                Vec<std::net::SocketAddr>,
+                std::time::Instant,
+                availability::Scope,
+            ),
+        > = HashMap::new();
         let mut initial_refresh = true;
         let mut cursors: HashMap<String, PeerCursor> = HashMap::new();
         let mut queue: VecDeque<(String, PeerRecord)> = VecDeque::new();
@@ -3683,6 +3729,13 @@ impl Node {
             let publication_deadline = local_maintenance
                 .as_ref()
                 .and_then(local_maintenance::LocalMaintenance::publication_deadline);
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!(
+                    "account_owner_local_state idle={}",
+                    !maintenance_requested && local_tasks.is_empty() && local_maintenance.is_some(),
+                )
+            });
             tokio::select! {
                 result = local_tasks.join_next(), if !local_tasks.is_empty() => {
                     match result {
@@ -3788,12 +3841,35 @@ impl Node {
                 }
                 _ = roster_changes.changed() => {
                     let changed = observe_fanout_routes(&mut fanout_routes);
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), ||
+                        "account_owner_roster_observed".into());
                     if !changed.is_empty() {
                         fanout.wake_pending_for(|group| self.channel_members(group).iter().any(
                             |member| changed.contains(&wake::wake_identity(member)),
                         ));
                     }
-                    enqueue_all = true;
+                    let projection = observe_roster_work();
+                    let semantic_change = !changed.is_empty()
+                        || projection.is_none()
+                        || projection != roster_projection;
+                    if !semantic_change {
+                        // A steady heartbeat renews freshness, not retry credit.
+                        // Otherwise the previous cached lease would manufacture
+                        // a reconnect despite continuously observed presence.
+                        let scope = self.sibling_availability_scope();
+                        for (identity, (_, deadline, known_scope)) in &mut online_routes {
+                            let public = PublicIdentity { ed25519_pub: identity.0, x25519_pub: identity.1 };
+                            if *known_scope == scope
+                                && let Some(current) = self.sibling_availability_deadline(&public) {
+                                *deadline = current;
+                            }
+                        }
+                    }
+                    enqueue_all |= semantic_change
+                        || online_routes.values().any(|(_, deadline, _)|
+                            *deadline <= std::time::Instant::now());
+                    roster_projection = projection;
                 }
                 // This coalesced watch carries no peer identity; it grants one
                 // conservative wake, never a fresh-to-fresh lease renewal.
