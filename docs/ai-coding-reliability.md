@@ -584,6 +584,15 @@ progress while the durable delivery destination still awaits its receipt. The
 `unchanged_direct_custody_does_not_keep_destination_retry_hot` regression drives
 the real delivery loop, retains awaiting state, bounds repeated positive
 confirmations and admits another new message before the first receipt arrives.
+A successful idempotent commit is not a presentation change. Publish status
+notifications only when the owning durable fact changes; compare its runtime
+revision under the same guard as the commit, then notify after releasing it.
+Preserve independently changed document notifications and failed-write recovery.
+The `channel_custody_noop_` loopback regressions in the
+[channel](../crates/mesh-talk-core/src/node/channels.rs) and
+[relay](../crates/mesh-talk-core/src/node/serving.rs) owners cover repeated positive
+and negative probes, journal-only repair, changed shared witnesses and rejected
+relay policy without inventing recipient-delivery evidence.
 New retry demand belongs to durable intent acceptance, not successful polling
 or idempotent reacceptance of an existing pending intent. Settled reception
 retirement suppresses same-value
@@ -597,6 +606,17 @@ a late completion must not cool or release its replacement, including after a
 route changes away and back. Bound retained reservations without evicting active
 or unexpired entries to admit new work. Start failure backoff from completion,
 and distinguish a successful clean protocol step from an unchanged phase name.
+Settled maintenance needs an explicit outcome, distinct from unfinished pages,
+blocked dependencies and failed cleanup. Subscribe before the first pass and
+retire only observations captured before admitted work; changes during that work
+must remain pending. A finite retry sweep must admit a new bounded suffix when
+later discovery creates work beyond its cut. Final lease release, private proof
+or route commits and actual policy changes need retained wakes, including after
+partial persistence failure. Keep lease expiration and contended cleanup on their
+own deadlines. The `profile_owner_` regressions in the
+[Profile maintenance owner](../crates/mesh-talk-core/src/node/profile_io.rs)
+cover quietness, late discovery, blocked-prefix fairness, dependency recovery and
+expiry; its existing worker admission continues to own cancellation.
 A future deadline must not force fast polling; expired
 deadlines must not create zero-delay spins. Finite discovery still needs short
 turns while admission capacity remains, even when every queued job is cooling.

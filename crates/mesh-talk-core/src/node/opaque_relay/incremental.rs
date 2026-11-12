@@ -138,6 +138,34 @@ impl Drop for Lease {
     }
 }
 impl UploadCache {
+    pub(in crate::node) fn repair_maintenance_deadline(
+        &self,
+        generation: u64,
+    ) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
+        self.entries
+            .values()
+            .chain(self.receive_entries.values())
+            .filter_map(|entry| {
+                let entry = match entry.try_lock() {
+                    Ok(entry) => entry,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        return Some(now + std::time::Duration::from_secs(3));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(error)) => {
+                        panic!("upload entry: {error}")
+                    }
+                };
+                entry.repair_lease.as_ref()?;
+                Some(if entry.repair_generation != generation {
+                    now
+                } else {
+                    tokio::time::Instant::from_std(entry.repair_progress)
+                        + std::time::Duration::from_millis(30_001)
+                })
+            })
+            .min()
+    }
     fn unselected_target(
         &mut self,
         scope: &[u8],
@@ -214,7 +242,10 @@ impl UploadCache {
                 }
             };
             if entry.repair_generation != generation
-                || entry.repair_progress.elapsed() > std::time::Duration::from_secs(30)
+                || tokio::time::Instant::now()
+                    .into_std()
+                    .saturating_duration_since(entry.repair_progress)
+                    > std::time::Duration::from_secs(30)
             {
                 entry.repair_reset_epoch = entry.repair_reset_epoch.wrapping_add(1);
                 entry.repair_lease = None;
@@ -308,7 +339,7 @@ impl UploadCache {
                     repair_lease: None,
                     repair_generation: 0,
                     repair_reset_epoch: 0,
-                    repair_progress: std::time::Instant::now(),
+                    repair_progress: tokio::time::Instant::now().into_std(),
                 })),
             );
         }
@@ -809,10 +840,11 @@ impl Node {
             let old = {
                 let mut entry = state(p).lease.0.lock().expect("upload entry");
                 entry.repair_generation = generation;
-                entry.repair_progress = std::time::Instant::now();
+                entry.repair_progress = tokio::time::Instant::now().into_std();
                 entry.repair_lease.replace(lease)
             };
             drop(old);
+            self.storage.database().maintenance_waker().notify();
         }
         state_mut(p).repair_generation = Some(generation);
         self.validate_mailbox_repair(p)
@@ -949,7 +981,7 @@ impl Node {
             entry.repair_hints.remove(&id);
             entry.repair_declarations.remove(&id);
             if !was_present {
-                entry.repair_progress = std::time::Instant::now();
+                entry.repair_progress = tokio::time::Instant::now().into_std();
             }
         }
         #[cfg(test)]
@@ -1907,6 +1939,75 @@ mod upload_admission_tests {
         discovery::Announce,
         identity::{account::Account, device::DeviceIdentity},
     };
+
+    #[tokio::test(start_paused = true)]
+    async fn profile_owner_expires_abandoned_repair_at_its_owned_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "peer",
+            9,
+        );
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let mut cache = UploadCache::default();
+        let (lease, retired) = cache
+            .acquire(
+                b"expiry",
+                UploadScope::History,
+                0,
+                tokio::time::Instant::now().into_std(),
+            )
+            .unwrap();
+        drop(retired);
+        {
+            let mut entry = lease.0.lock().unwrap();
+            entry.repair_progress = tokio::time::Instant::now().into_std();
+            entry.repair_generation = 0;
+            entry.repair_lease = Some(node.acquire_profile_compaction_lease().unwrap());
+        }
+        *node.opaque_upload_cache.lock().unwrap() = cache;
+        let (sent, mut idle) = tokio::sync::mpsc::unbounded_channel();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "profile_maintenance_wait" {
+                let _ = sent.send(());
+            }
+        }));
+        async fn wait(received: &mut tokio::sync::mpsc::UnboundedReceiver<()>) -> bool {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < until {
+                if received.try_recv().is_ok() {
+                    return true;
+                }
+                tokio::task::yield_now().await;
+            }
+            false
+        }
+        let owner = tokio::spawn(node.clone().run_profile_compaction_loop());
+        let initial = wait(&mut idle).await;
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        let protected = *node.profile_compaction_leases.lock().unwrap() == 1;
+        tokio::time::advance(std::time::Duration::from_millis(2)).await;
+        let expired = wait(&mut idle).await;
+        let remaining = *node.profile_compaction_leases.lock().unwrap();
+        node.runtime_work.close();
+        owner.abort();
+        let _ = owner.await;
+        node.runtime_work.drain().await;
+        assert!(initial && protected && expired);
+        assert_eq!(
+            remaining, 0,
+            "repair expiration must not wait for300s integrity repair"
+        );
+    }
 
     #[test]
     fn file_dispatch_has_a_distinct_publication_priority_key() {

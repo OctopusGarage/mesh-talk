@@ -515,6 +515,59 @@ async fn assert_incremental_consent_offer_selection(send_only: bool) {
         custody, 0,
         "unchanged control evidence must not repeat per-event HAVE requests"
     );
+    if !send_only {
+        // Age only local scheduling metadata after the real Noise exchange has
+        // proved all eight signed controls are in durable relay custody.
+        assert_eq!(
+            node.age_quiet_consent_hints_for_test(std::time::Duration::from_secs(75)),
+            expected.len()
+        );
+        super::super::file_consent::offered_observations::reset();
+        let (_, custody, _) = counted_scope_exchange(
+            &node,
+            office.clone(),
+            &relay,
+            &sender.public(),
+            conversation,
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(
+            super::super::file_consent::offered_observations::count(),
+            0,
+            "unchanged confirmed consent controls must stay quiet at 75 seconds"
+        );
+        assert_eq!(
+            custody, 0,
+            "unchanged confirmed controls must not repeat HAVE before sparse repair"
+        );
+        // Continue from the original check time. A quiet read must not renew it:
+        // 75 + 226 seconds crosses the finite 300-second repair deadline.
+        assert_eq!(
+            node.age_quiet_consent_hints_for_test(std::time::Duration::from_secs(226)),
+            expected.len()
+        );
+        super::super::file_consent::offered_observations::reset();
+        let (_, custody, _) = counted_scope_exchange(
+            &node,
+            office.clone(),
+            &relay,
+            &sender.public(),
+            conversation,
+            true,
+            None,
+        )
+        .await;
+        assert!(
+            super::super::file_consent::offered_observations::count() >= expected.len(),
+            "301-second sparse repair must recheck the actual offers"
+        );
+        assert!(
+            custody >= expected.len(),
+            "expired scheduling evidence must resume actual per-control HAVE"
+        );
+    }
     if send_only {
         assert!(!node.relay_receive_allowed(&relay.public()));
         assert!(node.relay_send_allowed(&relay.public()));

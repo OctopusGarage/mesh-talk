@@ -405,12 +405,18 @@ impl Node {
                     if held {
                         self.publish_channel_custody(conv, id, &po.public, true, false, true)
                             .map_err(|error| SessionError::Serialization(error.to_string()))?;
-                        self.channel_custody
-                            .lock()
-                            .expect("channel custody lock")
-                            .confirm(id, &format!("relay:{}", po.public.user_id()))
-                            .map_err(|error| SessionError::Serialization(error.to_string()))?;
-                        self.delivery_status_notify.notify_waiters();
+                        let changed = {
+                            let mut store =
+                                self.channel_custody.lock().expect("channel custody lock");
+                            let before = store.revision();
+                            store
+                                .confirm(id, &format!("relay:{}", po.public.user_id()))
+                                .map_err(|error| SessionError::Serialization(error.to_string()))?;
+                            store.revision() != before
+                        };
+                        if changed {
+                            self.delivery_status_notify.notify_waiters();
+                        }
                     }
                 }
                 self.recycle_sync_channel(channel);
@@ -3623,5 +3629,205 @@ mod inbound_idle_capacity_tests {
             clients[7].account_document_meta(&control_key),
             Some(expected)
         );
+    }
+}
+
+#[cfg(test)]
+mod custody_notification_tests {
+    use super::*;
+    use crate::{
+        discovery::Announce,
+        identity::{account::Account, device::DeviceIdentity},
+        node::test_support::node_with_files,
+    };
+    use futures_util::FutureExt;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn channel_custody_noop_relay_confirmation_does_not_notify_delivery_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let recipient = DeviceIdentity::generate();
+        let proof =
+            Announce::new_with_account(&recipient, &Account::generate(), "offline member", 1);
+        let (source, _, _) = node_with_files(
+            &dir.path().join("source"),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let relay_identity = DeviceIdentity::generate();
+        let secret = relay_identity.secret_bytes();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let relay_proof = Announce::new_post_office(&relay_identity, "relay", address.port());
+        source
+            .roster
+            .lock()
+            .unwrap()
+            .update(&relay_proof, address.ip(), &source.user_id());
+        let relay = Arc::new(Mutex::new(
+            crate::postoffice::PostOffice::open(&dir.path().join("relay"), "pw", relay_identity)
+                .unwrap(),
+        ));
+        let worker = tokio::spawn(super::super::postbox::run_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            listener,
+            relay.clone(),
+        ));
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let channel = source
+                .create_channel("relay status notification", vec![recipient.public()])
+                .await
+                .unwrap();
+            let event = source
+                .enqueue_channel_message_reply_expiring_if(
+                    channel,
+                    b"retained relay custody",
+                    None,
+                    None,
+                    |commit| commit(),
+                )
+                .unwrap();
+            let first = source.delivery_status_notify.notified();
+            tokio::pin!(first);
+            first.as_mut().enable();
+            assert!(
+                source
+                    .replicate_to_post_office_targets_confirming(
+                        channel,
+                        vec![recipient.public()],
+                        Some(event)
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                first.as_mut().now_or_never().is_some(),
+                "first durable relay custody must notify"
+            );
+            let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+                &source.identity,
+                &recipient.public(),
+                &relay_proof.public(),
+            )
+            .unwrap();
+            let original = source.log.lock().unwrap().get(&event).unwrap().unwrap();
+            assert!(
+                relay
+                    .lock()
+                    .unwrap()
+                    .has(&mailbox.wrap(&original).unwrap().id),
+                "real recipient-encrypted wrapper must be held by the relay"
+            );
+            let journal_peer = format!("relay:{}", relay_proof.user_id);
+            assert!(
+                source
+                    .channel_custody
+                    .lock()
+                    .unwrap()
+                    .peers(event)
+                    .unwrap()
+                    .contains(&journal_peer)
+            );
+            let before = source.channel_custody_observations(channel, event);
+            let repeated = source.delivery_status_notify.notified();
+            tokio::pin!(repeated);
+            repeated.as_mut().enable();
+            assert!(
+                source
+                    .replicate_to_post_office_targets_confirming(
+                        channel,
+                        vec![recipient.public()],
+                        Some(event)
+                    )
+                    .await
+                    .unwrap()
+            );
+            let unchanged_woke = repeated.as_mut().now_or_never().is_some();
+            let after = source.channel_custody_observations(channel, event);
+            assert_eq!(
+                before
+                    .iter()
+                    .map(|m| (&m.key, m.revision, m.content_hash))
+                    .collect::<Vec<_>>(),
+                after
+                    .iter()
+                    .map(|m| (&m.key, m.revision, m.content_hash))
+                    .collect::<Vec<_>>(),
+                "the repeated exchange must retain the same published witness"
+            );
+            // An unchanged document must not suppress repair of a real local
+            // custody change after a successfully authenticated held answer.
+            source
+                .channel_custody
+                .lock()
+                .unwrap()
+                .revoke(event, &journal_peer)
+                .unwrap();
+            let repair = source.delivery_status_notify.notified();
+            tokio::pin!(repair);
+            repair.as_mut().enable();
+            source
+                .replicate_to_post_office_targets_confirming(
+                    channel,
+                    vec![recipient.public()],
+                    Some(event),
+                )
+                .await
+                .unwrap();
+            assert!(
+                repair.as_mut().now_or_never().is_some(),
+                "local custody repair must notify independently of the unchanged document"
+            );
+            assert!(
+                source
+                    .channel_custody
+                    .lock()
+                    .unwrap()
+                    .peers(event)
+                    .unwrap()
+                    .contains(&journal_peer)
+            );
+            // Real policy rejection still produces no custody publication.
+            source.set_post_office_permissions(false, true);
+            let denied = source.delivery_status_notify.notified();
+            tokio::pin!(denied);
+            denied.as_mut().enable();
+            assert!(
+                !source
+                    .replicate_to_post_office_targets_confirming(
+                        channel,
+                        vec![recipient.public()],
+                        Some(event)
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert!(denied.as_mut().now_or_never().is_none());
+            assert!(
+                !unchanged_woke,
+                "unchanged relay-held confirmation must not wake delivery status"
+            );
+        })
+        .catch_unwind()
+        .await;
+        source.sessions.clear();
+        worker.abort();
+        let _ = worker.await;
+        // The existing relay accept helper spawns bounded connection workers.
+        // Closing pooled sockets must retire their store owners before cleanup,
+        // including when an assertion failed before the policy-rejection cut.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&relay) != 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("relay connection workers must release their profile");
+        source.runtime_work.close();
+        source.runtime_work.drain().await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 }

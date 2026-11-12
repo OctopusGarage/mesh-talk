@@ -2397,9 +2397,19 @@ including an oversized row, so unselected work keeps its fair turn. New
 pending work still rotates before expensive authentication, and accepted or
 definitively rejected sources retain their existing exact durable completion.
 Network callbacks retry only their actual conversation through a covering
-account/conversation/ticket index. The admitted periodic worker retains global
-rotation and bounded metadata discovery, so proof arrival and policy recovery do
-not depend on another packet for that conversation. Retained headers qualify
+account/conversation/ticket index. Accept-loop-owned maintenance subscribes before
+its initial bounded pass. Committed sources, meaningful verified proof/route or
+policy changes, final repair-lease release and deferred selection retirement
+retain local demand independently of network source changes. Each finite retry
+sweep visits at most sixteen rows per turn; later discovery pages earn a bounded
+suffix sweep without repeatedly visiting a blocked prefix. Available work
+continues after 25 ms, storage failures retry after three seconds, and settled
+or dependency-blocked work uses a five-minute integrity repair. Abandoned repair
+leases retain their thirty-second deadline; real progress, deferred cleanup and
+unknown dependencies remain distinct. Changes during an admitted blocking worker
+retain a following turn, and cancellation retains its existing work lifetime.
+Proof arrival and policy recovery therefore do not depend on another packet for
+that conversation. Retained headers qualify
 routing and disabled sibling policy before retry bodies are hydrated; skipped
 sources remain pending and final decoded authentication checks remain fresh.
 Index installation scans pending metadata once, without replaying ciphertext or

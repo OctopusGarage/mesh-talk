@@ -374,7 +374,8 @@
         "crates/mesh-talk-core/src/node/node_tests.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
         "crates/mesh-talk-core/src/node/media_store/**",
-        "crates/mesh-talk-core/src/node/account_documents/tests.rs"
+        "crates/mesh-talk-core/src/node/account_documents/tests.rs",
+        "crates/mesh-talk-core/src/node/serving.rs"
       ],
       "rust": [
         {
@@ -398,7 +399,8 @@
             "custody_report_progresses_while_unrelated_channel_recovery_is_held",
             "account_wake_requires_exact_linked_noise_identity_and_deduplicates_revisions",
             "account_preference_local_edit_wakes_sibling_before_periodic_retry",
-            "legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_repairs"
+            "legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_repairs",
+            "channel_custody_noop_"
           ]
         }
       ],
@@ -420,6 +422,10 @@
           },
           {
             "name": "Media cleanup checks current references and exact revisions per deletion, but checkpoints a protected metadata page once rather than writing per read. Failed pages remain pending and replay at most the bounded page after reopen.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
+          {
+            "name": "Successful unchanged member or relay custody confirmation does not publish a presentation invalidation. Actual durable journal changes and independently changed shared witnesses still notify; negative rechecks, failed writes and current authorization retain their owning contracts.",
             "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
@@ -1798,6 +1804,10 @@
           },
           {
             "name": "Only newly discovered retained active Profile headers create maintenance demand, including own-author sources; bounded deduplicated demand commits before cursor acknowledgement. Account-fenced retry and atomic one-time legacy header bootstrap preserve pending tickets and completed receive facts without replaying completed payloads.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Accept-loop-owned Profile maintenance retains meaningful source, proof/route, policy, lease and cleanup wakes; finite retry cuts and later discovery suffixes preserve fairness. Settled or dependency-blocked work uses sparse repair, while real lease expiry, failure recovery and unfinished pages retain their own deadlines and cancellation-owned admission.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

@@ -16,6 +16,35 @@ use std::{
 };
 use tokio::net::TcpStream;
 
+/// Captured before operation guards, so even a later error/cancellation retires
+/// those guards before publishing an actual policy-generation dependency change.
+struct ProfilePolicyWake<'a> {
+    generation: &'a AtomicU64,
+    before: u64,
+    wake: crate::storage::database::MaintenanceWake,
+}
+impl Drop for ProfilePolicyWake<'_> {
+    fn drop(&mut self) {
+        if self.generation.load(Ordering::Acquire) != self.before {
+            self.wake.notify();
+        }
+    }
+}
+
+struct ProfileFactWake {
+    changed: bool,
+    wake: Option<crate::storage::database::MaintenanceWake>,
+}
+impl Drop for ProfileFactWake {
+    fn drop(&mut self) {
+        if self.changed
+            && let Some(wake) = &self.wake
+        {
+            wake.notify();
+        }
+    }
+}
+
 /// A valid signed account change for an otherwise unchanged, previously pinned device.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AccountBindingChange {
@@ -82,6 +111,14 @@ fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "privacy operation denied")
 }
 impl Node {
+    fn profile_policy_wake(&self) -> ProfilePolicyWake<'_> {
+        ProfilePolicyWake {
+            generation: &self.privacy.generation,
+            before: self.privacy.generation.load(Ordering::Acquire),
+            wake: self.storage.database().maintenance_waker(),
+        }
+    }
+
     /// Restrict public discovery to enumerated physical LAN interfaces. Known,
     /// explicitly authorized contacts can still use existing TCP routes.
     pub fn physical_lan_only(&self) -> bool {
@@ -105,6 +142,7 @@ impl Node {
         enabled: bool,
         mut authorize: impl FnMut(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         let _policy_guard = self.privacy.gate.write().await;
         let visibility = self
             .privacy
@@ -225,6 +263,7 @@ impl Node {
         invisible: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         let _operation = self.privacy.gate.write().await;
         let (visibility, previous) = {
             let state = self.privacy.state.read().map_err(|_| denied())?;
@@ -292,6 +331,7 @@ impl Node {
         allowed: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         {
             let _operation = self.privacy.gate.write().await;
             self.change_allowed_locked_guarded(
@@ -336,6 +376,7 @@ impl Node {
         expected: &AccountBindingChange,
         authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         {
             let _operation = self.privacy.gate.write().await;
             self.change_allowed_locked_guarded_selected(
@@ -369,6 +410,7 @@ impl Node {
         account: &str,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        let _profile_wake = self.profile_policy_wake();
         // Reusing a durable grant is an observation, not a policy transition.
         // Handshakes hold the disclosure gate while doing network IO; taking
         // its writer for every message makes local acceptance depend on them.
@@ -432,6 +474,7 @@ impl Node {
         account: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         {
             let _operation = self.privacy.gate.write().await;
             self.change_allowed_locked_guarded(
@@ -452,6 +495,7 @@ impl Node {
         source: PermissionSource,
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         let _operation = self.privacy.gate.write().await;
         self.change_allowed_locked(account, allowed, source, authorize)
     }
@@ -1009,6 +1053,12 @@ impl Node {
         if let Some(hook) = self.remember_peer_hook.lock().unwrap().take() {
             hook();
         }
+        // Declared before the policy/roster guards: even a later route-write
+        // failure wakes retry work only after those guards have retired.
+        let mut proof_wake = ProfileFactWake {
+            changed: false,
+            wake: Some(self.storage.database().maintenance_waker()),
+        };
         loop {
             let mut guard = self
                 .privacy
@@ -1027,16 +1077,20 @@ impl Node {
                 continue;
             }
             if announce.account_id().is_some() {
+                let revision = state.proofs.revision();
                 state
                     .proofs
                     .record(announce)
                     .map_err(|_| TransportError::AdmissionDenied)?;
+                proof_wake.changed |= state.proofs.revision() != revision;
             }
             if direct || group_member.unwrap_or(false) {
+                let known_route = state.routes.contains(public, ip);
                 state
                     .routes
                     .record(public, ip)
                     .map_err(|_| TransportError::AdmissionDenied)?;
+                proof_wake.changed |= !known_route;
             }
             break;
         }
@@ -1048,6 +1102,7 @@ impl Node {
         } else {
             roster.forget(public);
         }
+        drop(roster);
         Ok(())
     }
 
@@ -1099,6 +1154,13 @@ impl Node {
         privacy: &PrivacyControl,
         (proofs, peers): (Vec<Announce>, Vec<crate::discovery::PeerRecord>),
     ) -> io::Result<Vec<crate::discovery::PeerRecord>> {
+        let mut dependency = ProfileFactWake {
+            changed: false,
+            wake: privacy
+                ._storage
+                .as_ref()
+                .map(|storage| storage.database().maintenance_waker()),
+        };
         let mut guard = privacy.state.write().map_err(|_| denied())?;
         let Some(state) = guard.as_mut() else {
             return Ok(peers);
@@ -1114,7 +1176,10 @@ impl Node {
                 }
                 continue;
             }
-            if let Err(error) = state.proofs.record(&proof) {
+            let before = state.proofs.revision();
+            let recorded = state.proofs.record(&proof);
+            dependency.changed |= state.proofs.revision() != before;
+            if let Err(error) = recorded {
                 // Rejected bindings are ineligible peers; failed persistence is
                 // an unavailable snapshot, never a successful empty roster.
                 if error.kind() != io::ErrorKind::InvalidData {
@@ -1126,8 +1191,8 @@ impl Node {
                 );
                 continue;
             }
-            if let Some(peer) = peers.iter().find(|p| p.public == proof.public())
-                && (if peer.routes.is_empty() {
+            if let Some(peer) = peers.iter().find(|p| p.public == proof.public()) {
+                let ips = if peer.routes.is_empty() {
                     vec![peer.addr.ip()]
                 } else {
                     peer.routes
@@ -1137,11 +1202,14 @@ impl Node {
                         })
                         .map(|route| route.addr.ip())
                         .collect()
-                })
-                .into_iter()
-                .any(|ip| state.routes.record(&peer.public, ip).is_err())
-            {
-                return Err(io::Error::other("discovered peer route was not cached"));
+                };
+                for ip in ips {
+                    let known = state.routes.contains(&peer.public, ip);
+                    if state.routes.record(&peer.public, ip).is_err() {
+                        return Err(io::Error::other("discovered peer route was not cached"));
+                    }
+                    dependency.changed |= !known;
+                }
             }
             successful.push(proof);
         }

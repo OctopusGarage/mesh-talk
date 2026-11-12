@@ -40,6 +40,7 @@ pub(in crate::node) const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 /// A count-only maintenance lease. No mutex or database guard spans network I/O.
 pub(in crate::node) struct ProfileCompactionLease {
     active: Arc<Mutex<usize>>,
+    wake: crate::storage::database::MaintenanceWake,
 }
 
 impl Drop for ProfileCompactionLease {
@@ -51,6 +52,11 @@ impl Drop for ProfileCompactionLease {
         *active = active
             .checked_sub(1)
             .expect("profile compaction lease count");
+        let released = *active == 0;
+        drop(active);
+        if released {
+            self.wake.notify();
+        }
     }
 }
 
@@ -580,7 +586,10 @@ impl Node {
             .checked_add(1)
             .ok_or(LogError::RepositoryCounterExhausted)?;
         drop(count);
-        Ok(ProfileCompactionLease { active })
+        Ok(ProfileCompactionLease {
+            active,
+            wake: self.storage.database().maintenance_waker(),
+        })
     }
 
     /// Close every legacy handle and the encrypted connection before directory

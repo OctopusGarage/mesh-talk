@@ -911,16 +911,21 @@ impl Node {
         category: SyncCategory,
         enabled: bool,
     ) -> Result<(), NodeError> {
-        {
+        let changed = {
             let _commit = self
                 .account_sync_commit
                 .lock()
                 .expect("account sync commit mutex not poisoned");
-            self.account_sync_policy
+            let mut policy = self
+                .account_sync_policy
                 .lock()
-                .expect("account sync policy mutex not poisoned")
-                .set(category, enabled)
-                .map_err(NodeError::Log)?;
+                .expect("account sync policy mutex not poisoned");
+            let before = policy.revision();
+            policy.set(category, enabled).map_err(NodeError::Log)?;
+            policy.revision() != before
+        };
+        if changed {
+            self.storage.database().maintenance_waker().notify();
         }
         self.account_sync_notify.notify_one();
         self.note_ui_change();

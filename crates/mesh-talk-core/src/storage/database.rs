@@ -197,11 +197,21 @@ impl MainWriteStamp {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct MaintenanceWake(tokio::sync::watch::Sender<u64>);
+impl MaintenanceWake {
+    pub(crate) fn notify(&self) {
+        self.0
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+}
+
 pub(crate) struct EncryptedDatabase {
     connection: Mutex<work_clock::OwnedConnection>,
     path: PathBuf,
     faulted: AtomicBool,
     source_changes: tokio::sync::watch::Sender<u64>,
+    maintenance_changes: tokio::sync::watch::Sender<u64>,
     write_observer: Option<Mutex<observation::Observer>>,
     #[cfg(test)]
     successful_write_commits: std::sync::atomic::AtomicUsize,
@@ -334,6 +344,7 @@ impl EncryptedDatabase {
             path,
             faulted: AtomicBool::new(false),
             source_changes: tokio::sync::watch::channel(0).0,
+            maintenance_changes: tokio::sync::watch::channel(0).0,
             write_observer,
             #[cfg(test)]
             successful_write_commits: std::sync::atomic::AtomicUsize::new(0),
@@ -512,6 +523,13 @@ impl EncryptedDatabase {
     /// Restricted derived transactions cannot feed their own receive loop.
     pub(crate) fn subscribe_source_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.source_changes.subscribe()
+    }
+    /// Retained local maintenance demand, separate from network source evidence.
+    pub(crate) fn maintenance_waker(&self) -> MaintenanceWake {
+        MaintenanceWake(self.maintenance_changes.clone())
+    }
+    pub(crate) fn subscribe_maintenance_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.maintenance_changes.subscribe()
     }
 
     pub(crate) fn read<T>(

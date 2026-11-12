@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 const MAX_QUIET_CONSENTS: usize = 256;
 const MAX_SCOPE_BYTES: usize = 512;
-const QUIET_CONSENT_TTL: Duration = Duration::from_secs(60);
+const QUIET_CONSENT_TTL: Duration = Duration::from_secs(300);
 type Offer = (ConversationId, EventId);
 
 #[derive(Clone)]
@@ -47,6 +47,17 @@ struct QuietConsent {
     scope: ControlScope,
     offer: Offer,
     checked: Instant,
+    #[cfg(test)]
+    extra_age: Duration,
+}
+
+impl QuietConsent {
+    fn elapsed_at(&self, now: Instant) -> Duration {
+        let elapsed = now.saturating_duration_since(self.checked);
+        #[cfg(test)]
+        let elapsed = elapsed.saturating_add(self.extra_age);
+        elapsed
+    }
 }
 
 #[derive(Default)]
@@ -72,7 +83,7 @@ impl QuietConsentCache {
             reason::CONSENT_REMOTE_CHANGED
         } else if !hint.scope.accepts_remote_floor(scope) {
             reason::CONSENT_FLOOR_CHANGED
-        } else if now.saturating_duration_since(hint.checked) >= QUIET_CONSENT_TTL {
+        } else if hint.elapsed_at(now) >= QUIET_CONSENT_TTL {
             reason::CONSENT_EXPIRED
         } else {
             reason::CONSENT_HIT
@@ -82,7 +93,7 @@ impl QuietConsentCache {
         self.0.iter().any(|hint| {
             hint.scope.permits_reuse(scope)
                 && hint.offer == *offer
-                && now.saturating_duration_since(hint.checked) < QUIET_CONSENT_TTL
+                && hint.elapsed_at(now) < QUIET_CONSENT_TTL
         })
     }
 
@@ -101,7 +112,7 @@ impl QuietConsentCache {
             return false;
         }
         self.0
-            .retain(|hint| now.saturating_duration_since(hint.checked) < QUIET_CONSENT_TTL);
+            .retain(|hint| hint.elapsed_at(now) < QUIET_CONSENT_TTL);
         // Negative scheduling knowledge must never consume a live positive's
         // slot, including a same-offer observation under a different scope.
         if kind == QuietConsentKind::NoControlDue
@@ -133,12 +144,26 @@ impl QuietConsentCache {
             scope,
             offer,
             checked: now,
+            #[cfg(test)]
+            extra_age: Duration::ZERO,
         });
         true
     }
 }
 
 impl Node {
+    #[cfg(test)]
+    pub(in crate::node::opaque_relay) fn age_quiet_consent_hints_for_test(
+        &self,
+        elapsed: Duration,
+    ) -> usize {
+        let mut cache = self.opaque_upload_cache.lock().expect("upload cache");
+        for hint in &mut cache.quiet_consents.0 {
+            hint.extra_age = hint.extra_age.saturating_add(elapsed);
+        }
+        cache.quiet_consents.len()
+    }
+
     pub(super) fn consent_control_scope(
         &self,
         p: &OpaqueMailboxProgress,

@@ -2848,8 +2848,8 @@ outcome and qualified fallible source/mailbox observations before and after prep
 The per-offer owner releases delivery, consent and publication guards before
 scope recapture or cache admission; no I/O runs under the cache guard.
 NoControlDue is neither consent nor custody evidence. Reads never renew either
-variant's sixty-second expiry, which bounds rechecks of external files and time
-conditions.
+variant's five-minute expiry, which bounds fallback rechecks of external files
+and time conditions when no invalidation event is available.
 Local mutations, remote replacement or revision changes immediately restore
 normal preparation and current send checks. Hints contain no event bodies and
 never skip the rotating offer selector, so later unseen offers retain their turn.

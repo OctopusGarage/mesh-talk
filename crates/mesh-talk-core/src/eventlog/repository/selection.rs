@@ -115,8 +115,13 @@ impl Drop for Selection {
                 "UPDATE participant_work.participant_sync_views SET retired=1 WHERE id=?1 AND owner=?2",
                 params![self.id.as_slice(), self.owner.as_slice()],
             )?;
-            cleanup_on(tx, self.domain, self.owner, STEP).map(|_| ())
+            cleanup_on(tx, self.domain, self.owner, STEP)
         });
+        // Only deferred reclamation needs another local turn. This must never
+        // publish a network source change, and runs after the SQL guard retires.
+        if !matches!(&result, Ok(false)) {
+            self.database.maintenance_waker().notify();
+        }
         if let Err(error) = result {
             log::warn!("participant sync selection cleanup deferred: {error}");
         }
@@ -262,14 +267,17 @@ impl EventRepository {
         // expire cached SQL plans even when no selection needs reclamation.
         // A retirement after this observation is safe to defer to its owner or
         // the next bounded cleanup pass; this is not an authority decision.
-        let pending = self.database.read(|c| {
-            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2) UNION ALL SELECT 1 FROM main.participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2))", params![self.domain.0.as_slice(),self.selection_owner.as_slice()], |r|r.get::<_,bool>(0))?)
-        })?;
+        let pending = self.selection_cleanup_pending()?;
         if !pending {
             return Ok(false);
         }
         self.database.selection_work_transaction(|tx| {
             cleanup_pending_on(tx, self.domain, self.selection_owner, STEP)
+        })
+    }
+    pub(crate) fn selection_cleanup_pending(&self) -> Result<bool, LogError> {
+        self.database.read(|c| {
+            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2) UNION ALL SELECT 1 FROM main.participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2))", params![self.domain.0.as_slice(),self.selection_owner.as_slice()], |r|r.get::<_,bool>(0))?)
         })
     }
     pub(crate) fn activate_cached_selection(
@@ -505,6 +513,45 @@ impl EventRepository {
 #[cfg(test)]
 mod retirement_tests {
     use super::*;
+
+    #[test]
+    fn selection_retirement_wakes_local_cleanup_without_network_source_change() {
+        use super::super::tests::{database, event};
+        use crate::eventlog::sync::network::NetworkSyncStore;
+        let directory = tempfile::tempdir().unwrap();
+        let db = database(&directory);
+        let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let message = event(
+            &crate::identity::device::DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repository.append(&message).unwrap();
+        let view = NetworkSyncStore::open_view(&repository, &message.conversation_id).unwrap();
+        let selection = repository.begin_selection(&view, 1, 512).unwrap().unwrap();
+        db.selection_work_transaction(|c| {
+            for index in 0..STEP+1 {
+                let mut id=[0xffu8;32];id[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                c.execute("INSERT INTO participant_work.participant_sync_rows(view,id,rank,candidate,selected,own) VALUES(?1,?2,?3,0,0,0)",params![selection.id.as_slice(),id.as_slice(),(index+10000) as i64])?;
+            }
+            Ok(())
+        }).unwrap();
+        let maintenance = db.subscribe_maintenance_changes();
+        let source = db.subscribe_source_changes();
+        drop(selection);
+        assert!(maintenance.has_changed().unwrap());
+        assert!(!source.has_changed().unwrap());
+        assert!(repository.selection_cleanup_pending().unwrap());
+        for _ in 0..8 {
+            if !repository.cleanup_selections().unwrap() {
+                break;
+            }
+        }
+        assert!(!repository.selection_cleanup_pending().unwrap());
+    }
 
     #[test]
     fn empty_selection_cleanup_preserves_cached_read_plans() {

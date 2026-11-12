@@ -2981,14 +2981,15 @@ impl Node {
                                 false,
                             )
                             .is_ok();
-                        let persisted = witnessed
-                            && self
-                                .channel_custody
-                                .lock()
-                                .expect("channel custody mutex")
-                                .confirm(event_id, &device)
-                                .is_ok();
-                        if persisted {
+                        let changed = if witnessed {
+                            let mut store =
+                                self.channel_custody.lock().expect("channel custody mutex");
+                            let before = store.revision();
+                            store.confirm(event_id, &device).is_ok() && store.revision() != before
+                        } else {
+                            false
+                        };
+                        if changed {
                             self.delivery_status_notify.notify_waiters();
                         }
                     }
@@ -3098,15 +3099,17 @@ impl Node {
         {
             return;
         }
-        let recorded = {
+        let changed = {
             let mut store = self.channel_custody.lock().expect("channel custody mutex");
-            if held {
+            let before = store.revision();
+            let recorded = if held {
                 store.confirm(event_id, &peer.public.user_id())
             } else {
                 store.revoke(event_id, &peer.public.user_id())
-            }
+            };
+            recorded.is_ok() && store.revision() != before
         };
-        if recorded.is_ok() {
+        if changed {
             self.delivery_status_notify.notify_waiters();
         }
     }
@@ -3705,6 +3708,193 @@ mod fanout_tests {
     use crate::identity::device::DeviceIdentity;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Instant;
+
+    async fn custody_notification_probe_fixture(sync: bool) {
+        use crate::{
+            identity::account::Account,
+            node::test_support::{IndependentPeerRuntime, node_with_files},
+        };
+        use futures_util::FutureExt;
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let remote_account = Account::generate();
+        let identity = DeviceIdentity::generate();
+        let remote_identity = DeviceIdentity::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proof =
+            Announce::new_with_account(&remote_identity, &remote_account, "holder", address.port());
+        let (source, _, _) = node_with_files(&dir.path().join("source"), identity, account, &proof);
+        let own = Announce::new_with_account(&source.identity, &source.account, "source", 1);
+        let (holder, _, _) = node_with_files(
+            &dir.path().join("holder"),
+            remote_identity,
+            remote_account,
+            &own,
+        );
+        let mut server = IndependentPeerRuntime::start_multithreaded_with(
+            holder.clone(),
+            listener,
+            |node, listener| node.run_inbound_connections_for_test(listener),
+        )
+        .await;
+        server.launch();
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let channel = source
+                .create_channel("custody notification", vec![holder.identity.public()])
+                .await
+                .unwrap();
+            let event = source
+                .enqueue_channel_message_reply_expiring_if(
+                    channel,
+                    b"held probe",
+                    None,
+                    None,
+                    |commit| commit(),
+                )
+                .unwrap();
+            let peer = source.routing_peer(&holder.user_id()).unwrap();
+            source
+                .sync_and_confirm_custody_admitted(channel, event, &peer)
+                .await
+                .unwrap();
+            holder.process_channel(channel);
+            source
+                .sync_and_confirm_custody_admitted(channel, event, &peer)
+                .await
+                .unwrap();
+            assert!(holder.log.lock().unwrap().get(&event).unwrap().is_some());
+            // Leave the published positive witness unchanged. The first probe
+            // must still notify when it repairs only the local custody fact.
+            source
+                .channel_custody
+                .lock()
+                .unwrap()
+                .revoke(event, &holder.user_id())
+                .unwrap();
+            let first = source.delivery_status_notify.notified();
+            tokio::pin!(first);
+            first.as_mut().enable();
+            if sync {
+                source
+                    .sync_and_confirm_custody_admitted(channel, event, &peer)
+                    .await
+                    .unwrap();
+            } else {
+                source
+                    .recheck_channel_custody_peer(channel, event, &peer)
+                    .await;
+            }
+            assert!(
+                first.as_mut().now_or_never().is_some(),
+                "first held fact must notify even with an unchanged document"
+            );
+            assert!(
+                source
+                    .channel_custody
+                    .lock()
+                    .unwrap()
+                    .peers(event)
+                    .unwrap()
+                    .contains(&holder.user_id())
+            );
+            let repeated = source.delivery_status_notify.notified();
+            tokio::pin!(repeated);
+            repeated.as_mut().enable();
+            if sync {
+                source
+                    .sync_and_confirm_custody_admitted(channel, event, &peer)
+                    .await
+                    .unwrap();
+            } else {
+                source
+                    .recheck_channel_custody_peer(channel, event, &peer)
+                    .await;
+            }
+            let unchanged_held_woke = repeated.as_mut().now_or_never().is_some();
+            // An authenticated negative for an absent event retracts a real
+            // journal positive, then remains quiet on the identical next probe.
+            let absent = EventId::new([243; 32]);
+            source
+                .publish_channel_custody(channel, absent, &peer.public, false, false, false)
+                .unwrap();
+            source
+                .channel_custody
+                .lock()
+                .unwrap()
+                .confirm(absent, &holder.user_id())
+                .unwrap();
+            let revoked = source.delivery_status_notify.notified();
+            tokio::pin!(revoked);
+            revoked.as_mut().enable();
+            source
+                .recheck_channel_custody_peer(channel, absent, &peer)
+                .await;
+            assert!(
+                revoked.as_mut().now_or_never().is_some(),
+                "first negative must notify when it retracts custody"
+            );
+            assert!(
+                !source
+                    .channel_custody
+                    .lock()
+                    .unwrap()
+                    .peers(absent)
+                    .unwrap()
+                    .contains(&holder.user_id())
+            );
+            let negative = source.delivery_status_notify.notified();
+            tokio::pin!(negative);
+            negative.as_mut().enable();
+            source
+                .recheck_channel_custody_peer(channel, absent, &peer)
+                .await;
+            let unchanged_negative_woke = negative.as_mut().now_or_never().is_some();
+            let document = source.delivery_status_notify.notified();
+            tokio::pin!(document);
+            document.as_mut().enable();
+            source
+                .publish_channel_custody(
+                    channel,
+                    EventId::new([244; 32]),
+                    &peer.public,
+                    false,
+                    false,
+                    false,
+                )
+                .unwrap();
+            assert!(
+                document.as_mut().now_or_never().is_some(),
+                "a changed shared witness retains its independent notification"
+            );
+            assert!(
+                !unchanged_held_woke,
+                "unchanged held probe must not wake delivery status"
+            );
+            assert!(
+                !unchanged_negative_woke,
+                "unchanged negative probe must not wake delivery status"
+            );
+        })
+        .catch_unwind()
+        .await;
+        server.stop().await;
+        source.runtime_work.close();
+        source.runtime_work.drain().await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_custody_noop_sync_confirmation_does_not_notify_delivery_status() {
+        custody_notification_probe_fixture(true).await;
+    }
+
+    #[tokio::test]
+    async fn channel_custody_noop_recheck_does_not_notify_delivery_status() {
+        custody_notification_probe_fixture(false).await;
+    }
 
     #[tokio::test(start_paused = true)]
     async fn settled_channel_custody_waits_for_semantic_change_instead_of_three_second_scan() {

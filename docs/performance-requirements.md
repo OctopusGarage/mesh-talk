@@ -70,6 +70,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Apply that projection consistently across retry, continuation and publication
    consumers; otherwise an unchanged observation can still reset another lane.
    Advance semantic revisions only when their authoritative value changes.
+   Emit presentation invalidations only for changed facts; successful idempotent
+   confirmation must not restart UI reads or persistence. Capture change evidence
+   inside the committing owner and notify after releasing its guard.
    Replacing an identical binding map is not invalidation; actual removal and
    later restoration must each invalidate their preceding observation.
 

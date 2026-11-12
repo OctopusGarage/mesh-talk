@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::sync::{Arc, Mutex};
 
 mod retry;
+type PendingRetryRow = ((i64, EventId), Candidate);
 const SCHEMA: &str = "CREATE TABLE profile_receive_scan(account BLOB PRIMARY KEY CHECK(length(account)=32), after_commit INTEGER CHECK(after_commit IS NULL OR after_commit>=0), next_ticket INTEGER NOT NULL CHECK(next_ticket>0));
 CREATE TABLE profile_receive_pending(account BLOB NOT NULL CHECK(length(account)=32), id BLOB NOT NULL CHECK(length(id)=32), conversation BLOB NOT NULL CHECK(length(conversation)=32), ticket INTEGER NOT NULL CHECK(ticket>0), PRIMARY KEY(account,id));
 CREATE INDEX profile_receive_retry ON profile_receive_pending(account,ticket);
@@ -176,6 +177,36 @@ impl ProfileReceiveWork {
                 [self.account.as_slice()],
                 |r| r.get(0),
             )?)
+        })
+    }
+    /// Capture one finite retry sweep without consuming another callback's cursor.
+    pub(crate) fn retry_upper(&self) -> Result<Option<(i64, EventId)>, LogError> {
+        self.profile.database().read(|c| {
+            self.check(c)?;
+            let row: Option<(i64,Vec<u8>)> = c.query_row("SELECT ticket,id FROM profile_receive_pending WHERE account=?1 ORDER BY ticket DESC,id DESC LIMIT 1", [self.account.as_slice()], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+            row.map(|(ticket,id)| {
+                if ticket<=0 { return Err(invalid("invalid profile retry ticket")); }
+                Ok((ticket,EventId::new(id.try_into().map_err(|_| invalid("invalid profile retry id"))?)))
+            }).transpose()
+        })
+    }
+    pub(crate) fn retry_page(
+        &self,
+        after: (i64, EventId),
+        through: (i64, EventId),
+    ) -> Result<Vec<PendingRetryRow>, LogError> {
+        self.profile.database().read(|c| {
+            self.check(c)?;
+            let mut statement = c.prepare_cached("SELECT ticket,id,conversation FROM profile_receive_pending WHERE account=?1 AND (ticket,id)>(?2,?3) AND (ticket,id)<=(?4,?5) ORDER BY ticket,id LIMIT 16")?;
+            let rows = statement.query_map(params![self.account.as_slice(),after.0,after.1.as_bytes().as_slice(),through.0,through.1.as_bytes().as_slice()], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,Vec<u8>>(1)?,row.get::<_,Vec<u8>>(2)?)))?;
+            let mut result = Vec::with_capacity(16);
+            for row in rows {
+                let (ticket,id,conversation) = row?;
+                if ticket<=0 { return Err(invalid("invalid profile retry ticket")); }
+                let id = EventId::new(id.try_into().map_err(|_| invalid("invalid profile retry id"))?);
+                result.push(((ticket,id),Candidate { id, conversation: ConversationId::new(conversation.try_into().map_err(|_| invalid("invalid profile retry conversation"))?) }));
+            }
+            Ok(result)
         })
     }
     /// Exact account-scoped presentation terminal or authorized superseded-source
