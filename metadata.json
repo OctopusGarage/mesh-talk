@@ -24,23 +24,22 @@
       "transcript": "/1/full.jsonl",
       "compact_transcript": "/1/transcript.jsonl",
       "content_hash": "/1/content_hash.txt",
-      "prompt": "/1/prompt.txt"
+      "prompt": ""
     }
   ],
   "token_usage": {
-    "input_tokens": 125168,
+    "input_tokens": 95958,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 87356544,
-    "output_tokens": 107452,
-    "api_call_count": 343,
+    "cache_read_tokens": 83722880,
+    "output_tokens": 102411,
+    "api_call_count": 313,
     "subagent_tokens": {
       "input_tokens": 0,
       "cache_creation_tokens": 0,
       "cache_read_tokens": 0,
       "output_tokens": 0,
       "api_call_count": 0
-    },
-    "subagent_tokens_complete": true
+    }
   },
   "redaction": {
     "replacements": 4880,
