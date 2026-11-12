@@ -512,7 +512,24 @@ async fn group_file_full_queue_request_survives_older_discovery_eof() {
         let victim = *jobs.keys().find(|candidate| **candidate != key).unwrap();
         jobs.remove(&victim);
     }
-    node.refill_group_file_delivery().unwrap();
+    // The signed request changes the authorization source. Its bounded
+    // preparation can require several turns for whichever recipient the
+    // randomized identities placed first; one turn is not an admission promise.
+    for _ in 0..1024 {
+        match node.refill_group_file_delivery() {
+            Ok(()) | Err(LogError::StaleCursor) => {}
+            Err(error) => panic!("group refill failed: {error}"),
+        }
+        if node
+            .group_file_delivery
+            .jobs
+            .lock()
+            .unwrap()
+            .contains_key(&key)
+        {
+            break;
+        }
+    }
     let jobs = node.group_file_delivery.jobs.lock().unwrap();
     assert_eq!(
         jobs[&key].demand,
@@ -769,7 +786,16 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
             }
         }));
         RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
-        node.retry_group_file_delivery().await;
+        // The imported signed demand invalidates the prior finite source view.
+        // Drive its preparation owner until the actual network completion cut,
+        // rather than assuming every randomized recipient is warm in one turn.
+        for _ in 0..128 {
+            if let Some(pending) = node.group_file_delivery.jobs.lock().unwrap().get_mut(&key) {
+                pending.retry_after = None;
+            }
+            node.retry_group_file_delivery().await;
+            if changed_demand.load(Ordering::SeqCst) { break; }
+        }
         assert!(changed_demand.load(Ordering::SeqCst), "the real completion race cut must run");
         for outer in &chunk_outers {
             assert!(office.durable_have(&mailbox.id(), outer).unwrap(),
@@ -783,12 +809,12 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
         assert_eq!(node.group_file_delivery.jobs.lock().unwrap()[&key].demand,
             Some(superseding_request.id), "new demand must survive the old job's retirement");
         *node.account_client_test_hook.lock().unwrap() = None;
-        for _ in 0..4 {
+        for _ in 0..128 {
             if let Some(pending) = node.group_file_delivery.jobs.lock().unwrap().get_mut(&key) {
                 pending.retry_after = None;
             }
             node.retry_group_file_delivery().await;
-            if office.durable_have(&mailbox.id(), &final_outer).unwrap() { break; }
+            if !node.group_file_delivery.jobs.lock().unwrap().contains_key(&key) { break; }
         }
         let replacement_reads = RECEIVE_ENTRY_CALLS.with(std::cell::Cell::get);
         let restored_custody = office.durable_have(&mailbox.id(), &final_outer).unwrap();
