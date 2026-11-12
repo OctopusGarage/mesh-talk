@@ -1134,6 +1134,16 @@ acceptance. Best-effort hint maintenance must not replace the original failure.
 The [paged-session regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
 own rejection, source/privacy invalidation and transport/cancellation cleanup.
 
+Trace every consumer of a scheduling projection: relay-control retries, file
+continuations, profile publication, account access and receive maintenance must
+share canonical endpoint semantics. Equal projections preserve owners, completion
+and backoff; new attempts still read current transport choices. Raw observations
+continue to refresh liveness. The
+[delivery retry tests](../crates/mesh-talk-core/src/node/delivery_runtime.rs),
+[publication tests](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs) and
+[account-access tests](../crates/mesh-talk-core/src/node/account_access.rs) own
+these consumer boundaries.
+
 Coalescing must preserve semantic scope as well as queue size. Reusing a value
 must not claim a new read observation or suppress a pending result for another
 resource; retain independent publication order for peers and account metadata.

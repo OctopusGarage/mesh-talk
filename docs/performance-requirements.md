@@ -65,6 +65,8 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Compare canonical endpoint sets rather than preferred-route order. Renewing
    an already-known route must not restart synchronization; actual topology,
    role, account and privacy changes retain their invalidations.
+   Apply that projection consistently across retry, continuation and publication
+   consumers; otherwise an unchanged observation can still reset another lane.
    Advance semantic revisions only when their authoritative value changes.
    Replacing an identical binding map is not invalidation; actual removal and
    later restoration must each invalidate their preceding observation.

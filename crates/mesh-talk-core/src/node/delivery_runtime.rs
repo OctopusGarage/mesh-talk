@@ -78,8 +78,40 @@ enum ControlWork {
     Pull(String),
 }
 
+// Scheduling inputs only. Actual dials keep the current preferred address and
+// authenticate the exact physical endpoint through the existing transport owner.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct RelayRouteInput {
+    ed25519: [u8; 32],
+    x25519: [u8; 32],
+    account: Option<String>,
+    post_office: bool,
+    endpoints: crate::discovery::roster::SchedulingEndpoints,
+}
+impl RelayRouteInput {
+    fn observe(peer: &crate::discovery::roster::PeerRecord) -> Self {
+        Self {
+            ed25519: peer.public.ed25519_pub,
+            x25519: peer.public.x25519_pub,
+            account: peer.account_id.clone(),
+            post_office: peer.post_office,
+            endpoints: peer.scheduling_endpoints(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ControlRouteInput {
+    endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
+    relays: std::collections::BTreeSet<RelayRouteInput>,
+    publicly_observed: bool,
+    policy_generation: u64,
+    demand_generation: u64,
+}
+
 struct ControlRoutes {
     peer: PublicIdentity,
+    relays: std::collections::BTreeSet<RelayRouteInput>,
     endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
     publicly_observed: bool,
     policy_generation: u64,
@@ -135,20 +167,14 @@ impl ControlWork {
 }
 
 impl ControlRoutes {
-    fn retry_routes(
-        &self,
-    ) -> (
-        std::collections::BTreeSet<(String, std::net::SocketAddr)>,
-        bool,
-        u64,
-        u64,
-    ) {
-        (
-            self.endpoints.clone(),
-            self.publicly_observed,
-            self.policy_generation,
-            self.demand_generation,
-        )
+    fn retry_routes(&self) -> ControlRouteInput {
+        ControlRouteInput {
+            endpoints: self.endpoints.clone(),
+            relays: self.relays.clone(),
+            publicly_observed: self.publicly_observed,
+            policy_generation: self.policy_generation,
+            demand_generation: self.demand_generation,
+        }
     }
 }
 
@@ -333,6 +359,8 @@ struct FileStepCompletion {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FileRoutes {
+    relays: std::collections::BTreeSet<RelayRouteInput>,
+    policy_generation: u64,
     endpoints: std::collections::BTreeSet<(bool, String, Option<String>, std::net::SocketAddr)>,
     current: bool,
     custody: bool,
@@ -2217,6 +2245,7 @@ impl Node {
 
     fn control_routes(&self, peer: &PublicIdentity) -> ControlRoutes {
         let roster = self.roster.lock().expect("roster mutex not poisoned");
+        let mut relays = std::collections::BTreeSet::new();
         let mut endpoints = std::collections::BTreeSet::new();
         let mut publicly_observed = false;
         if let Some(record) = roster
@@ -2241,12 +2270,13 @@ impl Node {
             .load(std::sync::atomic::Ordering::SeqCst)
         {
             for relay in self.post_office_candidates_for(&roster, peer) {
-                endpoints.insert((relay.public.user_id(), relay.addr));
+                relays.insert(RelayRouteInput::observe(&relay));
             }
         }
         ControlRoutes {
             peer: peer.clone(),
             endpoints,
+            relays,
             publicly_observed,
             policy_generation: self.privacy.generation.load(Ordering::Acquire),
             demand_generation: self.delivery_demand_generation.load(Ordering::Acquire),
@@ -2315,7 +2345,10 @@ impl Node {
     ) {
         let changed: Vec<_> = active
             .iter()
-            .filter(|(_, routes)| self.control_routes(&routes.peer).endpoints != routes.endpoints)
+            .filter(|(_, routes)| {
+                let current = self.control_routes(&routes.peer);
+                current.endpoints != routes.endpoints || current.relays != routes.relays
+            })
             .map(|(key, _)| key.clone())
             .collect();
         for key in changed {
@@ -3162,6 +3195,7 @@ impl Node {
         let current = self.file_destination_current(file, destination);
         let custody = self.file_relay_custody_current(file, destination);
         let binding = &destination.binding;
+        let mut relay_inputs = std::collections::BTreeSet::new();
         let mut endpoints = std::collections::BTreeSet::new();
         if current
             && let Some(peer) = self
@@ -3195,14 +3229,16 @@ impl Node {
                 let roster = self.roster.lock().expect("roster lock not poisoned");
                 self.post_office_candidates_for(&roster, &binding.device)
             };
-            endpoints.extend(
+            relay_inputs.extend(
                 relays
                     .into_iter()
                     .filter(|peer| self.relay_send_allowed(&peer.public))
-                    .map(|peer| (true, peer.public.user_id(), peer.account_id, peer.addr)),
+                    .map(|peer| RelayRouteInput::observe(&peer)),
             );
         }
         FileRoutes {
+            relays: relay_inputs,
+            policy_generation: self.privacy.generation.load(Ordering::Acquire),
             endpoints,
             current,
             custody,
@@ -4184,6 +4220,264 @@ mod diagnostic_tests {
             retries.ready(&"peer", &node.control_routes(&peer).retry_routes(), now),
             "reverification must wake retained pull work"
         );
+    }
+
+    #[tokio::test]
+    async fn control_known_route_preference_renewals_preserve_owner_and_retry_deadline() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Peer",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let relay_identity = DeviceIdentity::generate();
+        let relay = Announce::new_post_office(&relay_identity, "Relay", 12345);
+        for ip in ["127.0.0.1", "127.0.0.2"] {
+            node.roster
+                .lock()
+                .unwrap()
+                .update(&relay, ip.parse().unwrap(), &node.user_id());
+        }
+        let initial = node.control_routes(&peer.public());
+        let input = initial.retry_routes();
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        let now = std::time::Instant::now();
+        retries.settled(
+            "peer",
+            input.clone(),
+            std::time::Duration::from_secs(60),
+            now,
+        );
+        let key = super::ControlWork::Pull(peer.user_id.clone());
+        let mut tasks = tokio::task::JoinSet::new();
+        let task = tasks.spawn(std::future::pending::<()>());
+        let id = task.id();
+        let mut owners = super::ControlTaskOwners::default();
+        owners.insert(key.clone(), task);
+        let mut active = std::collections::HashMap::from([(key.clone(), initial)]);
+        let baseline = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&relay.user_id)
+            .unwrap()
+            .scheduling_endpoints();
+        let mut preferred = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&relay.user_id)
+            .unwrap()
+            .addr;
+        for index in 0..8 {
+            let ip = if index % 2 == 0 {
+                "127.0.0.1"
+            } else {
+                "127.0.0.2"
+            };
+            {
+                let mut roster = node.roster.lock().unwrap();
+                roster.update(&relay, ip.parse().unwrap(), &node.user_id());
+                let record = roster.get(&relay.user_id).unwrap();
+                assert_eq!(record.scheduling_endpoints(), baseline);
+                assert_ne!(record.addr, preferred);
+                preferred = record.addr;
+            }
+            node.cancel_changed_delivery_routes(&mut active, &mut owners);
+            assert!(
+                active.contains_key(&key),
+                "known route preference must not cancel current control owner"
+            );
+            assert_eq!(owners.current[&key].id(), id);
+            assert!(!owners.current[&key].is_finished());
+            let refreshed = node.control_routes(&peer.public()).retry_routes();
+            assert_eq!(refreshed, input);
+            assert!(
+                !retries.ready(&"peer", &refreshed, now),
+                "known route preference must preserve future quiet deadline"
+            );
+        }
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&relay, "127.0.0.3".parse().unwrap(), &node.user_id());
+        assert!(retries.ready(
+            &"peer",
+            &node.control_routes(&peer.public()).retry_routes(),
+            now
+        ));
+        node.cancel_changed_delivery_routes(&mut active, &mut owners);
+        assert!(
+            !active.contains_key(&key),
+            "new eligible endpoint must retire old control owner"
+        );
+        assert!(!owners.current.contains_key(&key));
+        let before_policy = node.control_routes(&peer.public()).retry_routes();
+        node.privacy
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(
+            node.control_routes(&peer.public()).retry_routes(),
+            before_policy
+        );
+        let before_role = node.control_routes(&peer.public()).retry_routes();
+        let changed = Announce::new(&relay_identity, "Relay", relay.tcp_port);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&changed, "127.0.0.1".parse().unwrap(), &node.user_id());
+        assert_ne!(
+            node.control_routes(&peer.public()).retry_routes(),
+            before_role
+        );
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn file_known_route_preference_renewals_preserve_parked_continuation_and_retry_deadline()
+    {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let peer = Announce::new_with_account(&DeviceIdentity::generate(), &account, "Peer", 9);
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let relay_identity = DeviceIdentity::generate();
+        let relay = Announce::new_post_office(&relay_identity, "Relay", 12345);
+        for ip in ["127.0.0.1", "127.0.0.2"] {
+            node.roster
+                .lock()
+                .unwrap()
+                .update(&relay, ip.parse().unwrap(), &node.user_id());
+        }
+        let path = dir.path().join("retained-candidate.bin");
+        std::fs::write(&path, b"retained candidate traversal").unwrap();
+        let (logical, _) = node
+            .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = node
+            .delivery
+            .lock()
+            .unwrap()
+            .file_card(logical)
+            .unwrap()
+            .clone();
+        let destination = card.destinations[0].clone();
+        let key = (logical, destination.binding.event_id);
+        let routes = node.file_retry_routes(&card, &destination);
+        assert!(routes.current && routes.custody);
+        let now = std::time::Instant::now();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), now)
+            .unwrap()
+            .0;
+        let mut transfer = super::FileTransfer::new(card.clone(), destination.clone());
+        transfer.candidate_cursor = 1;
+        transfer.candidate_count = 2;
+        transfer.identity_offered = true;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                std::collections::HashMap::from([(key, transfer)]),
+                super::FileStepCompletion {
+                    token,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Failed,
+                },
+            )),
+            &mut diagnostic,
+            now,
+        );
+        let baseline = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&relay.user_id)
+            .unwrap()
+            .scheduling_endpoints();
+        let mut preferred = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&relay.user_id)
+            .unwrap()
+            .addr;
+        for index in 0..8 {
+            let ip = if index % 2 == 0 {
+                "127.0.0.1"
+            } else {
+                "127.0.0.2"
+            };
+            {
+                let mut roster = node.roster.lock().unwrap();
+                roster.update(&relay, ip.parse().unwrap(), &node.user_id());
+                let record = roster.get(&relay.user_id).unwrap();
+                assert_eq!(record.scheduling_endpoints(), baseline);
+                assert_ne!(record.addr, preferred);
+                preferred = record.addr;
+            }
+            scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, now);
+            assert!(
+                scheduler.transfers.is_empty(),
+                "known relay preference must not bypass file failure deadline"
+            );
+            assert_eq!(scheduler.parked[&key].candidate_cursor, 1);
+            assert!(scheduler.parked[&key].identity_offered);
+            assert_eq!(
+                scheduler.parked[&key].routes,
+                node.file_retry_routes(&card, &destination)
+            );
+        }
+        scheduler.admit_at(
+            &node,
+            vec![(card.clone(), destination.clone())],
+            None,
+            now + std::time::Duration::from_secs(2),
+        );
+        assert_eq!(scheduler.transfers[&key].candidate_cursor, 1);
+        assert!(scheduler.transfers[&key].identity_offered);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&relay, "127.0.0.3".parse().unwrap(), &node.user_id());
+        assert_ne!(
+            node.file_retry_routes(&card, &destination),
+            routes,
+            "new relay endpoint must invalidate old continuation input"
+        );
+        let before_policy = node.file_retry_routes(&card, &destination);
+        node.privacy
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(node.file_retry_routes(&card, &destination), before_policy);
+        let before_role = node.file_retry_routes(&card, &destination);
+        let changed = Announce::new(&relay_identity, "Relay", relay.tcp_port);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&changed, "127.0.0.1".parse().unwrap(), &node.user_id());
+        assert_ne!(node.file_retry_routes(&card, &destination), before_role);
     }
 
     #[tokio::test]

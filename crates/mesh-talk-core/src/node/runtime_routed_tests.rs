@@ -1858,3 +1858,127 @@ async fn security_rekey_does_not_publish_linking_account_continuity() {
     );
     reopened.stop().await;
 }
+
+#[test]
+fn profile_publication_known_route_preference_renewals_preserve_owner_and_retry() {
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    for complete in [false, true] {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&identity, &account, "Recipient", 21212);
+        let mut roster = Roster::default();
+        for ip in ["127.0.0.1", "127.0.0.2"] {
+            roster.update(&proof, ip.parse().unwrap(), "local");
+        }
+        let now = std::time::Instant::now();
+        let scope = ProfilePublicationScope::default();
+        let mut published = std::collections::HashMap::new();
+        let uid = identity.user_id();
+        profile_republish_targets(&mut published, &roster.peers(), 1, scope, now);
+        let owner = published[&uid].owner.clone();
+        let conversation = ConversationId::new([9; 32]);
+        prepare_profile_publication(published.get_mut(&uid).unwrap(), now, || {
+            Ok(Some(conversation))
+        })
+        .unwrap();
+        finish_profile_publication(&mut published, &uid, &owner, complete, now);
+        let retry = published[&uid].retry_at;
+        let failures = published[&uid].failures;
+        for ip in ["127.0.0.1", "127.0.0.2", "127.0.0.1", "127.0.0.2"] {
+            roster.update(&proof, ip.parse().unwrap(), "local");
+            assert!(
+                profile_republish_targets(&mut published, &roster.peers(), 1, scope, now)
+                    .is_empty(),
+                "known route preference renewal must not grant publication credit"
+            );
+            let state = &published[&uid];
+            assert!(Arc::ptr_eq(&state.owner, &owner));
+            assert_eq!(state.complete, complete);
+            assert_eq!(state.retry_at, retry);
+            assert_eq!(state.failures, failures);
+            assert_eq!(state.conversation, Some(conversation));
+        }
+        if let Some(due) = retry {
+            let targets = profile_republish_targets(&mut published, &roster.peers(), 1, scope, due);
+            assert_eq!(targets.len(), 1);
+            assert_eq!(
+                targets[0].addr,
+                roster.peers()[0].addr,
+                "a new attempt must carry the current preferred dial route"
+            );
+        }
+        roster.update(&proof, "127.0.0.3".parse().unwrap(), "local");
+        assert_eq!(
+            profile_republish_targets(&mut published, &roster.peers(), 1, scope, now).len(),
+            1
+        );
+        assert!(!Arc::ptr_eq(&published[&uid].owner, &owner));
+        let owner = published[&uid].owner.clone();
+        let mut private_scope = scope;
+        private_scope.privacy += 1;
+        profile_republish_targets(&mut published, &roster.peers(), 1, private_scope, now);
+        assert!(!Arc::ptr_eq(&published[&uid].owner, &owner));
+        let owner = published[&uid].owner.clone();
+        let rebound =
+            Announce::new_with_account(&identity, &Account::generate(), "Recipient", 21212);
+        roster.update(&rebound, "127.0.0.3".parse().unwrap(), "local");
+        profile_republish_targets(&mut published, &roster.peers(), 1, private_scope, now);
+        assert!(
+            !Arc::ptr_eq(&published[&uid].owner, &owner),
+            "changed certified account binding must replace work owner"
+        );
+        let mut peer = roster.peers().remove(0);
+        peer.post_office = true;
+        assert!(
+            profile_republish_targets(&mut published, &[peer], 1, private_scope, now).is_empty()
+        );
+        assert!(
+            published.is_empty(),
+            "role replacement retires the publication owner"
+        );
+    }
+}
+
+#[tokio::test]
+async fn profile_relay_known_route_preference_renewals_preserve_scope() {
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    let root = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&recipient, &Account::generate(), "Recipient", 21212);
+    let (node, _, _) = crate::node::test_support::node_with_files(
+        root.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let relay = DeviceIdentity::generate();
+    let proof =
+        Announce::new_post_office_with_account(&relay, &Account::generate(), "Relay", 21213);
+    for ip in ["127.0.0.1", "127.0.0.2"] {
+        node.roster
+            .lock()
+            .unwrap()
+            .update_routed(&proof, ip.parse().unwrap(), &node.user_id());
+    }
+    let now = std::time::Instant::now();
+    let mut relays = ProfileRelayObservation::default();
+    let scope = profile_publication_scope(&node, &mut relays, now);
+    for ip in ["127.0.0.1", "127.0.0.2", "127.0.0.1", "127.0.0.2"] {
+        node.roster
+            .lock()
+            .unwrap()
+            .update_routed(&proof, ip.parse().unwrap(), &node.user_id());
+        assert!(
+            profile_publication_scope(&node, &mut relays, now) == scope,
+            "known relay preference renewal must not invalidate every recipient publication"
+        );
+    }
+    node.roster.lock().unwrap().update_routed(
+        &proof,
+        "127.0.0.3".parse().unwrap(),
+        &node.user_id(),
+    );
+    assert!(profile_publication_scope(&node, &mut relays, now) != scope);
+}

@@ -56,20 +56,17 @@ struct ProfilePublication {
 struct ProfilePublicationTarget {
     public: PublicIdentity,
     account: Option<String>,
-    preferred: std::net::SocketAddr,
-    routes: Vec<std::net::SocketAddr>,
+    post_office: bool,
+    routes: crate::discovery::roster::SchedulingEndpoints,
 }
 
 impl ProfilePublicationTarget {
     fn observe(peer: &PeerRecord) -> Self {
-        let mut routes: Vec<_> = peer.routes.iter().map(|route| route.addr).collect();
-        routes.sort_unstable();
-        routes.dedup();
         Self {
             public: peer.public.clone(),
             account: peer.account_id.clone(),
-            preferred: peer.addr,
-            routes,
+            post_office: peer.post_office,
+            routes: peer.scheduling_endpoints(),
         }
     }
 }
@@ -200,6 +197,8 @@ fn profile_republish_targets(
         // new retry credit after the original observation's deadline passes.
         publication.presence_until = presence_until;
         if !publication.complete && publication.retry_at.is_none_or(|at| at <= now) {
+            // Work equality ignores preference within the same route set. A
+            // newly admitted attempt still carries the current physical route.
             targets.push(p.clone());
         }
         present_now.insert(uid);
