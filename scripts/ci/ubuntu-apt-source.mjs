@@ -1,4 +1,4 @@
-// Preserve signed APT configuration; this changes one runner-image mirror only.
+// Preserve signed APT configuration while avoiding the Ubuntu DNS namespace.
 import {
   lstat,
   readFile,
@@ -19,12 +19,28 @@ function archiveUri(uri) {
   } catch {
     throw new Error("Unsupported APT URI");
   }
-  if (parsed.hostname !== "azure.archive.ubuntu.com") return uri;
-  const exact = /^https?:\/\/azure\.archive\.ubuntu\.com\/ubuntu(\/?)$/.exec(
-    uri,
+  const paths = {
+    "azure.archive.ubuntu.com": "ubuntu",
+    "archive.ubuntu.com": "ubuntu",
+    "security.ubuntu.com": "ubuntu",
+    "ports.ubuntu.com": "ubuntu-ports",
+  };
+  if (!Object.hasOwn(paths, parsed.hostname)) return uri;
+  const path = paths[parsed.hostname];
+  const prefix = `https://mirrors.ocf.berkeley.edu/${path}`;
+  if (
+    uri === `http://${parsed.hostname}/${path}` ||
+    uri === `https://${parsed.hostname}/${path}`
+  )
+    return prefix;
+  if (
+    uri === `http://${parsed.hostname}/${path}/` ||
+    uri === `https://${parsed.hostname}/${path}/`
+  )
+    return `${prefix}/`;
+  throw new Error(
+    `Unsupported ${parsed.hostname === "azure.archive.ubuntu.com" ? "Azure " : "Ubuntu "}APT URI`,
   );
-  if (!exact) throw new Error("Unsupported Azure APT URI");
-  return `https://archive.ubuntu.com/ubuntu${exact[1]}`;
 }
 
 const localMirrorLists = new Set(["/etc/apt/apt-mirrors.txt"]);
@@ -187,6 +203,6 @@ if (
   if (process.argv.length !== 2)
     throw new Error("Usage: ubuntu-apt-source.mjs");
   console.log(
-    `Prepared official Ubuntu archive in ${await prepareUbuntuAptSources()} APT source file(s)`,
+    `Prepared signed Ubuntu mirror in ${await prepareUbuntuAptSources()} APT source file(s)`,
   );
 }

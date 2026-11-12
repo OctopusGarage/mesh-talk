@@ -63,6 +63,7 @@ export function requiredBrowserPaths(tier) {
     ["screenshot-portable.spec.ts", "unavailable capture is disabled and failed send preserves staged screenshot"],
     ["screenshot-portable.spec.ts", "desktop overlay at 1280x720 preserves Retina crop and keeps controls in bounds"],
     ["screenshot-portable.spec.ts", "desktop overlay at 760x620 preserves Retina crop and keeps controls in bounds"],
+    ["screenshot-portable.spec.ts", "screenshot dismissal observes timely DOM commits and rejects missing or late transitions"],
     ["file-send-progress.spec.ts", "file sender keeps confirmed upload percent and ETA visible until recipient custody"],
     ["file-send-progress.spec.ts", "image sender keeps confirmed upload percent and ETA visible until recipient custody"],
     ["file-send-progress.spec.ts", "concurrent sends keep progress with their own file bubbles"],

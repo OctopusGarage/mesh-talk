@@ -883,7 +883,9 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   `ScreenshotEditor.tsx` copies the final cropped/annotated PNG to the clipboard
   on confirmation before staging the same bytes; copy failures retain the editor
   for retry and cancellation never writes the clipboard. Confirmed screenshots
-  join the composer's pending files; only the normal Send action hands them to delivery. `screenshot/` owns image-coordinate geometry,
+  join the composer's pending files as `screenshot-<capture-time-ms>.png`; editing
+  and retry preserve that acquisition-time filename. Only the normal Send action
+  hands them to delivery. `screenshot/` owns image-coordinate geometry,
   annotation painting, floating controls and temporary fullscreen restoration.
   Its shortcut router shares that intake path for local and opt-in global
   activation. `src-tauri/src/screenshot_shortcuts.rs` owns OS registration and

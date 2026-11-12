@@ -372,6 +372,9 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   presentation summaries or wait for their publication; a pending unrelated
   channel cannot prevent a local erase. Canonical lookup and suppression-storage
   failures remain explicit, and encrypted event history remains unchanged.
+  Single-message erasure reconciles file keys only when it found file-card rows
+  to erase; text deletion does not depend on unrelated live file offers or their
+  revision. File-card deletion retains key revocation before physical row removal.
   Historical file cards carry their signed manifest event as a detached proof when
   the original device-pair event DAG is unavailable. A sibling can request an
   available attachment through a separate authenticated stream; the receiver checks

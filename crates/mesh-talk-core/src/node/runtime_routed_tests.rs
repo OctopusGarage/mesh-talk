@@ -11,6 +11,55 @@ impl crate::discovery::candidates::CandidateSource for FixedCandidates {
 }
 
 #[tokio::test]
+async fn runtime_zero_discovery_port_owns_a_reachable_assigned_endpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let start = |name| {
+        NodeRuntime::start(
+            root.path(),
+            name,
+            name,
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+    };
+    let source = start("assigned-source").await.unwrap();
+    let target = start("assigned-target").await.unwrap();
+    let source_port = source.discovery_port();
+    let target_port = target.discovery_port();
+    let result = async {
+        if source_port == 0 || target_port == 0 || source_port == target_port {
+            return Err(format!(
+                "runtime did not retain distinct assigned endpoints: source={source_port}, target={target_port}"
+            ));
+        }
+        target
+            .probe_endpoint(([127, 0, 0, 1], source_port).into())
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if target.handle().cached_peer_snapshot_async().await?.iter().any(
+                    |peer| peer.public.user_id() == source.user_id()
+                        && peer.account_id.as_deref() == Some(source.account_id()),
+                ) {
+                    return Ok::<_, std::io::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.map_err(|_| "signed discovery timed out".to_owned())?
+            .map_err(|error| error.to_string())
+    }.await;
+    target.stop().await;
+    source.stop().await;
+    result.expect("assigned endpoint must answer the real signed discovery probe");
+}
+
+#[tokio::test]
 async fn runtime_automatically_queries_a_host_supplied_routed_candidate() {
     let root = tempfile::tempdir().unwrap();
     let reserve = crate::transport::net::discovery_socket(0).unwrap();

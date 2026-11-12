@@ -327,36 +327,68 @@ impl Node {
             .expect("file book mutex")
             .clone()
             .revision()?;
+        // Attachment commits own policy before inspecting these sidecars. Do
+        // not retain a sidecar while waiting for that same policy mutex. The
+        // selected page revalidates this revision with the complete archive key.
+        let policy_revision = {
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "archive_policy_snapshot_begin".into()
+            });
+            self.device_sync_policy_snapshot().1
+        };
+        // Identity imports retain proofs while examining file sidecars.
+        // Snapshot and release proofs before taking any sidecar guard too.
+        let proof_revision = {
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "archive_file_proofs_snapshot_begin".into()
+            });
+            self.account_file_proofs
+                .lock()
+                .expect("proofs mutex")
+                .revision()?
+        };
         let sent = self.sentlog.lock().expect("sent mutex");
         let received = self.received.lock().expect("received mutex");
         let file = self.received_files.lock().expect("files mutex");
+        // A temporary inside the revision array would retain suppression until
+        // after identity acquisition, reversing file visibility's identity →
+        // suppression order. A separate statement retires this guard first.
+        let suppression_revision = self
+            .account_suppression
+            .lock()
+            .expect("suppression mutex")
+            .len()? as u64;
+        let recovered_revision = self
+            .recovered_sent_ids
+            .lock()
+            .expect("recovered mutex")
+            .as_ref()
+            .map(|r| r.revision())
+            .transpose()?
+            .unwrap_or(0);
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "archive_file_identities_snapshot_begin".into()
+        });
+        let identity_revision = self
+            .file_message_identities
+            .lock()
+            .expect("identities mutex")
+            .revision()?;
         let revisions = [
             sent.revision(),
             received.revision(),
             file.revision(),
-            self.device_sync_policy_snapshot().1,
-            self.account_suppression
-                .lock()
-                .expect("suppression mutex")
-                .len()? as u64,
+            policy_revision,
+            suppression_revision,
             sent.rewrite_revision(),
             received.rewrite_revision(),
             file.rewrite_revision(),
-            self.recovered_sent_ids
-                .lock()
-                .expect("recovered mutex")
-                .as_ref()
-                .map(|r| r.revision())
-                .transpose()?
-                .unwrap_or(0),
-            self.file_message_identities
-                .lock()
-                .expect("identities mutex")
-                .revision()?,
-            self.account_file_proofs
-                .lock()
-                .expect("proofs mutex")
-                .revision()?,
+            recovered_revision,
+            identity_revision,
+            proof_revision,
         ];
         drop(file);
         drop(received);
@@ -850,5 +882,187 @@ impl Node {
             plaintext,
             event_id: row.key.id,
         })))
+    }
+}
+
+#[cfg(test)]
+mod lock_order_tests {
+    use super::*;
+
+    #[test]
+    fn archive_snapshot_does_not_hold_sidecars_while_waiting_for_policy() {
+        let (_directory, source, sibling) = super::super::selection_tests::sibling_nodes();
+        let (arrived, waiting) = std::sync::mpsc::sync_channel(1);
+        *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "archive_policy_snapshot_begin" {
+                let _ = arrived.try_send(());
+            }
+        }));
+        // Attachment commit owns policy before inspecting file sidecars. Hold
+        // exactly that guard, then probe the archive's genuine policy boundary
+        // without ever waiting for another mutex while policy remains held.
+        let policy = source.account_sync_policy.lock().unwrap();
+        let expected_revision = policy.revision();
+        let worker_source = source.clone();
+        let requester = sibling.identity.public();
+        let worker = std::thread::spawn(move || {
+            worker_source.archive_key(&requester, true, true, AccountSyncVersion::V2)
+        });
+        let reached_policy = waiting.recv_timeout(std::time::Duration::from_secs(5));
+        let sent_available = source.sentlog.try_lock().is_ok();
+        let received_available = source.received.try_lock().is_ok();
+        let files_available = source.received_files.try_lock().is_ok();
+        drop(policy);
+        let snapshot = worker.join();
+        *source.account_client_test_hook.lock().unwrap() = None;
+        assert!(
+            reached_policy.is_ok(),
+            "archive reached its real policy boundary"
+        );
+        assert!(
+            sent_available && received_available && files_available,
+            "archive must wait for policy without retaining sent, received or file sidecars: sent={sent_available} received={received_available} files={files_available}"
+        );
+        let snapshot = snapshot
+            .expect("archive worker joins after policy release")
+            .expect("archive snapshot completes after policy release");
+        assert_eq!(snapshot.revisions[3], expected_revision);
+        source
+            .set_device_sync_category(crate::node::SyncCategory::History, false)
+            .unwrap();
+        let changed = source
+            .archive_key(
+                &sibling.identity.public(),
+                true,
+                true,
+                AccountSyncVersion::V2,
+            )
+            .unwrap();
+        assert!(
+            !snapshot.accepts_append_only_change(&changed),
+            "an earlier policy snapshot cannot accept a later policy revision"
+        );
+    }
+
+    #[test]
+    fn archive_snapshot_does_not_hold_sidecars_while_waiting_for_file_proofs() {
+        let (_directory, source, sibling) = super::super::selection_tests::sibling_nodes();
+        let (arrived, waiting) = std::sync::mpsc::sync_channel(1);
+        *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "archive_file_proofs_snapshot_begin" {
+                let _ = arrived.try_send(());
+            }
+        }));
+        // Logical-file identity import owns proofs before examining file rows.
+        // Hold its exact mutex, then probe all sidecars without waiting for them.
+        let proofs = source.account_file_proofs.lock().unwrap();
+        let expected_revision = proofs.revision().unwrap();
+        let worker_source = source.clone();
+        let requester = sibling.identity.public();
+        let worker = std::thread::spawn(move || {
+            worker_source.archive_key(&requester, true, true, AccountSyncVersion::V2)
+        });
+        let reached_proofs = waiting.recv_timeout(std::time::Duration::from_secs(5));
+        let sent_available = source.sentlog.try_lock().is_ok();
+        let received_available = source.received.try_lock().is_ok();
+        let files_available = source.received_files.try_lock().is_ok();
+        drop(proofs);
+        let snapshot = worker.join();
+        *source.account_client_test_hook.lock().unwrap() = None;
+        assert!(
+            reached_proofs.is_ok(),
+            "archive reached its real file-proof boundary"
+        );
+        assert!(
+            sent_available && received_available && files_available,
+            "archive must wait for file proofs without retaining sent, received or file sidecars: sent={sent_available} received={received_available} files={files_available}"
+        );
+        let snapshot = snapshot
+            .expect("archive worker joins after proof guard release")
+            .expect("archive snapshot completes after proof guard release");
+        assert_eq!(snapshot.revisions[10], expected_revision);
+        let proof = Event::new(
+            &source.identity,
+            ConversationId::new([51; 32]),
+            1,
+            vec![],
+            1,
+            1,
+            crate::eventlog::EventKind::FileManifest,
+            vec![1],
+        );
+        source
+            .account_file_proofs
+            .lock()
+            .unwrap()
+            .insert(proof)
+            .unwrap();
+        let changed = source
+            .archive_key(
+                &sibling.identity.public(),
+                true,
+                true,
+                AccountSyncVersion::V2,
+            )
+            .unwrap();
+        assert!(
+            !snapshot.accepts_append_only_change(&changed),
+            "an earlier file-proof snapshot cannot accept a later proof revision"
+        );
+    }
+
+    #[test]
+    fn archive_snapshot_does_not_hold_suppression_while_waiting_for_file_identities() {
+        let (_directory, source, sibling) = super::super::selection_tests::sibling_nodes();
+        let (arrived, waiting) = std::sync::mpsc::sync_channel(1);
+        *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "archive_file_identities_snapshot_begin" {
+                let _ = arrived.try_send(());
+            }
+        }));
+        // File visibility owns identity before suppression. A revision array
+        // must not silently retain suppression's temporary guard across identity.
+        let identities = source.file_message_identities.lock().unwrap();
+        let expected_revision = identities.revision().unwrap();
+        let worker_source = source.clone();
+        let requester = sibling.identity.public();
+        let worker = std::thread::spawn(move || {
+            worker_source.archive_key(&requester, true, true, AccountSyncVersion::V2)
+        });
+        let reached_identities = waiting.recv_timeout(std::time::Duration::from_secs(5));
+        let suppression_available = source.account_suppression.try_lock().is_ok();
+        drop(identities);
+        let snapshot = worker.join();
+        *source.account_client_test_hook.lock().unwrap() = None;
+        assert!(
+            reached_identities.is_ok(),
+            "archive reached its real identity boundary"
+        );
+        assert!(
+            suppression_available,
+            "archive must release its suppression snapshot before waiting for identity"
+        );
+        let snapshot = snapshot
+            .expect("archive worker joins after identity guard release")
+            .expect("archive snapshot completes after identity guard release");
+        assert_eq!(snapshot.revisions[9], expected_revision);
+        source
+            .account_suppression
+            .lock()
+            .unwrap()
+            .suppress(ConversationId::new([52; 32]), EventId::new([53; 32]))
+            .unwrap();
+        let changed = source
+            .archive_key(
+                &sibling.identity.public(),
+                true,
+                true,
+                AccountSyncVersion::V2,
+            )
+            .unwrap();
+        assert!(
+            !snapshot.accepts_append_only_change(&changed),
+            "an earlier suppression snapshot cannot accept a later local erasure"
+        );
     }
 }

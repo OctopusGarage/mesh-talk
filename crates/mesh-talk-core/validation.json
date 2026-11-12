@@ -133,6 +133,7 @@
             "paired_control_recycles_parked_completed_background_only_for_genuine_followup",
             "queued_setup_retires_wake_replacement_before_arming_the_natural_hold",
             "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
+            "queued_background_hold_distinguishes_foreground_pair_from_interrupted_resume",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
             "selected_queued_source_dispatches_while_unrelated_local_maintenance_is_held",
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
@@ -451,6 +452,7 @@
           "filters": [
             "startup_identity_precedes_blocked_durable_store_and_matches_runtime",
             "startup_identity_rejection_stops_before_listener_and_durable_stores",
+            "runtime_zero_discovery_port_owns_a_reachable_assigned_endpoint",
             "node::node::participant_storage_tests::",
             "node::runtime::retirement_tests::",
             "multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
@@ -464,6 +466,10 @@
         "summary": "Own exclusive participant construction and observe verified public identity after keystore unlocks without starting participant producers.",
         "guide": "docs/ARCHITECTURE.md",
         "invariants": [
+          {
+            "name": "OS-assigned discovery sockets retain their actual bound endpoint across IPv4, optional IPv6, runtime reporting and discovery producers; callers never release a port reservation before runtime binding.",
+            "reference": "docs/network-design-reference.md#managed-discovery-ports"
+          },
           {
             "name": "The optional synchronous identity observer runs before durable stores open, grants no runtime authority and can abort stale startup before producers launch. Existing constructors retain their behavior.",
             "reference": "docs/ARCHITECTURE.md"
@@ -644,6 +650,7 @@
             "node::account_sync::selection_tests::foreign_public_profile_documents_cross_certified_loopback_with_profile_consent",
             "node::account_sync::personal_replay_tests::",
             "node::lifecycle::personal_scope_tests::",
+            "node::delivery_runtime_tests::owned_read_failure_text_erasure_does_not_reconcile_unrelated_files",
             "late_group_clear_preserves_only_fresh_lifetime_ancestry",
             "known_role_digest_does_not_block_a_new_terminal_result_behind_repeated_role_headers",
             "terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows",
@@ -2862,6 +2869,7 @@
           "filters": [
             "node::transcript_repository::tests::",
             "node::delivery_runtime::lock_order_tests::",
+            "node::account_sync::archive::lock_order_tests::",
             "node::account_file_repository::tests::",
             "runtime_metadata_",
             "selected_history_and_archive_wait_for_admitted_recall_before_body_reads",

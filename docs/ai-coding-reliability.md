@@ -90,6 +90,25 @@ otherwise hold sent while waiting for received. The real recovery regression
 [recovery owner](../crates/mesh-talk-core/src/node/delivery_runtime.rs) holds sent,
 probes received at the actual acquisition boundary, then releases contention and
 joins the worker before asserting replay and progress.
+Archive revision snapshots must read and release device-sync policy before
+acquiring plaintext sidecars. Attachment commit holds delivery and policy while
+checking the live received-file card; an archive holding received files while
+waiting for policy creates a cycle and can also block erasure behind delivery.
+Keep archive-key revalidation after indexing and page selection so a changed
+policy still invalidates the export. The regression belongs to the
+[account archive owner](../crates/mesh-talk-core/src/node/account_sync/archive.rs)
+and must qualify progress while the competing policy/sidecar boundary is held,
+then release and join both owners before asserting the outcome.
+The same boundary applies to file-proof revisions: identity import holds the
+proof store while validating received-file rows. Archive snapshots must read and
+release proof metadata before taking sidecars, and retain proof revision in the
+final archive-key validation. Its separate held-proof regression qualifies the
+actual archive path; policy-only coverage does not establish this lock order.
+Do not build a revision array from chained mutex temporaries: guards can survive
+until the entire array statement ends. Snapshot each value in a completed
+statement before acquiring the next metadata lock. The archive's held-identity
+control must also prove suppression is free, preserving the identity-then-
+suppression order used by file-row visibility checks.
 Avoid invoking arbitrary callbacks while guarded. Where a commit callback must
 run inside an authority guard, keep that contract narrow and inspect its complete
 call chain. Queue presentation without retaining a guard needed by the UI;
@@ -900,6 +919,14 @@ on subsequent projection readiness, and a generic mutation retry can repeat work
 that already committed. The [local erasure owner](../crates/mesh-talk-core/src/node/lifecycle.rs)
 checks a real pending archived projection, unrelated DM/unknown targets,
 suppression failure without erasure, and retained suppression after reopen.
+Do not attach unrelated global projection work to a narrow mutation. Text
+erasure has no file keys to revoke; a full file-book reconciliation can fail on
+unrelated reads or concurrent acceptance after suppression already committed.
+The `owned_read_failure_text_erasure_does_not_reconcile_unrelated_files`
+regression in [delivery tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+qualifies the real read failure, verifies text removal and suppression, and
+retains the unrelated live file. File erasure still revokes its keys before
+physical removal, and reconciliation still rejects stale revisions.
 
 Keep inspection affordances separate from mutation permissions, and propagate
 the containing view's restrictions into nested inspectors. Opening a reader must
@@ -1369,6 +1396,27 @@ retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
 
+For browser compatibility changes, inspect the actual embedded engine's feature
+support and resolved production CSS. A JavaScript target or installed browser
+version does not prove CSS compatibility. A fallback that loses alpha can make
+a same-color SVG disappear even though its paths render correctly. The
+[production frontend owner](testing-feedback-loop.md#production-frontend-startup)
+and [theme alpha regression](../frontend/scripts/theme-alpha.test.mjs) preserve
+HSL transparency through the real CSS pipeline; native light/dark computed-style
+and visual checks remain separate acceptance evidence.
+
+
+A successful package-index command can still report failed repositories and use
+cached indexes. Release preparation must reuse the
+[hosted Ubuntu source owner](../scripts/ci/ubuntu-apt-source.mjs), reject any index
+refresh error before installing dependencies, and preserve repository signing and
+architecture. Any download-mirror change belongs in that owner, with exact origin
+validation and separate normal/ports paths; it must not replace Ubuntu's signing
+authority or disable freshness checks. The [release workflow regression](../scripts/diagnostics/release-workflow.test.mjs)
+executes its shell boundaries with preparation/index failures and proves that
+installation does not follow. Fixture success does not establish runner DNS or
+signed hosted release acceptance.
+
 Dependency upgrades can change equivalent CSS serialization without changing the
 interaction contract. Keep assertions narrow enough to reject wrong geometry and
 scale while accepting equivalent omitted zero coordinates. The reset assertion in
@@ -1654,6 +1702,13 @@ clocks at the actual boundary. Prefer an observable progress assertion to an
 arbitrary sleep or a test that checks only that a timeout helper was called.
 Verify successful behavior, failure, cleanup and replacement through the same
 production owner; a mock that bypasses the problematic lock proves little.
+Install response holds before admitting background producers, and observe the
+actual held handler before publishing the state that must remain unavailable.
+Arming after launch cannot stop an earlier request that already passed the hook
+from reading later state. The exact-peer hostname hold in
+`channel_custody_converges_while_directory_is_held` in
+[account document tests](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
+preserves that ordering while measuring independent custody progress.
 
 The group-inventory held-peer fixture rejects a real authenticated setup
 exchange before admitting its independent publication measurement. Snapshot
@@ -1698,6 +1753,22 @@ A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck
 the actual condition on a transition, retaining the original deadline and bounded
 fallback. A snapshot taken after timeout is diagnostic evidence, not success.
+Screenshot dismissal acceptance uses a browser-local MutationObserver under its
+original five-second monotonic deadline, instead of driver-side count polling.
+The [screenshot confirmation observer](../frontend/e2e/helpers/screenshot-confirmation.ts)
+records actual timely DOM commits even when the driver consumes the result later.
+Its real-browser controls in [screenshot scenarios](../frontend/e2e/screenshot-portable.spec.ts)
+reject missing and late transitions, retain cleanup checks and preserve the crop,
+clipboard and staging assertions. The canonical browser inventory selects this
+control alongside both Retina viewport journeys.
+An isolated DOM control retires its observers and timers before restoring real
+application content for shared screenshot capture. A passing test on a blank
+document is not meaningful visual evidence; retain the strict PNG rejection.
+A manual-recovery fixture must keep its provider failure active until the real
+recovery gesture. One failed call does not hold an error state while automatic
+timer or focus retries remain live. The [unread badge scenario](../frontend/e2e/unread-badge.spec.ts)
+keeps those retries enabled, rejects synthetic recovery and requires the trusted
+retry to write the current cleared count before retiring its controlled fault.
 
 The metadata-hold and repair-body-hold controls in the
 [opaque mailbox regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
@@ -1762,6 +1833,14 @@ departure proof owns actual offline pause/relaunch and retry of the original
 signed event and parent cut. Do not chain unrelated controls and reconnection
 requirements onto an already complete invitation scenario.
 
+Desktop archive fixtures must use the same account-owned channel genesis as the
+desktop creation command and assert its owner before seeding content. Legacy
+device-only genesis starts a separately consented background authority migration;
+it cannot stand in for the desktop factory. The
+[cloud archive command regression](../src-tauri/src/google_drive/command_tests.rs)
+owns this production-path precondition and preserves real file/archive/restart
+acceptance; core channel-maintenance tests own legacy migration.
+
 A fixture with a live authoritative identity observer must not simulate account
 replacement by changing only a derived UI store. A later valid backend observation
 can restore that store. Keep the [startup browser proof](../frontend/e2e/theme-picker.spec.ts)
@@ -1777,6 +1856,22 @@ separate real-protocol tests own full-page durability and replay. Qualify reques
 liveness before its cancellation trigger and the actual resumed owner before
 admission. A cancellation-triggering publication need not leave the old request
 alive after the publisher returns.
+The queued A-side paired hold must bind the scheduler's actual `paid_resume`
+dispatch to its exact live child task. Same-source foreground replacements can also carry
+the resumed/protected trace labels; those labels cannot certify a paid parked
+turn or trigger its before-B ordering assertion. Retain the classifier's negative
+foreground control and the real queued Noise scenarios under core-account-group
+validation. A cross-peer interrupted unpaired continuation retains its distinct
+live/resumed/protected admission proof; it does not spend paired resume credit.
+
+Keep browser lifecycle fixtures at the smallest valid corpus that exercises their
+contract, with separate inventory coverage for full archives. The
+[sticker removal fixture](../frontend/e2e/stickers.spec.ts) imports one unchanged
+animated asset through the real ZIP path, verifies its sent bytes before and
+after removal, and checks persisted removal after one cold navigation. Its
+installation and panel scenarios retain the complete pack. Avoid a redundant
+reload immediately before a helper that already navigates; preserve the scenario
+deadline and the persistence assertion.
 
 Browser device options express intent; they do not observe native input state.
 Establish the required device mode through the browser's supported emulation
@@ -1798,6 +1893,13 @@ outer deadline when a synchronous lock cycle cannot be safely unwound. An async
 timeout inside the blocked thread is not sufficient. Avoid port-selection races
 and process-global fixtures that assume serial execution; respect the repository's
 test environment and resource controls.
+For an ephemeral UDP endpoint, let the real socket owner bind port zero and
+report the selected port. A released reservation is not ownership; reusable
+discovery sockets can silently share the selected port with another runtime.
+Participant preparation owns the actual IPv4/IPv6 port, and
+`runtime_zero_discovery_port_owns_a_reachable_assigned_endpoint` in
+[routed runtime tests](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs)
+requires distinct assigned endpoints and a real signed discovery response.
 
 Intentional cancellation and output-limit controls need an independent process
 owner. Inheriting the real runner's owner marker can terminate the enclosing

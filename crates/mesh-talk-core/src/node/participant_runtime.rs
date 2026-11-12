@@ -175,6 +175,7 @@ impl Node {
 
 /// Network inventory supplied by the host; identity and roster come from Node.
 pub struct ParticipantConfig {
+    /// UDP discovery port; zero asks the OS to assign a port owned by this participant.
     pub discovery_port: u16,
     pub candidate_source: Option<Arc<dyn CandidateSource>>,
 }
@@ -196,10 +197,13 @@ impl PreparedParticipant {
         node: Arc<Node>,
         listener: TcpListener,
         visibility: Arc<DiscoveryVisibility>,
-        config: ParticipantConfig,
+        mut config: ParticipantConfig,
     ) -> std::io::Result<Self> {
         let tcp_port = listener.local_addr()?.port();
         let socket = Arc::new(discovery_socket(config.discovery_port)?);
+        // Retain the bound endpoint rather than the request (which may be zero).
+        // Both address families and every producer must use this same owned port.
+        config.discovery_port = socket.local_addr()?.port();
         let socket_v6 = routed_ipv6_socket(config.discovery_port).ok().map(Arc::new);
         let routed = Arc::new(RoutedDiscovery::new({
             let node = Arc::clone(&node);

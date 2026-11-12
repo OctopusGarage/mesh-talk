@@ -184,6 +184,7 @@ test("browser and native dependency installation use the same Linux-only prepara
     native,
     /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS.*scripts\/ci\/ubuntu-apt-source\.mjs/,
   );
+  assert.match(native, /sudo apt-get update --error-on=any\n/);
   for (const name of ["ci.yml", "mutants.yml"]) {
     const workflow = await readFile(
       new URL(`../../.github/workflows/${name}`, import.meta.url),
@@ -204,7 +205,12 @@ test("browser and native dependency installation use the same Linux-only prepara
       workflow,
       /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS.*scripts\/ci\/ubuntu-apt-source\.mjs/,
     );
+    const updates = [...workflow.matchAll(/sudo apt-get update([^\n]*)/g)];
+    assert.ok(updates.length > 0, name);
+    for (const update of updates) assert.equal(update[1], " --error-on=any", name);
   }
+  const consumer = await readFile(new URL("../../.github/workflows/linux-workspace-consumer.yml", import.meta.url), "utf8");
+  assert.match(consumer, /sudo apt-get update --error-on=any\n/);
 });
 
 test("only auxiliary diagnostic transport is optional; acceptance artifacts stay mandatory", () => {
