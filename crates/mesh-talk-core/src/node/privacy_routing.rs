@@ -126,6 +126,10 @@ impl Node {
     }
 
     pub(in crate::node) fn cached_routing_peers(&self) -> Vec<PeerRecord> {
+        self.cached_routing_peers_for(None)
+    }
+
+    fn cached_routing_peers_for(&self, user_id: Option<&str>) -> Vec<PeerRecord> {
         let guard = self
             .privacy
             .state
@@ -138,6 +142,9 @@ impl Node {
             .routes
             .routes()
             .into_iter()
+            // Filter before proof hydration and unrelated group policy reads;
+            // the existing route iterator retains its exact multi-IP order.
+            .filter(|(public, _)| user_id.is_none_or(|id| public.user_id() == id))
             .filter_map(|(public, ip)| {
                 let proof = state
                     .proofs
@@ -199,9 +206,21 @@ impl Node {
     }
 
     pub(in crate::node) fn routing_peer(&self, user_id: &str) -> Option<PeerRecord> {
-        self.routing_peers()
+        // get() and peers() observe the same roster map without extra expiry
+        // filtering. Preserve its existing winner before optional cached routes.
+        let live = {
+            self.roster
+                .lock()
+                .expect("roster lock not poisoned")
+                .get(user_id)
+                .cloned()
+        };
+        if live.is_some() {
+            return live;
+        }
+        self.cached_routing_peers_for(Some(user_id))
             .into_iter()
-            .find(|p| p.public.user_id() == user_id)
+            .next()
     }
 
     pub(in crate::node) async fn probe_private_routes(self: &Arc<Self>) {
@@ -393,6 +412,195 @@ impl Node {
 mod tests {
     use super::*;
     use crate::transport::TransportError;
+
+    fn routing_point_node(path: &std::path::Path) -> Arc<Node> {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&identity, &account, "owner", 1);
+        let (node, _, _) =
+            crate::node::test_support::node_with_files(path, identity, account, &proof);
+        node.configure_privacy(
+            path,
+            "pw",
+            &node.signed_announce("owner", 1),
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node
+    }
+
+    fn routing_point_under_held_guard<G>(
+        node: Arc<Node>,
+        id: String,
+        guard: G,
+    ) -> Option<PeerRecord> {
+        let (started, start) = std::sync::mpsc::sync_channel(1);
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            sent.send(node.routing_peer(&id)).unwrap();
+        });
+        let dispatched = start.recv_timeout(Duration::from_secs(1));
+        let observed = received.recv_timeout(Duration::from_millis(250));
+        // Always release and join actual work BEFORE an assertion, including
+        // the expected RED timeout. No stranded thread can outlive its profile.
+        drop(guard);
+        let retired = worker.join();
+        assert!(retired.is_ok(), "lookup worker panicked");
+        assert!(dispatched.is_ok(), "lookup worker was not admitted");
+        observed.expect("point lookup must not wait for unrelated routing/authority owners")
+    }
+
+    #[test]
+    fn routing_point_live_winner_does_not_wait_for_unrelated_privacy_owner() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let node = routing_point_node(dir.path());
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "live",
+            54321,
+        );
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+        let guard = node.privacy.state.write().unwrap();
+        let result =
+            routing_point_under_held_guard(node.clone(), proof.user_id.clone(), guard).unwrap();
+        assert_eq!(result.public, proof.public());
+        assert_eq!(result.addr, "127.0.0.1:54321".parse().unwrap());
+        assert_eq!(result.name, "live");
+    }
+
+    #[test]
+    fn routing_point_cached_target_does_not_query_unrelated_group_authority() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+            node::privacy::PermissionSource,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let node = routing_point_node(dir.path());
+        let target = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "allowed target",
+            54321,
+        );
+        let unrelated = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "unrelated denied",
+            54322,
+        );
+        {
+            let mut guard = node.privacy.state.write().unwrap();
+            let state = guard.as_mut().unwrap();
+            state.policy.set_invisible(true).unwrap();
+            state
+                .policy
+                .grant(
+                    &target.account_id().unwrap(),
+                    "target",
+                    PermissionSource::Manual,
+                )
+                .unwrap();
+            for proof in [&target, &unrelated] {
+                state.proofs.record(proof).unwrap();
+                state
+                    .routes
+                    .record(&proof.public(), "127.0.0.1".parse().unwrap())
+                    .unwrap();
+            }
+        }
+        let group = node.channels.lock().unwrap();
+        let result =
+            routing_point_under_held_guard(node.clone(), target.user_id.clone(), group).unwrap();
+        assert_eq!(result.public, target.public());
+        assert_eq!(result.addr, "127.0.0.1:54321".parse().unwrap());
+        // Releasing the unrelated group owner must not turn this point lookup
+        // into cached permission. The target's next lookup checks live policy.
+        node.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .policy
+            .revoke(&target.account_id().unwrap())
+            .unwrap();
+        assert!(
+            node.routing_peer(&target.user_id).is_none(),
+            "revoked target without shared group authority must remain denied"
+        );
+        assert!(node.routing_peer(&unrelated.user_id).is_none());
+    }
+
+    #[test]
+    fn routing_point_preserves_live_precedence_cached_ip_order_and_missing_results() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let node = routing_point_node(dir.path());
+        let peer = DeviceIdentity::generate();
+        let account = Account::generate();
+        let cached = Announce::new_with_account(&peer, &account, "cached", 54321);
+        {
+            let mut guard = node.privacy.state.write().unwrap();
+            let state = guard.as_mut().unwrap();
+            state.proofs.record(&cached).unwrap();
+            for ip in ["127.0.0.2", "127.0.0.1"] {
+                state
+                    .routes
+                    .record(&cached.public(), ip.parse().unwrap())
+                    .unwrap();
+            }
+        }
+        let addresses: Vec<_> = node
+            .cached_routing_peers()
+            .into_iter()
+            .filter(|record| record.public == cached.public())
+            .map(|record| record.addr)
+            .collect();
+        assert_eq!(
+            addresses,
+            vec![
+                "127.0.0.2:54321".parse().unwrap(),
+                "127.0.0.1:54321".parse().unwrap()
+            ]
+        );
+        assert_eq!(
+            node.routing_peer(&cached.user_id).unwrap().addr,
+            addresses[0]
+        );
+        let live = Announce::new_with_account(&peer, &account, "live", 54323);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&live, "127.0.0.3".parse().unwrap(), &node.user_id());
+        let actual = node.routing_peer(&cached.user_id).unwrap();
+        assert_eq!(actual.addr, "127.0.0.3:54323".parse().unwrap());
+        assert_eq!(actual.name, "live");
+        node.roster.lock().unwrap().forget(&cached.public());
+        assert_eq!(
+            node.routing_peer(&cached.user_id).unwrap().addr,
+            addresses[0]
+        );
+        assert!(node.routing_peer("absent device").is_none());
+        // Public snapshots continue to exclude historical private dial hints.
+        assert!(node.roster.lock().unwrap().peers().is_empty());
+    }
 
     #[test]
     fn private_probe_capacity_defers_without_erasing_peer_failures() {

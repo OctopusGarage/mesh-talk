@@ -1118,6 +1118,14 @@ regressions and the real incremental-mailbox consent exchange cover independent
 selection preparation/retirement, transport checkpoint advancement, actual
 authority invalidation and rollback. Optional transport hints have their own
 closed table set; they cannot acquire selection or business-write authority.
+
+A directed lookup must select its target before hydrating every cached peer or
+consulting unrelated group authority. Preserve live-roster precedence and the
+existing cached-route order; recheck the selected target's policy and keep dial
+admission independent. Drop the roster guard before entering the cached-policy
+fallback. The [routing owner](../crates/mesh-talk-core/src/node/privacy_routing.rs)
+regressions hold unrelated owners to check lookup isolation, then verify target
+revocation, cached ordering and missing results.
 Progress in one mailbox must not invalidate every settled consent offer merely
 because both happen to share the same encrypted database.
 
