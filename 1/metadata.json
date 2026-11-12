@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7798V3EK1F6W91WYMJT1C31",
+  "session_id": "01a1ce68-e121-7810-9711-536f5a82c90b",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-12T07:06:39.456669Z",
+  "branch": "fix/macos-webview-theme-alpha",
+  "checkpoints_count": 2,
+  "save_step_count": 1,
+  "files_touched": [
+    "docs/module-boundaries.md",
+    "frontend/e2e/chat.spec.ts",
+    "frontend/e2e/screenshot-portable.spec.ts",
+    "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+    "frontend/src/features/chat/attachments/useAttachmentIntake.ts"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "b0160d186ea9",
+  "checkpoint_transcript_start": 556,
+  "transcript_lines_at_start": 556,
+  "compact_transcript_start": 81,
+  "token_usage": {
+    "input_tokens": 29494,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 3768960,
+    "output_tokens": 5081,
+    "api_call_count": 31,
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 4673,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 4726,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 6
+  }
+}
