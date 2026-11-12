@@ -517,6 +517,16 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+For browser compatibility changes, inspect the actual embedded engine's feature
+support and resolved production CSS. A JavaScript target or installed browser
+version does not prove CSS compatibility. A fallback that loses alpha can make
+a same-color SVG disappear even though its paths render correctly. The
+[production frontend owner](testing-feedback-loop.md#production-frontend-startup)
+and [theme alpha regression](../frontend/scripts/theme-alpha.test.mjs) preserve
+HSL transparency through the real CSS pipeline; native light/dark computed-style
+and visual checks remain separate acceptance evidence.
+
+
 A successful package-index command can still report failed repositories and use
 cached indexes. Release preparation must reuse the
 [hosted Ubuntu source owner](../scripts/ci/ubuntu-apt-source.mjs), reject any index

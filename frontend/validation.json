@@ -97,10 +97,13 @@
         "frontend/vite.config.ts",
         "frontend/package.json",
         "frontend/package-lock.json",
-        "scripts/diagnostics/react-singleton.test.mjs"
+        "scripts/diagnostics/react-singleton.test.mjs",
+        "frontend/postcss.config.js",
+        "frontend/scripts/theme-alpha.test.mjs"
       ],
       "node": [
-        "scripts/diagnostics/react-singleton.test.mjs"
+        "scripts/diagnostics/react-singleton.test.mjs",
+        "frontend/scripts/theme-alpha.test.mjs"
       ],
       "capability": {
         "summary": "Keep the production React renderer and hooks bound to one runtime across dependency layouts.",
@@ -109,11 +112,16 @@
           {
             "name": "Production builds deduplicate React and React DOM even when dependency caches contain duplicate package trees.",
             "reference": "docs/testing-feedback-loop.md#production-frontend-startup"
+          },
+          {
+            "name": "Theme HSL opacity utilities preserve their alpha and SVG contrast without color-mix support; unrelated color mixes retain their semantics.",
+            "reference": "docs/testing-feedback-loop.md#production-frontend-startup"
           }
         ]
       },
       "escalation": [
-        "Run the built production frontend in Chromium and WebKit, and verify the native startup screen without a display-error boundary. A development server or process-only installation check cannot certify production startup."
+        "Run the built production frontend in Chromium and WebKit, and verify the native startup screen without a display-error boundary. A development server or process-only installation check cannot certify production startup.",
+        "For CSS compatibility changes, verify built CSS in the affected native WKWebView in light and dark modes; installed Safari version and a JavaScript build target do not establish CSS feature support."
       ]
     },
     {
