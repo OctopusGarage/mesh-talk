@@ -2528,6 +2528,67 @@ async fn settled_history_publication_does_not_refill_replaced_relay_without_a_ta
         )
         .await;
         assert!(!rejected.2.iter().any(|(inner, _)| *inner == absent));
+        // The replacement above changed remote incarnation after the local
+        // upload entry was evicted. Repeat both exact negative membership and
+        // selected-target lookup; only the selected target needs fresh custody.
+        for target in [absent, messages[0]] {
+            for repeat in 0..2 {
+                incremental::HISTORY_METADATA_ROWS.with(|rows| rows.set(0));
+                let repeated = counted_scope_exchange_with_intent(
+                    &node,
+                    replacement.clone(),
+                    &relay,
+                    &recipient.public(),
+                    conversation,
+                    federated,
+                    Some(target),
+                    MailboxIntent::HistoryPublication,
+                )
+                .await;
+                if target == absent {
+                    assert!(!repeated.2.iter().any(|(inner, _)| *inner == absent));
+                    assert_eq!(
+                        repeated.1, 0,
+                        "unselected target must not invent wrapper custody"
+                    );
+                } else {
+                    assert!(repeated.2.iter().any(|(inner, _)| *inner == target));
+                    assert_eq!(
+                        repeated.1, 2,
+                        "selected target requires the production exact HAVE and independent fixture HAVE"
+                    );
+                }
+                if repeat == 1 {
+                    assert_eq!(
+                        incremental::HISTORY_METADATA_ROWS.with(|rows| rows.get()),
+                        0,
+                        "same target after eviction and relay replacement must not repeat local preparation: federated={federated} target={target:?}"
+                    );
+                }
+            }
+        }
+        // Privacy changes invalidate local membership qualification as well as
+        // current network admission, even when the target and relay are stable.
+        node.privacy
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        incremental::HISTORY_METADATA_ROWS.with(|rows| rows.set(0));
+        let requalified = counted_scope_exchange_with_intent(
+            &node,
+            replacement.clone(),
+            &relay,
+            &recipient.public(),
+            conversation,
+            federated,
+            Some(messages[0]),
+            MailboxIntent::HistoryPublication,
+        )
+        .await;
+        assert!(requalified.2.iter().any(|(inner, _)| *inner == messages[0]));
+        assert!(
+            incremental::HISTORY_METADATA_ROWS.with(|rows| rows.get()) > 0,
+            "changed privacy generation must requalify the selected source"
+        );
         let event = Event::new(
             &node.identity,
             conversation,

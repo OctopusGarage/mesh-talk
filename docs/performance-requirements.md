@@ -55,6 +55,8 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Reconfirming an already-held relay copy is not new progress. Park unchanged
    successful reconciliation until sparse repair; keep authenticated recipient
    delivery and actual custody-loss recovery separate from that scheduling hint.
+   A bounded historical scan must also become quiet after its complete sweep;
+   preserve prompt unfinished pages and separate lightweight claim rechecks.
    Preserve invalidation domains through batching and acknowledgement; a roster
    heartbeat must not reload unrelated settings or history. Empty pages do not
    imply a global change. Presentation metadata does not renew user activity.
@@ -96,6 +98,8 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    failure checks independent of that reuse.
    Keep this reuse inside the decision when metadata alone cannot establish
    that durable bytes still exist and pass integrity checks.
+   Local selected/absent-target preparation may survive relay replacement under
+   current source and policy fences; remote custody still needs its fresh probe.
    Reconnection is a delivery trigger, not a new content revision. Reuse a
    retained immutable publication only with exact, bounded sender provenance
    committed alongside that event. Do not infer plaintext equality from

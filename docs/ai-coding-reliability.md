@@ -1133,6 +1133,18 @@ current source and authority checks on reuse; this never certifies remote
 acceptance. Best-effort hint maintenance must not replace the original failure.
 The [paged-session regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
 own rejection, source/privacy invalidation and transport/cancellation cleanup.
+Local selection membership and remote custody have different lifetimes: relay
+replacement must not discard valid local target preparation, and local reuse
+must never substitute for a fresh remote custody probe. The
+[incremental mailbox tests](../crates/mesh-talk-core/src/node/opaque_relay/incremental_tests.rs)
+repeat selected and absent targets after eviction, replacement and invalidation.
+
+A bounded page is still expensive if an unchanged timer keeps rescanning it.
+Gate repair scans with pre-work semantic input, retain short continuation until
+a complete fair sweep, then park until a relevant event or sparse fallback.
+Independent expiry/recheck clocks must not admit the full scan. Actual-owner
+quiet, continuation and recovery controls live in the
+[channel custody tests](../crates/mesh-talk-core/src/node/channels.rs).
 
 Trace every consumer of a scheduling projection: relay-control retries, file
 continuations, profile publication, account access and receive maintenance must

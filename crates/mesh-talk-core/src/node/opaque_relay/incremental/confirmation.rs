@@ -1,5 +1,5 @@
 //! Exact target resolution reuses qualified membership only under an unchanged
-//! completed local selection and freshly observed relay incarnation.
+//! completed local selection. Remote custody always requires its own fresh probe.
 use super::*;
 
 #[derive(Default)]
@@ -163,24 +163,22 @@ impl Node {
             tokio::task::yield_now().await;
         }
     }
-    fn confirmation_certificate(
+    fn local_confirmation_certificate(
         &self,
         p: &OpaqueMailboxProgress,
     ) -> Result<Option<CompletedUpload>, LogError> {
         let Mode::Active(s) = &p.incremental else {
             return Ok(None);
         };
-        let (Some(certificate), Some(remote), Some(floor), Some(conversation)) = (
-            s.receipt.completed.as_ref(),
-            s.remote.as_ref(),
-            s.remote_floor,
-            p.conversation,
-        ) else {
+        let (Some(certificate), Some(conversation)) =
+            (s.receipt.completed.as_ref(), p.conversation)
+        else {
             return Ok(None);
         };
-        if !certificate.accepts(remote, floor) {
-            return Ok(None);
-        }
+        // Selected membership belongs to the exact local source and recipient,
+        // even after relay replacement. This does not qualify remote completion
+        // or custody: the caller still probes/repairs the exact current wrapper.
+        // Keep the original receipt's remote binding unchanged.
         let current = self
             .sync_store(&p.recipient)
             .lock()
@@ -210,7 +208,7 @@ impl Node {
         if !permitted() {
             return Err(session::SessionError::UnexpectedMessage);
         }
-        let before = self.confirmation_certificate(p)?;
+        let before = self.local_confirmation_certificate(p)?;
         if let Some(outer) = before.as_ref().and_then(|certificate| {
             certificate
                 .targets
@@ -238,7 +236,7 @@ impl Node {
                     return Err(session::SessionError::UnexpectedMessage);
                 }
                 if self
-                    .confirmation_certificate(p)?
+                    .local_confirmation_certificate(p)?
                     .as_ref()
                     .is_some_and(|after| after.local == certificate.local)
                 {
@@ -273,7 +271,7 @@ impl Node {
         {
             return Err(session::SessionError::UnexpectedMessage);
         }
-        let after = self.confirmation_certificate(p)?;
+        let after = self.local_confirmation_certificate(p)?;
         let qualified = before
             .as_ref()
             .zip(after.as_ref())

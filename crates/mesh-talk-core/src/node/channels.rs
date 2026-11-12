@@ -150,7 +150,46 @@ const SMALL_CHANNEL_MEMBER_LIMIT: usize = 5;
 const LARGE_CHANNEL_INITIAL_FANOUT: usize = 2;
 const CHANNEL_CONTROL_FANOUT_CONCURRENCY: usize = 4;
 const CHANNEL_CUSTODY_SCAN_PER_TICK: usize = 128;
-const CHANNEL_CUSTODY_RECHECK_TICKS: usize = 20;
+const CHANNEL_CUSTODY_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+const CHANNEL_CUSTODY_QUIET_INTERVAL: Duration = Duration::from_secs(300);
+
+#[derive(Default)]
+struct CustodyRetryProgress {
+    quiet_complete: bool,
+}
+
+// One owner replaces the existing parallel retry position/cycle maps. Sweep
+// qualification adds fixed scalar fields per existing channel cursor, not a new
+// history- or channel-cardinality cache. Physical position survives invalidation.
+#[derive(Default)]
+struct CustodyRetryCursor {
+    after: Option<(u64, EventId)>,
+    cycle: usize,
+    generation: u64,
+    boundary: Option<(u64, EventId)>,
+    wraps: u8,
+    complete: bool,
+}
+impl CustodyRetryCursor {
+    fn restart_sweep(&mut self) {
+        self.boundary = self.after;
+        self.wraps = 0;
+        self.complete = false;
+    }
+    fn advance(&mut self, key: (u64, EventId)) -> (usize, bool) {
+        if self.after.is_some_and(|old| key <= old) {
+            self.cycle = self.cycle.wrapping_add(1);
+            self.wraps = self.wraps.saturating_add(1);
+        }
+        self.after = Some(key);
+        let covered = self.wraps > 0
+            && (self.boundary.is_none()
+            || self.boundary.is_some_and(|boundary| key >= boundary)
+            // A removed boundary can lie above every surviving key.
+            || self.wraps > 1);
+        (self.cycle, covered)
+    }
+}
 
 /// Members in canonical order: sorted by `user_id` and de-duplicated. `ChannelMeta` encodes
 /// the membership Vec positionally, and the same-epoch convergence tie-break in
@@ -194,6 +233,7 @@ fn advance_custody_cursor(
     *cycle
 }
 
+#[cfg(test)]
 fn next_custody_retry_key(
     candidates: &mut impl Iterator<Item = (u64, EventId)>,
     channel: ConversationId,
@@ -787,48 +827,148 @@ impl Node {
         }
     }
 
-    // Keep the existing custody clock and single turn independent of remote history.
+    // Independent subscriptions never consume the local recovery Notify permit.
+    fn channel_custody_work_input(&self) -> Result<[u8; 32], LogError> {
+        use sha2::{Digest, Sha256};
+        let projection = self.group_projection_revision()?;
+        let custody = self
+            .channel_custody
+            .lock()
+            .expect("custody mutex")
+            .revision();
+        let now = Instant::now();
+        let mut peers: Vec<_> = self
+            .roster
+            .lock()
+            .expect("roster mutex")
+            .peers()
+            .into_iter()
+            .map(|peer| {
+                let routes = peer.scheduling_endpoints();
+                let online = peer.presence_deadline(now).is_some_and(|at| at > now);
+                (
+                    peer.public,
+                    peer.account_id,
+                    peer.post_office,
+                    routes,
+                    online,
+                )
+            })
+            .collect();
+        peers.sort_unstable_by_key(|peer| (peer.0.ed25519_pub, peer.0.x25519_pub));
+        let bytes = bincode::serialize(&(
+            projection,
+            custody,
+            peers,
+            self.group_file_sharing_status().paused,
+            self.sibling_availability_revision(),
+        ))
+        .map_err(|error| LogError::Serialization(error.to_string()))?;
+        Ok(Sha256::digest(bytes).into())
+    }
+
     async fn run_channel_custody_recovery_loop(self: Arc<Self>, periodic: bool) {
-        let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut metadata = self.subscribe_channel_changes();
+        let mut network = self.network_changes.subscribe();
+        let mut ui = self.subscribe_ui_changes();
+        let mut documents = self.account_document_updates.subscribe();
+        let mut roster = self.subscribe_roster_changes();
+        let mut availability = self.subscribe_sibling_availability();
+        let mut source = self.storage.database().subscribe_source_changes();
         let mut custody_cursor = 0usize;
-        let mut retry_after = HashMap::new();
-        let mut retry_cycle = HashMap::new();
+        let mut recheck_cursor = 0usize;
+        let mut retry_cursors = HashMap::<ConversationId, CustodyRetryCursor>::new();
+        let mut generation = 1u64;
         let mut recheck_after = HashMap::new();
         let mut recheck_cycle = HashMap::new();
+        let mut input = None;
+        let mut settled = false;
+        let mut retry_at = tokio::time::Instant::now();
+        let mut recheck_at = retry_at;
         loop {
-            tick.tick().await;
-            // The policy can change while the selected tick is pending. Awaiting
-            // the interval first also permits a disabled test worker to resume.
+            tokio::select! {
+                _ = tokio::time::sleep_until(retry_at.min(recheck_at)) => {},
+                change = ui.changed() => { if change.is_err() { return; } },
+                change = source.changed() => { if change.is_err() { return; } },
+                change = documents.changed() => { if change.is_err() { return; } },
+                change = roster.changed() => { if change.is_err() { return; } },
+                change = network.changed() => { if change.is_err() { return; } input = None; },
+                change = availability.changed() => { if change.is_err() { return; } },
+                change = metadata.recv() => match change {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                },
+            }
             if !self.channel_recovery_periodic_enabled(periodic) {
+                retry_at = tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL;
+                recheck_at = retry_at;
                 continue;
             }
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_custody_begin".into()
-            });
-            if let Some((channel, event, peer)) = self
-                .retry_one_channel_custody(custody_cursor, &mut retry_after, &mut retry_cycle)
-                .await
+            let observed = self.channel_custody_work_input().ok();
+            if observed.is_none()
+                || observed != input
+                || (settled && tokio::time::Instant::now() >= retry_at)
             {
-                // No replication exchange used this turn. Repair only the
-                // missing report with the existing exact durable-have query.
-                self.recheck_channel_custody_peer(channel, event, &peer)
-                    .await;
+                generation = match generation.checked_add(1) {
+                    Some(next) => next,
+                    None => {
+                        for state in retry_cursors.values_mut() {
+                            state.generation = 0;
+                        }
+                        1
+                    }
+                };
+                settled = false;
+                retry_at = tokio::time::Instant::now();
             }
-            if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
+            if tokio::time::Instant::now() >= retry_at {
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_custody_begin".into()
+                });
+                let mut progress = CustodyRetryProgress::default();
+                if let Some((channel, event, peer)) = self
+                    .retry_channel_custody_turn(
+                        custody_cursor,
+                        &mut retry_cursors,
+                        generation,
+                        &mut progress,
+                    )
+                    .await
+                {
+                    self.recheck_channel_custody_peer(channel, event, &peer)
+                        .await;
+                }
+                custody_cursor = custody_cursor.wrapping_add(1);
+                // A captured pre-work input cannot acknowledge a concurrent or
+                // self-produced update. Its retained subscription wakes the owner.
+                input = observed;
+                settled = input.is_some() && progress.quiet_complete;
+                retry_at = tokio::time::Instant::now()
+                    + if settled {
+                        CHANNEL_CUSTODY_QUIET_INTERVAL
+                    } else {
+                        CHANNEL_RECOVERY_INTERVAL
+                    };
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_custody_done".into()
+                });
+            }
+            if tokio::time::Instant::now() >= recheck_at {
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_custody_recheck_begin".into()
+                });
                 self.recheck_one_channel_custody(
-                    custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS,
+                    recheck_cursor,
                     &mut recheck_after,
                     &mut recheck_cycle,
                 )
                 .await;
+                recheck_cursor = recheck_cursor.wrapping_add(1);
+                recheck_at = tokio::time::Instant::now() + CHANNEL_CUSTODY_RECHECK_INTERVAL;
             }
-            custody_cursor = custody_cursor.wrapping_add(1);
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_custody_done".into()
-            });
             tokio::task::yield_now().await;
         }
     }
@@ -2976,12 +3116,62 @@ impl Node {
     /// Alternate competing replication and missing-report work across message
     /// scan cycles. Return at most one read-only query instead of a replication
     /// exchange, preserving the existing recovery slot and peer rotation.
+    #[cfg(test)]
     pub(in crate::node) async fn retry_one_channel_custody(
         &self,
         cursor: usize,
         after: &mut HashMap<ConversationId, (u64, EventId)>,
         cycles: &mut HashMap<ConversationId, usize>,
     ) -> Option<(ConversationId, EventId, PeerRecord)> {
+        // Existing real-protocol controls own the legacy position/cycle maps.
+        // Adapt only this test-facing call; production retains typed cursors.
+        let mut cursors: HashMap<_, _> = after
+            .iter()
+            .map(|(channel, key)| {
+                (
+                    *channel,
+                    CustodyRetryCursor {
+                        after: Some(*key),
+                        cycle: cycles.get(channel).copied().unwrap_or(0),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        for (channel, cycle) in cycles.iter() {
+            cursors
+                .entry(*channel)
+                .or_insert_with(|| CustodyRetryCursor {
+                    cycle: *cycle,
+                    ..Default::default()
+                });
+        }
+        let report = self
+            .retry_channel_custody_turn(
+                cursor,
+                &mut cursors,
+                1,
+                &mut CustodyRetryProgress::default(),
+            )
+            .await;
+        for (channel, state) in cursors {
+            if let Some(key) = state.after {
+                after.insert(channel, key);
+                cycles.insert(channel, state.cycle);
+            }
+        }
+        report
+    }
+
+    async fn retry_channel_custody_turn(
+        &self,
+        cursor: usize,
+        cursors: &mut HashMap<ConversationId, CustodyRetryCursor>,
+        generation: u64,
+        progress: &mut CustodyRetryProgress,
+    ) -> Option<(ConversationId, EventId, PeerRecord)> {
+        let mut selected_channel = None;
+        let mut quiet_turn = false;
         let result: Result<Option<(ConversationId, EventId, PeerRecord)>, NodeError> = async {
             let me = self.user_id();
             let mut channels: Vec<_> = {
@@ -2996,26 +3186,36 @@ impl Node {
                     .collect()
             };
             if channels.is_empty() {
+                progress.quiet_complete = true;
                 return Ok(None);
             }
             channels.sort_unstable_by_key(|(channel, _)| *channel.as_bytes());
             let (channel, _) = &channels[cursor % channels.len()];
             let channel = *channel;
+            selected_channel = Some(channel);
+            let state = cursors.entry(channel).or_default();
+            if state.generation != generation {
+                state.generation = generation;
+                state.restart_sweep();
+            }
+            if state.complete {
+                quiet_turn = true;
+                progress.quiet_complete = channels.iter().all(|(id, _)| {
+                    cursors
+                        .get(id)
+                        .is_some_and(|state| state.generation == generation && state.complete)
+                });
+                return Ok(None);
+            }
             let members = self.channel_custody_repair_members(channel);
             let author =
                 crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
             let candidates: Vec<_> = {
                 let log = self.log.lock().expect("log mutex not poisoned");
-                log.message_keys_after(
-                    channel,
-                    author,
-                    after.get(&channel).copied(),
-                    CHANNEL_CUSTODY_SCAN_PER_TICK,
-                )?
+                log.message_keys_after(channel, author, state.after, CHANNEL_CUSTODY_SCAN_PER_TICK)?
             };
-            if candidates.is_empty() {
-                return Ok(None);
-            }
+            let short_page = candidates.len() < CHANNEL_CUSTODY_SCAN_PER_TICK;
+            let mut covered = false;
             // A read-only custody report does not require a physical group grant.
             // Pairing's current full-device/account binding selects the endpoint;
             // the ordinary durable-have responder still owns original visibility.
@@ -3039,10 +3239,12 @@ impl Node {
                 })
                 .collect();
             let mut missing_report = None;
-            let mut candidates = candidates.into_iter();
-            while let Some((event_id, cycle)) =
-                next_custody_retry_key(&mut candidates, channel, after, cycles)
-            {
+            for key in candidates {
+                // Advance fair scheduling before any attempt, while retaining
+                // the generation's original boundary across quiet pages.
+                let (cycle, reached) = state.advance(key);
+                covered |= reached;
+                let event_id = key.1;
                 let (report_first, report_cycle) = custody_retry_order(cycle);
                 if missing_report.is_none()
                     && self
@@ -3099,9 +3301,25 @@ impl Node {
                     return Ok(None);
                 }
             }
+            quiet_turn = missing_report.is_none();
+            state.complete = quiet_turn && (short_page || covered);
+            progress.quiet_complete = channels.iter().all(|(id, _)| {
+                cursors
+                    .get(id)
+                    .is_some_and(|state| state.generation == generation && state.complete)
+            });
             Ok(missing_report)
         }
         .await;
+        if !quiet_turn
+            && let Some(channel) = selected_channel
+            && let Some(state) = cursors.get_mut(&channel)
+        {
+            // A selected exchange/report or failed classification does not
+            // certify a quiet pass. Resume fairly from its committed position.
+            state.restart_sweep();
+            progress.quiet_complete = false;
+        }
         match result {
             Ok(report) => report,
             Err(error) => {
@@ -3451,6 +3669,365 @@ mod fanout_tests {
     use crate::identity::device::DeviceIdentity;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Instant;
+
+    #[tokio::test(start_paused = true)]
+    async fn settled_channel_custody_waits_for_semantic_change_instead_of_three_second_scan() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "known peer", 12345);
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.2".parse().unwrap(), &node.user_id());
+        let channel = node
+            .create_channel("settled local group", Vec::new())
+            .await
+            .unwrap();
+        node.send_channel_message(channel, b"durable startup message")
+            .await
+            .unwrap();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let rechecked = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let completed = completed.clone();
+            let rechecked = rechecked.clone();
+            move |_, phase| {
+                if phase == "channel_recovery_custody_recheck_begin" {
+                    rechecked.fetch_add(1, Ordering::SeqCst);
+                }
+                if phase == "channel_recovery_custody_done" {
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let worker = tokio::spawn(node.clone().run_channel_custody_recovery_loop(true));
+        async fn await_turn(completed: &AtomicUsize, minimum: usize) {
+            for _ in 0..128 {
+                if completed.load(Ordering::SeqCst) >= minimum {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("custody owner did not complete expected admitted turn");
+        }
+        let result = async {
+            await_turn(&completed, 1).await;
+            let initial = completed.load(Ordering::SeqCst);
+            tokio::time::advance(Duration::from_secs(15)).await;
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                completed.load(Ordering::SeqCst),
+                initial,
+                "settled unchanged custody must not rescan own-message keys every three seconds"
+            );
+            for ip in ["127.0.0.1", "127.0.0.2"] {
+                node.roster
+                    .lock()
+                    .unwrap()
+                    .update(&proof, ip.parse().unwrap(), &node.user_id());
+                for _ in 0..32 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    completed.load(Ordering::SeqCst),
+                    initial,
+                    "known-route freshness/preference renewal must not admit custody scans"
+                );
+            }
+            tokio::time::advance(Duration::from_secs(45)).await;
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                rechecked.load(Ordering::SeqCst) >= 2,
+                "old claims retain independent sixty-second repair"
+            );
+            assert_eq!(
+                completed.load(Ordering::SeqCst),
+                initial,
+                "old-claim recheck must not invoke the 128-row retry scan"
+            );
+            tokio::time::advance(Duration::from_secs(240)).await;
+            await_turn(&completed, initial + 1).await;
+            let initial = completed.load(Ordering::SeqCst);
+            node.send_channel_message(channel, b"new durable message")
+                .await
+                .unwrap();
+            await_turn(&completed, initial + 1).await;
+            let after_message = completed.load(Ordering::SeqCst);
+            node.roster.lock().unwrap().update(
+                &proof,
+                "127.0.0.3".parse().unwrap(),
+                &node.user_id(),
+            );
+            await_turn(&completed, after_message + 1).await;
+        };
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
+        worker.abort();
+        let _ = worker.await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_custody_startup_continues_beyond_one_bounded_page_before_parking() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "peer",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("startup durable queue", Vec::new())
+            .await
+            .unwrap();
+        for _ in 0..CHANNEL_CUSTODY_SCAN_PER_TICK + 1 {
+            node.send_channel_message(channel, b"durable startup message")
+                .await
+                .unwrap();
+        }
+        let completed = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let completed = completed.clone();
+            move |_, phase| {
+                if phase == "channel_recovery_custody_done" {
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let worker = tokio::spawn(node.clone().run_channel_custody_recovery_loop(true));
+        let result = async {
+            for _ in 0..128 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(completed.load(Ordering::SeqCst), 1);
+            tokio::time::advance(CHANNEL_RECOVERY_INTERVAL).await;
+            for _ in 0..128 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                completed.load(Ordering::SeqCst),
+                2,
+                "a full first page cannot acknowledge the unvisited startup tail"
+            );
+            tokio::time::advance(Duration::from_secs(15)).await;
+            for _ in 0..128 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                completed.load(Ordering::SeqCst),
+                2,
+                "the completed unchanged sweep must then become quiet"
+            );
+        };
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
+        worker.abort();
+        let _ = worker.await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_custody_input_change_requires_complete_sweep_from_retained_cursor() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "peer",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("generation-qualified startup sweep", Vec::new())
+            .await
+            .unwrap();
+        for _ in 0..CHANNEL_CUSTODY_SCAN_PER_TICK * 2 + 1 {
+            node.send_channel_message(channel, b"durable startup message")
+                .await
+                .unwrap();
+        }
+        let completed = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let completed = completed.clone();
+            move |_, phase| {
+                if phase == "channel_recovery_custody_done" {
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let worker = tokio::spawn(node.clone().run_channel_custody_recovery_loop(true));
+        async fn drain_ready() {
+            for _ in 0..128 {
+                tokio::task::yield_now().await;
+            }
+        }
+        let result = async {
+            drain_ready().await;
+            assert_eq!(completed.load(Ordering::SeqCst), 1);
+            // The retained fair cursor is now #128. A new source generation
+            // must cover that boundary too, not settle on the earlier key wrap.
+            node.send_channel_message(channel, b"new source generation")
+                .await
+                .unwrap();
+            drain_ready().await;
+            assert_eq!(completed.load(Ordering::SeqCst), 2);
+            tokio::time::advance(CHANNEL_RECOVERY_INTERVAL).await;
+            drain_ready().await;
+            assert_eq!(completed.load(Ordering::SeqCst), 3);
+            tokio::time::advance(CHANNEL_RECOVERY_INTERVAL).await;
+            drain_ready().await;
+            assert_eq!(
+                completed.load(Ordering::SeqCst),
+                4,
+                "wrapping to #1 cannot settle a generation whose scan began after #128; the boundary must be reconsidered"
+            );
+            tokio::time::advance(Duration::from_secs(15)).await;
+            drain_ready().await;
+            assert_eq!(
+                completed.load(Ordering::SeqCst),
+                4,
+                "a completed current-generation sweep must then park"
+            );
+        };
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
+        worker.abort();
+        let _ = worker.await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_custody_sweeps_accumulate_across_offset_channel_cursors() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "peer",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let mut channels = Vec::new();
+        for name in ["first quiet sweep", "offset quiet sweep"] {
+            let channel = node.create_channel(name, Vec::new()).await.unwrap();
+            for _ in 0..CHANNEL_CUSTODY_SCAN_PER_TICK * 3 {
+                node.send_channel_message(channel, b"quiet durable startup message")
+                    .await
+                    .unwrap();
+            }
+            channels.push(channel);
+        }
+        channels.sort_unstable_by_key(|id| *id.as_bytes());
+        let keys = node
+            .log
+            .lock()
+            .unwrap()
+            .message_keys_after(
+                channels[1],
+                crate::eventlog::event::Author::from_ed25519(node.identity.public().ed25519_pub),
+                None,
+                CHANNEL_CUSTODY_SCAN_PER_TICK * 3,
+            )
+            .unwrap();
+        let mut cursors = HashMap::from([(
+            channels[1],
+            CustodyRetryCursor {
+                after: Some(keys[CHANNEL_CUSTODY_SCAN_PER_TICK * 2 - 1]),
+                ..Default::default()
+            },
+        )]);
+        let mut progress = CustodyRetryProgress::default();
+        for turn in 0..8 {
+            progress = CustodyRetryProgress::default();
+            assert!(
+                node.retry_channel_custody_turn(turn, &mut cursors, 1, &mut progress)
+                    .await
+                    .is_none()
+            );
+            if turn == 5 {
+                assert!(cursors[&channels[1]].complete);
+                assert!(!cursors[&channels[0]].complete);
+            }
+            if turn > 5 {
+                assert!(
+                    cursors[&channels[1]].complete,
+                    "another channel's unfinished page cannot erase completed sweep qualification"
+                );
+            }
+        }
+        assert!(
+            progress.quiet_complete,
+            "independently completed current-generation sweeps must park"
+        );
+        assert_eq!(cursors.len(), 2);
+    }
+
+    #[test]
+    fn channel_custody_cursor_qualifies_generation_boundary_without_resetting_fair_position() {
+        let key = |lamport| (lamport, EventId::new([lamport as u8; 32]));
+        let mut state = CustodyRetryCursor {
+            after: Some(key(128)),
+            ..Default::default()
+        };
+        state.restart_sweep();
+        assert!(!state.advance(key(256)).1);
+        assert!(
+            !state.advance(key(1)).1,
+            "first wrap does not revisit the captured boundary"
+        );
+        assert!(!state.advance(key(127)).1);
+        assert!(state.advance(key(128)).1);
+        assert_eq!(state.after, Some(key(128)));
+        state.restart_sweep();
+        assert_eq!(
+            state.after,
+            Some(key(128)),
+            "invalidation preserves fair position"
+        );
+        assert!(!state.advance(key(1)).1);
+        assert!(!state.advance(key(127)).1);
+        assert!(
+            state.advance(key(1)).1,
+            "a removed boundary completes after the next full traversal"
+        );
+    }
 
     #[test]
     fn channel_custody_batch_verifier_keys_full_certificate_and_bounds_retention() {
