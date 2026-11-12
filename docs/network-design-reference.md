@@ -1038,6 +1038,13 @@ or chunk download. Both observe meaningful network, route, availability and grou
 changes; outgoing custody also observes committed file changes. Existing gates,
 transport limits and participant stop/join ownership remain authoritative. The
 public one-shot `pull_pending_files` API still performs both directions.
+Custody eligibility requires retained signed ciphertext chunks and the original
+self-authored final chunk header. UI progress and export may instead use a managed
+plaintext copy after ciphertext reclamation; that local availability must never
+authorize a network dispatch. Missing ciphertext leaves the offer unsettled and
+waits for a valid source and the existing source-change/receiver-demand queue or
+bounded repair, without repeatedly verifying managed-export proofs. Restoring the
+original signed chunks can make the same retained offer eligible again.
 Its active index holds at most 10,000 jobs;
 bounded rotating scans of durable source rows refill it, including pre-upgrade
 sends and restarts. A pass launches at most two recipient jobs and races at most

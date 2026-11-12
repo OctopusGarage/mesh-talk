@@ -605,6 +605,27 @@ impl Node {
             .min()
     }
 
+    #[cfg(test)]
+    pub(super) fn group_file_custody_ready_for_test(
+        &self,
+        channel: ConversationId,
+        file: ConversationId,
+        manifest: EventId,
+        recipient: &PublicIdentity,
+    ) -> Result<bool, LogError> {
+        self.group_file_custody_allowed(&GroupFileUpload {
+            channel,
+            waiting_dependency: false,
+            file,
+            manifest,
+            recipient: recipient.clone(),
+            retry_after: None,
+            retry_delay: std::time::Duration::from_secs(3),
+            demand: None,
+            authorization_stamp: Arc::new(Mutex::new(None)),
+        })
+    }
+
     fn group_file_custody_allowed(&self, job: &GroupFileUpload) -> Result<bool, LogError> {
         self.group_file_custody_with_attempt(job, None)
     }
@@ -629,15 +650,35 @@ impl Node {
         };
         let original = &offer.event;
         if original.author.ed25519_pub() != &self.identity.public().ed25519_pub
-            || self
-                .file_progress(job.file)
-                .map_err(|error| match error {
-                    super::NodeError::Log(error) => error,
-                    other => LogError::Serialization(other.to_string()),
-                })?
-                .is_none_or(|p| p.done != p.total)
+            || self.expired_received_file(job.file)?
         {
             return Ok(AuthorizationProbe::Denied);
+        }
+        let Some(retention) = self
+            .files
+            .lock()
+            .expect("files lock")
+            .retention_for(job.file)?
+        else {
+            return Ok(AuthorizationProbe::Denied);
+        };
+        {
+            // UI completeness can use a managed plaintext copy after signed
+            // chunks are reclaimed. Custody exports only retained ciphertext;
+            // its final confirmation also requires our original final header.
+            let log = self.log.lock().expect("log lock");
+            if log.count_kind(&job.file, EventKind::Message)? < u64::from(retention.chunks)
+                || !log
+                    .repository()?
+                    .authored_header(
+                        &job.file,
+                        crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub),
+                        u64::from(retention.chunks),
+                    )?
+                    .is_some_and(|header| header.kind == EventKind::Message)
+            {
+                return Ok(AuthorizationProbe::Denied);
+            }
         }
         // Custody of ciphertext may precede approval. An explicit refusal or
         // verified recipient completion stops further deposits for this device.
@@ -1103,6 +1144,8 @@ impl Node {
                                     {
                                         return;
                                     }
+                                    #[cfg(test)]
+                                    self.trace_account_client(&job.recipient, || "group_file_relay_attempt".into());
                                     let Ok(mut channel) =
                                         self.privacy_sync_dial(relay.addr, &relay.public).await
                                     else {

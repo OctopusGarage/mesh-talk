@@ -1040,6 +1040,14 @@ regression reconstructs the exact legacy serializer and exercises that collision
 through actual compaction and parent retirement. Invalidate only the obsolete
 completion qualification; preserve compatible receive cursors and pending work.
 
+Keep presentation availability separate from transport availability. A local
+managed copy can satisfy UI progress/export after signed ciphertext is reclaimed,
+while network custody still requires retained signed chunks and the original final
+header. The group-file regression
+`managed_plaintext_without_retained_ciphertext_cannot_authorize_group_custody`
+checks valid local export, zero relay attempts and no false custody after raw
+retirement, then restores the original signed chunks through the owning queue.
+
 Give finite buffer dispatch an explicit settled state. A remote buffer's
 capacity eviction or replacement must not silently become perpetual receiver
 demand for all retained source history. The

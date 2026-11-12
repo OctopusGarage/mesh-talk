@@ -2582,6 +2582,10 @@
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
+            "name": "Group custody requires retained signed ciphertext and the self-authored final chunk header; managed plaintext may satisfy UI export/progress but never network dispatch. Missing ciphertext causes zero relay attempts and no false settlement, and restored original signed chunks can re-enter the owning queue.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
             "name": "Ciphertext custody may precede approval; recipient durable chunk admission and direct pushes still require approval. Only verified recipient completion retires recipient-delivery work; actual durable HAVE settles its finite group custody dispatch without claiming current custody. A canonical own-device copy cannot confirm external recipient delivery, and a stalled sibling host cannot prevent target confirmation; the full-host fixture keeps independent two-worker reactors and both original five-second confirmation windows.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },

@@ -875,3 +875,92 @@ async fn participant_outgoing_custody_runs_without_manual_pull_or_incoming_work(
         "the owned outgoing producer must deposit the exact final chunk without any manual file pull"
     );
 }
+
+#[tokio::test]
+async fn managed_plaintext_without_retained_ciphertext_cannot_authorize_group_custody() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let f = GroupRelayFixture::new().await;
+        let (manifest, file, payload) = f.enqueue_offer_expiring(None).await;
+        let ready = || {
+            for _ in 0..4096 {
+                match f
+                    .a
+                    .group_file_custody_ready_for_test(f.group, file, manifest, &f.bp.public())
+                {
+                    Err(crate::eventlog::LogError::StaleCursor) => continue,
+                    result => return result.unwrap(),
+                }
+            }
+            panic!("bounded group authorization must finish");
+        };
+        assert!(ready(), "current original ciphertext must remain eligible");
+        let chunks = f.a.log.lock().unwrap().events(&file).unwrap();
+        assert!(!chunks.is_empty());
+        let stored = f.a.files.lock().unwrap().manifest(file).unwrap().unwrap();
+        let source = f.directory.path().join("ordinary-document.bin");
+        f.a.media
+            .store_from_path(file, stored.name(), &source)
+            .unwrap();
+        assert_eq!(
+            f.a.log.lock().unwrap().drop_conversation(&file).unwrap(),
+            chunks.len()
+        );
+        let progress = f.a.file_progress(file).unwrap().unwrap();
+        assert_eq!(
+            progress.done, progress.total,
+            "UI completeness may use retained managed plaintext"
+        );
+        let saved = f.directory.path().join("export-after-raw-retirement.bin");
+        f.a.save_file(file, &saved).unwrap();
+        assert_eq!(std::fs::read(saved).unwrap(), payload);
+        assert!(
+            f.a.group_file_offer(file, manifest, &f.bp.public())
+                .unwrap()
+                .is_some(),
+            "the exact manifest and group grant remain current"
+        );
+        assert!(
+            !ready(),
+            "managed plaintext cannot authorize custody of absent signed ciphertext"
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        *f.a.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "group_file_relay_attempt" {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        f.a.retry_group_file_delivery().await;
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "an absent ciphertext source must not dial a relay"
+        );
+        assert!(
+            !f.a.files
+                .lock()
+                .unwrap()
+                .group_custody_settled(file, manifest, &f.bp.public(), None)
+                .unwrap(),
+            "local export must never certify remote custody"
+        );
+        for chunk in chunks {
+            f.a.log.lock().unwrap().append_durable(chunk).unwrap();
+        }
+        assert!(
+            ready(),
+            "a later restored signed ciphertext source must become eligible"
+        );
+        // The owning queue, rather than only the isolated predicate, must
+        // reconstruct dispatch after a valid source becomes available again.
+        f.a.queue_group_file_delivery(file, manifest).unwrap();
+        f.a.retry_group_file_delivery().await;
+        assert!(
+            attempts.load(Ordering::SeqCst) > 0,
+            "restored retained ciphertext must admit a real relay attempt"
+        );
+    })
+    .await
+    .expect("retained ciphertext qualification must stay bounded");
+}
