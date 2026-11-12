@@ -300,3 +300,99 @@ fn mailbox_delta_covering_seek_work_stays_bounded_at_10k_and_100k() {
             .unwrap();
     }
 }
+
+#[test]
+fn watch_token_ignores_unrelated_commits() {
+    let (_root, state, identity) = fixture();
+    let conv = ConversationId::new([1; 32]);
+    let before = state.mailbox_watch_snapshot_at(&[conv], 10).unwrap();
+    state
+        .record(&event(&identity, ConversationId::new([2; 32]), 1), 10, None)
+        .unwrap();
+    assert_eq!(
+        before,
+        state.mailbox_watch_snapshot_at(&[conv], 10).unwrap()
+    );
+    state.record(&event(&identity, conv, 1), 10, None).unwrap();
+    assert_ne!(
+        before,
+        state.mailbox_watch_snapshot_at(&[conv], 10).unwrap()
+    );
+    assert!(
+        state
+            .mailbox_watch_snapshot_at(&vec![conv; 65], 10)
+            .is_err()
+    );
+    assert!(state.mailbox_watch_snapshot_at(&[conv, conv], 10).is_err());
+}
+
+#[test]
+fn watch_token_expiry_is_read_only_and_destructive_recreation_changes_identity() {
+    use super::super::maintenance::RelayMaintenanceBudget;
+    let (_root, state, identity) = fixture();
+    let conv = ConversationId::new([7; 32]);
+    state.record(&event(&identity, conv, 1), 10, None).unwrap();
+    let before = state.mailbox_watch_snapshot_at(&[conv], 10).unwrap();
+    let counts = state.body_read_counts();
+    let writes = state
+        .profile
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    let now = 10 + crate::postoffice::MAX_RELAY_AGE.as_secs();
+    let expired = state.mailbox_watch_snapshot_at(&[conv], now).unwrap();
+    assert_ne!(before, expired);
+    assert_eq!(expired[0].first_seen, None);
+    assert_eq!(counts, state.body_read_counts());
+    assert_eq!(
+        writes,
+        state
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap()
+    );
+    for _ in 0..128 {
+        if !state.next_work_at(now).unwrap().has_work() {
+            break;
+        }
+        state
+            .maintenance_step_at(now, RelayMaintenanceBudget::default())
+            .unwrap();
+    }
+    state
+        .record(&event(&identity, conv, 2), now + 1, None)
+        .unwrap();
+    assert_ne!(
+        before,
+        state.mailbox_watch_snapshot_at(&[conv], now + 1).unwrap()
+    );
+}
+
+#[test]
+fn watch_token_reopen_is_stable_and_new_store_has_new_identity() {
+    let (root, state, identity) = fixture();
+    let conv = ConversationId::new([9; 32]);
+    state.record(&event(&identity, conv, 1), 10, None).unwrap();
+    let before = state.mailbox_watch_snapshot_at(&[conv], 10).unwrap();
+    drop(state);
+    let profile = ProfileStorage::open_relay(
+        ProfileStorageLease::acquire(root.path()).unwrap(),
+        &identity.public(),
+        &root.path().join("relay.log"),
+        "pw",
+        10,
+    )
+    .unwrap();
+    let reopened =
+        IndexedRelayState::from_profile(profile, RelayAdmission::LegacyCompatible).unwrap();
+    assert_eq!(
+        before,
+        reopened.mailbox_watch_snapshot_at(&[conv], 10).unwrap()
+    );
+    let (_replacement_root, replacement, _) = fixture();
+    assert_ne!(
+        before[0].store_uuid,
+        replacement.mailbox_watch_snapshot_at(&[conv], 10).unwrap()[0].store_uuid
+    );
+}

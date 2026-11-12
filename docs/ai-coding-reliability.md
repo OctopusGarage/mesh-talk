@@ -331,6 +331,19 @@ and [group invitation tests](../crates/mesh-talk-core/src/node/account_group/tes
 
 ## R05: Bounded work must also make progress
 
+For change-driven receive, subscribe before observing the predicate and retain
+that observation until all captured work is handled. A notification invalidates
+quietness; it must not cancel valid unrelated work or acknowledge delivery. Keep
+one coalesced follow-up for changes during a drain. Observation tokens may outlive
+a connection: do not hold an idle socket across many individually bounded steps
+whose aggregate exceeds its between-request deadline. The
+[receive owner](../crates/mesh-talk-core/src/node/serving/mailbox_watch.rs) and
+[loopback receive regressions](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+cover quiet preparation, prompt arrival and local policy invalidation; the
+[watch protocol tests](../crates/mesh-talk-core/src/node/session/mailbox_watch.rs)
+cover timeout, reconnection predicates, EOF and bounded capacity. Keep their
+acceptance limits distinct from measured native CPU and power.
+
 When a state publication reschedules an actual-deadline timer, already-due work
 must not depend on another timer tick after the original callback is cancelled.
 Dispatch the due work after the current state notification, coalesce repeated

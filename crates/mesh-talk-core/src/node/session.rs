@@ -18,6 +18,7 @@ use crate::transport::{MAX_PLAINTEXT, SecureChannel, TransportError};
 mod backend;
 mod have_budget;
 pub(crate) mod mailbox;
+pub(crate) mod mailbox_watch;
 use backend::*;
 use bincode::Options;
 pub use have_budget::RemoteHaveBudget;

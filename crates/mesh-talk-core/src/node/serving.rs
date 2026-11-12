@@ -15,6 +15,8 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
+mod mailbox_watch;
+
 /// Per-connection round ceiling for an inbound serve loop (matches the requester-side
 /// `MAX_SYNC_ROUNDS`); a real reconciliation converges far below this.
 const MAX_SERVE_ROUNDS: usize = 10_000;
@@ -1976,112 +1978,7 @@ impl Node {
     /// Receive producer owned by the participant runtime task set. A healthy
     /// relay keeps its own cadence while one alternative makes bounded progress.
     pub(in crate::node) async fn run_post_office_drains(self: Arc<Self>) {
-        use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
-        let mut network = self.network_changes.subscribe();
-        let mut roster = self
-            .roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .subscribe_changes();
-        loop {
-            let mut candidates = self.post_office_drain_candidates();
-            let generation = self
-                .privacy
-                .generation
-                .load(std::sync::atomic::Ordering::SeqCst);
-            let mut schedule = PostOfficeDrainSchedule::default();
-            let mut active = Vec::new();
-            let mut cancellation = Vec::new();
-            let mut attempts = FuturesUnordered::new();
-            loop {
-                let eligible = candidates
-                    .iter()
-                    .filter(|po| {
-                        self.relay_receive_allowed(&po.public) && self.relay_retry_due(&po.public)
-                    })
-                    .map(|po| (self.peer_endpoint_key(po.addr, &po.public), po.clone()))
-                    .collect::<Vec<_>>();
-                while let Some(index) =
-                    schedule.select(&eligible, &active, tokio::time::Instant::now())
-                {
-                    let (key, po) = eligible[index].clone();
-                    active.push(key.clone());
-                    let (abort, registration) = futures_util::future::AbortHandle::new_pair();
-                    cancellation.push((key.clone(), abort));
-                    let node = &self;
-                    attempts.push(
-                        async move {
-                            let result = futures_util::future::Abortable::new(
-                                async {
-                                    if node.cached_peer_snapshot_async().await.is_err() {
-                                        log::warn!("verified discovery cache update failed");
-                                    }
-                                    let peers = node.post_office_drain_peers();
-                                    if peers.is_empty() {
-                                        None
-                                    } else {
-                                        Some(node.drain_one_post_office(&po, &peers).await)
-                                    }
-                                },
-                                registration,
-                            )
-                            .await;
-                            (key, result)
-                        }
-                        .boxed(),
-                    );
-                }
-                let wake = schedule.next_wake(&eligible, &active, tokio::time::Instant::now());
-                tokio::select! {
-                    result = attempts.next(), if !attempts.is_empty() => {
-                        if let Some((key, result)) = result {
-                            active.retain(|candidate| candidate != &key);
-                            cancellation.retain(|(candidate, _)| candidate != &key);
-                            if let Ok(result) = result {
-                                schedule.completed(key, result, tokio::time::Instant::now());
-                            }
-                        }
-                    }
-                    _ = tokio::time::sleep_until(wake) => {},
-                    // Mailbox switches own a retained wake rather than competing
-                    // with delivery's Notify or waiting for the idle cadence.
-                    _ = self.post_office_receive_notify.notified() => break,
-                    _ = network.changed() => break,
-                    _ = roster.changed() => {},
-                }
-                // Roster churn must not repeatedly cancel a valid slow relay.
-                // Retire only the exact identities/endpoints that lost authority;
-                // network and policy generations retire the whole owned work set.
-                if generation
-                    != self
-                        .privacy
-                        .generation
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    break;
-                }
-                candidates = self.post_office_drain_candidates();
-                let current = candidates
-                    .iter()
-                    .map(|po| self.peer_endpoint_key(po.addr, &po.public))
-                    .collect::<Vec<_>>();
-                for (key, abort) in &cancellation {
-                    if !current.contains(key) {
-                        abort.abort();
-                    }
-                }
-                schedule.due.retain(|(key, _)| current.contains(key));
-                if schedule
-                    .primary
-                    .as_ref()
-                    .is_some_and(|key| !current.contains(key))
-                {
-                    schedule.primary = None;
-                }
-            }
-            // Futures are owned here: cancellation/reset drops every socket and
-            // in-flight exchange before the next generation starts.
-        }
+        self.run_watched_post_office_drains().await;
     }
 
     fn post_office_drain_candidates(&self) -> Vec<PeerRecord> {
@@ -2139,6 +2036,16 @@ impl Node {
         po: &PeerRecord,
         peers: &[crate::discovery::Announce],
     ) -> bool {
+        self.drain_one_post_office_with_channel(po, peers, None)
+            .await
+    }
+
+    async fn drain_one_post_office_with_channel(
+        &self,
+        po: &PeerRecord,
+        peers: &[crate::discovery::Announce],
+        mut channel: Option<SecureChannel<TcpStream>>,
+    ) -> bool {
         if !self.relay_receive_allowed(&po.public) || !self.relay_retry_due(&po.public) {
             return false;
         }
@@ -2150,7 +2057,6 @@ impl Node {
             .get(&relay_id)
             .copied()
             .unwrap_or(0);
-        let mut channel = None;
         let mut success = true;
         for offset in 0..peers.len().min(8) {
             let index = start.wrapping_add(offset) % peers.len();

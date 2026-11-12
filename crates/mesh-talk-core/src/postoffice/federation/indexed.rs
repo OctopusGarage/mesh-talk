@@ -124,6 +124,7 @@ pub struct IndexedRelayEndpoint {
     directory: Option<FederationDirectory>,
     trust: Option<IndexedRelayTrust>,
     budget: RemoteHaveBudget,
+    watch_permits: Arc<tokio::sync::Semaphore>,
     conditional: Arc<ConditionalState>,
 }
 impl IndexedRelayEndpoint {
@@ -137,6 +138,7 @@ impl IndexedRelayEndpoint {
             directory,
             trust,
             budget: RemoteHaveBudget::default(),
+            watch_permits: Arc::new(tokio::sync::Semaphore::new(64)),
             conditional: Arc::new(ConditionalState::default()),
         }
     }
@@ -459,6 +461,15 @@ impl IndexedRelayEndpoint {
             return self
                 .serve_directory(&mut channel, &first, origin_signer)
                 .await;
+        }
+        if crate::node::session::mailbox_watch::is_probe(&first) {
+            return crate::node::session::mailbox_watch::serve(
+                &mut channel,
+                &self.office,
+                &self.watch_permits,
+            )
+            .await
+            .map_err(Into::into);
         }
         let store = Mutex::new(self.office.clone());
         let mut mailbox_authorized = None;

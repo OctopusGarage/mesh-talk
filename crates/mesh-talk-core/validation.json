@@ -3040,7 +3040,9 @@
         "crates/mesh-talk-core/src/storage/database/query_scratch.rs",
         "crates/mesh-talk-core/src/eventlog/repository/selection/export.rs",
         "crates/mesh-talk-core/src/eventlog/repository/selection/metadata.rs",
-        "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs"
+        "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs",
+        "crates/mesh-talk-core/src/node/session/mailbox_watch.rs",
+        "crates/mesh-talk-core/src/node/serving/"
       ],
       "rust": [
         {
@@ -3092,7 +3094,14 @@
             "main_data_version_ignores_temp_and_reads_but_detects_owner_commits",
             "storage::database::",
             "disposable_selection_prepare_export_and_drop_leave_main_storage_unchanged",
-            "empty_selection_cleanup_preserves_cached_read_plans"
+            "empty_selection_cleanup_preserves_cached_read_plans",
+            "node::session::mailbox_watch::",
+            "node::serving::mailbox_watch::",
+            "modern_relay_receive_",
+            "source_notifications_exclude_reads_rollbacks_and_derived_work",
+            "parked_mailbox_watches_preserve_normal_capacity_and_release_on_drop",
+            "healthy_relay_receive_",
+            "receive_worker_"
           ]
         }
       ],

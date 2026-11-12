@@ -25,7 +25,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod indexed;
-pub(crate) use indexed::{MailboxCursor, MailboxDeltaPage};
+pub(crate) use indexed::{MailboxCursor, MailboxDeltaPage, MailboxWatchToken};
 mod maintenance;
 pub use indexed::{
     IndexedPostOffice, IndexedRelayExportCursor, IndexedRelayHaveCursor, IndexedRelayView,

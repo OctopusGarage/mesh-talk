@@ -699,6 +699,7 @@ impl Node {
                 .fetch_add(1, Ordering::Release);
         }
         self.delivery_notify.notify_one();
+        self.post_office_receive_notify.notify_one();
     }
 
     pub(in crate::node) fn verified_dm_pull_peer(&self, fingerprint: &str) -> bool {

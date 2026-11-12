@@ -10007,7 +10007,20 @@ enum RelayReceiveReset {
     Master,
 }
 
+#[tokio::test]
+async fn healthy_relay_receive_preserves_same_slow_exchange_during_source_commit_churn() {
+    relay_receive_cadence_fixture_with_source_churn(true, RelayReceiveReset::None, true).await;
+}
+
 async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: RelayReceiveReset) {
+    relay_receive_cadence_fixture_with_source_churn(progressing_alternative, reset, false).await;
+}
+
+async fn relay_receive_cadence_fixture_with_source_churn(
+    progressing_alternative: bool,
+    reset: RelayReceiveReset,
+    source_churn: bool,
+) {
     let source = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     let relay_dir = tempfile::tempdir().unwrap();
@@ -10133,6 +10146,18 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: Rel
         .unwrap()
         .unwrap();
     let slow_started = tokio::time::Instant::now();
+    let source_churn_task = source_churn.then(|| {
+        let receiver = b.clone();
+        tokio::spawn(async move {
+            // Real application policy commits reach the shared database source
+            // notification. They must leave an already authenticated exchange
+            // alive while marking its completed result for a bounded followup.
+            for index in 0..20 {
+                receiver.set_attachment_global_auto(index % 2 == 0).unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        })
+    });
     tokio::time::timeout(std::time::Duration::from_secs(2), rounds.recv())
         .await
         .unwrap()
@@ -10147,6 +10172,9 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: Rel
             b.sessions.clear();
         }
         let capacity = || {
+            if b.sessions.test_watch_available() != super::session_pool::MAX_WATCH_CONNECTIONS {
+                return None;
+            }
             (0..super::session_pool::MAX_DIRECTION_CONNECTIONS)
                 .map(|_| b.sessions.try_outbound())
                 .collect::<Option<Vec<_>>>()
@@ -10289,6 +10317,10 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: Rel
     } else {
         None
     };
+
+    if let Some(task) = source_churn_task {
+        task.await.unwrap();
+    }
 
     let replacement_task = if progressing_alternative {
         // The cadence/churn phase is complete. Join its producer before retiring
@@ -11919,4 +11951,192 @@ async fn owned_read_failure_relay_consent_aborts_before_successful_empty_export(
     );
     assert!(progress.uploaded().is_empty());
     assert!(relay_store.lock().unwrap().conversations().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn modern_relay_receive_stays_quiet_and_wakes_for_arrival_and_local_policy() {
+    modern_relay_receive_fixture(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn modern_relay_receive_preserves_original_observation_across_connection_replacement() {
+    modern_relay_receive_fixture(true).await;
+}
+
+async fn modern_relay_receive_fixture(rearm_gap: bool) {
+    use crate::postoffice::{IndexedPostOffice, federation::IndexedRelayEndpoint};
+    use crate::storage::profile::ProfileStorageLease;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let rd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, mut inbox) = node(bd.path(), bob, ba, &ap);
+    b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+    let relay = DeviceIdentity::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_post_office(&relay, "Modern", listener.local_addr().unwrap().port());
+    let office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(rd.path()).unwrap(),
+        &rd.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::from_secret_bytes(relay.secret_bytes().0, relay.secret_bytes().1),
+    )
+    .unwrap();
+    let endpoint = IndexedRelayEndpoint::new(office.clone(), None, None);
+    let keys = relay.secret_bytes();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let endpoint = endpoint.clone();
+                    connections.spawn(async move {
+                        let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                        if let Ok(channel) = super::transport::secure_accept(stream, &identity).await {
+                            let _ = endpoint.serve_connection_checked(channel, None).await;
+                        }
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    for participant in [&a, &b] {
+        participant.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &participant.user_id(),
+        );
+    }
+    let gap_event = if rearm_gap {
+        let id = a
+            .enqueue_to_account(&b.account_id(), b"arrived between drain and rearm", None)
+            .await
+            .unwrap();
+        let event = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+            .event
+            .clone();
+        let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+            &a.identity,
+            &b.identity.public(),
+            &proof.public(),
+        )
+        .unwrap();
+        Some((id, mailbox.wrap(&event).unwrap()))
+    } else {
+        None
+    };
+    let gap_message = gap_event.as_ref().map(|(id, _)| *id);
+    let prepared = Arc::new(AtomicUsize::new(0));
+    *b.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let prepared = prepared.clone();
+        let injected = std::sync::atomic::AtomicBool::new(false);
+        move |_, phase| {
+            if phase == "mailbox_watch_rearming"
+                && !injected.swap(true, Ordering::SeqCst)
+                && let Some((_, event)) = &gap_event
+            {
+                use crate::eventlog::sync::network::NetworkSyncStore;
+                office.clone().ingest(event.clone()).unwrap();
+            }
+            if phase == "consent_controls_prepared" {
+                prepared.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }));
+    let worker = tokio::spawn(b.clone().run_post_office_drains());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while prepared.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial bounded receive must complete");
+    if let Some(id) = gap_message {
+        let message = tokio::time::timeout(Duration::from_secs(8), inbox.recv())
+            .await
+            .expect("original pre-drain observation must detect an arrival before connection rearm")
+            .unwrap();
+        assert_eq!(message.message_id, Some(id));
+        assert_eq!(message.text.as_slice(), b"arrived between drain and rearm");
+        worker.abort();
+        let _ = worker.await;
+        server.abort();
+        let _ = server.await;
+        return;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let quiet = prepared.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(
+        prepared.load(Ordering::SeqCst),
+        quiet,
+        "unchanged modern mailbox must not repeat consent preparation"
+    );
+    // Exercise the same source notifier repeatedly through committed product
+    // writes, then prove its dirty followup drains stop when writes stop.
+    for index in 0..12 {
+        b.set_attachment_global_auto(index % 2 == 0).unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let after_churn = prepared.load(Ordering::SeqCst);
+    assert!(
+        after_churn > quiet,
+        "committed local changes must cause a receive followup"
+    );
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(
+        prepared.load(Ordering::SeqCst),
+        after_churn,
+        "modern receive must become quiet again after source commits stop"
+    );
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"event-driven receive", None)
+        .await
+        .unwrap();
+    let destination = a.delivery.lock().unwrap().message(id).unwrap().destinations[0].clone();
+    let mut upload = a
+        .privacy_sync_dial(
+            std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), proof.tcp_port),
+            &proof.public(),
+        )
+        .await
+        .unwrap();
+    a.opaque_relay_round(
+        &mut upload,
+        &b.identity.public(),
+        Some(destination.event.conversation_id),
+    )
+    .await
+    .unwrap();
+    drop(upload);
+    let message = tokio::time::timeout(Duration::from_secs(8), inbox.recv())
+        .await
+        .expect("watch must promptly wake receive")
+        .unwrap();
+    assert_eq!(message.text.as_slice(), b"event-driven receive");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before_policy = prepared.load(Ordering::SeqCst);
+    b.set_attachment_global_auto(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while prepared.load(Ordering::SeqCst) == before_policy {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("local policy must invalidate quiet admission");
+    worker.abort();
+    let _ = worker.await;
+    server.abort();
+    let _ = server.await;
 }

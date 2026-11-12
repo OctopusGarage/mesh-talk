@@ -198,6 +198,7 @@ pub(crate) struct EncryptedDatabase {
     connection: Mutex<work_clock::OwnedConnection>,
     path: PathBuf,
     faulted: AtomicBool,
+    source_changes: tokio::sync::watch::Sender<u64>,
     write_observer: Option<Mutex<observation::Observer>>,
     #[cfg(test)]
     successful_write_commits: std::sync::atomic::AtomicUsize,
@@ -329,6 +330,7 @@ impl EncryptedDatabase {
             connection: Mutex::new(work_clock::OwnedConnection::new(connection)),
             path,
             faulted: AtomicBool::new(false),
+            source_changes: tokio::sync::watch::channel(0).0,
             write_observer,
             #[cfg(test)]
             successful_write_commits: std::sync::atomic::AtomicUsize::new(0),
@@ -490,6 +492,12 @@ impl EncryptedDatabase {
         }
         result
     }
+    /// Coalesced invalidation only, never commit authority or a delivery cursor.
+    /// Restricted derived transactions cannot feed their own receive loop.
+    pub(crate) fn subscribe_source_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.source_changes.subscribe()
+    }
+
     pub(crate) fn read<T>(
         &self,
         operation: impl FnOnce(&Connection) -> Result<T, LogError>,
@@ -501,7 +509,17 @@ impl EncryptedDatabase {
         if self.faulted.load(Ordering::Acquire) {
             return Err(invalid("database connection faulted; reopen required"));
         }
-        self.checked_operation(operation(&connection))
+        let before = connection.total_changes();
+        let result = self.checked_operation(operation(&connection));
+        let changed = connection.total_changes() != before;
+        drop(connection);
+        // Legacy read closures can perform auto-committed writes, even before
+        // returning an error. Conservatively invalidate rather than lose them.
+        if changed {
+            self.source_changes
+                .send_modify(|revision| *revision = revision.wrapping_add(1));
+        }
+        result
     }
     /// Runtime-only MAIN file version, including this connection's writes but
     /// excluding unrelated TEMP work. Compare only within this open owner and a
@@ -647,7 +665,6 @@ impl EncryptedDatabase {
                 .transaction()
                 .map_err(|e| context("begin database transaction", e)),
         )?;
-        #[cfg(test)]
         let changes_before = tx.total_changes();
         let observed_before = self.write_observer.as_ref().map(|_| tx.total_changes());
         match self.checked_operation(operation(&tx)) {
@@ -674,8 +691,14 @@ impl EncryptedDatabase {
                     }
                     let changed_rows = observed_before
                         .map(|before| connection.total_changes().saturating_sub(before));
+                    let source_changed =
+                        purpose.is_none() && connection.total_changes() != changes_before;
                     // Observation/logging never retain the durable connection owner.
                     drop(connection);
+                    if source_changed {
+                        self.source_changes
+                            .send_modify(|revision| *revision = revision.wrapping_add(1));
+                    }
                     if let (Some(observer), Some(rows)) = (&self.write_observer, changed_rows)
                         && let Some(snapshot) = observation::record(
                             observer,
@@ -1294,6 +1317,43 @@ mod tests {
             "a hint read cannot bypass the database fault fence"
         );
     }
+    #[test]
+    fn source_notifications_exclude_reads_rollbacks_and_derived_work() {
+        let root = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&root);
+        let mut changes = db.subscribe_source_changes();
+        db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?))
+            .unwrap();
+        db.transaction(|_| Ok(())).unwrap();
+        let failed: Result<(), LogError> = db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES ('rolled back')", [])?;
+            Err(LogError::StaleCursor)
+        });
+        assert!(failed.is_err());
+        db.selection_work_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO participant_sync_progress VALUES (1,'selection')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!changes.has_changed().unwrap());
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES ('committed')", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(changes.has_changed().unwrap());
+        let _ = *changes.borrow_and_update();
+        db.read(|c| {
+            c.execute("UPDATE messages SET body='read closure write'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(changes.has_changed().unwrap());
+    }
+
     #[test]
     fn write_commit_observation_excludes_reads_and_rollbacks() {
         let root = tempfile::tempdir().unwrap();

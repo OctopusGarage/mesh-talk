@@ -1309,7 +1309,7 @@ impl Node {
         expected: &PublicIdentity,
         priority: super::session_pool::AuthenticationPriority,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
-        self.privacy_dial_budgeted(addr, expected, priority, false)
+        self.privacy_dial_budgeted(addr, expected, priority, false, false)
             .await
     }
 
@@ -1325,6 +1325,24 @@ impl Node {
             expected,
             super::session_pool::AuthenticationPriority::Ordinary,
             true,
+            false,
+        )
+        .await
+    }
+
+    /// Dedicated bounded mailbox watch, with the same privacy, identity and
+    /// authentication admission as an ordinary outgoing connection.
+    pub(in crate::node) async fn privacy_watch_dial(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_dial_budgeted(
+            addr,
+            expected,
+            super::session_pool::AuthenticationPriority::Ordinary,
+            false,
+            true,
         )
         .await
     }
@@ -1335,13 +1353,14 @@ impl Node {
         expected: &PublicIdentity,
         priority: super::session_pool::AuthenticationPriority,
         interactive: bool,
+        watch: bool,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         // One caller owns every route attempt and the disclosure lease. Keep
         // that lease across Noise identity disclosure, but never accumulate a
         // fresh full deadline for each capacity wait or candidate wave.
         tokio::time::timeout(
             super::route_timing::MAX_AUTHENTICATION_DEADLINE,
-            self.privacy_dial_inner(addr, expected, priority, interactive),
+            self.privacy_dial_inner(addr, expected, priority, interactive, watch),
         )
         .await
         .map_err(|_| TransportError::Noise("dial deadline exceeded".into()))?
@@ -1353,6 +1372,7 @@ impl Node {
         expected: &PublicIdentity,
         priority: super::session_pool::AuthenticationPriority,
         interactive: bool,
+        watch: bool,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
@@ -1427,7 +1447,11 @@ impl Node {
                     self.trace_account_client(expected, || {
                         "dial_authentication_admission_acquired_outbound_wait".into()
                     });
-                    let permits = self.sessions.outbound().await?;
+                    let permits = if watch {
+                        self.sessions.watch_outbound().await?
+                    } else {
+                        self.sessions.outbound().await?
+                    };
                     #[cfg(test)]
                     self.trace_account_client(expected, || "dial_outbound_acquired".into());
                     let started = std::time::Instant::now();

@@ -17,6 +17,7 @@ use tokio::{
 };
 
 pub(super) const MAX_TCP_CONNECTIONS: usize = 8;
+pub(super) const MAX_WATCH_CONNECTIONS: usize = 4;
 pub(super) const MAX_DIRECTION_CONNECTIONS: usize = MAX_TCP_CONNECTIONS - 1;
 const IDLE_TTL: Duration = Duration::from_secs(15);
 const CAPACITY_WAIT: Duration = Duration::from_secs(2);
@@ -312,6 +313,7 @@ pub(in crate::node) struct SessionPool {
     slow_authentication_diagnostics: Mutex<SlowAuthenticationDiagnostics>,
     total: Arc<Semaphore>,
     outbound: Arc<Semaphore>,
+    watches: Arc<Semaphore>,
     historical: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     idle: Arc<Mutex<Vec<Idle>>>,
@@ -337,6 +339,7 @@ impl Default for SessionPool {
             slow_authentication_diagnostics: Mutex::new(SlowAuthenticationDiagnostics::default()),
             total: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
             outbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
+            watches: Arc::new(Semaphore::new(MAX_WATCH_CONNECTIONS)),
             historical: Arc::new(Semaphore::new(2)),
             inbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             idle: Arc::new(Mutex::new(Vec::new())),
@@ -747,6 +750,19 @@ impl SessionPool {
         self.acquire(&self.outbound).await
     }
 
+    /// Parked mailbox notification sockets have their own fixed budget. They
+    /// never enter the sequential exchange pool or consume ordinary TCP slots.
+    /// Each raced route retains its actual permit until its socket is dropped.
+    pub(in crate::node) async fn watch_outbound(
+        &self,
+    ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
+        let permit = tokio::time::timeout(CAPACITY_WAIT, self.watches.clone().acquire_owned())
+            .await
+            .map_err(|_| TransportError::Noise("mailbox watch capacity busy".into()))?
+            .map_err(|_| TransportError::AdmissionDenied)?;
+        Ok(vec![permit])
+    }
+
     /// An alternate route gets its own socket permits. Racing addresses must
     /// not turn one logical dial into unaccounted TCP connections.
     pub(in crate::node) fn try_outbound(&self) -> Option<Vec<OwnedSemaphorePermit>> {
@@ -754,6 +770,11 @@ impl SessionPool {
         let directional = self.outbound.clone().try_acquire_owned().ok()?;
         let shared = self.total.clone().try_acquire_owned().ok()?;
         Some(vec![directional, shared])
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn test_watch_available(&self) -> usize {
+        self.watches.available_permits()
     }
 
     #[cfg(test)]
@@ -1187,6 +1208,37 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn parked_mailbox_watches_preserve_normal_capacity_and_release_on_drop() {
+        let pool = SessionPool::default();
+        let mut watches = Vec::new();
+        for _ in 0..4 {
+            watches.push(pool.watch_outbound().await.unwrap());
+        }
+        assert_eq!(pool.test_capacity_snapshot().0, MAX_TCP_CONNECTIONS);
+        let mut ordinary = Vec::new();
+        for _ in 0..MAX_DIRECTION_CONNECTIONS {
+            ordinary.push(pool.outbound().await.unwrap());
+        }
+        let inbound = pool.inbound().await.unwrap();
+        assert_eq!(pool.test_capacity_snapshot().0, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), pool.watch_outbound())
+                .await
+                .is_err()
+        );
+        drop(watches.pop());
+        watches.push(pool.watch_outbound().await.unwrap());
+        drop(watches);
+        drop(ordinary);
+        drop(inbound);
+        assert_eq!(pool.test_capacity_snapshot().0, MAX_TCP_CONNECTIONS);
+        let mut restored = Vec::new();
+        for _ in 0..4 {
+            restored.push(pool.watch_outbound().await.unwrap());
+        }
+    }
 
     fn historical_key() -> PeerEndpointKey {
         PeerEndpointKey {

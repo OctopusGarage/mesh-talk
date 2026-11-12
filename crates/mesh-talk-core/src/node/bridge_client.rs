@@ -179,6 +179,7 @@ impl Node {
         }
         self.delivery_notify.notify_one();
         self.bridge_notify.notify_one();
+        self.post_office_receive_notify.notify_one();
     }
 
     pub(in crate::node) fn clear_bridge_introductions(&self) {

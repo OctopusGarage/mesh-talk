@@ -34,6 +34,20 @@ struct IoAdmission {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
+    /// Cancellation-safe terminal read for a dedicated outstanding watch. Any
+    /// byte or EOF terminates the connection; framing must never resume after it.
+    pub(crate) async fn watch_disconnect(&mut self) -> Result<(), TransportError> {
+        let mut byte = [0u8; 1];
+        match self.stream.read(&mut byte).await? {
+            0 => Ok(()),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected input during mailbox change wait",
+            )
+            .into()),
+        }
+    }
+
     /// Dial: perform the XX handshake as initiator, then authenticate.
     /// If `expected_peer` is set, the authenticated identity must match it.
     pub async fn connect(

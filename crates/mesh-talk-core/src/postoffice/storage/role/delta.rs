@@ -12,6 +12,16 @@ pub(crate) struct MailboxCursor {
     pub window: Option<(i64, i64)>,
 }
 
+/// Read-only invalidation hint; never a delivery checkpoint or receipt.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MailboxWatchToken {
+    pub store_uuid: [u8; 16],
+    pub conversation: ConversationId,
+    pub epoch: i64,
+    pub first_seen: Option<u64>,
+    pub revision: i64,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MailboxDeltaPage {
     pub cursor: MailboxCursor,
@@ -42,6 +52,35 @@ impl MailboxCursor {
 }
 
 impl IndexedRelayState {
+    pub(crate) fn mailbox_watch_snapshot_at(
+        &self,
+        scopes: &[ConversationId],
+        now: u64,
+    ) -> Result<Vec<MailboxWatchToken>, LogError> {
+        if scopes.len() > 64
+            || scopes
+                .iter()
+                .enumerate()
+                .any(|(i, c)| scopes[..i].contains(c))
+        {
+            return Err(LogError::InvalidPageBudget);
+        }
+        self.profile.database().read(|c| {
+            require_ready(c)?;
+            let uuid: Vec<u8> = c.prepare_cached("SELECT store_uuid FROM mesh_database_metadata WHERE singleton=1")?.query_row([], |r| r.get(0))?;
+            let store_uuid: [u8;16] = uuid.try_into().map_err(|_| invalid("invalid mailbox store identity"))?;
+            let durable_cutoff: Option<Vec<u8>> = c.prepare_cached("SELECT expired_cutoff FROM relay_runtime WHERE singleton=1")?.query_row([], |r|r.get(0))?;
+            let durable_cutoff = durable_cutoff.map(decode_time).transpose()?;
+            scopes.iter().map(|conv| {
+                let metadata = self.mailbox_on(c, conv)?;
+                let first_seen = metadata.filter(|m| !m.retained.retiring && !durable_cutoff.is_some_and(|cutoff|m.first_seen<=cutoff) && m.first_seen.saturating_add(crate::postoffice::MAX_RELAY_AGE.as_secs()) > now).map(|m|m.first_seen);
+                let (epoch,revision): (i64,i64) = c.prepare_cached("SELECT destructive_epoch,revision FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![RELAY_EVENTS.0.as_slice(),conv.as_bytes().as_slice()], |r|Ok((r.get(0)?,r.get(1)?))).optional()?.unwrap_or((0,0));
+                if epoch < 0 || revision < 0 { return Err(invalid("negative mailbox watch authority")); }
+                Ok(MailboxWatchToken { store_uuid, conversation:*conv, epoch, first_seen, revision })
+            }).collect()
+        })
+    }
+
     fn mailbox_cursor_on(
         &self,
         c: &Connection,
