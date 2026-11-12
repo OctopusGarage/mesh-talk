@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7798V3EK1F6W91WYMJT1C31",
+  "session_id": "01a1c87c-abff-7a32-90e2-597d98bf5a5c",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-12T07:06:38.492001Z",
+  "branch": "fix/macos-webview-theme-alpha",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "frontend/e2e/screenshot-portable.spec.ts"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "94dba2d4820a",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 95674,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 83587584,
+    "output_tokens": 102371,
+    "api_call_count": 312,
+    "subagent_tokens": {
+      "input_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 0,
+      "api_call_count": 0
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 207,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 2,
+      "entropy": 206,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 6
+  }
+}
