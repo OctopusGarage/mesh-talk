@@ -2805,10 +2805,29 @@ Legacy exchanges and the three-second receive cadence remain unchanged.
 Completed upload qualifications are kept in the existing bounded signed
 checkpoint store independently of those four heavyweight views. Rotating through
 more relay/mailbox scopes therefore does not restart unchanged history traversal
-merely because a view was evicted. A qualification compares the captured local
+merely because a view was evicted. A duplex qualification compares the captured local
 history/authority stamp with the current stamp and a fresh authenticated remote
 store UUID, mailbox, destructive epoch and arrival incarnation. Ordinary appends
-do not invalidate an unrelated scope; remote replacement or retention changes do.
+do not invalidate an unrelated scope; remote replacement or retention changes
+invalidate duplex custody qualification. Send-only history publication instead
+records past accepted source dispatch. A relay reset does not rewind its local
+selection rank or republish an unchanged completed history/authority stamp.
+This is not present custody: a finite relay can evict old history. It intentionally
+gives up automatic archival refill after eviction; the source retains history for
+direct receiver recovery and explicitly requested delivery work. A selected exact
+confirmation checks real current durable HAVE, and a missing target revalidates
+the existing export and uploads that target alone. The local history/authority
+stamp captured before target resolution must still match before and after HAVE
+and repair; unknown or changed evidence defers confirmation. Legacy negotiation
+retains its ordinary dispatch and separate custody check. Transport and storage failures
+remain failures, while unknown or changed local source/authority stamps retain
+normal preparation. Duplex incoming cursor reset and dependency repair are
+unchanged.
+Genuine queued group-file work uses a distinct send-only file-dispatch purpose:
+it must recover all signed chunks for its current retained receiver demand, not
+reuse an archival dispatch watermark. Its local key remains in the bounded
+publication-hint class and cannot evict receive checkpoints. The owning durable
+file-demand settlement still controls whether this work can be scheduled.
 Authenticated cursor rejection and regression below the recorded revision/commit
 floors invalidate a qualification even when the incarnation fields still match.
 Partial pages use their authenticated window bounds for these comparisons.
@@ -2821,7 +2840,9 @@ stamp and freshly authenticated remote binding and floors. A missing target
 lazily prepares the existing bounded selection before extending the same valid
 qualification. A view created solely for an already finished confirmation is
 retired after its validated lookup; it must not occupy a protected unfinished
-upload slot. Existing incomplete upload views and interrupted preparation keep
+upload slot. A retained admission lease retires newly ready repair-only views
+even when the caller is cancelled; the scope remains busy until that cleanup
+finishes. Existing incomplete upload views and interrupted preparation keep
 their original progress protection. This retirement never claims bulk completion.
 New local generations replace its pairs; they never inherit
 membership from an older selection. Every custody check still requires fresh

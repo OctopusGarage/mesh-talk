@@ -1832,6 +1832,739 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
 }
 
 #[tokio::test]
+async fn cancelled_ready_history_confirmation_releases_unrelated_scope_capacity() {
+    use crate::{discovery::Announce, eventlog::sync::network::NetworkSyncStore};
+    use std::time::{Duration, Instant};
+
+    let directory = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let peer = recipient.public();
+    let proof = Announce::new_with_account(&recipient, &Account::generate(), "Recipient", 9);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.set_bridge_discovery_enabled(true);
+    let conversation =
+        super::super::conversation::dm_conversation_id(&node.identity.public(), &peer);
+    let event = Event::new(
+        &node.identity,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![7; 32],
+    );
+    let inner = event.id;
+    node.log.lock().unwrap().append_durable(event).unwrap();
+    let relays: Vec<_> = (0..3).map(|_| DeviceIdentity::generate()).collect();
+    let scopes = [(0, false), (0, true), (1, false), (1, true), (2, false)];
+    // Open all durable stores before measuring the unfinished-capacity window.
+    let roots: Vec<_> = (0..10).map(|_| tempfile::tempdir().unwrap()).collect();
+    let offices: Vec<_> = roots
+        .iter()
+        .map(|root| {
+            IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let mut outers = Vec::new();
+    for (index, &(relay, federated)) in scopes.iter().enumerate() {
+        let published = tokio::time::timeout(
+            Duration::from_secs(5),
+            counted_scope_exchange_with_intent(
+                &node,
+                offices[index].clone(),
+                &relays[relay],
+                &peer,
+                conversation,
+                federated,
+                None,
+                MailboxIntent::HistoryPublication,
+            ),
+        )
+        .await
+        .expect("initial publication deadline");
+        outers.push(published.2.iter().find(|(id, _)| *id == inner).unwrap().1);
+    }
+    // All five compact completions survive this single cold-owner transition.
+    let retired = std::mem::take(&mut *node.opaque_upload_cache.lock().unwrap());
+    drop(retired);
+    let started = Instant::now();
+    for (index, &(relay, federated)) in scopes[..4].iter().enumerate() {
+        let relay = &relays[relay];
+        let mailbox = if federated {
+            RelayMailbox::federated(&node.identity, &peer).unwrap()
+        } else {
+            RelayMailbox::new(&node.identity, &peer, &relay.public()).unwrap()
+        };
+        let mailbox_id = mailbox.id();
+        let outer = outers[index];
+        let office = offices[index + 5].clone();
+        assert!(!office.durable_have(&mailbox_id, &outer).unwrap());
+        let keys = relay.secret_bytes();
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let (entered, admitted) = tokio::sync::oneshot::channel();
+        let mut task = tokio::spawn(async move {
+            let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+            let mut channel = crate::transport::SecureChannel::accept(server, &identity)
+                .await
+                .map_err(|error| format!("server handshake: {error:?}"))?;
+            let store = Mutex::new(office);
+            let budget = crate::node::session::RemoteHaveBudget::default();
+            let mut authorized = None;
+            let mut exact_queries = 0;
+            while let Ok(bytes) = channel.recv().await {
+                if crate::node::session::durable_have_query_for_test(&bytes)
+                    == Some((mailbox_id, outer))
+                {
+                    exact_queries += 1;
+                    if exact_queries == 2 {
+                        // The first HAVE was answered by the actual empty store.
+                        // This second HAVE is emitted by upload_history_event
+                        // only after a ready selected export supplied its body.
+                        entered.send(()).map_err(|_| "admission observer closed")?;
+                        return match tokio::time::timeout(Duration::from_secs(5), channel.recv())
+                            .await
+                        {
+                            Ok(Err(_)) => Ok(()),
+                            Ok(Ok(_)) => Err("cancelled client sent another request".into()),
+                            Err(_) => Err("cancelled client transport did not retire".into()),
+                        };
+                    }
+                }
+                crate::node::session::mailbox::serve(
+                    &mut channel,
+                    &store,
+                    &bytes,
+                    &budget,
+                    &mut authorized,
+                )
+                .await
+                .map_err(|error| format!("mailbox dispatcher: {error:?}"))?;
+            }
+            Err::<(), String>("client closed before the ready repair request".into())
+        });
+        let mut channel = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::transport::SecureChannel::connect(client, &node.identity, Some(&relay.public())),
+        )
+        .await
+        .expect("client handshake deadline")
+        .unwrap();
+        let mut round = Box::pin(node.opaque_mailbox_round_confirmed(
+            &mut channel,
+            &peer,
+            Some(conversation),
+            mailbox,
+            Some(inner),
+            MailboxIntent::HistoryPublication,
+        ));
+        let admission = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut round => Err(format!("repair returned before its hold: {result:?}")),
+                result = admitted => result.map_err(|_| "repair admission closed".to_owned()),
+            }
+        })
+        .await;
+        // Drop the actual operation while its ready repair is on the wire.
+        // Retire its transport and server before inspecting any fixture result.
+        drop(round);
+        drop(channel);
+        let retirement = tokio::time::timeout(Duration::from_secs(5), &mut task).await;
+        if retirement.is_err() {
+            task.abort();
+            let _ = task.await;
+        }
+        admission.expect("ready repair admission deadline").unwrap();
+        retirement
+            .expect("server retirement deadline")
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "cancellations must leave time to test within the 30-second protection window"
+    );
+    // A fifth real scope must acquire capacity immediately; expiry is not the
+    // recovery mechanism. Its selected target also proves the exchange finished.
+    let fifth = tokio::time::timeout(
+        Duration::from_secs(5),
+        counted_scope_exchange_with_intent(
+            &node,
+            offices[9].clone(),
+            &relays[2],
+            &peer,
+            conversation,
+            false,
+            Some(inner),
+            MailboxIntent::HistoryPublication,
+        ),
+    )
+    .await
+    .expect("unrelated fifth scope must not wait for unfinished protection expiry");
+    assert!(fifth.2.contains(&(inner, outers[4])));
+    assert!(started.elapsed() < Duration::from_secs(30));
+}
+
+#[tokio::test]
+async fn history_publication_legacy_confirmation_keeps_ordinary_custody_failure() {
+    use crate::{discovery::Announce, eventlog::sync::network::NetworkSyncStore};
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&recipient, &Account::generate(), "Recipient", 9);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let conversation = super::super::conversation::dm_conversation_id(
+        &node.identity.public(),
+        &recipient.public(),
+    );
+    let event = Event::new(
+        &node.identity,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![7; 32],
+    );
+    let inner = event.id;
+    let relay = DeviceIdentity::generate();
+    let mailbox = RelayMailbox::new(&node.identity, &recipient.public(), &relay.public()).unwrap();
+    let mailbox_id = mailbox.id();
+    let outer = mailbox.wrap(&event).unwrap().id;
+    node.log.lock().unwrap().append_durable(event).unwrap();
+    let original_root = tempfile::tempdir().unwrap();
+    let original = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(original_root.path()).unwrap(),
+        &original_root.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    let replacement_root = tempfile::tempdir().unwrap();
+    let replacement = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(replacement_root.path()).unwrap(),
+        &replacement_root.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    let keys = relay.secret_bytes();
+    let (client, server) = tokio::io::duplex(256 * 1024);
+    let task = tokio::spawn(async move {
+        let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+        let mut channel = crate::transport::SecureChannel::accept(server, &identity)
+            .await
+            .unwrap();
+        let store = Mutex::new(original);
+        let budget = crate::node::session::RemoteHaveBudget::default();
+        // The actual first probe reaches the ordinary protocol handler, which
+        // negotiates unsupported without forcing the client's internal mode.
+        assert!(matches!(
+            crate::node::session::serve_one_budgeted(&mut channel, &store, &budget)
+                .await
+                .unwrap(),
+            crate::node::session::Served::Handled(_)
+        ));
+        let mut replacement = Some(replacement);
+        let mut retired = false;
+        while let Ok(bytes) = channel.recv().await {
+            if crate::node::session::durable_have_query_for_test(&bytes)
+                == Some((mailbox_id, outer))
+            {
+                let mut store = store.lock().unwrap();
+                assert!(store.durable_have(&mailbox_id, &outer).unwrap());
+                *store = replacement.take().expect("one exact custody query");
+                assert!(!store.durable_have(&mailbox_id, &outer).unwrap());
+                retired = true;
+            }
+            crate::node::session::serve_wire_bytes_budgeted(&mut channel, &store, &bytes, &budget)
+                .await
+                .unwrap();
+        }
+        retired
+    });
+    let mut channel =
+        crate::transport::SecureChannel::connect(client, &node.identity, Some(&relay.public()))
+            .await
+            .unwrap();
+    // Catch a regression panic so this fixture still retires its actual server.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        std::panic::AssertUnwindSafe(node.opaque_mailbox_round_confirmed(
+            &mut channel,
+            &recipient.public(),
+            Some(conversation),
+            mailbox,
+            Some(inner),
+            MailboxIntent::HistoryPublication,
+        ))
+        .catch_unwind(),
+    )
+    .await;
+    let held = if matches!(&result, Ok(Ok(Ok(_)))) {
+        Some(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                crate::node::session::request_durable_have(&mut channel, mailbox_id, outer),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    drop(channel);
+    let retired = task.await.unwrap();
+    let uploaded = result
+        .expect("legacy round deadline")
+        .expect("legacy confirmation must not panic")
+        .expect("ordinary legacy publication");
+    assert!(uploaded.contains(&(inner, outer)));
+    assert!(
+        retired,
+        "the real stored target must disappear at the exact HAVE"
+    );
+    assert!(
+        !held.unwrap().unwrap().unwrap(),
+        "legacy dispatch is not current custody"
+    );
+}
+
+#[tokio::test]
+async fn history_publication_confirmation_rejects_source_change_during_positive_have() {
+    use crate::{discovery::Announce, eventlog::sync::network::NetworkSyncStore};
+    for federated in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let recipient = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&recipient, &Account::generate(), "Recipient", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.set_bridge_discovery_enabled(true);
+        let conversation = super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &recipient.public(),
+        );
+        let event = Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![7; 32],
+        );
+        let inner = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        let relay = DeviceIdentity::generate();
+        let relay_root = tempfile::tempdir().unwrap();
+        let office = IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(relay_root.path()).unwrap(),
+            &relay_root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let first = counted_scope_exchange_with_intent(
+            &node,
+            office.clone(),
+            &relay,
+            &recipient.public(),
+            conversation,
+            federated,
+            None,
+            MailboxIntent::HistoryPublication,
+        )
+        .await;
+        let outer = first.2.iter().find(|(id, _)| *id == inner).unwrap().1;
+        let mailbox = if federated {
+            RelayMailbox::federated(&node.identity, &recipient.public()).unwrap()
+        } else {
+            RelayMailbox::new(&node.identity, &recipient.public(), &relay.public()).unwrap()
+        };
+        let mailbox_id = mailbox.id();
+        assert!(office.durable_have(&mailbox_id, &outer).unwrap());
+        let before = node
+            .sync_store(&recipient.public())
+            .lock()
+            .unwrap()
+            .history_sync_stamp(&conversation)
+            .unwrap()
+            .expect("known source stamp");
+        let generation = node.privacy.generation.load(Ordering::SeqCst);
+        let keys = relay.secret_bytes();
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let (entered, admitted) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+            let mut channel = crate::transport::SecureChannel::accept(server, &identity)
+                .await
+                .unwrap();
+            let store = Mutex::new(office);
+            let budget = crate::node::session::RemoteHaveBudget::default();
+            let mut authorized = None;
+            let mut hold = Some((entered, released));
+            while let Ok(bytes) = channel.recv().await {
+                if crate::node::session::durable_have_query_for_test(&bytes)
+                    == Some((mailbox_id, outer))
+                    && let Some((entered, released)) = hold.take()
+                {
+                    assert!(
+                        store
+                            .lock()
+                            .unwrap()
+                            .durable_have(&mailbox_id, &outer)
+                            .unwrap()
+                    );
+                    entered.send(()).unwrap();
+                    tokio::time::timeout(std::time::Duration::from_secs(5), released)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(
+                        store
+                            .lock()
+                            .unwrap()
+                            .durable_have(&mailbox_id, &outer)
+                            .unwrap()
+                    );
+                }
+                // The production dispatcher returns the real positive HAVE;
+                // neither the response nor durable custody is fabricated.
+                crate::node::session::mailbox::serve(
+                    &mut channel,
+                    &store,
+                    &bytes,
+                    &budget,
+                    &mut authorized,
+                )
+                .await
+                .unwrap();
+            }
+            hold.is_none()
+        });
+        let mut channel =
+            crate::transport::SecureChannel::connect(client, &node.identity, Some(&relay.public()))
+                .await
+                .unwrap();
+        let mutate = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), admitted)
+                .await
+                .unwrap()
+                .unwrap();
+            let fresh = Event::new(
+                &node.identity,
+                conversation,
+                2,
+                vec![inner],
+                2,
+                0,
+                EventKind::Message,
+                vec![8; 32],
+            );
+            node.log.lock().unwrap().append_durable(fresh).unwrap();
+            let after = node
+                .sync_store(&recipient.public())
+                .lock()
+                .unwrap()
+                .history_sync_stamp(&conversation)
+                .unwrap()
+                .expect("changed known source stamp");
+            assert_ne!(before, after);
+            assert_eq!(node.privacy.generation.load(Ordering::SeqCst), generation);
+            release.send(()).unwrap();
+        };
+        let recipient_public = recipient.public();
+        let round = node.opaque_mailbox_round_confirmed(
+            &mut channel,
+            &recipient_public,
+            Some(conversation),
+            mailbox,
+            Some(inner),
+            MailboxIntent::HistoryPublication,
+        );
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(round, mutate).0
+        })
+        .await;
+        drop(channel);
+        let held = task.await.unwrap();
+        assert!(
+            held,
+            "must hold the exact real positive HAVE before changing source"
+        );
+        assert!(
+            matches!(
+                result.unwrap(),
+                Err(crate::node::session::SessionError::Store(
+                    LogError::StaleCursor
+                ))
+            ),
+            "source replacement while HAVE is pending must reject the old selection"
+        );
+    }
+}
+
+#[tokio::test]
+async fn settled_history_publication_does_not_refill_replaced_relay_without_a_target() {
+    use crate::{discovery::Announce, eventlog::sync::network::NetworkSyncStore};
+    for federated in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let recipient = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&recipient, &Account::generate(), "Recipient", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.set_bridge_discovery_enabled(true);
+        let conversation = super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &recipient.public(),
+        );
+        let mut messages = Vec::new();
+        for sequence in 1..=3 {
+            let event = Event::new(
+                &node.identity,
+                conversation,
+                sequence,
+                messages.last().copied().into_iter().collect(),
+                sequence,
+                0,
+                EventKind::Message,
+                vec![7; 512],
+            );
+            messages.push(event.id);
+            node.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        let relay = DeviceIdentity::generate();
+        let original_root = tempfile::tempdir().unwrap();
+        let original = IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(original_root.path()).unwrap(),
+            &original_root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let first = counted_scope_exchange_with_intent(
+            &node,
+            original.clone(),
+            &relay,
+            &recipient.public(),
+            conversation,
+            federated,
+            None,
+            MailboxIntent::HistoryPublication,
+        )
+        .await;
+        let mailbox = if federated {
+            RelayMailbox::federated(&node.identity, &recipient.public()).unwrap()
+        } else {
+            RelayMailbox::new(&node.identity, &recipient.public(), &relay.public()).unwrap()
+        };
+        for id in &messages {
+            let outer = first.2.iter().find(|(inner, _)| inner == id).unwrap().1;
+            assert!(original.durable_have(&mailbox.id(), &outer).unwrap());
+        }
+        let retired = std::mem::take(&mut *node.opaque_upload_cache.lock().unwrap());
+        drop(retired);
+        let replacement_root = tempfile::tempdir().unwrap();
+        let replacement = IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(replacement_root.path()).unwrap(),
+            &replacement_root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        counted_scope_exchange_with_intent(
+            &node,
+            replacement.clone(),
+            &relay,
+            &recipient.public(),
+            conversation,
+            federated,
+            None,
+            MailboxIntent::HistoryPublication,
+        )
+        .await;
+        for id in &messages {
+            let outer = first.2.iter().find(|(inner, _)| inner == id).unwrap().1;
+            assert!(
+                !replacement.durable_have(&mailbox.id(), &outer).unwrap(),
+                "relay replacement is not a request to refill acknowledged source history"
+            );
+        }
+        // The server answers the exact target's real HAVE, then closes before
+        // accepting a repair. Failure cannot become a successful confirmation.
+        let missing_outer = first
+            .2
+            .iter()
+            .find(|(inner, _)| *inner == messages[0])
+            .unwrap()
+            .1;
+        let relay_keys = relay.secret_bytes();
+        let failed_store = replacement.clone();
+        let mailbox_id = mailbox.id();
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let failure = tokio::spawn(async move {
+            let identity = DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1);
+            let mut channel = crate::transport::SecureChannel::accept(server, &identity)
+                .await
+                .unwrap();
+            let store = Mutex::new(failed_store);
+            let budget = crate::node::session::RemoteHaveBudget::default();
+            let mut authorized = None;
+            while let Ok(bytes) = channel.recv().await {
+                let target = crate::node::session::durable_have_query_for_test(&bytes)
+                    == Some((mailbox_id, missing_outer));
+                crate::node::session::mailbox::serve(
+                    &mut channel,
+                    &store,
+                    &bytes,
+                    &budget,
+                    &mut authorized,
+                )
+                .await
+                .unwrap();
+                if target {
+                    assert!(
+                        !store
+                            .lock()
+                            .unwrap()
+                            .durable_have(&mailbox_id, &missing_outer)
+                            .unwrap()
+                    );
+                    return;
+                }
+            }
+            panic!("the explicit target must require an actual fresh HAVE");
+        });
+        let mut channel =
+            crate::transport::SecureChannel::connect(client, &node.identity, Some(&relay.public()))
+                .await
+                .unwrap();
+        let failed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            node.opaque_mailbox_round_confirmed(
+                &mut channel,
+                &recipient.public(),
+                Some(conversation),
+                if federated {
+                    RelayMailbox::federated(&node.identity, &recipient.public()).unwrap()
+                } else {
+                    RelayMailbox::new(&node.identity, &recipient.public(), &relay.public()).unwrap()
+                },
+                Some(messages[0]),
+                MailboxIntent::HistoryPublication,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(failed.is_err());
+        drop(channel);
+        failure.await.unwrap();
+        assert!(
+            !replacement
+                .durable_have(&mailbox.id(), &missing_outer)
+                .unwrap()
+        );
+        let requested = counted_scope_exchange_with_intent(
+            &node,
+            replacement.clone(),
+            &relay,
+            &recipient.public(),
+            conversation,
+            federated,
+            Some(messages[0]),
+            MailboxIntent::HistoryPublication,
+        )
+        .await;
+        let outer = requested
+            .2
+            .iter()
+            .find(|(inner, _)| *inner == messages[0])
+            .unwrap()
+            .1;
+        assert!(replacement.durable_have(&mailbox.id(), &outer).unwrap());
+        for id in &messages[1..] {
+            let outer = first.2.iter().find(|(inner, _)| inner == id).unwrap().1;
+            assert!(
+                !replacement.durable_have(&mailbox.id(), &outer).unwrap(),
+                "explicit confirmation must not restore unrelated historical messages"
+            );
+        }
+        let absent = EventId::new([0xff; 32]);
+        let rejected = counted_scope_exchange_with_intent(
+            &node,
+            replacement.clone(),
+            &relay,
+            &recipient.public(),
+            conversation,
+            federated,
+            Some(absent),
+            MailboxIntent::HistoryPublication,
+        )
+        .await;
+        assert!(!rejected.2.iter().any(|(inner, _)| *inner == absent));
+        let event = Event::new(
+            &node.identity,
+            conversation,
+            4,
+            vec![*messages.last().unwrap()],
+            4,
+            0,
+            EventKind::Message,
+            vec![8; 512],
+        );
+        let fresh = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        let changed = counted_scope_exchange_with_intent(
+            &node,
+            replacement.clone(),
+            &relay,
+            &recipient.public(),
+            conversation,
+            federated,
+            Some(fresh),
+            MailboxIntent::HistoryPublication,
+        )
+        .await;
+        let outer = changed
+            .2
+            .iter()
+            .find(|(inner, _)| *inner == fresh)
+            .unwrap()
+            .1;
+        assert!(
+            replacement.durable_have(&mailbox.id(), &outer).unwrap(),
+            "a changed local selection must still publish new messages"
+        );
+    }
+}
+
+#[tokio::test]
 async fn history_publication_relay_eviction_reuses_the_exact_ready_selection() {
     use crate::{discovery::Announce, eventlog::sync::network::NetworkSyncStore};
     let directory = tempfile::tempdir().unwrap();

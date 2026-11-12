@@ -970,6 +970,19 @@ covers actual HAVE, failed persistence, relay replacement, a new signed request,
 duplicate requests, the completion race and independent incoming traversal.
 Qualify receiver actions per file: an unrelated account policy generation must
 not manufacture new demand, while current policy still fences publication.
+The same distinction applies to send-only historical publication: remote buffer
+retirement cannot rewind an unchanged source dispatch. The
+[mailbox owner](../crates/mesh-talk-core/src/node/opaque_relay/incremental.rs)
+preserves duplex receive reset and repair, while explicit targets require fresh
+durable HAVE and current selected export before a missing target is republished.
+The real replacement-store regression covers a cold dispatch owner, selective
+target recovery, transport failure and retry, and changed local source input.
+Keep genuine file requests distinct from archival publication: the file owner
+must redispatch every signed chunk, under a separately qualified send-only key.
+Temporary ready confirmation views retain their admission lease through
+cancellation cleanup; partial preparation keeps its existing protection. The
+four-scope cancellation regression requires real unrelated admission before the
+ordinary unfinished-work timeout, without increasing the view budget.
 
 Keep UI observations distinct from durable progress: phase/check timestamps
 must not rewrite a reception ledger. An unchanged committed cursor can reuse its

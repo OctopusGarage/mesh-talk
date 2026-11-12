@@ -342,6 +342,10 @@ struct QueuedFixture {
 }
 
 async fn queued_fixture() -> QueuedFixture {
+    queued_fixture_with_size(128).await
+}
+
+async fn queued_fixture_with_size(bytes: usize) -> QueuedFixture {
     let root = tempfile::tempdir().unwrap();
     let node = node(root.path());
     let peers: Vec<_> = (0..5).map(|_| DeviceIdentity::generate()).collect();
@@ -366,7 +370,7 @@ async fn queued_fixture() -> QueuedFixture {
     node.cached_peer_snapshot_async().await.unwrap();
     crate::node::test_support::settle_group_metadata(&node, channel);
     let source = root.path().join("queued.bin");
-    std::fs::write(&source, [7; 128]).unwrap();
+    std::fs::write(&source, vec![7; bytes]).unwrap();
     let (manifest, file) = node
         .enqueue_file_channel_progress_expiring_if(
             channel,
@@ -524,7 +528,7 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
     use crate::eventlog::sync::network::NetworkSyncStore;
     use crate::postoffice::{IndexedPostOffice, federation::IndexedRelayEndpoint};
     use crate::storage::profile::ProfileStorageLease;
-    let fixture = queued_fixture().await;
+    let fixture = queued_fixture_with_size(crate::file::CHUNK_SIZE * 2 + 1).await;
     let node = &fixture.node;
     node.refill_group_file_delivery().unwrap();
     let (key, job) = {
@@ -615,6 +619,21 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
         .id;
     let final_event = node.log.lock().unwrap().get(&final_chunk).unwrap().unwrap();
     let final_outer = mailbox.wrap(&final_event).unwrap().id;
+    assert!(
+        chunks > 1,
+        "redispatch must exercise more than its final chunk"
+    );
+    let chunk_outers: Vec<_> = node
+        .log
+        .lock()
+        .unwrap()
+        .events(&fixture.file)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::Message)
+        .map(|event| mailbox.wrap(&event).unwrap().id)
+        .collect();
+    assert_eq!(chunk_outers.len(), chunks as usize);
     let relay_store = Arc::new(Mutex::new(office.clone()));
     let served_store = relay_store.clone();
     let replacement_root = tempfile::tempdir().unwrap();
@@ -752,6 +771,10 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
         RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
         node.retry_group_file_delivery().await;
         assert!(changed_demand.load(Ordering::SeqCst), "the real completion race cut must run");
+        for outer in &chunk_outers {
+            assert!(office.durable_have(&mailbox.id(), outer).unwrap(),
+                "a genuine request must redispatch every signed file chunk");
+        }
         assert!(node.files.lock().unwrap().group_custody_settled(
             fixture.file, fixture.manifest, &job.recipient, Some(requested.id)).unwrap());
         assert!(!node.files.lock().unwrap().group_custody_settled(

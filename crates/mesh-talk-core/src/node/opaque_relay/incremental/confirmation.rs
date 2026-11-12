@@ -10,7 +10,91 @@ struct ConfirmationLookup {
     unselected: bool,
 }
 
+// Keep admission owned until cancellation cleanup finishes, independent of the
+// caller progress's drop order. Only ready views created for this lookup retire;
+// partial preparation and preexisting uploads retain their normal protection.
+struct ReadyConfirmationView {
+    lease: Lease,
+    retire: bool,
+}
+impl Drop for ReadyConfirmationView {
+    fn drop(&mut self) {
+        if self.retire {
+            let retired = self.lease.0.lock().expect("upload entry").view.take();
+            drop(retired);
+        }
+    }
+}
+
 impl Node {
+    fn validate_opaque_confirmation_source(
+        &self,
+        p: &OpaqueMailboxProgress,
+        expected: &HistorySyncStamp,
+    ) -> Result<(), LogError> {
+        let conversation = p.conversation.ok_or(LogError::StaleCursor)?;
+        let owner = self.sync_store(&p.recipient);
+        let current = owner
+            .lock()
+            .expect("projection")
+            .history_sync_stamp(&conversation)?;
+        if current.as_ref() != Some(expected) {
+            return Err(LogError::StaleCursor);
+        }
+        Ok(())
+    }
+
+    /// A source dispatch watermark is not current relay custody. Repair only an
+    /// explicitly selected target, preserving failure and authorization checks.
+    pub(in crate::node) async fn ensure_opaque_confirmation_custody<
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: Fn() -> bool + Sync,
+    >(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        p: &mut OpaqueMailboxProgress,
+        target: (EventId, EventId),
+        source: &HistorySyncStamp,
+        current: &F,
+    ) -> Result<EventId, session::SessionError> {
+        if !matches!(p.incremental, Mode::Active(_)) || !self.upload_permitted(p, current) {
+            return Err(session::SessionError::UnexpectedMessage);
+        }
+        let (inner, outer) = target;
+        self.validate_opaque_confirmation_source(p, source)?;
+        let held = session::request_durable_have(channel, p.mailbox.id(), outer).await?;
+        if !self.upload_permitted(p, current) {
+            return Err(session::SessionError::UnexpectedMessage);
+        }
+        self.validate_opaque_confirmation_source(p, source)?;
+        if held {
+            return Ok(outer);
+        }
+        let transient = state(p).history_done
+            && state(p)
+                .lease
+                .0
+                .lock()
+                .expect("upload entry")
+                .view
+                .is_none();
+        let mut cleanup = ReadyConfirmationView {
+            lease: state(p).lease.retain(),
+            retire: false,
+        };
+        self.prepare_opaque_confirmation(p, current).await?;
+        cleanup.retire = transient;
+        self.validate_opaque_confirmation_source(p, source)?;
+        let outer = self
+            .upload_history_event(channel, p, inner, current)
+            .await?;
+        self.validate_opaque_confirmation_source(p, source)?;
+        if !self.upload_permitted(p, current) {
+            return Err(session::SessionError::UnexpectedMessage);
+        }
+        Ok(outer)
+    }
+
     /// Recreate the existing selected export for a target absent from the
     /// completed proof's bounded qualified membership memo.
     pub(in crate::node) async fn prepare_opaque_confirmation<F: Fn() -> bool + Sync>(

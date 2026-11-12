@@ -59,7 +59,7 @@ struct UnselectedTarget {
     inner: EventId,
 }
 struct UploadEntry {
-    busy: bool,
+    active_leases: usize,
     used: std::time::Instant,
     progress_at: std::time::Instant,
     progress_generation: u64,
@@ -115,9 +115,26 @@ impl UploadEntry {
     }
 }
 struct Lease(UploadEntryOwner);
+impl Lease {
+    // Cleanup retains actual admission; dropping the caller cannot admit a new
+    // user of this entry before its temporary selection has retired.
+    fn retain(&self) -> Self {
+        let mut entry = self.0.lock().expect("upload entry");
+        assert!(entry.active_leases != 0, "retain an active upload lease");
+        entry.active_leases = entry
+            .active_leases
+            .checked_add(1)
+            .expect("bounded upload leases");
+        Self(self.0.clone())
+    }
+}
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.0.lock().expect("upload entry").busy = false;
+        let mut entry = self.0.lock().expect("upload entry");
+        entry.active_leases = entry
+            .active_leases
+            .checked_sub(1)
+            .expect("active upload lease");
     }
 }
 impl UploadCache {
@@ -260,7 +277,7 @@ impl UploadCache {
                                 panic!("upload entry: {error}");
                             }
                         };
-                        if e.busy || e.protect_unfinished(generation, now) {
+                        if e.active_leases != 0 || e.protect_unfinished(generation, now) {
                             return None;
                         }
                         // Empty/completed entries yield before expired or
@@ -276,7 +293,7 @@ impl UploadCache {
             entries.insert(
                 key.to_vec(),
                 Arc::new(Mutex::new(UploadEntry {
-                    busy: false,
+                    active_leases: 0,
                     used: now,
                     progress_at: now,
                     progress_generation: generation,
@@ -306,10 +323,10 @@ impl UploadCache {
                     panic!("upload entry: {error}");
                 }
             };
-            if e.busy {
+            if e.active_leases != 0 {
                 return Err(session::SessionError::ResourceUnavailable);
             }
-            e.busy = true;
+            e.active_leases = 1;
             e.used = now;
         }
         Ok((Lease(entry), retired))
@@ -469,7 +486,10 @@ fn cache_key(p: &OpaqueMailboxProgress) -> Result<Vec<u8>, session::SessionError
         p.conversation,
     ))
     .map_err(|e| session::SessionError::Serialization(e.to_string()))?;
-    if p.intent == MailboxIntent::HistoryPublication {
+    if p.intent == MailboxIntent::FileDispatch {
+        key.extend_from_slice(b"\0file-dispatch-v1");
+    }
+    if p.intent != MailboxIntent::Duplex {
         // Local hint namespace only: leave every old duplex cursor, pending
         // repair and runtime binding untouched. The wire mailbox is unchanged.
         key.extend_from_slice(HISTORY_PUBLICATION_KEY_SUFFIX);
@@ -1508,7 +1528,12 @@ impl Node {
                     .remote
                     .as_ref()
                     .is_some_and(|old| *old != remote && !own_creation);
-            if changed || (page.reset && !own_creation) {
+            // The relay owns a bounded buffer. Its retirement invalidates receive
+            // progress, not the sender's already accepted publication work. An
+            // explicit target still requires fresh custody in confirmation.rs.
+            if p.intent != MailboxIntent::HistoryPublication
+                && (changed || (page.reset && !own_creation))
+            {
                 if state(p).receipt.completed.is_some() {
                     self.observe_mailbox_work(reason::COMPLETION_REMOTE_CLEARED, None);
                 }
@@ -1694,7 +1719,8 @@ impl Node {
                     Some(reason::COMPLETION_LOCAL_CHANGED)
                 }
                 (Some(completed), Some(_))
-                    if state(p).remote.as_ref() != Some(&completed.remote) =>
+                    if p.intent != MailboxIntent::HistoryPublication
+                        && state(p).remote.as_ref() != Some(&completed.remote) =>
                 {
                     Some(reason::COMPLETION_REMOTE_CHANGED)
                 }
@@ -1710,7 +1736,8 @@ impl Node {
                     .as_ref()
                     .is_some_and(|completed| {
                         &completed.local == stamp
-                            && state(p).remote.as_ref() == Some(&completed.remote)
+                            && (p.intent == MailboxIntent::HistoryPublication
+                                || state(p).remote.as_ref() == Some(&completed.remote))
                     })
             }) {
                 self.observe_mailbox_work(reason::VIEW_SKIP, None);
@@ -1880,6 +1907,53 @@ mod upload_admission_tests {
         discovery::Announce,
         identity::{account::Account, device::DeviceIdentity},
     };
+
+    #[test]
+    fn file_dispatch_has_a_distinct_publication_priority_key() {
+        let source = DeviceIdentity::generate();
+        let recipient = DeviceIdentity::generate().public();
+        let relay = DeviceIdentity::generate().public();
+        let conversation = ConversationId::new([3; 32]);
+        let mailbox = || RelayMailbox::new(&source, &recipient, &relay).unwrap();
+        let duplex = OpaqueMailboxProgress::new(&relay, &recipient, Some(conversation), mailbox());
+        let archive = OpaqueMailboxProgress::new_history_publication(
+            &relay,
+            &recipient,
+            conversation,
+            mailbox(),
+        );
+        let file =
+            OpaqueMailboxProgress::new_file_dispatch(&relay, &recipient, conversation, mailbox());
+        assert_eq!(duplex.mailbox.id(), file.mailbox.id());
+        assert_eq!(archive.mailbox.id(), file.mailbox.id());
+        let file_key = cache_key(&file).unwrap();
+        assert_ne!(file_key, cache_key(&duplex).unwrap());
+        assert_ne!(file_key, cache_key(&archive).unwrap());
+        assert!(file_key.ends_with(HISTORY_PUBLICATION_KEY_SUFFIX));
+        assert!(file_key.len() <= MAX_UNSELECTED_SCOPE_BYTES);
+    }
+
+    #[test]
+    fn retained_cleanup_lease_prevents_early_scope_reuse() {
+        let mut cache = UploadCache::default();
+        let now = std::time::Instant::now();
+        let (caller, retired) = cache
+            .acquire(b"owned", UploadScope::History, 1, now)
+            .unwrap();
+        assert!(retired.is_none());
+        let cleanup = caller.retain();
+        drop(caller);
+        assert!(matches!(
+            cache.acquire(b"owned", UploadScope::History, 1, now),
+            Err(session::SessionError::ResourceUnavailable)
+        ));
+        drop(cleanup);
+        let (resumed, retired) = cache
+            .acquire(b"owned", UploadScope::History, 1, now)
+            .unwrap();
+        assert!(retired.is_none());
+        drop(resumed);
+    }
 
     #[test]
     fn upload_maintenance_does_not_wait_for_a_held_entry_owner() {

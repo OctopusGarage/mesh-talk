@@ -187,6 +187,7 @@ impl SyncStore for OpaqueRoundStore<'_> {
 enum MailboxIntent {
     Duplex,
     HistoryPublication,
+    FileDispatch,
 }
 
 /// Transport progress is separate from retained event custody. Semantic
@@ -262,6 +263,19 @@ impl OpaqueMailboxProgress {
     ) -> Self {
         let mut progress = Self::new(relay, recipient, Some(conversation), mailbox);
         progress.intent = MailboxIntent::HistoryPublication;
+        progress
+    }
+
+    /// A genuine queued file request owns whole-file dispatch recovery. Its
+    /// source watermark must not alias archival publication or inbox progress.
+    pub(in crate::node) fn new_file_dispatch(
+        relay: &PublicIdentity,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+        mailbox: RelayMailbox,
+    ) -> Self {
+        let mut progress = Self::new(relay, recipient, Some(conversation), mailbox);
+        progress.intent = MailboxIntent::FileDispatch;
         progress
     }
 
@@ -459,6 +473,12 @@ impl Node {
                 conversation.ok_or(super::session::SessionError::UnexpectedMessage)?,
                 mailbox,
             ),
+            MailboxIntent::FileDispatch => OpaqueMailboxProgress::new_file_dispatch(
+                channel.peer_identity(),
+                recipient,
+                conversation.ok_or(super::session::SessionError::UnexpectedMessage)?,
+                mailbox,
+            ),
         };
         while !self.advance_opaque_mailbox(channel, &mut progress).await? {}
         if let Some(inner) = confirm {
@@ -476,9 +496,43 @@ impl Node {
                         || (self.bridge_directory_allowed()
                             && self.bridge_generation.load(Ordering::SeqCst) == bridge))
             };
+            let modern_publication = intent == MailboxIntent::HistoryPublication
+                && matches!(progress.incremental, incremental::Mode::Active(_));
+            let source = if modern_publication {
+                let conversation = progress.conversation.ok_or(LogError::StaleCursor)?;
+                let owner = self.sync_store(&progress.recipient);
+                let stamp = owner
+                    .lock()
+                    .expect("projection")
+                    .history_sync_stamp(&conversation)?
+                    .ok_or(LogError::StaleCursor)?;
+                Some(stamp)
+            } else {
+                None
+            };
             let outer = self
                 .resolve_opaque_confirmation(&mut progress, inner, &current)
                 .await?;
+            let outer = if modern_publication {
+                match outer {
+                    Some(outer) => Some(
+                        self.ensure_opaque_confirmation_custody(
+                            channel,
+                            &mut progress,
+                            (inner, outer),
+                            source.as_ref().ok_or(LogError::StaleCursor)?,
+                            &current,
+                        )
+                        .await?,
+                    ),
+                    None => {
+                        progress.uploaded.retain(|(id, _)| *id != inner);
+                        None
+                    }
+                }
+            } else {
+                outer
+            };
             if !current() || !channel.io_admitted() {
                 return Err(super::session::SessionError::UnexpectedMessage);
             }

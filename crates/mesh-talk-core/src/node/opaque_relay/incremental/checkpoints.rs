@@ -1551,7 +1551,7 @@ mod tests {
             let mut cache = node.opaque_upload_cache.lock().unwrap();
             cache.clear_stale_receive_repair_leases(generation);
             let entry = cache.entries.get(&hook_key).unwrap().lock().unwrap();
-            assert!(entry.busy);
+            assert!(entry.active_leases != 0);
             assert!(entry.repair_lease.is_none());
             let receipt = entry.receipt.clone().unwrap();
             let repair = receipt.repair.as_ref().unwrap();
@@ -1584,7 +1584,7 @@ mod tests {
             (
                 entry.receipt.clone(),
                 entry.repair_lease.is_some(),
-                entry.busy,
+                entry.active_leases != 0,
             )
         };
         let expected = rewound.lock().unwrap().clone();
