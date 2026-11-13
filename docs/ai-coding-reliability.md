@@ -995,6 +995,16 @@ and existing compatibility rules. Multi-store changes are not automatically one
 transaction; define recovery or compensation for every partial commit boundary.
 Use established error types and distinguish absent, unavailable and corrupt data.
 
+Retire successfully handled controls from derived receive work, including controls
+encoded as ordinary Message events. Define recovery across effect and scheduling
+commits before discarding the effect's authentication inputs. A terminal no-op
+classification may retire only work that a matching durable, monotone state can
+never require again; it must not grant authority or manufacture success. The
+[receipt owner](../crates/mesh-talk-core/src/node/delivery_runtime.rs) and
+`authenticated_receipt_retirement` regressions cover quiet replay, failed marker
+persistence after delivery, restart without the original body, current ownership
+and ordinary-message isolation. See the [state contract](network-design-reference.md#state-and-concurrency-contract).
+
 Separate authoritative durability from disposable SQL query progress. The
 [selection owner](../crates/mesh-talk-core/src/eventlog/repository/selection.rs)
 uses the existing connection's encrypted temporary pager for derived ranks and

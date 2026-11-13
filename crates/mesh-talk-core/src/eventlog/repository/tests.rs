@@ -2501,3 +2501,78 @@ fn profile_publication_provenance_rolls_back_with_failed_hint_and_bounds_evictio
         1024
     );
 }
+
+#[test]
+fn authenticated_receipt_retirement_marker_preserves_ordinary_receive_work_and_owner() {
+    use crate::storage::profile::participant::{finish_adoption, prepare_adoption};
+    let dir = tempfile::tempdir().unwrap();
+    let (profile, repo, local, account) = receive_profile(&dir);
+    repo.initialize_receiving(
+        Author::from_ed25519(local.public().ed25519_pub),
+        &account.public(),
+    )
+    .unwrap();
+    let peer = DeviceIdentity::generate();
+    let receipt = event(&peer, 1, vec![], 1, EventKind::Message);
+    let ordinary = event(&peer, 2, vec![], 2, EventKind::Message);
+    repo.append(&receipt).unwrap();
+    repo.append(&ordinary).unwrap();
+    // A host-completed receipt may precede bounded discovery. The exact marker
+    // must survive delayed discovery without creating transcript evidence.
+    repo.complete_control(receipt.id).unwrap();
+    assert_eq!(
+        repo.pending_receive_ids(receipt.conversation_id, 128, 8 * 1024 * 1024)
+            .unwrap(),
+        vec![ordinary.id]
+    );
+    let evidence: i64 = profile
+        .database()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM transcript_received_evidence WHERE id=?1",
+                [receipt.id.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        evidence, 0,
+        "receipt processing cannot fabricate a received chat row"
+    );
+    let later = event(&peer, 3, vec![], 3, EventKind::Message);
+    repo.append(&later).unwrap();
+    assert!(
+        repo.pending_receive_ids(later.conversation_id, 128, 8 * 1024 * 1024)
+            .unwrap()
+            .contains(&later.id)
+    );
+    repo.complete_control(later.id).unwrap();
+    assert_eq!(
+        repo.pending_receive_ids(later.conversation_id, 128, 8 * 1024 * 1024)
+            .unwrap(),
+        vec![ordinary.id]
+    );
+    let absent = EventId::new([93; 32]);
+    assert!(repo.complete_control(absent).is_err());
+    let fk = profile.database().transaction(|c| {
+        c.execute(
+            "INSERT INTO participant_control_processed VALUES(?1,?2)",
+            rusqlite::params![repo.domain.0.as_slice(), absent.as_bytes().as_slice()],
+        )?;
+        Ok(())
+    });
+    assert!(
+        fk.is_err(),
+        "completed scheduling evidence must remain foreign-key bound to retained events"
+    );
+    let next = crate::identity::account::Account::generate().public();
+    prepare_adoption(profile.database(), &account.public(), &next).unwrap();
+    finish_adoption(profile.database(), &next).unwrap();
+    assert!(
+        matches!(
+            repo.complete_control(ordinary.id),
+            Err(LogError::StaleCursor)
+        ),
+        "stale participant owner cannot complete another account's pending work"
+    );
+}

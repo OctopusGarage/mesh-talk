@@ -2859,6 +2859,8 @@
     {
       "id": "core-indexed-transcripts",
       "paths": [
+        "crates/mesh-talk-core/src/node/delivery_receipt.rs",
+        "crates/mesh-talk-core/src/node/delivery_receipt_tests.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/account_sync/archive.rs",
@@ -2881,6 +2883,8 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "receipt_retirement",
+            "node::delivery_receipt::tests::",
             "node::transcript_repository::tests::",
             "node::delivery_runtime::lock_order_tests::",
             "node::account_sync::archive::lock_order_tests::",
@@ -2916,6 +2920,10 @@
         "summary": "Serve production participant history, recall, archive, and exact deletion state from profile-owned indexed stores with bounded metadata discovery and selected-body reads.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
+          {
+            "name": "Authenticated delivery receipt controls retire exact retained receive work after durable delivery; Message discovery and pending selection honor processed-control evidence without replacing transcript evidence. Current-owner retirement retries after failure/reopen. Terminal irrelevance requires exact completed modern account-message scope, wall clock and an absent remaining original; it never grants delivery or retires another destination. Unknown, cancelled, legacy, file-alias and still-pending work retain authentication and recovery.",
+            "reference": "docs/network-design-reference.md#state-and-concurrency-contract"
+          },
           {
             "name": "Account archive snapshots, history projections and delivery recovery acquire sent, received and received-file sidecars in the same order, preserving coherent snapshots without a received/sent lock cycle.",
             "reference": "docs/ai-coding-reliability.md#r01-lock-order-and-reentrant-calls"

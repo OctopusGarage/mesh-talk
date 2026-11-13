@@ -486,6 +486,20 @@ Wire layouts are versioned protocol contracts, including bincode enum order and 
 
 Accepted user work, cryptographic ratchets and delivery bookkeeping must commit through their existing durable transition mechanisms. An I/O success alone cannot advance user-visible delivery truth. Durable receipt handling and file decisions retain independent responsibilities.
 
+Delivery receipt processing retires its exact retained control from receive work
+after authenticated durable delivery acceptance. Message-kind controls use the
+existing processed-control evidence alongside ordinary transcript evidence in both
+discovery and pending selection; that marker cascades with retained event erasure
+and is checked under the current participant owner. Failed retirement stays retryable.
+For modern account messages, a fully opened control is also terminally irrelevant
+when its exact logical delivery is durably completed, its canonical account
+conversation and original wall clock match, and its original is absent from the
+monotone remaining-target set. This retires scheduling only and never authenticates
+that original, changes delivery status or consumes another target. It recovers
+retirement failures after completion discarded the original reference. Unknown
+deliveries, remaining targets, legacy raw scopes and file aliases retain their
+existing authentication/recovery path.
+
 Transport awaits must not retain ordinary store/roster mutex guards. Network tasks use owned snapshots, bounded work and cancellation-safe ownership. Privacy generation checks revoke retained sessions and in-flight publication after a policy transition; directory queries additionally validate their captured directory/preference generation before publishing results. Startup applies network preferences before disclosure or delivery producers run.
 
 ### Runtime delivery observations

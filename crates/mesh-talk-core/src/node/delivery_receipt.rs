@@ -13,7 +13,7 @@
 //! additional host check, never a permission granted by this module.
 
 use super::conversation::{account_conversation_id, dm_conversation_id};
-use super::delivery_store::OutgoingDelivery;
+use super::delivery_store::{CompletedDelivery, OutgoingDelivery};
 use super::dm_envelope::DmEnvelope;
 use super::received_log::ReceivedEntry;
 use crate::discovery::Announce;
@@ -259,6 +259,22 @@ impl OpenedReceipt {
 
     pub(crate) fn original_event_id(&self) -> EventId {
         self.payload.original_event_id
+    }
+
+    /// Scheduling only: a fully opened control cannot affect a completed
+    /// account message once its claimed original is outside remaining work.
+    /// This does not authenticate that original or grant delivery/custody.
+    pub(crate) fn irrelevant_to_completed(&self, completed: &CompletedDelivery) -> bool {
+        let payload = &self.payload;
+        payload.original_kind == EventKind::Message
+            && payload.logical_id == completed.logical_id
+            && completed.conversation
+                == account_conversation_id(&payload.sender_account, &payload.recipient_account)
+            && completed.wall_clock == payload.original_wall_clock
+            && !completed
+                .remaining
+                .iter()
+                .any(|reference| reference.event_id == payload.original_event_id)
     }
 
     pub(crate) fn authenticate(&self, message: &OutgoingDelivery) -> Option<AuthenticatedReceipt> {

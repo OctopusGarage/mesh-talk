@@ -1821,11 +1821,30 @@ impl Node {
         proof: &crate::discovery::Announce,
         store: &mut DeliveryStore,
     ) {
+        #[cfg(test)]
+        self.trace_account_client(&proof.public(), || "delivery_receipt_open".into());
         let Some(opened) =
             super::delivery_receipt::open_receipt(&self.identity, &self.account_id(), proof, event)
         else {
             return;
         };
+        if store
+            .completed_delivery(opened.logical_id())
+            .is_some_and(|completed| opened.irrelevant_to_completed(completed))
+        {
+            // The exact delivery guard also serializes cancel/edit. A fully
+            // opened but now irrelevant control retires only receive work.
+            if self
+                .log
+                .lock()
+                .expect("log lock not poisoned")
+                .append_durable(event.clone())
+                .is_ok()
+            {
+                self.retire_retained_delivery_control(event.id);
+            }
+            return;
+        }
         let canonical = store
             .logical_for_original(opened.original_event_id())
             .unwrap_or_else(|| opened.logical_id());
@@ -1859,11 +1878,28 @@ impl Node {
             )
             .is_ok()
         {
+            self.retire_retained_delivery_control(event.id);
             self.delivery_observations
                 .lock()
                 .expect("delivery observations lock not poisoned")
                 .retain(|logical, _| logical != authenticated.logical_id());
             self.delivery_status_notify.notify_waiters();
+        }
+    }
+
+    /// Call only after the exact signed control is durably retained and its
+    /// handling has reached a terminal result under the delivery guard.
+    fn retire_retained_delivery_control(&self, id: EventId) {
+        let result = self
+            .log
+            .lock()
+            .expect("log lock not poisoned")
+            .repository()
+            .and_then(|repository| repository.complete_control(id));
+        // Failed retirement stays pending. Completed irrelevance permits safe
+        // later recovery even after the original destination was retired.
+        if let Err(error) = result {
+            log::warn!("delivery receipt work retirement deferred: {error}");
         }
     }
 

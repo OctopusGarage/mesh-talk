@@ -157,7 +157,7 @@ impl EventRepository {
                 let kind:i64=row.get(3)?;
                 last=nonnegative(row.get(4)?)?;scanned+=1;
                 if ![0,2,3].contains(&kind) || author.as_slice()==owner.as_slice(){continue;}
-                let seen:bool=if kind==0 {c.query_row("SELECT EXISTS(SELECT 1 FROM transcript_received_evidence WHERE id=?1)",[id.as_slice()],|r|r.get(0))?}else{c.query_row("SELECT EXISTS(SELECT 1 FROM participant_control_processed WHERE domain=?1 AND id=?2)",params![self.domain.0.as_slice(),id.as_slice()],|r|r.get(0))?};
+                let seen:bool=if kind==0 {c.query_row("SELECT EXISTS(SELECT 1 FROM transcript_received_evidence WHERE id=?1 UNION ALL SELECT 1 FROM participant_control_processed WHERE domain=?2 AND id=?1)",params![id.as_slice(),self.domain.0.as_slice()],|r|r.get(0))?}else{c.query_row("SELECT EXISTS(SELECT 1 FROM participant_control_processed WHERE domain=?1 AND id=?2)",params![self.domain.0.as_slice(),id.as_slice()],|r|r.get(0))?};
                 if !seen {
                     let namespace=participant_event_namespace_on(c,last)?;
                     let inserted=c.execute("INSERT OR IGNORE INTO participant_receive_pending VALUES(?1,?2,?3,?4,?5,?6)",params![self.domain.0.as_slice(),id.as_slice(),conversation.as_slice(),namespace,ticket,kind!=0])?;
@@ -218,7 +218,7 @@ impl EventRepository {
             // Keep the queue index as the outer driver. Without fixed join
             // order, cold statistics can scan the entire retained domain and
             // sort its matches before LIMIT bounds the returned queue page.
-            let mut statement=c.prepare("SELECT p.id,e.stored_bytes,(s.lifecycle<>0 OR (e.kind=0 AND EXISTS(SELECT 1 FROM transcript_received_evidence d WHERE d.id=p.id)) OR (e.kind<>0 AND EXISTS(SELECT 1 FROM participant_control_processed d WHERE d.domain=p.domain AND d.id=p.id))) FROM participant_receive_pending p INDEXED BY participant_receive_turn CROSS JOIN retained_events e ON e.domain=p.domain AND e.id=p.id CROSS JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE p.domain=?1 AND p.account=?5 AND p.conversation=?2 AND p.purpose=?4 AND EXISTS(SELECT 1 FROM participant_event_ranges r WHERE r.account_id=?5 AND r.start_commit<=e.commit_ordinal AND (r.end_commit IS NULL OR e.commit_ordinal<r.end_commit)) ORDER BY p.ticket,p.id LIMIT ?3")?;
+            let mut statement=c.prepare("SELECT p.id,e.stored_bytes,(s.lifecycle<>0 OR (e.kind=0 AND EXISTS(SELECT 1 FROM transcript_received_evidence d WHERE d.id=p.id)) OR EXISTS(SELECT 1 FROM participant_control_processed d WHERE d.domain=p.domain AND d.id=p.id)) FROM participant_receive_pending p INDEXED BY participant_receive_turn CROSS JOIN retained_events e ON e.domain=p.domain AND e.id=p.id CROSS JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE p.domain=?1 AND p.account=?5 AND p.conversation=?2 AND p.purpose=?4 AND EXISTS(SELECT 1 FROM participant_event_ranges r WHERE r.account_id=?5 AND r.start_commit<=e.commit_ordinal AND (r.end_commit IS NULL OR e.commit_ordinal<r.end_commit)) ORDER BY p.ticket,p.id LIMIT ?3")?;
             let mut rows=statement.query(params![self.domain.0.as_slice(),conversation.as_bytes().as_slice(),integer(limit + 1)?,controls,owner.namespace()])?;
             // Keep only fixed keys before mutating the queue's ordering index.
             let mut selected=Vec::new();let mut charged=0usize;let mut required:Option<usize>=None;

@@ -12255,3 +12255,328 @@ async fn modern_relay_receive_fixture(rearm_gap: bool) {
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test]
+async fn authenticated_receipt_retirement_after_discovery_prevents_quiet_reopen() {
+    authenticated_receipt_retirement(false).await;
+}
+
+#[tokio::test]
+async fn authenticated_receipt_retirement_before_discovery_prevents_quiet_reopen() {
+    authenticated_receipt_retirement(true).await;
+}
+
+async fn authenticated_receipt_retirement(before_discovery: bool) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, mut received) = node(bd.path(), bob, ba, &ap);
+    a.replace_verified_dm_pull_peers(vec![bp.user_id.clone()]);
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"receipt retirement", None)
+        .await
+        .unwrap();
+    let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .clone();
+    b.log
+        .lock()
+        .unwrap()
+        .append_durable(original.clone())
+        .unwrap();
+    b.emit_new_messages(original.conversation_id);
+    assert_eq!(received.try_recv().unwrap().text, b"receipt retirement");
+    let receipt = b.delivery.lock().unwrap().retry_receipts(1)[0]
+        .destination
+        .event
+        .clone();
+    let control = receipt.conversation_id;
+    a.log
+        .lock()
+        .unwrap()
+        .append_durable(receipt.clone())
+        .unwrap();
+    let pending = || {
+        a.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .pending_receive_ids(control, 128, 8 * 1024 * 1024)
+            .unwrap()
+    };
+    if !before_discovery {
+        assert_eq!(pending(), vec![receipt.id]);
+    }
+    let opens = Arc::new(AtomicUsize::new(0));
+    let observed = opens.clone();
+    *a.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+        if phase == "delivery_receipt_open" {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    if before_discovery {
+        a.process_delivery_control(&receipt, &bp, &mut a.delivery.lock().unwrap());
+    } else {
+        a.emit_new_messages(control);
+    }
+    assert_eq!(
+        a.delivery_status(id),
+        Some(DeliveryStatus::Delivered),
+        "real authenticated receipt must commit durable Delivered before retirement qualifies"
+    );
+    let initial_opens = opens.load(Ordering::SeqCst);
+    assert_eq!(initial_opens, 1);
+    let initial_pending = pending().len();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let serving = async {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let responder = b.clone();
+                    connections.spawn(async move {
+                        let channel = responder.privacy_accept(stream).await.unwrap();
+                        responder.serve_connection(channel).await;
+                    });
+                }
+                result = connections.join_next(), if !connections.is_empty() => {
+                    result.unwrap().unwrap();
+                }
+                _ = &mut stopped => break,
+            }
+        }
+        connections.abort_all();
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                assert!(error.is_cancelled());
+            }
+        }
+    };
+    let reconciling = async {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let first = a.reconcile_delivery_peer(&bp).await;
+            let second = a.reconcile_delivery_peer(&bp).await;
+            (first, second, pending().len(), opens.load(Ordering::SeqCst))
+        })
+        .await;
+        let _ = stop.send(());
+        result
+    };
+    let (result, ()) = tokio::join!(reconciling, serving);
+    let (first, second, remaining, final_opens) =
+        result.expect("real quiet receipt reconciliation must finish");
+    assert_eq!(first, super::delivery_runtime::Reconciliation::Quiet);
+    assert_eq!(second, super::delivery_runtime::Reconciliation::Quiet);
+    assert_eq!(
+        (initial_pending, remaining, final_opens - initial_opens),
+        (0, 0, 0),
+        "accepted receipt must retire pending work and avoid crypto reopen; before_discovery={before_discovery}"
+    );
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+}
+
+pub(super) struct ReceiptRetirementFixture {
+    sender_directory: tempfile::TempDir,
+    _recipient_directory: tempfile::TempDir,
+    pub(super) sender: Arc<Node>,
+    pub(super) recipient: Arc<Node>,
+    pub(super) recipient_proof: Announce,
+    pub(super) logical: EventId,
+    pub(super) original: crate::eventlog::Event,
+    pub(super) receipt: crate::eventlog::Event,
+}
+impl ReceiptRetirementFixture {
+    pub(super) async fn new(own_copy: bool) -> Self {
+        let sender_directory = tempfile::tempdir().unwrap();
+        let recipient_directory = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let ba = Account::generate();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+        let (a, _) = node(sender_directory.path(), alice, aa, &bp);
+        if own_copy {
+            let other = DeviceIdentity::generate();
+            let cp = Announce::new_with_account(&other, &a.account, "Offline own copy", 9);
+            a.roster
+                .lock()
+                .unwrap()
+                .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+        }
+        let (b, mut received) = node(recipient_directory.path(), bob, ba, &ap);
+        let logical = a
+            .enqueue_to_account(&b.account_id(), b"receipt failure recovery", None)
+            .await
+            .unwrap();
+        let original = a
+            .delivery
+            .lock()
+            .unwrap()
+            .message(logical)
+            .unwrap()
+            .destinations
+            .iter()
+            .find(|destination| destination.device == b.identity.public())
+            .unwrap()
+            .event
+            .clone();
+        b.log
+            .lock()
+            .unwrap()
+            .append_durable(original.clone())
+            .unwrap();
+        b.emit_new_messages(original.conversation_id);
+        assert_eq!(
+            received.try_recv().unwrap().text,
+            b"receipt failure recovery"
+        );
+        let receipt = b.delivery.lock().unwrap().retry_receipts(1)[0]
+            .destination
+            .event
+            .clone();
+        Self {
+            sender_directory,
+            _recipient_directory: recipient_directory,
+            sender: a,
+            recipient: b,
+            recipient_proof: bp,
+            logical,
+            original,
+            receipt,
+        }
+    }
+    pub(super) fn process(&self, event: &crate::eventlog::Event) {
+        self.sender.process_delivery_control(
+            event,
+            &self.recipient_proof,
+            &mut self.sender.delivery.lock().unwrap(),
+        );
+    }
+    pub(super) fn pending(&self) -> Vec<EventId> {
+        self.sender
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .pending_receive_ids(self.receipt.conversation_id, 128, 8 * 1024 * 1024)
+            .unwrap()
+    }
+    fn reopen_sender(&mut self) {
+        let identity = self.sender.identity.secret_bytes();
+        let account = self.sender.account.secret_bytes();
+        let old = std::mem::replace(&mut self.sender, self.recipient.clone());
+        drop(old);
+        self.sender = node(
+            self.sender_directory.path(),
+            DeviceIdentity::from_secret_bytes(identity.0, identity.1),
+            Account::from_secret_bytes(account),
+            &self.recipient_proof,
+        )
+        .0;
+    }
+}
+
+#[tokio::test]
+async fn authenticated_receipt_retirement_recovers_marker_failure_after_delivered_and_restart() {
+    let mut f = ReceiptRetirementFixture::new(false).await;
+    f.sender
+        .log
+        .lock()
+        .unwrap()
+        .append_durable(f.receipt.clone())
+        .unwrap();
+    assert_eq!(f.pending(), vec![f.receipt.id]);
+    f.sender.storage.database().transaction(|c| {
+        c.execute_batch("CREATE TRIGGER fail_receipt_retirement BEFORE INSERT ON participant_control_processed BEGIN SELECT RAISE(ABORT,'receipt marker failure'); END")?; Ok(())
+    }).unwrap();
+    f.process(&f.receipt);
+    assert_eq!(
+        f.sender.delivery_status(f.logical),
+        Some(DeliveryStatus::Delivered)
+    );
+    assert_eq!(
+        f.pending(),
+        vec![f.receipt.id],
+        "marker failure must leave actual pending work"
+    );
+    assert!(
+        f.sender
+            .delivery
+            .lock()
+            .unwrap()
+            .completed_work(f.logical)
+            .is_none(),
+        "the lost original reference must make the old reauthentication route unavailable"
+    );
+    f.sender
+        .storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_receipt_retirement")?;
+            Ok(())
+        })
+        .unwrap();
+    f.sender
+        .log
+        .lock()
+        .unwrap()
+        .drop_conversation(&f.original.conversation_id)
+        .unwrap();
+    f.reopen_sender();
+    assert_eq!(
+        f.sender.delivery_status(f.logical),
+        Some(DeliveryStatus::Delivered)
+    );
+    assert!(
+        f.sender
+            .log
+            .lock()
+            .unwrap()
+            .get(&f.original.id)
+            .unwrap()
+            .is_none()
+    );
+    f.sender.emit_new_messages(f.receipt.conversation_id);
+    assert!(
+        f.pending().is_empty(),
+        "durable completed irrelevance must recover old unmarked receipts without the retired original body"
+    );
+    assert_eq!(
+        f.sender.delivery_status(f.logical),
+        Some(DeliveryStatus::Delivered)
+    );
+}
+
+#[tokio::test]
+async fn authenticated_receipt_retirement_cancelled_delivery_does_not_qualify() {
+    let f = ReceiptRetirementFixture::new(false).await;
+    f.sender
+        .delete_account_message(&f.recipient.account_id(), f.logical)
+        .unwrap();
+    assert_eq!(f.sender.delivery_status(f.logical), None);
+    f.sender
+        .log
+        .lock()
+        .unwrap()
+        .append_durable(f.receipt.clone())
+        .unwrap();
+    f.process(&f.receipt);
+    assert_eq!(f.pending(), vec![f.receipt.id]);
+    assert_eq!(
+        f.sender.delivery_status(f.logical),
+        None,
+        "receipt processing must not resurrect an erased/cancelled delivery"
+    );
+}

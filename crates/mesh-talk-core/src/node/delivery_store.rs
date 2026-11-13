@@ -1858,6 +1858,15 @@ impl DeliveryStore {
         self.install_record(OutboxRecord::RetireDestination(id, original))
     }
 
+    /// Read only after recovered durable outbox publication. Completed targets
+    /// can shrink through retirement but cannot acquire new originals.
+    pub(crate) fn completed_delivery(&self, id: EventId) -> Option<&CompletedDelivery> {
+        if self.needs_sync || !self.pending.is_empty() {
+            return None;
+        }
+        self.completed.get(&id)
+    }
+
     pub(crate) fn completed_work(&self, id: EventId) -> Option<&CompletedDelivery> {
         self.completed.get(&id).filter(|m| !m.remaining.is_empty())
     }
