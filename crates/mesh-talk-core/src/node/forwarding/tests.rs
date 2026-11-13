@@ -609,151 +609,153 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
             })
             .collect::<Vec<_>>()
     };
-    let observed = std::panic::AssertUnwindSafe(async {
-        let mut request = ForwardRequest {
-            operation_id: format!("{}-group-text", super::super::node::now_millis()),
-            source: selected,
-            destinations: vec![ForwardTarget {
-                kind: "channel".into(),
-                target: hex::encode(group.as_bytes()),
-            }],
-            mode: "individual".into(),
-        };
-        // Two distinct user submissions each own functional acceptance. The
-        // second operation does not inherit time spent delivering the first.
-        crate::node::account_group::functional_account_convergence(async {
-            phase = "individual-admission";
-            phase_entries.push((phase, started.elapsed().as_millis()));
-            let accepted = sender
-                .forward_messages_if(request.clone(), |commit| commit())
-                .await
-                .unwrap();
-            individual_states = admission_states(&accepted.items);
-            assert_eq!(
-                accepted.items.len(),
-                2,
-                "individual admission item count: {individual_states:?}"
-            );
-            assert!(
-                accepted
-                    .items
-                    .iter()
-                    .all(|item| item.status == "pending" || item.status == "accepted"),
-                "individual admission: {individual_states:?}"
-            );
-            phase = "individual-acceptance";
-            phase_entries.push((phase, started.elapsed().as_millis()));
-            let accepted = wait_forward_receipts(&sender, &request).await;
-            for item in &accepted.items {
-                let id = crate::eventlog::EventId::new(
-                    hex::decode(item.message_id.as_ref().unwrap())
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                );
-                sender
-                    .flush_accepted_message(&MessageDestination::Channel(group), id)
-                    .await;
-            }
-            phase = "individual-history";
-            phase_entries.push((phase, started.elapsed().as_millis()));
-            loop {
-                match recipient.channel_history(group, 10) {
-                    Ok(history) if history.len() >= 2 => break,
-                    Ok(_) | Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
-                    Err(error) => panic!("recipient history failed: {error}"),
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            let history = recipient.channel_history(group, 10).unwrap();
-            assert_eq!(
-                history
-                    .iter()
-                    .map(|row| row.text.clone())
-                    .collect::<Vec<_>>(),
-                vec![b"first".to_vec(), b"second".to_vec()]
-            );
-        })
-        .await?;
-        request.operation_id = format!("{}-group-merged", super::super::node::now_millis());
-        request.mode = "merged".into();
-        crate::node::account_group::functional_account_convergence(async {
-            phase = "merged-admission";
-            phase_entries.push((phase, started.elapsed().as_millis()));
-            let merged = sender
-                .forward_messages_if(request.clone(), |commit| commit())
-                .await
-                .unwrap();
-            merged_states = admission_states(&merged.items);
-            assert_eq!(
-                merged.items.len(),
-                1,
-                "merged admission item count: {merged_states:?}"
-            );
-            assert!(
-                merged.items[0].status == "pending" || merged.items[0].status == "accepted",
-                "merged admission: {merged_states:?}"
-            );
-            phase = "merged-acceptance";
-            phase_entries.push((phase, started.elapsed().as_millis()));
-            let merged = wait_forward_receipts(&sender, &request).await;
-            let archive_id = merged.items[0].message_id.as_ref().unwrap();
-            phase = "merged-history";
-            phase_entries.push((phase, started.elapsed().as_millis()));
-            let archive = loop {
-                match sender.channel_history(group, 10) {
-                    Ok(history) => {
-                        if let Some(row) = history
-                            .into_iter()
-                            .find(|row| row.id.to_hex() == *archive_id)
-                        {
-                            break row.file.unwrap().file_conv;
-                        }
-                    }
-                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
-                    Err(error) => panic!("forwarded archive history failed: {error}"),
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+    let observed = Box::pin(
+        std::panic::AssertUnwindSafe(async {
+            let mut request = ForwardRequest {
+                operation_id: format!("{}-group-text", super::super::node::now_millis()),
+                source: selected,
+                destinations: vec![ForwardTarget {
+                    kind: "channel".into(),
+                    target: hex::encode(group.as_bytes()),
+                }],
+                mode: "individual".into(),
             };
-            phase = "merged-transfer";
-            phase_entries.push((phase, started.elapsed().as_millis()));
-            sender.flush_channel_file(group, archive).await;
-            phase = "merged-offer";
-            phase_entries.push((phase, started.elapsed().as_millis()));
-            let offer = offers.recv().await.unwrap();
-            offer_observed = true;
-            assert_eq!(offer.name, "Chat records.mtchat");
-            recipient.decide_attachment(archive, true).unwrap();
-            consent_accepted = true;
-            phase = "merged-bytes";
-            phase_entries.push((phase, started.elapsed().as_millis()));
-            loop {
-                let ready = recipient.file_ready_to_save(archive).unwrap();
-                last_file_ready = Some(ready);
-                if ready {
-                    break;
+            // Two distinct user submissions each own functional acceptance. The
+            // second operation does not inherit time spent delivering the first.
+            crate::node::account_group::functional_account_convergence(async {
+                phase = "individual-admission";
+                phase_entries.push((phase, started.elapsed().as_millis()));
+                let accepted = sender
+                    .forward_messages_if(request.clone(), |commit| commit())
+                    .await
+                    .unwrap();
+                individual_states = admission_states(&accepted.items);
+                assert_eq!(
+                    accepted.items.len(),
+                    2,
+                    "individual admission item count: {individual_states:?}"
+                );
+                assert!(
+                    accepted
+                        .items
+                        .iter()
+                        .all(|item| item.status == "pending" || item.status == "accepted"),
+                    "individual admission: {individual_states:?}"
+                );
+                phase = "individual-acceptance";
+                phase_entries.push((phase, started.elapsed().as_millis()));
+                let accepted = wait_forward_receipts(&sender, &request).await;
+                for item in &accepted.items {
+                    let id = crate::eventlog::EventId::new(
+                        hex::decode(item.message_id.as_ref().unwrap())
+                            .unwrap()
+                            .try_into()
+                            .unwrap(),
+                    );
+                    sender
+                        .flush_accepted_message(&MessageDestination::Channel(group), id)
+                        .await;
                 }
-                recipient.pull_pending_files().await;
-                sender.pull_pending_files().await;
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            let received = recipient.read_file(archive).unwrap();
-            verified_bytes = Some(received.len());
-            let record: serde_json::Value = serde_json::from_slice(&received).unwrap();
-            assert_eq!(record["format"], "MTCHAT1");
-            assert_eq!(record["messages"][0]["text"], "first");
-            assert_eq!(record["messages"][1]["text"], "second");
-            assert!(
-                recipient
-                    .account_history(&sender.account_id(), 10)
-                    .unwrap()
-                    .is_empty(),
-                "receiver never joined original direct conversation"
-            );
+                phase = "individual-history";
+                phase_entries.push((phase, started.elapsed().as_millis()));
+                loop {
+                    match recipient.channel_history(group, 10) {
+                        Ok(history) if history.len() >= 2 => break,
+                        Ok(_) | Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                        Err(error) => panic!("recipient history failed: {error}"),
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let history = recipient.channel_history(group, 10).unwrap();
+                assert_eq!(
+                    history
+                        .iter()
+                        .map(|row| row.text.clone())
+                        .collect::<Vec<_>>(),
+                    vec![b"first".to_vec(), b"second".to_vec()]
+                );
+            })
+            .await?;
+            request.operation_id = format!("{}-group-merged", super::super::node::now_millis());
+            request.mode = "merged".into();
+            crate::node::account_group::functional_account_convergence(async {
+                phase = "merged-admission";
+                phase_entries.push((phase, started.elapsed().as_millis()));
+                let merged = sender
+                    .forward_messages_if(request.clone(), |commit| commit())
+                    .await
+                    .unwrap();
+                merged_states = admission_states(&merged.items);
+                assert_eq!(
+                    merged.items.len(),
+                    1,
+                    "merged admission item count: {merged_states:?}"
+                );
+                assert!(
+                    merged.items[0].status == "pending" || merged.items[0].status == "accepted",
+                    "merged admission: {merged_states:?}"
+                );
+                phase = "merged-acceptance";
+                phase_entries.push((phase, started.elapsed().as_millis()));
+                let merged = wait_forward_receipts(&sender, &request).await;
+                let archive_id = merged.items[0].message_id.as_ref().unwrap();
+                phase = "merged-history";
+                phase_entries.push((phase, started.elapsed().as_millis()));
+                let archive = loop {
+                    match sender.channel_history(group, 10) {
+                        Ok(history) => {
+                            if let Some(row) = history
+                                .into_iter()
+                                .find(|row| row.id.to_hex() == *archive_id)
+                            {
+                                break row.file.unwrap().file_conv;
+                            }
+                        }
+                        Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                        Err(error) => panic!("forwarded archive history failed: {error}"),
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                };
+                phase = "merged-transfer";
+                phase_entries.push((phase, started.elapsed().as_millis()));
+                sender.flush_channel_file(group, archive).await;
+                phase = "merged-offer";
+                phase_entries.push((phase, started.elapsed().as_millis()));
+                let offer = offers.recv().await.unwrap();
+                offer_observed = true;
+                assert_eq!(offer.name, "Chat records.mtchat");
+                recipient.decide_attachment(archive, true).unwrap();
+                consent_accepted = true;
+                phase = "merged-bytes";
+                phase_entries.push((phase, started.elapsed().as_millis()));
+                loop {
+                    let ready = recipient.file_ready_to_save(archive).unwrap();
+                    last_file_ready = Some(ready);
+                    if ready {
+                        break;
+                    }
+                    recipient.pull_pending_files().await;
+                    sender.pull_pending_files().await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let received = recipient.read_file(archive).unwrap();
+                verified_bytes = Some(received.len());
+                let record: serde_json::Value = serde_json::from_slice(&received).unwrap();
+                assert_eq!(record["format"], "MTCHAT1");
+                assert_eq!(record["messages"][0]["text"], "first");
+                assert_eq!(record["messages"][1]["text"], "second");
+                assert!(
+                    recipient
+                        .account_history(&sender.account_id(), 10)
+                        .unwrap()
+                        .is_empty(),
+                    "receiver never joined original direct conversation"
+                );
+            })
+            .await
         })
-        .await
-    })
-    .catch_unwind()
+        .catch_unwind(),
+    )
     .await;
     for node in [&sender, &recipient] {
         node.runtime_work.close();

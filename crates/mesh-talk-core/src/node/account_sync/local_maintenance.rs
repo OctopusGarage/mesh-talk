@@ -147,6 +147,10 @@ impl LocalMaintenance {
         fanout_cursor: u64,
         select_data: bool,
     ) -> LocalMaintenanceTurn {
+        #[cfg(test)]
+        node.trace_account_client(&node.identity.public(), || {
+            "account_local_work_begin".into()
+        });
         // Capture BEFORE all work, including operation effects that can publish.
         // A commit during this turn then remains dirty even if it completes here.
         let publication_input = PublicationInput::capture(&node).ok();
@@ -309,6 +313,141 @@ pub(super) fn observe_fanout_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_local_repair_actual_owners_wait_for_cancelled_profile_worker() {
+        shared_local_repair_actual_owners(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_local_repair_actual_owners_cancel_queued_account_on_retirement() {
+        shared_local_repair_actual_owners(true).await;
+    }
+
+    async fn shared_local_repair_actual_owners(retire_waiter: bool) {
+        use futures_util::FutureExt;
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let (_directory, node, peer) = super::super::selection_tests::sibling_nodes();
+        let (entered, held) = tokio::sync::oneshot::channel();
+        let entered = Mutex::new(Some(entered));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let (scheduled, queued) = tokio::sync::oneshot::channel();
+        let scheduled = Mutex::new(Some(scheduled));
+        let (account_entered, account_ready) = tokio::sync::mpsc::unbounded_channel();
+        let (dirty, dirty_seen) = tokio::sync::oneshot::channel();
+        let dirty = Mutex::new(Some(dirty));
+        let turns = Arc::new(AtomicUsize::new(0));
+        let observed = turns.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "profile_local_work_begin" {
+                if let Some(entered) = entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                    let result = released
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(15));
+                    assert!(
+                        result.is_ok()
+                            || matches!(
+                                result,
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                            ),
+                        "actual profile worker release must stay bounded"
+                    );
+                }
+            } else if phase == "account_local_work_scheduled" {
+                if let Some(scheduled) = scheduled.lock().unwrap().take() {
+                    let _ = scheduled.send(());
+                }
+            } else if phase == "account_local_work_begin" {
+                observed.fetch_add(1, Ordering::SeqCst);
+                let _ = account_entered.send(());
+            } else if phase == "account_local_work_dirty"
+                && let Some(dirty) = dirty.lock().unwrap().take()
+            {
+                let _ = dirty.send(());
+            }
+        }));
+        let profile = tokio::spawn(node.clone().run_profile_compaction_loop());
+        let mut account = None;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let serving = tokio::spawn(node.clone().run_inbound_connections_for_test(listener));
+        let mut account_ready = account_ready;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(Duration::from_secs(3), held).await
+                .expect("actual profile work must start").unwrap();
+            account = Some(tokio::spawn(node.clone().run_account_history_loop_with_tick(None)));
+            tokio::time::timeout(Duration::from_secs(3), queued).await
+                .expect("account parent must schedule its real local child").unwrap();
+            node.account_sync_notify.notify_one();
+            tokio::time::timeout(Duration::from_secs(3), dirty_seen).await
+                .expect("account parent must retain dirty demand while its child waits").unwrap();
+            // A live foreground Noise and paged exchange must remain independent
+            // of the held local repair; no worker helper stands in for network work.
+            tokio::time::timeout(Duration::from_secs(3), async {
+                let mut channel = peer.privacy_sync_dial(address, &node.identity.public()).await.unwrap();
+                let store = peer.sync_store(&node.identity.public());
+                let conversation = super::super::super::conversation::dm_conversation_id(
+                    &peer.identity.public(), &node.identity.public());
+                super::super::super::session::request_round_paged(&mut channel, &store, conversation)
+                    .await.unwrap();
+            }).await.expect("foreground exchange must progress while local repair is held");
+            let before_cancel = turns.load(Ordering::SeqCst);
+            profile.abort();
+            for _ in 0..32 { tokio::task::yield_now().await; }
+            let after_cancel = turns.load(Ordering::SeqCst);
+            if retire_waiter {
+                node.runtime_work.close();
+                account.as_ref().unwrap().abort();
+            }
+            drop(release);
+            if !retire_waiter {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    for _ in 0..2 { account_ready.recv().await.unwrap(); }
+                }).await.expect("queued account work and retained dirty followup must run after actual profile worker retires");
+            }
+            (before_cancel, after_cancel)
+        }).catch_unwind().await;
+        // Channel closure releases the held worker even if setup/assertion fails.
+        // Always release real blocking work before joining/draining its owners.
+        profile.abort();
+        let _ = profile.await;
+        if let Some(account) = account {
+            account.abort();
+            let _ = account.await;
+        }
+        serving.abort();
+        let _ = serving.await;
+        node.runtime_work.close();
+        tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
+            .await
+            .expect("actual local and inbound work must retire");
+        *node.account_client_test_hook.lock().unwrap() = None;
+        let (before_cancel, after_cancel) = match outcome {
+            Ok(counts) => counts,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        assert_eq!(
+            before_cancel, 0,
+            "account scan must queue behind actual held profile work"
+        );
+        assert_eq!(
+            after_cancel, 0,
+            "observer cancellation must not release actual worker capacity"
+        );
+        if retire_waiter {
+            assert_eq!(
+                turns.load(Ordering::SeqCst),
+                0,
+                "retired queued owner cannot start work"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn unchanged_roster_heartbeat_does_not_admit_local_maintenance() {

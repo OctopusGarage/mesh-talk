@@ -6781,6 +6781,147 @@ async fn bounded_attachment_handoff_keeps_exact_total_and_rotates_past_page() {
     assert!(!first.files.iter().any(|item| next.files.contains(item)));
 }
 
+#[tokio::test]
+async fn attachment_recall_context_is_shared_only_within_one_selection() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (_dir, source, _receiver, files) = manifest_only_attachment_fixture(3).await;
+    let constructions = Arc::new(AtomicUsize::new(0));
+    let observed = constructions.clone();
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+        if phase == "attachment_recall_context_begin" {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    let expected: Vec<_> = files.iter().map(|(file, _)| (*file, false)).collect();
+    let first = source
+        .select_sibling_attachment_page(None, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(first.total, 3);
+    assert_eq!(first.files.into_iter().collect::<Vec<_>>(), expected);
+    let first_count = constructions.swap(0, Ordering::SeqCst);
+    let second = source
+        .select_sibling_attachment_page(None, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(second.total, 3);
+    assert_eq!(second.files.into_iter().collect::<Vec<_>>(), expected);
+    let second_count = constructions.swap(0, Ordering::SeqCst);
+    for (file, path) in &files {
+        restore_attachment_bytes(&source, *file, path);
+    }
+    let ready = source
+        .select_sibling_attachment_page(None, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(ready.total, 0);
+    assert!(ready.files.is_empty());
+    let ready_count = constructions.load(Ordering::SeqCst);
+    *source.account_client_test_hook.lock().unwrap() = None;
+    assert_eq!(
+        ready_count, 0,
+        "managed bytes must avoid recall preparation"
+    );
+    assert_eq!(
+        first_count, 1,
+        "three real media-missing manifests must share one known-account preparation"
+    );
+    assert_eq!(
+        second_count, 1,
+        "the next selection must build fresh context"
+    );
+}
+
+#[tokio::test]
+async fn attachment_recall_context_read_failure_is_not_empty_selection() {
+    let (_dir, source, _receiver, _) = manifest_only_attachment_fixture(1).await;
+    // No host tasks run in this fixture. Fail the actual account-route SELECT,
+    // then restore its table before assessing either outcome.
+    source
+        .storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch(
+                "ALTER TABLE transcript_first_routes RENAME TO attachment_recall_test_routes",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let failed = source.select_sibling_attachment_page(None, HashSet::new(), false);
+    source
+        .storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch(
+                "ALTER TABLE attachment_recall_test_routes RENAME TO transcript_first_routes",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        failed.is_err(),
+        "failed account-route reads cannot mean no missing files"
+    );
+    let recovered = source
+        .select_sibling_attachment_page(None, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(recovered.total, 1);
+    assert_eq!(recovered.files.len(), 1);
+}
+
+#[tokio::test]
+async fn attachment_recall_context_keeps_per_file_recall_and_eligibility_live() {
+    let (_dir, source, _receiver, files) = manifest_only_attachment_fixture(2).await;
+    let context = source.account_file_recall_context().unwrap();
+    let file = files[0].0;
+    let untouched = files[1].0;
+    assert!(!source.account_file_recalled_with(file, &context).unwrap());
+    let header = source
+        .received_files
+        .lock()
+        .unwrap()
+        .file_headers(&file, None, Default::default())
+        .unwrap()
+        .rows
+        .remove(0);
+    let row = source
+        .received_files
+        .lock()
+        .unwrap()
+        .row_by_ordinal(header.ordinal)
+        .unwrap()
+        .unwrap();
+    source
+        .recalls
+        .lock()
+        .unwrap()
+        .record(row.conversation, row.event_id, 42)
+        .unwrap();
+    assert!(
+        source.account_file_recalled_with(file, &context).unwrap(),
+        "a context must not cache the preceding negative recall decision"
+    );
+    assert!(
+        !source
+            .account_file_recalled_with(untouched, &context)
+            .unwrap()
+    );
+    let revision = context.file_book.begin_reconcile().unwrap();
+    context.file_book.stage_revoke(header.ordinal).unwrap();
+    context.file_book.finish_reconcile(revision).unwrap();
+    let before = source.received_files.lock().unwrap().body_reads();
+    assert!(
+        !source.account_file_recalled_with(file, &context).unwrap(),
+        "revoked indexed eligibility must be checked on every per-file lookup"
+    );
+    assert_eq!(
+        source.received_files.lock().unwrap().body_reads(),
+        before,
+        "revoked rows must remain excluded before plaintext hydration"
+    );
+    assert!(
+        !source.account_file_recalled(file).unwrap(),
+        "the standalone final-publication wrapper retains fresh checks"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

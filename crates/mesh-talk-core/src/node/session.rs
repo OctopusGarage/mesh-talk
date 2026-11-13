@@ -595,12 +595,17 @@ async fn recv_have_owned<IO: AsyncRead + AsyncWrite + Unpin>(
     want_req: bool,
     conversation: ConversationId,
     budget: Option<&RemoteHaveBudget>,
+    comparison: bool,
 ) -> Result<have_budget::ReceivedHave, SessionError> {
     // Never await admission: requester/responder endpoints may already be in
     // opposite network phases while holding other resources.
     let permit = budget.map(RemoteHaveBudget::try_admit).transpose()?;
     let ids = recv_have(channel, want_req, conversation).await?;
-    have_budget::ReceivedHave::from_vec(ids, permit)
+    if comparison {
+        have_budget::ReceivedHave::from_vec_for_comparison(ids, permit, true)
+    } else {
+        have_budget::ReceivedHave::from_vec(ids, permit)
+    }
 }
 
 /// Run one reconciliation round as the REQUESTER over `channel`, for
@@ -651,6 +656,8 @@ pub(in crate::node) struct SyncProgress {
     total: ApplyReport,
     first_have: usize,
     pushed_total: usize,
+    received_wire_total: usize,
+    comparison_disabled: bool,
     /// Intersection of local advertised IDs and peer availability, never custody.
     remote_have_count: Option<usize>,
 }
@@ -743,7 +750,15 @@ impl SyncProgress {
             self.v3 |= local_v3 || local_v4 || local_v5;
             self.v4 |= local_v4 || local_v5;
             self.v5 |= local_v5;
-            if let Some(fp) = metadata.fingerprint {
+            let comparison = if self.comparison_disabled {
+                None
+            } else {
+                backend.quiet_comparison(&conversation)?
+            };
+            if let Some(fp) = comparison
+                .map(|hint| hint.remote_fingerprint)
+                .or(metadata.fingerprint)
+            {
                 if let Some(view) = &probe_view {
                     backend.validate_view(view)?;
                 }
@@ -768,6 +783,7 @@ impl SyncProgress {
                     SyncWire::UpgradeRequired { conversation: c }
                         if c == conversation && !self.v5 =>
                     {
+                        self.comparison_disabled = true;
                         self.v5 = self.v4;
                         self.v4 = self.v3;
                         self.v3 = self.v2;
@@ -776,6 +792,19 @@ impl SyncProgress {
                         return Ok(false);
                     }
                     SyncWire::FpResponse(FpResponse { matched: true }) => {
+                        if let Some(hint) = comparison {
+                            if !backend.validate_quiet_comparison(&conversation, hint)? {
+                                self.comparison_disabled = true;
+                                self.started = false;
+                                return Ok(false);
+                            }
+                            if let Some(view) = probe_view {
+                                backend.validate_view(&view)?;
+                                drop(backend.retain_custody_view(view)?);
+                            }
+                            self.remote_have_count = Some(have_count(hint.remote_count)?);
+                            return Ok(true);
+                        }
                         if let Some(view) = probe_view {
                             backend.validate_view(&view)?;
                             drop(backend.retain_custody_view(view)?);
@@ -789,6 +818,7 @@ impl SyncProgress {
                         return Ok(true);
                     }
                     SyncWire::FpResponse(FpResponse { matched: false }) => {
+                        self.comparison_disabled |= comparison.is_some();
                         // A differing remote digest does not invalidate our
                         // local authorization selection. Transfer its one
                         // existing lease to the following Have/export phase.
@@ -816,6 +846,16 @@ impl SyncProgress {
             self.first_have = local_count;
         }
         self.rounds += 1;
+        let comparison_token = if !self.comparison_disabled
+            && self.received_wire_total == 0
+            && self.pushed_total == 0
+            && self.total.applied == 0
+            && self.total.rejected.is_empty()
+        {
+            backend.quiet_comparison_token(&have_view)?
+        } else {
+            None
+        };
         // Opening Request carries an empty inline have; the real set is streamed.
         let request = SyncRequest {
             conversation,
@@ -851,6 +891,7 @@ impl SyncProgress {
                 self.v4 = self.v3;
                 self.v3 = self.v2;
                 self.v2 = true;
+                self.comparison_disabled = true;
                 self.started = false;
                 return Ok(false);
             }
@@ -864,8 +905,15 @@ impl SyncProgress {
         {
             return Err(SessionError::UnexpectedMessage);
         }
-        let remote_have =
-            recv_have_owned(channel, false, conversation, backend.remote_have_budget()).await?;
+        self.received_wire_total += response.events.len();
+        let remote_have = recv_have_owned(
+            channel,
+            false,
+            conversation,
+            backend.remote_have_budget(),
+            comparison_token.is_some() && self.received_wire_total == 0,
+        )
+        .await?;
         self.remote_have_count = Some(intersection_count(backend, &have_view, &remote_have).await?);
         let report = backend.apply(&response.events)?;
         if backend.admission_denied() {
@@ -930,6 +978,7 @@ impl SyncProgress {
             self.v3 |= needs_v3;
             self.v4 |= needs_v4;
             self.v5 |= needs_v5;
+            self.comparison_disabled = true;
             self.started = false;
             self.previous_push.clear();
             return Ok(false);
@@ -993,6 +1042,25 @@ impl SyncProgress {
             // unchanged local preparation reusable without claiming delivery.
             drop(backend.retain_custody_view(outgoing_view));
             return Err(SessionError::NoProgress);
+        }
+        if complete
+            && self.received_wire_total == 0
+            && self.pushed_total == 0
+            && self.total.applied == 0
+            && self.total.rejected.is_empty()
+            && remote_have.len() < local_count
+            && self.remote_have_count == Some(remote_have.len())
+            && let (Some(local_token), Some(remote_fingerprint)) =
+                (comparison_token, remote_have.comparison_fingerprint())
+        {
+            backend.retain_quiet_comparison(
+                &outgoing_view,
+                crate::eventlog::sync::network::QuietComparison {
+                    local_token,
+                    remote_fingerprint,
+                    remote_count: remote_have.len() as u64,
+                },
+            )?;
         }
         // Retain after every followup was sent successfully. Changed
         // source/policy rejects retention; I/O failures/cancellation drop the lease.
@@ -1171,8 +1239,14 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             let v2 = v3 || matches!(decode(bytes)?, SyncWire::RequestV2(_));
             // The Request's inline have is empty on the networked path; read the
             // requester's streamed have, then answer.
-            let have =
-                recv_have_owned(channel, true, conversation, backend.remote_have_budget()).await?;
+            let have = recv_have_owned(
+                channel,
+                true,
+                conversation,
+                backend.remote_have_budget(),
+                false,
+            )
+            .await?;
             // Transfer the existing connection-owned lease before awaiting.
             // Incomplete responses drop it; only a fully sent response is retained.
             let view = match backend.take_custody_view(&conversation)? {

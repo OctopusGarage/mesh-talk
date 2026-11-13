@@ -48,9 +48,17 @@ impl Node {
             }
         };
         let files = self.files.lock().expect("files mutex not poisoned").files();
+        let mut recall_context = None;
         for file in files {
             let file = file?;
-            if !self.media.contains(file) && !self.account_file_recalled(file)? {
+            if self.media.contains(file) {
+                continue;
+            }
+            if recall_context.is_none() {
+                recall_context = Some(self.account_file_recall_context()?);
+            }
+            let context = recall_context.as_ref().expect("recall context initialized");
+            if !self.account_file_recalled_with(file, context)? {
                 offer(file, false);
             }
         }

@@ -889,6 +889,43 @@ impl GuardedSyncStore<'_> {
         })
     }
 
+    fn pull_comparison_scope(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<
+        Option<(
+            super::super::channel_projection_cache::PullComparisonScope,
+            HistorySyncStamp,
+        )>,
+        LogError,
+    > {
+        // Gate before any expensive observation or remote inventory hashing.
+        if !self.pull_only
+            || self.inbound
+            || self.denied
+            || !self.use_node_preparation
+            || self.node.runtime_work.is_closed()
+            || self
+                .pending_channels
+                .get(conversation)
+                .is_some_and(|pending| !pending.events.is_empty())
+        {
+            return Ok(None);
+        }
+        let Some(stamp) = self.history_sync_stamp(conversation)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            super::super::channel_projection_cache::PullComparisonScope {
+                peer: self.peer.clone(),
+                own: self.node.identity.public(),
+                own_account: self.node.account_id(),
+                conversation: *conversation,
+            },
+            stamp,
+        )))
+    }
+
     fn pending_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
         let mut ids: Vec<_> = self
             .pending_channels
@@ -911,6 +948,76 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     type View = ParticipantView;
     type HaveCursor = ParticipantHaveCursor;
     type ExportCursor = ParticipantExportCursor;
+    fn quiet_comparison(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<Option<crate::eventlog::sync::network::QuietComparison>, LogError> {
+        let Some((scope, stamp)) = self.pull_comparison_scope(conversation)? else {
+            return Ok(None);
+        };
+        let hint = self
+            .node
+            .channel_projection_cache
+            .lock()
+            .expect("projection cache")
+            .pull_comparison(&scope, &stamp);
+        // Recheck after the cache owner has been released.
+        if self.pull_comparison_scope(conversation)?.as_ref() != Some(&(scope, stamp)) {
+            return Ok(None);
+        }
+        Ok(hint)
+    }
+    fn validate_quiet_comparison(
+        &self,
+        conversation: &ConversationId,
+        hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<bool, LogError> {
+        Ok(self.quiet_comparison(conversation)? == Some(hint))
+    }
+    fn quiet_comparison_token(&self, view: &Self::View) -> Result<Option<[u8; 32]>, LogError> {
+        if !view.pending.is_empty() {
+            return Ok(None);
+        }
+        let ready_ordinary = {
+            let p = view.preparation.lock().expect("view preparation");
+            p.ready() && p.metadata.fingerprint.is_some()
+        };
+        if !ready_ordinary {
+            return Ok(None);
+        }
+        let Some((_, stamp)) = self.pull_comparison_scope(&view.conversation)? else {
+            return Ok(None);
+        };
+        if view.metadata_stamp.as_ref() != Some(&stamp) {
+            return Ok(None);
+        }
+        self.validate_view(view)?;
+        if self.history_sync_stamp(&view.conversation)?.as_ref() != Some(&stamp) {
+            return Ok(None);
+        }
+        Ok(Some(stamp.fingerprint))
+    }
+    fn retain_quiet_comparison(
+        &self,
+        view: &Self::View,
+        hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<(), LogError> {
+        if self.quiet_comparison_token(view)? != Some(hint.local_token) {
+            return Ok(());
+        }
+        let Some((scope, stamp)) = self.pull_comparison_scope(&view.conversation)? else {
+            return Ok(());
+        };
+        if stamp.fingerprint != hint.local_token {
+            return Ok(());
+        }
+        self.node
+            .channel_projection_cache
+            .lock()
+            .expect("projection cache")
+            .insert_pull_comparison(scope, stamp, hint);
+        Ok(())
+    }
     fn probe_metadata(
         &self,
         conversation: &ConversationId,
@@ -4615,5 +4722,222 @@ mod control_publication_tests {
             before,
             "a selected custody probe must not decode retained history"
         );
+    }
+
+    #[tokio::test]
+    async fn guarded_pull_only_remote_subset_scope_pending_owner_guards() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let event = Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![1],
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(event.clone())
+            .unwrap();
+        let owner = node.pull_sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        let view = open_prepared(&store, &conversation);
+        assert!(
+            store.quiet_comparison_token(&view).unwrap().is_none(),
+            "unbound transport cannot enroll a runtime hint"
+        );
+        store.bind_session_peer(&peer.public());
+        let token = store.quiet_comparison_token(&view).unwrap().unwrap();
+        let hint = crate::eventlog::sync::network::QuietComparison {
+            local_token: token,
+            remote_fingerprint: crate::eventlog::sync::fingerprint(vec![]),
+            remote_count: 0,
+        };
+        store.retain_quiet_comparison(&view, hint).unwrap();
+        assert_eq!(store.quiet_comparison(&conversation).unwrap(), Some(hint));
+        assert!(
+            !NetworkSyncStore::durable_have(&*store, &conversation, &EventId::new([240; 32]))
+                .unwrap(),
+            "quiet scheduling cannot fabricate durable custody"
+        );
+        for owner in [
+            node.sync_store(&peer.public()),
+            node.serve_sync_store(&peer.public()),
+            node.pull_sync_store(&DeviceIdentity::generate().public()),
+        ] {
+            let mut other = owner.lock().unwrap();
+            other.bind_session_peer(&peer.public());
+            assert!(
+                other.quiet_comparison(&conversation).unwrap().is_none(),
+                "direction/full peer/duplex scopes cannot borrow a pull hint"
+            );
+        }
+        let mut wrong = hint;
+        wrong.local_token = [239; 32];
+        store.retain_quiet_comparison(&view, wrong).unwrap();
+        assert_eq!(store.quiet_comparison(&conversation).unwrap(), Some(hint));
+        // This creates actual duplicate retained+pending contributors. Current
+        // pending later clears, but the captured view must remain ineligible.
+        store.pending_channels.insert(
+            conversation,
+            super::super::PendingChannel {
+                events: vec![event],
+                ..Default::default()
+            },
+        );
+        let pending = open_prepared(&store, &conversation);
+        assert!(store.quiet_comparison_token(&pending).unwrap().is_none());
+        store.pending_channels.clear();
+        assert!(
+            store.quiet_comparison_token(&pending).unwrap().is_none(),
+            "actual captured pending contributor must exclude a hint even after live pending clears"
+        );
+        drop(pending);
+        let upload = store.open_history_upload(&conversation).unwrap();
+        super::tests::prepare_upload(&store, &upload);
+        assert!(
+            store
+                .quiet_comparison_token(&upload.view)
+                .unwrap()
+                .is_none(),
+            "history-only preparation cannot enroll ordinary comparison metadata"
+        );
+        drop(upload);
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(Event::new(
+                &node.identity,
+                conversation,
+                2,
+                vec![],
+                2,
+                0,
+                EventKind::Message,
+                vec![2],
+            ))
+            .unwrap();
+        assert!(
+            !store
+                .validate_quiet_comparison(&conversation, hint)
+                .unwrap()
+        );
+        assert!(
+            store.quiet_comparison_token(&view).unwrap().is_none(),
+            "finite view validity alone cannot certify an unchanged answer"
+        );
+        let current = open_prepared(&store, &conversation);
+        let current_hint = crate::eventlog::sync::network::QuietComparison {
+            local_token: store.quiet_comparison_token(&current).unwrap().unwrap(),
+            ..hint
+        };
+        store
+            .retain_quiet_comparison(&current, current_hint)
+            .unwrap();
+        assert_eq!(
+            store.quiet_comparison(&conversation).unwrap(),
+            Some(current_hint),
+            "runtime closure control must start with currently qualified evidence"
+        );
+        node.runtime_work.close();
+        assert!(store.quiet_comparison(&conversation).unwrap().is_none());
+        assert!(store.quiet_comparison_token(&view).unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guarded_pull_only_remote_subset_cache_deadline_and_shared_capacity() {
+        use super::super::super::channel_projection_cache::{
+            ChannelProjectionCache, ProjectionKey, ProjectionMetadata, PullComparisonScope,
+        };
+        let mut cache = ChannelProjectionCache::default();
+        let own = DeviceIdentity::generate().public();
+        let peer = DeviceIdentity::generate().public();
+        let key = |tag| ProjectionKey {
+            conversation: ConversationId::new([tag; 32]),
+            raw: ([0; 32], 0),
+            peer: peer.clone(),
+            own: own.clone(),
+            own_account: "owner".into(),
+            established: None,
+            privacy_generation: 0,
+            privacy_configured: false,
+            inbound: false,
+            sharing: false,
+        };
+        let scope = |tag| PullComparisonScope {
+            conversation: ConversationId::new([tag; 32]),
+            peer: peer.clone(),
+            own: own.clone(),
+            own_account: "owner".into(),
+        };
+        let stamp = |tag| HistorySyncStamp {
+            fingerprint: [tag; 32],
+        };
+        let hint = |tag| crate::eventlog::sync::network::QuietComparison {
+            local_token: [tag; 32],
+            remote_fingerprint: [222; 32],
+            remote_count: 0,
+        };
+        let legacy = ProjectionMetadata {
+            fingerprint: [11; 32],
+            len: 0,
+            requires_v2: false,
+            requires_v3: false,
+            requires_v4: false,
+            requires_v5: false,
+        };
+        for tag in 0..64 {
+            cache.insert(key(tag), legacy);
+        }
+        let metadata = SyncMetadata {
+            fingerprint: Some([77; 32]),
+            ..Default::default()
+        };
+        for tag in 64..96 {
+            cache.insert_paged(stamp(tag), metadata);
+        }
+        for tag in 96..128 {
+            cache.insert_pull_comparison(scope(tag), stamp(tag), hint(tag));
+        }
+        assert_eq!(cache.len(), 128);
+        tokio::time::advance(std::time::Duration::from_secs(250)).await;
+        assert_eq!(
+            cache.pull_comparison(&scope(96), &stamp(96)),
+            Some(hint(96))
+        );
+        cache.insert_pull_comparison(scope(96), stamp(96), hint(96));
+        tokio::time::advance(std::time::Duration::from_secs(51)).await;
+        assert!(
+            cache.pull_comparison(&scope(96), &stamp(96)).is_none(),
+            "hits/identical observations must not renew the original deadline"
+        );
+        assert_eq!(
+            cache.get_paged(&stamp(64)).unwrap().fingerprint,
+            Some([77; 32]),
+            "remote comparison must never overwrite ordinary local fingerprint metadata"
+        );
+        cache.insert_pull_comparison(scope(128), stamp(128), hint(128));
+        assert_eq!(cache.len(), 128);
+        assert!(
+            cache.get(&key(0)).is_none(),
+            "new hint shares the existing FIFO quota"
+        );
+        assert!(cache.get(&key(1)).is_some());
     }
 }

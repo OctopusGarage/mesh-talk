@@ -2383,7 +2383,7 @@ async fn private_file_restart_yields_between_individually_bounded_exchanges() {
 
 #[tokio::test]
 async fn private_file_restart_advances_twenty_four_pending_scopes_fairly() {
-    private_file_restart_batch(FilePeerDelay::Aggregate, 24).await;
+    Box::pin(private_file_restart_batch(FilePeerDelay::Aggregate, 24)).await;
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2815,7 +2815,7 @@ async fn completed_file_custody_recycles_a_usable_sync_channel() {
 }
 
 async fn private_file_restart(delay: FilePeerDelay) {
-    private_file_restart_batch(delay, 1).await;
+    Box::pin(private_file_restart_batch(delay, 1)).await;
 }
 
 // Grant the original Manual permissions in order while their best-effort
@@ -12028,11 +12028,11 @@ async fn modern_relay_receive_fixture(rearm_gap: bool) {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut inbox) = node(bd.path(), bob, ba, &ap);
+    let (b, mut inbox) = node(bd.path(), bob, bob_account, &ap);
     b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
     let relay = DeviceIdentity::generate();
     let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
@@ -12273,12 +12273,17 @@ async fn authenticated_receipt_retirement(before_discovery: bool) {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut received) = node(bd.path(), bob, ba, &ap);
+    let (b, mut received) = node(bd.path(), bob, bob_account, &ap);
     a.replace_verified_dm_pull_peers(vec![bp.user_id.clone()]);
     let id = a
         .enqueue_to_account(&b.account_id(), b"receipt retirement", None)
@@ -12402,9 +12407,9 @@ impl ReceiptRetirementFixture {
         let alice = DeviceIdentity::generate();
         let bob = DeviceIdentity::generate();
         let aa = Account::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
         let (a, _) = node(sender_directory.path(), alice, aa, &bp);
         if own_copy {
             let other = DeviceIdentity::generate();
@@ -12414,7 +12419,7 @@ impl ReceiptRetirementFixture {
                 .unwrap()
                 .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
         }
-        let (b, mut received) = node(recipient_directory.path(), bob, ba, &ap);
+        let (b, mut received) = node(recipient_directory.path(), bob, bob_account, &ap);
         let logical = a
             .enqueue_to_account(&b.account_id(), b"receipt failure recovery", None)
             .await

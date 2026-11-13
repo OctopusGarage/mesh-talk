@@ -43,6 +43,13 @@ struct SelectedAttachment {
     scope: Option<archive::PrivateChannelScope>,
 }
 
+/// Decision-local account routes only. Eligibility, rows and recalls stay live;
+/// publication constructs a fresh context through `account_file_recalled`.
+struct AccountFileRecallContext {
+    file_book: super::filebook::indexed::IndexedFileBook,
+    peers: HashMap<ConversationId, String>,
+}
+
 mod archive;
 mod attachment_selection;
 mod availability;
@@ -1693,6 +1700,15 @@ impl Node {
         }
     }
     fn account_file_recalled(&self, file: ConversationId) -> Result<bool, NodeError> {
+        let context = self.account_file_recall_context()?;
+        self.account_file_recalled_with(file, &context)
+    }
+
+    fn account_file_recall_context(&self) -> Result<AccountFileRecallContext, NodeError> {
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "attachment_recall_context_begin".into()
+        });
         let file_book = self.files.lock().expect("file book mutex").clone();
         let own = self.account_id();
         let mut peers: HashMap<_, _> = self
@@ -1701,6 +1717,14 @@ impl Node {
             .map(|peer| (account_conversation_id(&own, &peer), peer))
             .collect();
         peers.insert(account_conversation_id(&own, &own), own);
+        Ok(AccountFileRecallContext { file_book, peers })
+    }
+
+    fn account_file_recalled_with(
+        &self,
+        file: ConversationId,
+        context: &AccountFileRecallContext,
+    ) -> Result<bool, NodeError> {
         let mut cursor = None;
         loop {
             let page = self
@@ -1717,10 +1741,10 @@ impl Node {
             }
             for header in page.rows {
                 cursor = Some(header.ordinal);
-                if !file_book.eligible_ordinal(header.ordinal)? {
+                if !context.file_book.eligible_ordinal(header.ordinal)? {
                     continue;
                 }
-                let Some(peer) = peers.get(&header.conversation) else {
+                let Some(peer) = context.peers.get(&header.conversation) else {
                     continue;
                 };
                 let Some(row) = self
@@ -3155,12 +3179,30 @@ impl Node {
                     return;
                 };
                 let select_data = attachments.len() < ATTACHMENT_WORKERS;
-                local_tasks.spawn_blocking(move || {
-                    // The actual filesystem closure owns admission even if its
-                    // scheduler is cancelled before the blocking work retires.
-                    let _permit = permit;
-                    state.run(node, fanout_cursor, select_data)
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "account_local_work_scheduled".into()
                 });
+                local_tasks.spawn(permit.track(async move {
+                    // Only this child waits; the parent keeps polling network
+                    // lanes and coalesces one dirty followup in its owned state.
+                    let capacity = node.runtime_work.local_repair_capacity().await?;
+                    let work = node.runtime_work.admit()?;
+                    let result = work
+                        .spawn_local_repair_blocking(capacity, move || {
+                            state.run(node, fanout_cursor, select_data)
+                        })
+                        .await;
+                    match result {
+                        Ok(value) => Some(value.into_inner()),
+                        Err(error) if error.is_panic() => {
+                            std::panic::resume_unwind(error.into_panic())
+                        }
+                        Err(error) => {
+                            panic!("owned account local worker was unexpectedly cancelled: {error}")
+                        }
+                    }
+                }));
             }
             // Reuse the cursor's existing authenticated observation-time rule
             // before calculating a paired cooldown. A successful newer proof
@@ -3741,7 +3783,7 @@ impl Node {
             tokio::select! {
                 result = local_tasks.join_next(), if !local_tasks.is_empty() => {
                     match result {
-                        Some(Ok(turn)) => {
+                        Some(Ok(Some(turn))) => {
                             maintenance_requested |= turn.more_inventory;
                             local_maintenance = Some(turn.state);
                             #[cfg(test)]
@@ -3802,6 +3844,7 @@ impl Node {
                                 }
                             }
                         }
+                        Some(Ok(None)) => return,
                         Some(Err(error)) => {
                             if error.is_panic() {
                                 std::panic::resume_unwind(error.into_panic());
@@ -3877,7 +3920,11 @@ impl Node {
                 // conservative wake, never a fresh-to-fresh lease renewal.
                 _ = availability_changes.changed() => { fanout.wake_pending(); enqueue_all = true; }
                 _ = fanout_network.changed() => { fanout.wake_pending(); enqueue_all = true; }
-                _ = self.account_sync_notify.notified() => { enqueue_all = true; }
+                _ = self.account_sync_notify.notified() => {
+                    enqueue_all = true;
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || "account_local_work_dirty".into());
+                }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
                     maintenance_requested = true;
                     let completion = match result {

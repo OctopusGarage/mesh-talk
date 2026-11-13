@@ -134,6 +134,10 @@
         "guide": "docs/network-design-reference.md#cost-aware-group-attachment-sharing",
         "invariants": [
           {
+            "name": "Windows/Linux native change notifications feed one serial coalescing query owner with fresh five-minute repair, retained in-query demand, conservative failure recovery and runtime-owned registration/stream cancellation; unchanged idle input does not trigger two-second provider polling. macOS keeps its native callback owner.",
+            "reference": "docs/network-design-reference.md#cost-aware-group-attachment-sharing"
+          },
+          {
             "name": "Unknown startup protection precedes participant producers; observers cannot retain a retired Node, and lock/replacement or mismatched cost rejects override mutations.",
             "reference": "docs/module-boundaries.md#network-cost-protection"
           },

@@ -449,7 +449,7 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   Proactive verified-contact recovery distinguishes accepted incoming progress,
   a clean unchanged exchange, and deferred failure. A clean exchange still
   recycles its authenticated session and retries local projections; it does not
-  schedule itself as new progress. Quiet peer recovery waits for a 60-second
+  schedule itself as new progress. Quiet peer recovery waits for a five-minute
   repair backstop, while ordinary pushes and queued delivery/receipt work keep
   their independent prompt lanes. Failure uses the existing bounded retry
   schedule. Captured endpoint, policy and semantic verification generations
@@ -551,6 +551,17 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   compare scalar summaries before creating SQL selections. Missing observations
   and changed stamps use ordinary bounded preparation; cached summaries never
   authorize export, custody or admission.
+  Ordinary outbound pull-only requests may additionally retain a quiet remote
+  subset comparison in that same 128-entry metadata quota. A completed exchange
+  must transfer zero events, advertise a unique remote set wholly present in the
+  captured local set, and have no captured or current pending invitation work.
+  Its exact local source/authority stamp and authenticated peer remain current.
+  The next request can compare the remote digest with the existing wire probe;
+  a match is accepted only after fresh local qualification and reports the
+  proved remote intersection, never local-set equality or custody. The hint
+  expires within five minutes without renewal on hits; changed or unknown state,
+  errors and unsupported stores retain ordinary reconciliation. Duplex and
+  history-upload paths do not use this hint; no event IDs or bodies are cached.
   Exact custody queries and ordinary history requests reuse node-owned prepared
   authorization indexes under the complete current source/authority stamp, full
   peer identity, direction, pull mode and denied state. Each request checks out

@@ -1283,11 +1283,16 @@ bytes; limited payload export must preserve actual possession inventories.
 
 `node/network_cost.rs` owns effective file-serving policy; the desktop
 `network_cost/` adapter supplies observations. macOS uses Network.framework path
-updates for expensive/Low Data Mode flags. Windows re-queries connection cost,
-roaming, limits and background restrictions; Linux reads NetworkManager's Metered
-property, including guessed states. Windows/Linux refresh every two seconds,
-with Linux queries bounded to one second. An unavailable provider yields unknown.
-The runtime owns cancellation and drops native observers at retirement. SDK,
+updates for expensive/Low Data Mode flags. Windows subscribes to native network
+status changes and re-queries connection cost, roaming, limits and background
+restrictions. Linux subscribes to NetworkManager's Metered property and service
+owner changes, including invalidations and guessed states. Each observer has one
+serial current-state query owner; event bursts coalesce, an event during a query
+retains one subsequent query, and a five-minute repair uses fresh provider data.
+Linux queries remain bounded to one second. Failed observation or registration
+produces unknown and retains bounded recovery; a stale unrestricted result cannot
+stand in for a failed current observation. The runtime owns cancellation and drops
+native registrations and signal streams at retirement. SDK,
 CLI and integration hosts preserve unrestricted compatibility defaults unless
 they supply an initial/current observation. The additive
 `start_configured_guarded_with_network_cost_observed` constructor applies initial

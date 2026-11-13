@@ -2321,6 +2321,7 @@ async fn budgeted_round_saturation_cancellation_and_healthy_retry_release_reserv
         true,
         ConversationId::new([7; 32]),
         Some(&budget),
+        false,
     );
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(20), receive)
@@ -3059,4 +3060,437 @@ async fn guarded_default_fingerprint_quiet_path_survives_unrelated_source_append
         converged,
         "the remote's new signed event must actually arrive"
     );
+}
+
+#[tokio::test]
+async fn guarded_pull_only_remote_subset_quiet_round_reuses_remote_fingerprint() {
+    guarded_pull_subset_fixture("stable").await;
+}
+
+#[tokio::test]
+async fn guarded_pull_only_remote_subset_changes_fall_back() {
+    for change in [
+        "remote_add",
+        "remote_delete",
+        "local_add",
+        "local_delete",
+        "policy",
+        "duplex",
+        "hidden_remote",
+    ] {
+        guarded_pull_subset_fixture(change).await;
+    }
+}
+
+#[tokio::test]
+async fn guarded_pull_only_remote_subset_inflight_and_failure() {
+    for change in ["inflight", "failure", "cancel"] {
+        guarded_pull_subset_fixture(change).await;
+    }
+}
+
+async fn guarded_pull_subset_fixture(change: &'static str) {
+    use crate::{discovery::Announce, identity::account::Account};
+    let left_directory = tempfile::tempdir().unwrap();
+    let right_directory = tempfile::tempdir().unwrap();
+    let left_identity = DeviceIdentity::generate();
+    let right_identity = DeviceIdentity::generate();
+    let left_account = Account::generate();
+    let right_account = Account::generate();
+    let left_proof = Announce::new_with_account(&left_identity, &left_account, "Left", 9);
+    let right_proof = Announce::new_with_account(&right_identity, &right_account, "Right", 9);
+    let (left, _, _) = super::super::test_support::node_with_files(
+        left_directory.path(),
+        left_identity,
+        left_account,
+        &right_proof,
+    );
+    let (right, _, _) = super::super::test_support::node_with_files(
+        right_directory.path(),
+        right_identity,
+        right_account,
+        &left_proof,
+    );
+    left.cached_peer_snapshot_async().await.unwrap();
+    right.cached_peer_snapshot_async().await.unwrap();
+    let conversation = super::super::conversation::dm_conversation_id(
+        &left.identity.public(),
+        &right.identity.public(),
+    );
+    let retained = Event::new(
+        &left.identity,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![7; 128],
+    );
+    let id = retained.id;
+    left.log.lock().unwrap().append_durable(retained).unwrap();
+    let other = Event::new(
+        &right.identity,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![8; 128],
+    );
+    if change == "remote_delete" {
+        for node in [&left, &right] {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(other.clone())
+                .unwrap();
+        }
+    }
+    if change == "hidden_remote" {
+        right
+            .log
+            .lock()
+            .unwrap()
+            .append_durable(other.clone())
+            .unwrap();
+    }
+    let source = left
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .source_revision()
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let responder = right.clone();
+    let peer = left.identity.public();
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let requester = left.clone();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let server_reached = reached.clone();
+    let server: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        let mut connection = 0;
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(socket, &responder.identity)
+                .await
+                .unwrap();
+            // A real export-disabled Guarded view still advertises retained
+            // possession. Returning to the ordinary responder on the next
+            // connection changes eligibility without changing remote Have.
+            let store = if change == "hidden_remote" && connection == 0 {
+                responder.pull_sync_store(&peer)
+            } else {
+                responder.serve_sync_store(&peer)
+            };
+            let mut probes = 0;
+            let mut requests = 0;
+            let mut wire_events = 0;
+            while let Ok(bytes) = channel.recv().await {
+                match decode(&bytes).unwrap() {
+                    SyncWire::FpRequest(_)
+                    | SyncWire::FpRequestV2(_)
+                    | SyncWire::FpRequestV3(_)
+                    | SyncWire::FpRequestV4(_)
+                    | SyncWire::FpRequestV5(_) => probes += 1,
+                    SyncWire::Request(_)
+                    | SyncWire::RequestV2(_)
+                    | SyncWire::RequestV3(_)
+                    | SyncWire::RequestV4(_)
+                    | SyncWire::RequestV5(_) => requests += 1,
+                    SyncWire::Followup(frame)
+                    | SyncWire::FollowupV2(frame)
+                    | SyncWire::FollowupV3(frame)
+                    | SyncWire::FollowupV4(frame)
+                    | SyncWire::FollowupV5(frame) => wire_events += frame.events.len(),
+                    _ => {}
+                }
+                if change == "inflight" && connection == 1 && probes == 1 && requests == 0 {
+                    requester
+                        .log
+                        .lock()
+                        .unwrap()
+                        .append_durable(Event::new(
+                            &requester.identity,
+                            conversation,
+                            2,
+                            vec![],
+                            2,
+                            0,
+                            EventKind::Message,
+                            vec![9; 128],
+                        ))
+                        .unwrap();
+                }
+                if connection == 0 && matches!(change, "failure" | "cancel") {
+                    if change == "cancel" {
+                        server_reached.notify_one();
+                        let _ = channel.recv().await;
+                    }
+                    break;
+                }
+                serve_wire_bytes_paged(&mut channel, &store, &bytes)
+                    .await
+                    .unwrap();
+            }
+            drop(store);
+            connection += 1;
+            sent.send((probes, requests, wire_events)).unwrap();
+        }
+    });
+    let experiment = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let mut observations = Vec::new();
+        for round in 0..3 {
+            if round == 1 {
+                match change {
+                    "remote_add" => {
+                        right.log.lock().unwrap().append_durable(other.clone())?;
+                    }
+                    "remote_delete" => {
+                        right.log.lock().unwrap().drop_conversation(&conversation)?;
+                    }
+                    "local_add" => {
+                        left.log.lock().unwrap().append_durable(Event::new(
+                            &left.identity,
+                            conversation,
+                            2,
+                            vec![],
+                            2,
+                            0,
+                            EventKind::Message,
+                            vec![9; 128],
+                        ))?;
+                    }
+                    "local_delete" => {
+                        left.log.lock().unwrap().drop_conversation(&conversation)?;
+                    }
+                    "policy" => {
+                        left.set_device_sync_category(crate::node::SyncCategory::Profile, false)
+                            .map_err(|error| LogError::Serialization(error.to_string()))?;
+                    }
+                    _ => {}
+                }
+            }
+            let socket = tokio::net::TcpStream::connect(address)
+                .await
+                .map_err(LogError::Io)?;
+            let mut channel =
+                SecureChannel::connect(socket, &left.identity, Some(&right.identity.public()))
+                    .await?;
+            let store = if change == "duplex" {
+                left.sync_store(&right.identity.public())
+            } else {
+                left.pull_sync_store(&right.identity.public())
+            };
+            let mut progress = SyncProgress::default();
+            let running = async {
+                while !progress
+                    .step_burst_paged(&mut channel, &store, conversation, 1)
+                    .await?
+                {}
+                Ok::<_, SessionError>(())
+            };
+            let failed = if change == "cancel" && round == 0 {
+                let mut active = Box::pin(running);
+                tokio::select! {
+                    _ = reached.notified() => true,
+                    result = &mut active => { result?; false },
+                }
+            } else {
+                let result = running.await;
+                if change == "failure" && round == 0 {
+                    result.is_err()
+                } else {
+                    result?;
+                    false
+                }
+            };
+            let hint = NetworkSyncStore::quiet_comparison(&*store.lock().unwrap(), &conversation)?
+                .is_some();
+            let applied = progress.total.applied;
+            let pushed = progress.pushed_total;
+            let intersection = progress.remote_have_count();
+            drop(store);
+            drop(channel);
+            let (probes, requests, wire_events) = received
+                .recv()
+                .await
+                .ok_or(SessionError::UnexpectedMessage)?;
+            observations.push((
+                probes,
+                requests,
+                wire_events,
+                applied,
+                pushed,
+                intersection,
+                failed,
+                hint,
+            ));
+        }
+        Ok::<_, SessionError>(observations)
+    })
+    .await;
+    server.abort();
+    let cleanup = server.await;
+    assert!(cleanup.unwrap_err().is_cancelled());
+    let observations = experiment
+        .expect("real pull-only subset exchange deadline")
+        .unwrap();
+    eprintln!("guarded_pull_subset change={change} rounds={observations:?}");
+    if change == "local_delete" {
+        assert!(!left.log.lock().unwrap().has(&id).unwrap());
+    } else {
+        assert!(left.log.lock().unwrap().has(&id).unwrap());
+    }
+    if change == "duplex" {
+        assert!(right.log.lock().unwrap().has(&id).unwrap());
+    } else {
+        assert!(
+            !right.log.lock().unwrap().has(&id).unwrap(),
+            "pull-only cannot disclose retained data"
+        );
+    }
+    if change == "remote_add" {
+        assert!(left.log.lock().unwrap().has(&other.id).unwrap());
+        assert_eq!(observations[1].3, 1);
+        assert!(
+            !observations[1].7,
+            "a received wire event must not earn a hint"
+        );
+    }
+    if change == "stable" {
+        assert_eq!(
+            left.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .source_revision()
+                .unwrap(),
+            source
+        );
+        for row in &observations {
+            assert!(row.0 > 0);
+            assert_eq!(
+                (row.2, row.3, row.4, row.5, row.6),
+                (0, 0, 0, Some(0), false)
+            );
+            assert!(row.7);
+        }
+        assert!(observations[0].1 > 0);
+        assert_eq!(
+            observations.iter().skip(1).map(|row| row.1).sum::<usize>(),
+            0,
+            "unchanged pull-only strict subset must skip full Have"
+        );
+    } else if matches!(change, "failure" | "cancel") {
+        assert!(
+            observations[0].0 > 0,
+            "failure/cancel must reach the actual fingerprint await"
+        );
+        assert!(
+            observations[0].6 && !observations[0].7,
+            "failed/cancelled request cannot earn evidence"
+        );
+        assert!(observations[1].1 > 0 && observations[1].7);
+        assert_eq!(observations[2].1, 0);
+    } else if change == "duplex" {
+        assert!(
+            observations[0].4 > 0,
+            "ordinary duplex must actually transfer retained events"
+        );
+        assert!(observations.iter().all(|row| !row.7));
+    } else if change == "hidden_remote" {
+        let first = &observations[0];
+        assert!(first.1 > 0 && !first.7);
+        assert_eq!(
+            (first.2, first.3, first.4, first.5),
+            (0, 0, 0, Some(0)),
+            "missing remote advertised IDs cannot qualify when the real remote export gate suppresses them"
+        );
+        assert!(
+            observations[1].1 > 0 && observations[1].3 == 1 && !observations[1].7,
+            "unchanged remote Have with newly allowed export must deliver its missing event"
+        );
+        assert!(left.log.lock().unwrap().has(&other.id).unwrap());
+    } else if change == "local_delete" {
+        assert!(
+            !observations[1].7,
+            "actual destructive local change invalidates the hint even when normal equality becomes true"
+        );
+        assert_eq!(observations[1].5, Some(0));
+    } else {
+        assert!(
+            observations[1].1 > 0,
+            "{change} must fall back to ordinary Have"
+        );
+        if change == "remote_delete" {
+            assert_eq!(observations[0].5, Some(1));
+            assert_eq!(observations[1].5, Some(0));
+        }
+        if change == "inflight" {
+            assert!(
+                observations[1].0 >= 2,
+                "stale conditional response must be followed by a fresh ordinary probe"
+            );
+        }
+    }
+}
+
+#[test]
+fn guarded_pull_only_remote_subset_have_duplicates_and_budget() {
+    let first = EventId::new([1; 32]);
+    let second = EventId::new([2; 32]);
+    let budget = RemoteHaveBudget::default();
+    let observed = have_budget::ReceivedHave::from_vec_for_comparison(
+        vec![second, first],
+        Some(budget.try_admit().unwrap()),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        observed.comparison_fingerprint(),
+        Some(crate::eventlog::sync::fingerprint(vec![first, second]))
+    );
+    assert!(observed.accounted_bytes() <= 32 * 1024 * 1024);
+    let duplicate = have_budget::ReceivedHave::from_vec_for_comparison(
+        vec![first, first],
+        Some(budget.try_admit().unwrap()),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        duplicate.len(),
+        1,
+        "normal remote Have remains a unique inventory"
+    );
+    assert!(
+        duplicate.comparison_fingerprint().is_none(),
+        "wire duplicate cardinality cannot certify a remote subset"
+    );
+    let disabled = have_budget::ReceivedHave::from_vec_for_comparison(
+        vec![second, first],
+        Some(budget.try_admit().unwrap()),
+        false,
+    )
+    .unwrap();
+    assert!(
+        disabled.comparison_fingerprint().is_none(),
+        "noneligible modes must skip canonical hash work"
+    );
+    let fourth = budget.try_admit().unwrap();
+    assert!(budget.try_admit().is_err());
+    drop(observed);
+    drop(duplicate);
+    drop(disabled);
+    drop(fourth);
+    let mut all = Vec::new();
+    for _ in 0..4 {
+        all.push(budget.try_admit().unwrap());
+    }
+    assert!(budget.try_admit().is_err());
 }

@@ -456,6 +456,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "shared_local_repair_actual_owners",
             "startup_identity_precedes_blocked_durable_store_and_matches_runtime",
             "startup_identity_rejection_stops_before_listener_and_durable_stores",
             "runtime_zero_discovery_port_owns_a_reachable_assigned_endpoint",
@@ -472,6 +473,10 @@
         "summary": "Own exclusive participant construction and observe verified public identity after keystore unlocks without starting participant producers.",
         "guide": "docs/ARCHITECTURE.md",
         "invariants": [
+          {
+            "name": "RuntimeWork keeps retirement accounting separate from one fair local-repair capacity slot shared by Profile and account-local scans. Queued account work does not park foreground/network scheduling; actual blocking captures and undelivered outputs retain capacity through cancellation/panic, dirty demand survives waiting, and runtime retirement cancels queued owners before draining actual workers.",
+            "reference": "docs/module-boundaries.md"
+          },
           {
             "name": "OS-assigned discovery sockets retain their actual bound endpoint across IPv4, optional IPv6, runtime reporting and discovery producers; callers never release a port reservation before runtime binding.",
             "reference": "docs/network-design-reference.md#managed-discovery-ports"
@@ -726,6 +731,7 @@
       "paths": [
         "crates/mesh-talk-core/src/node/account_sync.rs",
         "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
+        "crates/mesh-talk-core/src/node/account_sync/attachment_selection.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/account_sync_wire.rs"
@@ -734,6 +740,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "shared_local_repair_actual_owners",
             "node::account_sync::selection_tests::",
             "node::account_sync_wire::",
             "account_sync_attachment_preparation_releases_commit_guards_and_rechecks_changes",
@@ -747,6 +754,10 @@
         "summary": "Distinguish unavailable sibling file copies from transfer failures without starving ordinary history, documents or later available files.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
         "invariants": [
+          {
+            "name": "One missing-attachment selection lazily prepares its account-to-conversation mapping once instead of once per missing file. This stack-local scheduling context retains no guards or recall decisions; each file keeps current eligibility, row, author and recall checks, errors propagate, and final attachment publication builds a fresh context under its existing commit checks.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
           {
             "name": "Typed availability requires exact certified account admission, preserves legacy wire layouts and never treats corrupt bytes or transport closure as a missing copy",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
@@ -1694,6 +1705,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "shared_local_repair_actual_owners",
             "node::account_profile::tests::",
             "node::profile::tests::",
             "node::profile_store::tests::",
@@ -3083,6 +3095,7 @@
             "peer_known_export_ids_skip_sql_membership_and_preserve_unknown_authority",
             "hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh",
             "guarded_default_fingerprint_quiet_path_survives_unrelated_source_append",
+            "guarded_pull_only_remote_subset_",
             "node::opaque_relay::",
             "node::session::mailbox::tests::",
             "requester_have_selection_reuse_loopback",
@@ -3146,7 +3159,11 @@
         "guide": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization",
         "invariants": [
           {
-            "name": "Peer-known IDs skip export membership SQL and body hydration while preserving current view/owner validation, examined-row accounting and cursor progression; unknown IDs retain fresh outgoing authorization. Fixed hot revision SELECTs reuse bounded compiled statements without caching values, preserving fresh source/control/destructive revisions and corruption errors. Real Guarded default-progress quiet rounds use fingerprint-only exchange despite unrelated appends, and a shared append requires reconciliation.",
+            "name": "Ordinary Guarded outbound pull-only zero-wire reconciliation can reuse a proved unique remote subset under exact current local source and authority, empty pending work, a fresh existing wire fingerprint probe and a nonrenewing five-minute maximum deadline. It preserves the remote intersection count and the shared 128-entry metadata quota, never grants equality, custody or delivery, and leaves unsupported, changed, failed and duplex requests on ordinary reconciliation.",
+            "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"
+          },
+          {
+            "name": "Peer-known IDs skip export membership SQL and body hydration while preserving current view/owner validation, examined-row accounting and cursor progression; unknown IDs retain fresh outgoing authorization. Fixed hot revision SQL queries reuse bounded compiled statements without caching values, preserving fresh source/control/destructive revisions and corruption errors. Real Guarded default-progress quiet rounds use fingerprint-only exchange despite unrelated appends, and a shared append requires reconciliation.",
             "reference": "docs/performance-requirements.md#design-and-review-rules"
           },
           {

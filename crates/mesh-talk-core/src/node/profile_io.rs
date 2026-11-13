@@ -550,6 +550,10 @@ impl Node {
         &self,
         sweep: &mut ProfileRetrySweep,
     ) -> Result<ProfileTurn, NodeError> {
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "profile_local_work_begin".into()
+        });
         self.cache_discovered_peers()
             .map_err(|error| NodeError::Log(LogError::Io(error)))?;
         self.observe_order_work();
@@ -690,12 +694,15 @@ impl Node {
             self.trace_account_client(&self.identity.public(), || {
                 "profile_maintenance_turn".into()
             });
+            let Some(capacity) = self.runtime_work.local_repair_capacity().await else {
+                return;
+            };
             let Some(work) = self.runtime_work.admit() else {
                 return;
             };
             let node = self.clone();
             let result = work
-                .spawn_blocking(move || {
+                .spawn_local_repair_blocking(capacity, move || {
                     let result = node.profile_maintenance_turn(&mut sweep);
                     (sweep, result)
                 })

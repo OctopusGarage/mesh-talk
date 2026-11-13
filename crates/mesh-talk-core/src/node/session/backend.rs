@@ -19,6 +19,29 @@ pub(super) trait SessionBackend {
         &self,
         conversation: &ConversationId,
     ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError>;
+    fn quiet_comparison(
+        &self,
+        _c: &ConversationId,
+    ) -> Result<Option<crate::eventlog::sync::network::QuietComparison>, LogError> {
+        Ok(None)
+    }
+    fn validate_quiet_comparison(
+        &self,
+        _c: &ConversationId,
+        _hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    fn quiet_comparison_token(&self, _view: &Self::View) -> Result<Option<[u8; 32]>, LogError> {
+        Ok(None)
+    }
+    fn retain_quiet_comparison(
+        &self,
+        _view: &Self::View,
+        _hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<(), LogError> {
+        Ok(())
+    }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
     fn take_custody_view(
         &self,
@@ -355,6 +378,38 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
     type View = S::View;
     type HaveCursor = S::HaveCursor;
     type ExportCursor = S::ExportCursor;
+    fn quiet_comparison(
+        &self,
+        c: &ConversationId,
+    ) -> Result<Option<crate::eventlog::sync::network::QuietComparison>, LogError> {
+        self.0.lock().expect("store lock").quiet_comparison(c)
+    }
+    fn validate_quiet_comparison(
+        &self,
+        c: &ConversationId,
+        hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store lock")
+            .validate_quiet_comparison(c, hint)
+    }
+    fn quiet_comparison_token(&self, view: &Self::View) -> Result<Option<[u8; 32]>, LogError> {
+        self.0
+            .lock()
+            .expect("store lock")
+            .quiet_comparison_token(view)
+    }
+    fn retain_quiet_comparison(
+        &self,
+        view: &Self::View,
+        hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<(), LogError> {
+        self.0
+            .lock()
+            .expect("store lock")
+            .retain_quiet_comparison(view, hint)
+    }
     fn export_preparation_needs_have(&self, view: &Self::View) -> Result<bool, LogError> {
         self.0
             .lock()

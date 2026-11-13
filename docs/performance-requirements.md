@@ -76,7 +76,18 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Replacing an identical binding map is not invalidation; actual removal and
    later restoration must each invalidate their preceding observation.
 
-2. **Use recovery deliberately.** A fallback repairs missed events; it is not the
+2. **Use recovery deliberately.** Ordinary fallback maintenance should drain a
+   bounded, coalescing queue serially through its existing lifecycle owner.
+   Prefer one admitted worker; justify additional parallelism with a concrete
+   latency or progress requirement. Queue only relevant dirty work or due repair,
+   deduplicate by scope and skip missed timer bursts. Bound each turn and rotate
+   unfinished work fairly; an unavailable peer must not monopolize the queue.
+   Keep synchronous I/O/crypto off the UI/async event thread, and retain capacity
+   until the actual worker finishes even if its observer is cancelled. Preserve
+   independent deadlines for transport leases, active delivery and real expiry;
+   trace dependencies before sharing a worker to avoid cross-lane wait cycles.
+   Serial execution bounds peaks; unchanged inputs must still avoid the work.
+   A fallback repairs missed events; it is not the
    main data path. Back off failures, stop with the owner and refresh on return.
    A stored address or linked-device certificate is not current availability.
    A stale dependency is not preparation progress: retain its backoff instead
@@ -104,6 +115,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Reuse authenticated immutable input within one decision instead of reading
    and verifying it again down the call chain; keep current authority and read
    failure checks independent of that reuse.
+   Prepare shared lookup context once per bounded decision, lazily when needed;
+   do not rescan account history for every missing attachment. Keep per-item
+   reads and recall/eligibility checks current and build fresh context at final
+   publication. A scheduling snapshot is not commit authority or a durable cache.
    Keep this reuse inside the decision when metadata alone cannot establish
    that durable bytes still exist and pass integrity checks.
    Local selected/absent-target preparation may survive relay replacement under
@@ -118,6 +133,13 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    rehydrating group history or rereading account rosters. Qualify reuse only after
    successful current publication within the runtime owner; failures remain retryable.
    Validate a complete reply before caching its token.
+   Unequal inventories are not necessarily unfinished work. A receiver-only
+   comparison may reuse a completed zero-transfer result only with proof that
+   every remote advertised ID is already local, exact current local authority,
+   a fresh remote digest match and a bounded nonrenewing deadline. Preserve the
+   remote intersection count; never infer equality, custody or delivery. Unknown
+   or changed inputs use normal reconciliation. Keep the hint in the existing
+   metadata quota and account for its hashing within owned inventory budgets.
    Apply already-authoritative metadata exclusions before body reads, including
    inventory rows that a physical local group would later discard.
 

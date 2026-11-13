@@ -24,6 +24,7 @@ fn overload() -> SessionError {
 
 pub(super) struct ReceivedHave {
     ids: HashSet<EventId>,
+    comparison_fingerprint: Option<[u8; 32]>,
     // Must outlive both collection conversion and every network await using ids.
     _permit: Option<OwnedSemaphorePermit>,
     #[cfg(test)]
@@ -33,6 +34,13 @@ impl ReceivedHave {
     pub(super) fn from_vec(
         ids: Vec<EventId>,
         permit: Option<OwnedSemaphorePermit>,
+    ) -> Result<Self, SessionError> {
+        Self::from_vec_for_comparison(ids, permit, false)
+    }
+    pub(super) fn from_vec_for_comparison(
+        mut ids: Vec<EventId>,
+        permit: Option<OwnedSemaphorePermit>,
+        eligible: bool,
     ) -> Result<Self, SessionError> {
         if ids.len() > MAX_HAVE_IDS_TOTAL || ids.capacity() > MAX_HAVE_IDS_TOTAL {
             return Err(overload());
@@ -55,13 +63,33 @@ impl ReceivedHave {
         if bytes > RESERVATION_BYTES {
             return Err(overload());
         }
+        let comparison_fingerprint = if eligible {
+            use sha2::{Digest, Sha256};
+            ids.sort_unstable();
+            if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+                None
+            } else {
+                let mut hash = Sha256::new();
+                hash.update((ids.len() as u64).to_le_bytes());
+                for id in &ids {
+                    hash.update(id.as_bytes());
+                }
+                Some(hash.finalize().into())
+            }
+        } else {
+            None
+        };
         set.extend(ids);
         Ok(Self {
             ids: set,
+            comparison_fingerprint,
             _permit: permit,
             #[cfg(test)]
             accounted: bytes,
         })
+    }
+    pub(super) fn comparison_fingerprint(&self) -> Option<[u8; 32]> {
+        self.comparison_fingerprint
     }
     #[cfg(test)]
     pub(super) fn accounted_bytes(&self) -> usize {

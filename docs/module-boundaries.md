@@ -328,6 +328,13 @@ consumer boundary. Other participant domains retain their
 legacy owners until their own cutovers. `core/node/runtime_startup.rs` composes
 startup inputs and completion through `runtime_work.rs`; blocking captures and
 undelivered results remain admitted until their resources are destroyed.
+The same runtime owner keeps one separate fair capacity slot for top-level
+Profile and account-local maintenance turns. Their local scans execute serially;
+the account's existing child queues without parking its network scheduler.
+No leaf helper or network wait acquires this slot. Actual blocking captures and
+undelivered results retain both capacity and retirement admission; cancelling an
+observer cannot admit another scan while its worker is still running. Runtime
+retirement closes admission, cancels queued owners and drains actual work.
 The desktop startup permit retains replacement serialization, and backup consumes
 the retired owner only after matching its host local-user label and physical
 profile root. Core does not derive desktop authority from account keys or paths.
@@ -1103,7 +1110,11 @@ permission. See [ordinary file custody](network-design-reference.md#ordinary-fil
 `core/node/network_cost.rs` owns temporary group attachment export eligibility,
 independent of signed replica preferences and local retention. Desktop
 `src-tauri/src/network_cost/` owns native observations within the installed
-runtime's host-task lifetime. Existing group sync projections enforce the policy
+runtime's host-task lifetime. Native callbacks and signal streams carry only
+coalesced change demand; one observer serially queries current cost with sparse
+repair and owns registration/stream cleanup. Event arrival during a query must
+remain pending; the observer cannot keep a retired Node alive. Existing group
+sync projections enforce the policy
 in both directions; channel member IPC exposes only local-device status and
 session-authorized overrides. See [network cost protection](network-design-reference.md#cost-aware-group-attachment-sharing).
 

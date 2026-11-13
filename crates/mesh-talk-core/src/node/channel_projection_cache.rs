@@ -32,9 +32,24 @@ pub(super) struct ProjectionMetadata {
     pub requires_v5: bool,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct PullComparisonScope {
+    pub peer: PublicIdentity,
+    pub own: PublicIdentity,
+    pub own_account: String,
+    pub conversation: ConversationId,
+}
+
 enum Entry {
     Legacy(Box<ProjectionKey>, ProjectionMetadata),
     Paged(HistorySyncStamp, SyncMetadata),
+    // This variant is exclusively ordinary outbound, non-denied pull-only work.
+    PullQuiet(
+        Box<PullComparisonScope>,
+        HistorySyncStamp,
+        crate::eventlog::sync::network::QuietComparison,
+        tokio::time::Instant,
+    ),
 }
 
 #[derive(Default)]
@@ -60,7 +75,7 @@ impl ChannelProjectionCache {
                     || old.own != key.own
                     || old.inbound != key.inbound
             }
-            Entry::Paged(..) => true,
+            Entry::Paged(..) | Entry::PullQuiet(..) => true,
         });
         if self.entries.len() == MAX_PROJECTIONS {
             self.entries.pop_front();
@@ -86,6 +101,46 @@ impl ChannelProjectionCache {
         }
         self.entries.push_back(Entry::Paged(stamp, value));
         evicted
+    }
+
+    pub fn pull_comparison(
+        &self,
+        scope: &PullComparisonScope,
+        stamp: &HistorySyncStamp,
+    ) -> Option<crate::eventlog::sync::network::QuietComparison> {
+        self.entries.iter().find_map(|entry| match entry {
+            Entry::PullQuiet(key, local, hint, expires)
+                if key.as_ref() == scope
+                    && local == stamp
+                    && tokio::time::Instant::now() < *expires =>
+            {
+                Some(*hint)
+            }
+            _ => None,
+        })
+    }
+    pub fn insert_pull_comparison(
+        &mut self,
+        scope: PullComparisonScope,
+        stamp: HistorySyncStamp,
+        hint: crate::eventlog::sync::network::QuietComparison,
+    ) {
+        // A hit never renews an earned deadline, even if another full query
+        // observes the same unchanged pair while the hint is live.
+        if self.pull_comparison(&scope, &stamp) == Some(hint) {
+            return;
+        }
+        self.entries
+            .retain(|entry| !matches!(entry, Entry::PullQuiet(key, ..) if key.as_ref() == &scope));
+        if self.entries.len() == MAX_PROJECTIONS {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(Entry::PullQuiet(
+            Box::new(scope),
+            stamp,
+            hint,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(300),
+        ));
     }
 
     pub fn len(&self) -> usize {

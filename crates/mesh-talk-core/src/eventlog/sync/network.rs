@@ -17,6 +17,15 @@ pub struct SyncMetadata {
     pub fingerprint: Option<[u8; 32]>,
 }
 
+/// Local scheduling evidence for a completed quiet remote subset, never equality,
+/// custody or delivery. The issuing backend must revalidate the opaque local token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuietComparison {
+    pub local_token: [u8; 32],
+    pub remote_fingerprint: [u8; 32],
+    pub remote_count: u64,
+}
+
 /// Work includes rejected rows and graph edges, not just selected output. The
 /// transport releases the store lock and yields after each preparation step.
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +148,42 @@ pub trait NetworkSyncStore {
         _conversation: &ConversationId,
     ) -> Result<Option<SyncMetadata>, LogError> {
         Ok(None)
+    }
+    /// Optional receiver-only scheduling seam. Runtime opt-in requires an
+    /// ordinary pull-only view whose actual captured Have is unique, has empty
+    /// pending contributors, and exports no events. Earn evidence only after a
+    /// fully completed zero-wire-event exchange proves remote Have is a subset
+    /// of local Have under identical exact before/after local qualification.
+    /// Store fixed metadata in a shared bounded owner with a nonrenewing <=300s
+    /// repair deadline; never cache permission, full equality, custody or delivery.
+    fn quiet_comparison(
+        &self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<QuietComparison>, LogError> {
+        Ok(None)
+    }
+    /// Revalidate exact current owner/source/authority and the original deadline
+    /// after the awaited probe. Unknown, changed or expired evidence opts out.
+    fn validate_quiet_comparison(
+        &self,
+        _conversation: &ConversationId,
+        _hint: QuietComparison,
+    ) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    /// Only opt in when the actual captured ordinary Have is unique and has no
+    /// extra pending contributors; its exact local observation must still match.
+    fn quiet_comparison_token(&self, _view: &Self::View) -> Result<Option<[u8; 32]>, LogError> {
+        Ok(None)
+    }
+    /// Retain only the completed result described above, rechecking the actual
+    /// view and token. Repeated matches must not renew its repair deadline.
+    fn retain_quiet_comparison(
+        &self,
+        _view: &Self::View,
+        _hint: QuietComparison,
+    ) -> Result<(), LogError> {
+        Ok(())
     }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
     /// Optionally transfer an exclusively owned, currently qualified prepared

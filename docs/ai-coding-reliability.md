@@ -230,6 +230,16 @@ control proves error visibility, not the cause of an earlier hosted timeout.
 
 ## R03: Actual work owns its lifetime
 
+Keep concurrency capacity with the same actual owner as retirement admission.
+Cancelling a scheduler must not release a serial maintenance slot while its
+blocking worker or captures remain alive. Acquire only at top-level local-work
+entries, outside business guards; keep network waits and leaf calls independent.
+The `shared_local_repair_actual_owners` regressions hold real Profile work,
+require account-local queuing, verify foreground Noise progress and retain dirty
+follow-up or cancel the queued owner during retirement. The RuntimeWork
+`local_repair_capacity_outlives_blocking_captures_and_panic` control checks capture,
+output and panic cleanup before releasing capacity.
+
 Consume the canonical process owner's result contract rather than deriving a new
 verdict from a diagnostic flag. Windows atomically terminates its owned job even
 when empty, so verified `forcedRetirement` alone does not mean work leaked or a
@@ -1231,6 +1241,16 @@ current source and authority checks on reuse; this never certifies remote
 acceptance. Best-effort hint maintenance must not replace the original failure.
 The [paged-session regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
 own rejection, source/privacy invalidation and transport/cancellation cleanup.
+A quiet remote comparison must distinguish equal inventories from a proved
+remote subset. A zero-applied result alone cannot qualify reuse: policy rejection
+or duplicate wire events may still represent unfinished work. Restrict subset
+reuse to receiver-only export semantics, a unique advertised set already covered
+locally, complete zero-wire exchange and an exact current source/authority stamp.
+Revalidate after the awaited probe, preserve the remote intersection count and
+expire without renewing hits. Retain the shared cache and inventory allocation
+bounds; SDK defaults and duplex requests must follow their ordinary paths. The
+`guarded_pull_only_remote_subset_` regressions exercise the real Noise exchange;
+a skipped Have stream is neither durable possession nor recipient delivery.
 Local selection membership and remote custody have different lifetimes: relay
 replacement must not discard valid local target preparation, and local reuse
 must never substitute for a fresh remote custody probe. The
@@ -1411,6 +1431,13 @@ warming the actual production queries. The transcript
 actual VM reuse, read-only metadata, changed bindings, append/deletion and schema
 recovery without loading bodies. Intrinsic document memos similarly exclude
 receipt-derived publication authority even when the signed payload is unchanged.
+
+A bounded result page must not repeat a history-wide setup scan for each item.
+The [attachment selection owner](../crates/mesh-talk-core/src/node/account_sync/attachment_selection.rs)
+prepares its account lookup context once per decision, lazily on a media miss.
+Keep per-file eligibility, row/author and recall reads fresh and propagate their
+failures. Do not reuse that scheduling context for final publication: the
+attachment commit owner must build fresh context under its existing fences.
 
 Within one connection transaction, reuse a fresh observation through its owning
 role helpers instead of querying the same row again. Retain validation order,
