@@ -3320,18 +3320,6 @@ impl Node {
         Ok((confirmed, observations))
     }
 
-    fn confirmed_channel_custody_principals(
-        &self,
-        channel: ConversationId,
-        id: EventId,
-    ) -> Result<(HashSet<String>, bool), NodeError> {
-        self.confirmed_channel_custody_principals_with_verifier(
-            channel,
-            id,
-            &mut CustodyCertificateVerifier::default(),
-        )
-    }
-
     fn confirmed_channel_custody_principals_with_verifier(
         &self,
         channel: ConversationId,
@@ -3742,6 +3730,7 @@ impl Node {
                 })
                 .collect();
             let mut missing_report = None;
+            let mut verifier = CustodyCertificateVerifier::default();
             for key in candidates {
                 // Advance fair scheduling before any attempt, while retaining
                 // the generation's original boundary across quiet pages.
@@ -3766,12 +3755,18 @@ impl Node {
                     .len()
                     .min(2);
                 if target == 0
-                    || self.channel_custody_count(channel, event_id)?.unwrap_or(0) >= target
+                    || self
+                        .channel_custody_count_with_verifier(channel, event_id, &mut verifier)?
+                        .unwrap_or(0)
+                        >= target
                 {
                     continue;
                 }
-                let (principals, _) =
-                    self.confirmed_channel_custody_principals(channel, event_id)?;
+                let (principals, _) = self.confirmed_channel_custody_principals_with_verifier(
+                    channel,
+                    event_id,
+                    &mut verifier,
+                )?;
                 let peers = members
                     .iter()
                     .filter(|member| {
@@ -4719,6 +4714,96 @@ mod fanout_tests {
             progress.is_ok(),
             "background metadata publication must finish before held control release"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_full_accept_owners_settle_signed_controls_without_replay_feedback() {
+        use crate::{
+            identity::account::Account,
+            node::test_support::{node_with_files, settle_group_metadata},
+        };
+        use futures_util::FutureExt;
+        use std::sync::atomic::Ordering;
+
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let identities = [DeviceIdentity::generate(), DeviceIdentity::generate()];
+        let accounts = [Account::generate(), Account::generate()];
+        let left_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let right_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addresses = [
+            left_listener.local_addr().unwrap(),
+            right_listener.local_addr().unwrap(),
+        ];
+        let proofs = [
+            Announce::new_with_account(&identities[0], &accounts[0], "left", addresses[0].port()),
+            Announce::new_with_account(&identities[1], &accounts[1], "right", addresses[1].port()),
+        ];
+        let [left_identity, right_identity] = identities;
+        let [left_account, right_account] = accounts;
+        let (left, _left_messages, _left_files) =
+            node_with_files(dirs[0].path(), left_identity, left_account, &proofs[1]);
+        let (right, _right_messages, _right_files) =
+            node_with_files(dirs[1].path(), right_identity, right_account, &proofs[0]);
+        let nodes = [left, right];
+        for node in &nodes {
+            node.set_post_office_enabled(false);
+        }
+        let probes = [
+            control_retry_probe(&nodes[0]),
+            control_retry_probe(&nodes[1]),
+        ];
+        // Both listeners run the complete production parent, including account,
+        // custody, local metadata and the independent control recovery child.
+        let workers = [
+            tokio::spawn(nodes[0].clone().run_accept_loop(left_listener)),
+            tokio::spawn(nodes[1].clone().run_accept_loop(right_listener)),
+        ];
+        let outcome = std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                let group = nodes[0].create_channel_invited("settled duplex controls", vec![nodes[1].identity.public()]).await.unwrap();
+                settle_group_metadata(&nodes[1], group);
+                nodes[1].accept_channel_invite(group).await.unwrap();
+                for node in &nodes {
+                    node.set_channel_replica_enabled(group, true).await.unwrap();
+                }
+                nodes[0].set_channel_announcement_if(group, Some("signed metadata before observation"), None, |commit| commit()).await.unwrap();
+                // Explicit authenticated warmup is not the measured oracle: each
+                // full parent must serve the real session in both directions.
+                for (from, to) in [(0, 1), (1, 0)] {
+                    let mut connection = nodes[from].privacy_dial(addresses[to], &nodes[to].identity.public()).await.unwrap();
+                    let store = nodes[from].sync_store(&nodes[to].identity.public());
+                    super::super::session::request_round(&mut connection, &store, group).await.unwrap();
+                }
+                for node in &nodes {
+                    settle_group_metadata(node, group);
+                    assert!(node.channels.lock().unwrap().pending_control_state(group, &node.user_id()).is_some(), "retained signed controls remain permanent replay facts after successful sync");
+                    let metadata = node.channel_metadata(group).unwrap();
+                    assert!(!metadata.query_pending);
+                    assert_eq!(metadata.announcement.unwrap().content.as_deref(), Some("signed metadata before observation"));
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let snapshot = || nodes.iter().zip(&probes).map(|(node, probe)| (
+                    node.log.lock().unwrap().repository().unwrap().source_revision().unwrap(),
+                    probe.scans.load(Ordering::SeqCst),
+                    probe.dispatches.load(Ordering::SeqCst),
+                )).collect::<Vec<_>>();
+                let before = snapshot();
+                assert!(before.iter().all(|(_, scans, dispatches)| *scans > 0 && *dispatches > 0), "both real control owners must have selected and completed outbound work before observation: {before:?}");
+                // No foreground preparation, manual retry, fake publisher or
+                // source mutation occurs inside this sub-repair window.
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                let after = snapshot();
+                eprintln!("two full authenticated parents (source, scans, distributions): {before:?} -> {after:?}");
+                assert_eq!(before.iter().map(|row| row.0).collect::<Vec<_>>(), after.iter().map(|row| row.0).collect::<Vec<_>>(), "source movement indicates unfinished catch-up rather than a qualified unchanged-source replay regression");
+                assert_eq!(after, before, "successful retained controls must settle across two full authenticated parents before sparse repair");
+            }).await.expect("real two-parent control fixture must finish within its bounded protocol window");
+        }).catch_unwind().await;
+        for (node, worker) in nodes.iter().zip(workers) {
+            stop_control_retry_owner(node, worker).await;
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -6362,6 +6447,126 @@ mod fanout_tests {
         assert_ne!(
             certificate.device_ed25519_pub,
             node.identity.public().ed25519_pub
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_custody_retry_turn_verifies_shared_certificate_once_across_rows() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let holder = DeviceIdentity::generate();
+        let holder_account = Account::generate();
+        let proof = Announce::new_with_account(&holder, &holder_account, "holder", 9);
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.set_post_office_enabled(false);
+        // The unadvertised second member keeps the target at two independent
+        // principals. Each row therefore exercises both count and below-target
+        // confirmed-principal selection without opening any retry connection.
+        let other = DeviceIdentity::generate();
+        let channel = node
+            .create_channel(
+                "multirow custody intrinsic reuse",
+                vec![holder.public(), other.public()],
+            )
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for body in [
+            b"first".as_slice(),
+            b"second".as_slice(),
+            b"third".as_slice(),
+        ] {
+            let event = node
+                .enqueue_channel_message_reply_expiring_if(channel, body, None, None, |commit| {
+                    commit()
+                })
+                .unwrap();
+            node.publish_channel_custody(channel, event, &holder.public(), true, false, false)
+                .unwrap();
+            assert_eq!(node.channel_custody_count(channel, event).unwrap(), Some(1));
+            ids.push(event);
+        }
+        let members = node.channel_custody_repair_members(channel);
+        assert_eq!(
+            members
+                .iter()
+                .filter_map(|member| node.channel_custody_member_principal(channel, member, None))
+                .collect::<HashSet<_>>()
+                .len(),
+            2
+        );
+        let keys = node
+            .log
+            .lock()
+            .unwrap()
+            .message_keys_after(
+                channel,
+                crate::eventlog::event::Author::from_ed25519(node.identity.public().ed25519_pub),
+                None,
+                CHANNEL_CUSTODY_SCAN_PER_TICK,
+            )
+            .unwrap();
+        assert_eq!(keys.len(), ids.len());
+        let source = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .source_revision()
+            .unwrap();
+        let database = node.storage.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let verifies = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let verifies = verifies.clone();
+            move |_, phase| {
+                if phase == "custody_holder_certificate_verify" {
+                    verifies.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let mut cursors = HashMap::new();
+        let mut progress = CustodyRetryProgress::default();
+        assert!(
+            node.retry_channel_custody_turn(0, &mut cursors, 1, &mut progress)
+                .await
+                .is_none()
+        );
+        *node.account_client_test_hook.lock().unwrap() = None;
+        let actual = verifies.load(Ordering::SeqCst);
+        assert_eq!(
+            cursors[&channel].after,
+            keys.last().copied(),
+            "the actual bounded owner must traverse all three witnessed rows"
+        );
+        assert!(cursors[&channel].complete && progress.quiet_complete);
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .source_revision()
+                .unwrap(),
+            source
+        );
+        assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(database.successful_write_commits(), commits);
+        eprintln!(
+            "actual custody turn traversed {} rows with {actual} identical-certificate verifications",
+            keys.len()
+        );
+        assert_eq!(
+            actual, 1,
+            "one bounded custody retry turn must reuse identical certificate intrinsics across count and principal decisions"
         );
     }
 

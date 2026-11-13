@@ -394,6 +394,7 @@
             "node::node::tests::channel_custody_post_office_observation_survives_sibling_sync_without_relay",
             "node::node::tests::channel_member_recovers_missed_message_from_peer",
             "channel_custody_retry_skips_own_siblings_and_already_confirmed_account",
+            "channel_custody_retry_turn_verifies_shared_certificate_once_across_rows",
             "custody_retry_classes_each_rotate_through_all_competing_peers",
             "routed_offline_member_does_not_starve_sibling_custody_report_after_history_recovers",
             "custody_report_progresses_while_unrelated_channel_recovery_is_held",
@@ -409,7 +410,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "One bounded status request combines member and post-office counts and reuses only intrinsic verification under complete fixed-size certificate keys; document readability, holder binding, tombstones, membership and replica policy remain live per row. Member-count qualification reads each signed holder witness once within that decision; subsequent observations recheck durable readability. Unknown counts stay distinct from zero and request-local reuse expires on return or error.",
+            "name": "One bounded status request or 128-row custody repair turn reuses only intrinsic verification under complete fixed-size certificate keys; document readability, holder binding, tombstones, membership and replica policy remain live per row. Status requests combine member and post-office counts. Member-count qualification reads each signed holder witness once within that decision; subsequent observations recheck durable readability. Unknown counts stay distinct from zero and turn/request-local reuse expires on return or error.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -1037,7 +1038,11 @@
           "filters": [
             "node::favorites::",
             "node::account_sync::favorites::",
-            "node::account_sync_wire::"
+            "node::account_sync_wire::",
+            "bounded_attachment_handoff_keeps_exact_total_and_rotates_past_page",
+            "attachment_recall_context_",
+            "initial_attachment_selection_failure_retries_locally_without_history_restart",
+            "attachment_refill_observes_other_source_bytes_and_settles_without_history"
           ]
         }
       ],
@@ -1063,7 +1068,7 @@
             "reference": "docs/favorites.md#synchronization"
           },
           {
-            "name": "Favorite file access requires a nonremoved unexpired reference and never grants transfer consent",
+            "name": "Favorite file access requires a nonremoved unexpired reference and never grants transfer consent; empty attachment queues and unrelated file lookups skip canonical projection, while actual candidates retain current protection and final eligibility checks",
             "reference": "docs/favorites.md#lifetime-and-files"
           },
           {
@@ -1230,6 +1235,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::channels::fanout_tests::accept_owner_",
+            "node::channels::fanout_tests::two_full_accept_owners_settle_signed_controls_without_replay_feedback",
             "node::work_observation::tests::distribution_origins_record_actual_first_poll_not_construction_and_keep_variants",
             "channel_departure_retry_preserves_original_event_after_owner_reconnects",
             "channel_departure_automatic_recovery_preserves_original_event_after_owner_reconnects",

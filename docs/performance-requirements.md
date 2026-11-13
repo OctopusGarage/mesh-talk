@@ -122,8 +122,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    tick only after the owner exposes bounded continuation, failure retry and
    dependency-blocked outcomes; unfinished pages must still drain promptly.
 3. **Read metadata before payloads.** Compare revision/digest/cursor and query
-   pending keys before reading, decrypting, cloning or decoding bodies. Paginate
-   changes; drain available pages promptly in bounded batches. A slower fallback
+   pending keys before reading, decrypting, cloning or decoding bodies.
+   Reject impossible attachment candidates before canonical history projection;
+   selected candidates still require fresh protection and final eligibility.
+   Paginate changes; drain available pages promptly in bounded batches. A slower fallback
    must not delay each already-available page by another interval.
    A memo that still hydrates its input on every wake is not an I/O optimization.
    Reject exact peer-known IDs before per-item export lookup or body hydration;

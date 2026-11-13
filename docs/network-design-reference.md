@@ -1239,6 +1239,11 @@ document and checks current holder binding, tombstones, membership and replica
 policy. Unknown counts remain distinct from confirmed zero, and own-account
 copies and post-office copies remain separate from member-copy targets.
 
+Each bounded 128-row custody repair turn shares the same intrinsic verifier
+across its count and missing-principal decisions. The turn retains the same
+256-key cap and fresh per-row authority checks; no verification memo survives
+the turn or substitutes for reading the current witness.
+
 Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A five-minute modern-host metadata fallback and foreground activation repair missed events; older hosts retain compatibility polling; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
 ```mermaid

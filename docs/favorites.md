@@ -41,6 +41,11 @@ not grant transfer consent. File access requires a live unexpired favorite
 reference; removing the last reference permits cleanup. Account-data deletion
 removes the collection with the account's other local encrypted data.
 
+Attachment discovery filters live, missing, size-bounded file candidates before
+canonical source protection checks. Unrelated metadata lookups and empty queues
+must not materialize history. Actual candidates retain current protection and
+final expiry/availability checks; a candidate hint never grants file access.
+
 ## Backup and recovery
 
 Manual local-file and Google Drive backups include Favorites, titles,
@@ -100,6 +105,13 @@ Favorite-membership observations refresh for same-owner document or legacy broad
 invalidations, while known pure sync-status changes leave the saved-membership
 query quiet. Retired owner/runtime callbacks remain ineligible; status observation
 must not substitute for document or mutation ownership.
+
+Open views refresh on relevant document/file changes and foreground activation,
+with five-minute repair. Clocks wait for actual expiry or local midnight; a
+monotonic floor prevents expired content returning after a wall-clock rollback.
+Same-owner/query refreshes coalesce until the actual native read retires, even
+after its UI watchdog. Retired owners and replaced queries cannot publish or
+restart a stale refresh; independent foreground search retains its admission.
 
 Focused journal and loopback tests establish persistence, atomicity, stale edits,
 replay, policy intersections and unrelated-account rejection. Registered IPC tests

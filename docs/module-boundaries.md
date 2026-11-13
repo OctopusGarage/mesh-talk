@@ -166,6 +166,12 @@ stale URLs and clears video posters; retired reads cannot initiate fallback or
 publish a URL. Protected reveals keep the default per-mount URL lifecycle and
 never opt into ordinary-media reuse.
 
+Failed full reads retain three short commit-race retries, then recover on owned
+file changes, foreground activation or five-minute repair. The mounted owner
+serializes admitted reads and retains one dirty follow-up; success and retirement
+stop recovery. Failed bounded previews retain explicit retry without original
+fallback. These scheduling hints never grant consent or bypass current admission.
+
 `useConversationViewport.ts` owns reader anchors and live-edge intent alongside
 Virtuoso's variable-height measurements. Its guarded mutation and resize callbacks
 are the sole automatic live-edge writer; do not add a competing `followOutput`

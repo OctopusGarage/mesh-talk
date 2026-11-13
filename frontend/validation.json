@@ -434,6 +434,8 @@
       "frontend": [
         "src/features/chat/favorites/selection.test.ts",
         "src/features/chat/favorites/FavoriteEditor.test.ts",
+        "src/features/chat/favorites/FavoritesDialog.test.ts",
+        "src/features/chat/favorites/FavoriteAttachment.test.ts",
         "src/store/messageFavorites.test.ts",
         "src/lib/api/messageFavorites.test.ts",
         "src/lib/attachmentSave.test.ts",
@@ -459,7 +461,7 @@
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
-            "name": "Favorite membership ignores known pure sync-status invalidations, retains same-owner document and legacy broad refresh, and rejects retired owner/runtime callbacks.",
+            "name": "Favorite membership and list observations ignore known pure sync-status invalidations, retain same-owner document and legacy broad refresh, and reject retired owner/runtime callbacks. Open views use real expiry/calendar deadlines and event/activation refresh with five-minute repair; same-query background reads remain coalesced until actual native retirement, including after the UI watchdog.",
             "reference": "docs/favorites.md#ownership-and-acceptance"
           }
         ]
@@ -2230,7 +2232,7 @@
             "reference": "docs/module-boundaries.md#inline-media-presentation"
           },
           {
-            "name": "Ordinary media reuse shares admitted reads and URLs, bounds idle Blob bytes and entries, expires idle URLs, and revokes on owner/runtime retirement; protected reveals remain ephemeral.",
+            "name": "Ordinary media reuse shares admitted reads and URLs, bounds idle Blob bytes and entries, expires idle URLs, and revokes on owner/runtime retirement; protected reveals remain ephemeral. Failed full reads retain only three short commit-race retries, then owned file/activation events and five-minute repair, with serial coalescing and no recovery timer after success. Failed bounded previews do not fall back to originals or retry automatically.",
             "reference": "docs/module-boundaries.md#inline-media-presentation"
           },
           {

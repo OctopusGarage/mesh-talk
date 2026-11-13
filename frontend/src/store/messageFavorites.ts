@@ -36,6 +36,16 @@ export function createMessageFavoritesStore(
 ) {
   let lifetime = 0;
   let request = 0;
+  let loadObserver = 0;
+  type ReadOwner = {
+    owner: string;
+    epoch: number;
+    query: string;
+    current: () => boolean;
+  };
+  // A UI watchdog does not retire the native list or release its global slot.
+  const actualReads = new Set<ReadOwner>();
+  let queuedRefresh: ReadOwner | undefined;
   const empty = {
     items: [] as MessageFavorite[],
     query: "",
@@ -44,6 +54,31 @@ export function createMessageFavoritesStore(
     hasMore: false,
   };
   return create<FavoriteState>((set, get) => {
+    const matchingRead = (intent: ReadOwner) =>
+      [...actualReads].some(
+        (read) =>
+          read.owner === intent.owner &&
+          read.epoch === intent.epoch &&
+          read.query === intent.query &&
+          read.current(),
+      );
+    const drainRefresh = () => {
+      const intent = queuedRefresh;
+      if (!intent) return;
+      if (
+        intent.epoch !== lifetime ||
+        !intent.current() ||
+        get().query !== intent.query
+      ) {
+        queuedRefresh = undefined;
+        return;
+      }
+      if (matchingRead(intent)) return;
+      queuedRefresh = undefined;
+      void get()
+        .refresh()
+        .catch(() => {});
+    };
     const mutate = async <T>(operation: (owner: string) => Promise<T>) => {
       const lease = capture();
       const epoch = lifetime;
@@ -66,14 +101,32 @@ export function createMessageFavoritesStore(
       reset: () => {
         lifetime++;
         request++;
+        loadObserver++;
+        queuedRefresh = undefined;
         set(empty);
       },
-      refresh: () => get().load(get().query, false, true),
+      refresh: () => {
+        const lease = capture();
+        if (!lease.owner || !lease.current()) return Promise.resolve();
+        const intent = {
+          owner: lease.owner,
+          epoch: lifetime,
+          query: get().query,
+          current: lease.current,
+        };
+        if (matchingRead(intent)) {
+          queuedRefresh = intent;
+          return Promise.resolve();
+        }
+        return get().load(intent.query, false, true);
+      },
       load: async (query, append = false, refresh = false) => {
         const lease = capture();
         if (!lease.owner || !lease.current()) return;
         if (append && (get().loading || get().query !== query)) return;
+        queuedRefresh = undefined;
         const sequence = ++request;
+        const observer = ++loadObserver;
         const epoch = lifetime;
         const offset = append ? get().items.length : 0;
         const wanted = refresh ? Math.max(20, get().items.length) : 20;
@@ -87,9 +140,28 @@ export function createMessageFavoritesStore(
           const accumulated: MessageFavorite[] = [];
           let hasMore = false;
           do {
-            const page = await readWithDeadline(() =>
-              api.list(lease.owner!, query, offset + accumulated.length, 20),
-            );
+            const page = await readWithDeadline(() => {
+              // Invoke before tracking so a synchronous throw cannot leak a record.
+              const operation = Promise.resolve(
+                api.list(lease.owner!, query, offset + accumulated.length, 20),
+              );
+              const read = {
+                owner: lease.owner!,
+                epoch,
+                query,
+                current: lease.current,
+              };
+              actualReads.add(read);
+              const settled = () => {
+                actualReads.delete(read);
+                // The deadline owner releases its global slot in its next
+                // settlement handler. Admit queued work only after that release.
+                queueMicrotask(drainRefresh);
+              };
+              // Both physical outcomes release ownership, even after UI timeout.
+              void operation.then(settled, settled).catch(() => {});
+              return operation;
+            });
             if (!lease.current() || epoch !== lifetime || sequence !== request)
               return;
             accumulated.push(...page.items);
@@ -108,7 +180,13 @@ export function createMessageFavoritesStore(
             loading: false,
           });
         } catch (e) {
-          if (lease.current() && epoch === lifetime && sequence === request)
+          // A mutation invalidates result publication, not the latest load's UI
+          // watchdog. A newer load/reset still retires this observer independently.
+          if (
+            lease.current() &&
+            epoch === lifetime &&
+            observer === loadObserver
+          )
             set({ error: errorMessage(e), loading: false });
         }
       },

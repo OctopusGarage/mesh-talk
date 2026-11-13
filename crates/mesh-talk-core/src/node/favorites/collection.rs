@@ -521,6 +521,18 @@ impl Node {
             .current
             .values()
             .filter(|r| !r.removed)
+            .filter(|r| {
+                r.favorite.messages.iter().any(|message| {
+                    message
+                        .expires_at_ms
+                        .is_none_or(|end| end > self.expiry_now())
+                        && message.file.as_ref().is_some_and(|file| {
+                            file.size <= MAX_FAVORITE_FILE_BYTES
+                                && conversation(&file.file_conv)
+                                    .is_some_and(|file| !self.favorite_media.contains(file))
+                        })
+                })
+            })
             .filter(|r| !self.favorite_has_protected_content(&r.favorite))
             .flat_map(|r| &r.favorite.messages)
             .filter(|m| m.expires_at_ms.is_none_or(|end| end > self.expiry_now()))
@@ -564,17 +576,29 @@ impl Node {
         Ok(true)
     }
     fn favorite_file_metadata(&self, file_conv: ConversationId) -> Option<FavoriteFile> {
+        let requested = hex::encode(file_conv.as_bytes());
         self.favorites
             .lock()
             .expect("favorites mutex")
             .current
             .values()
             .filter(|r| !r.removed)
+            .filter(|r| {
+                r.favorite.messages.iter().any(|message| {
+                    message
+                        .expires_at_ms
+                        .is_none_or(|end| end > self.expiry_now())
+                        && message
+                            .file
+                            .as_ref()
+                            .is_some_and(|file| file.file_conv == requested)
+                })
+            })
             .filter(|r| !self.favorite_has_protected_content(&r.favorite))
             .flat_map(|r| &r.favorite.messages)
             .filter(|m| m.expires_at_ms.is_none_or(|end| end > self.expiry_now()))
             .filter_map(|m| m.file.as_ref())
-            .find(|f| f.file_conv == hex::encode(file_conv.as_bytes()))
+            .find(|f| f.file_conv == requested)
             .cloned()
     }
     pub(in crate::node) fn favorite_file_size(&self, file_conv: ConversationId) -> Option<u64> {

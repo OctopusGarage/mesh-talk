@@ -240,6 +240,12 @@ follow-up or cancel the queued owner during retirement. The RuntimeWork
 `local_repair_capacity_outlives_blocking_captures_and_panic` control checks capture,
 output and panic cleanup before releasing capacity.
 
+A UI read watchdog retires observation, not the native operation. Coalesce a
+same-owner/query refresh against the original promise until settlement, retaining
+one valid follow-up; reset or query replacement must not let stale work publish
+or block a new intent. The [Favorites store tests](../frontend/src/store/messageFavorites.test.ts)
+hold the actual list promise beyond its UI deadline before requesting refresh.
+
 Consume the canonical process owner's result contract rather than deriving a new
 verdict from a diagnostic flag. Windows atomically terminates its owned job even
 when empty, so verified `forcedRetirement` alone does not mean work leaked or a
@@ -1238,6 +1244,19 @@ and rows. The [repository regressions](../crates/mesh-talk-core/src/eventlog/rep
 `hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh` count
 actual SQLite preparation work while preserving unknown-item authorization,
 fresh revisions and corruption failures.
+
+Filter impossible candidates before canonical history or protection projection;
+an empty attachment query must not build an unrelated history index. Keep current
+protection and final eligibility checks for selected candidates. The
+[Favorites capture regressions](../crates/mesh-talk-core/src/node/favorites/capture_tests.rs)
+count changed rows and commits for empty queues and unrelated file lookups, with
+protected and corrupt canonical sources still denied.
+
+Share existing bounded intrinsic-proof verification within one repair turn,
+not just within its public batch API. Retain fresh witness and permission reads
+per item. The [custody recovery regression](../crates/mesh-talk-core/src/node/channels.rs)
+counts verification across real witnessed rows through the actual retry turn;
+complete-certificate keys and bounded retention keep their existing controls.
 
 Check read granularity as well as file size: streaming JSON parsers can turn
 each byte into an OS read. Use bounded buffering for files, as required by the
