@@ -76,6 +76,11 @@ pub(in crate::node) struct PendingChannelPlaintext {
     pub(in crate::node) retry_at: Option<std::time::Instant>,
     lanes: std::collections::HashMap<ConversationId, ChannelPlaintextRetry>,
     cursor: Option<ConversationId>,
+    owner_cursor: Option<ConversationId>,
+    owner_upper: Option<ConversationId>,
+    owner_active: bool,
+    owner_complete: bool,
+    pub(super) owner_resweep: bool,
 }
 #[derive(Default)]
 struct ChannelPlaintextRetry {
@@ -1027,7 +1032,17 @@ impl Node {
         conv: ConversationId,
         context: &'static str,
     ) {
-        let result = (|| -> Result<(), NodeError> {
+        if let Err(error) = self.process_file_events_reception_turn(conv, context) {
+            log::warn!("process_file_events_reception deferred after storage failure: {error}");
+        }
+    }
+
+    fn process_file_events_reception_turn(
+        &self,
+        conv: ConversationId,
+        context: &'static str,
+    ) -> Result<(), NodeError> {
+        (|| -> Result<(), NodeError> {
             self.discover_file_receives()?;
             let is_channel = self
                 .channels
@@ -1134,10 +1149,7 @@ impl Node {
                 }
             }
             Ok(())
-        })();
-        if let Err(error) = result {
-            log::warn!("process_file_events_reception deferred after storage failure: {error}");
-        }
+        })()
     }
 
     /// Fetch chunks for any file we've surfaced a manifest for but don't fully hold yet,
@@ -1933,11 +1945,136 @@ impl Node {
     }
 
     /// Retry the exact durable ciphertext work with no reachable peer or new event.
+    #[cfg(test)]
     pub(in crate::node) fn retry_channel_plaintext(&self) {
-        let turn = || -> Result<(), NodeError> {
+        if let Err(error) = self.retry_channel_plaintext_inner(false) {
+            log::warn!("channel work discovery deferred: {error}");
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn defer_channel_plaintext_for_test(
+        &self,
+        channel: ConversationId,
+        deadline: std::time::Instant,
+    ) {
+        self.pending_channel_plaintext
+            .lock()
+            .expect("channel retry lock")
+            .lanes
+            .entry(channel)
+            .or_default()
+            .retry_at = Some(deadline);
+    }
+
+    /// One local recovery admission keeps file failures attached to the same
+    /// durable runtime demand after plaintext independently finishes.
+    pub(super) fn process_channel_recovery_local(
+        &self,
+        channel: ConversationId,
+    ) -> Result<(), NodeError> {
+        let previous_delay = {
+            let pending = self
+                .pending_channel_plaintext
+                .lock()
+                .expect("channel retry lock");
+            let lane = pending.lanes.get(&channel);
+            if lane
+                .and_then(|lane| lane.retry_at)
+                .is_some_and(|at| std::time::Instant::now() < at)
+            {
+                return Ok(());
+            }
+            lane.map_or(0, |lane| lane.delay_ms)
+        };
+        let plaintext = self.process_channel_reception_inner(channel, "catch_up");
+        let files = self.process_file_events_reception_turn(channel, "catch_up");
+        #[cfg(test)]
+        let file_failed = files.is_err();
+        let result = match plaintext {
+            Err(error) => Err(error),
+            Ok(()) => files,
+        };
+        if let Err(error) = &result {
+            self.channel_checkpoints.queue_runtime(channel)?;
+            {
+                let mut pending = self
+                    .pending_channel_plaintext
+                    .lock()
+                    .expect("channel retry lock");
+                let lane = pending.lanes.entry(channel).or_default();
+                lane.delay_ms = lane.delay_ms.max(previous_delay);
+                if !lane.record_failure(error, std::time::Instant::now()) {
+                    self.channel_recovery_notify.notify_one();
+                }
+            }
+        }
+        #[cfg(test)]
+        if file_failed {
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_file_failure".into()
+            });
+        }
+        result
+    }
+
+    pub(super) fn note_channel_plaintext_recovery_input(&self) {
+        let mut pending = self
+            .pending_channel_plaintext
+            .lock()
+            .expect("channel retry lock");
+        if pending.owner_active {
+            pending.owner_resweep = true;
+        } else {
+            pending.owner_complete = false;
+        }
+    }
+
+    pub(super) fn retry_channel_plaintext_turn(
+        &self,
+    ) -> Result<super::channels::LocalRecoveryWork, NodeError> {
+        self.retry_channel_plaintext_inner(true)
+    }
+
+    fn retry_channel_plaintext_inner(
+        &self,
+        owned_turn: bool,
+    ) -> Result<super::channels::LocalRecoveryWork, NodeError> {
+        use super::channels::LocalRecoveryWork;
+        let turn = || -> Result<LocalRecoveryWork, NodeError> {
+            if owned_turn {
+                let pending = self
+                    .pending_channel_plaintext
+                    .lock()
+                    .expect("channel retry lock");
+                if pending.owner_complete {
+                    let now = std::time::Instant::now();
+                    let retry_after = pending
+                        .lanes
+                        .values()
+                        .filter_map(|lane| lane.retry_at)
+                        .chain(pending.retry_at)
+                        .filter(|at| *at > now)
+                        .map(|at| at.duration_since(now))
+                        .min();
+                    return Ok(LocalRecoveryWork {
+                        more: false,
+                        retry_after,
+                    });
+                }
+            }
+            #[cfg(test)]
+            if owned_turn {
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_plaintext_entered".into()
+                });
+            }
             if self.channel_checkpoints.retire_orphan_step(128)? != 0 {
                 self.channel_recovery_notify.notify_one();
-                return Ok(());
+                return Ok(LocalRecoveryWork {
+                    more: true,
+                    retry_after: None,
+                });
             }
             let more = {
                 let log = self.log.lock().expect("log lock");
@@ -1953,29 +2090,49 @@ impl Node {
                     .retry_at
                     .is_some_and(|deadline| std::time::Instant::now() < deadline)
                 {
-                    return Ok(());
+                    return Ok(LocalRecoveryWork {
+                        more: more || bootstrap,
+                        retry_after: pending
+                            .retry_at
+                            .map(|at| at.saturating_duration_since(std::time::Instant::now())),
+                    });
                 }
-                let channel = self.channel_checkpoints.next_runtime(pending.cursor)?;
-                pending.cursor = channel.map(|(channel, _)| channel);
-                channel
+                if owned_turn {
+                    if !pending.owner_active {
+                        pending.owner_upper = self.channel_checkpoints.runtime_upper()?;
+                        pending.owner_cursor = None;
+                        pending.owner_active = true;
+                    }
+                    if more || bootstrap {
+                        pending.owner_resweep = true;
+                    }
+                    let channel = match pending.owner_upper {
+                        Some(upper) => self
+                            .channel_checkpoints
+                            .next_runtime_through(pending.owner_cursor, upper)?,
+                        None => None,
+                    };
+                    pending.owner_cursor = channel.map(|(channel, _)| channel);
+                    channel
+                } else {
+                    let channel = self.channel_checkpoints.next_runtime(pending.cursor)?;
+                    pending.cursor = channel.map(|(channel, _)| channel);
+                    channel
+                }
             };
             if more || bootstrap {
                 self.channel_recovery_notify.notify_one();
             }
+            let mut local_failed = false;
             if let Some((channel, _)) = channel {
-                if let Err(error) = self.process_channel_reception_inner(channel, "catch_up") {
-                    let mut pending = self
-                        .pending_channel_plaintext
-                        .lock()
-                        .expect("channel retry lock");
-                    let lane = pending.lanes.entry(channel).or_default();
-                    if lane.record_failure(&error, std::time::Instant::now()) {
-                        log::warn!("channel recovery deferred after storage failure: {error}");
-                    } else {
-                        self.channel_recovery_notify.notify_one();
-                    }
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    format!("channel_recovery_plaintext_selected {channel:?}")
+                });
+                if let Err(error) = self.process_channel_recovery_local(channel) {
+                    local_failed = true;
+                    log::warn!("channel local recovery deferred: {error}");
                 }
-                self.process_file_events_reception(channel, "catch_up");
             }
             #[cfg(test)]
             self.trace_account_client(&self.identity.public(), || {
@@ -1997,11 +2154,44 @@ impl Node {
                     global_delayed, next_delayed, next.is_err(), pending.lanes.len(), more, bootstrap
                 )
             });
-            Ok(())
+            let mut pending = self
+                .pending_channel_plaintext
+                .lock()
+                .expect("channel retry lock");
+            let runtime_more = if owned_turn {
+                let next = match pending.owner_upper {
+                    Some(upper) => self
+                        .channel_checkpoints
+                        .next_runtime_through(pending.owner_cursor, upper)?,
+                    None => None,
+                };
+                if next.is_some() {
+                    true
+                } else {
+                    pending.owner_active = false;
+                    let again = std::mem::take(&mut pending.owner_resweep);
+                    pending.owner_complete = !again && !local_failed && !more && !bootstrap;
+                    again
+                }
+            } else {
+                false
+            };
+            let now = std::time::Instant::now();
+            let retry_after = pending
+                .lanes
+                .values()
+                .filter_map(|lane| lane.retry_at)
+                .chain(pending.retry_at)
+                .filter(|at| *at > now)
+                .map(|at| at.duration_since(now))
+                .chain(local_failed.then_some(Duration::from_secs(3)))
+                .min();
+            Ok(LocalRecoveryWork {
+                more: more || bootstrap || runtime_more,
+                retry_after,
+            })
         };
-        if let Err(error) = turn() {
-            log::warn!("channel work discovery deferred: {error}");
-        }
+        turn()
     }
 
     /// Receive producer owned by the participant runtime task set. A healthy

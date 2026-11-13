@@ -1274,6 +1274,24 @@ recovery must not expire established peers, miss visibility restoration or trunc
 a large known-target tail. Gate hidden producers before OS inventory work and
 retain per-send disclosure checks. Real UDP and target-budget controls belong to
 the [discovery owner](../crates/mesh-talk-core/src/discovery/service.rs).
+Independent signed discovery can suppress an optional transport probe only for
+the same full binding and endpoint, with enough lease remaining for recovery.
+Reserve the handshake budget in an actual deadline; a coarse timer can otherwise
+wake after the safe start time. The real periodic-worker and slow authenticated-only
+controls in [privacy runtime tests](../crates/mesh-talk-core/src/node/privacy_runtime_tests.rs)
+own both avoided handshakes and timely recovery.
+
+A sparse deadline below a fast loop does not make that loop quiet. Observe entry
+into the real business owner, including queries before inner revision gates.
+Before removing its timer, expose finite continuations and failed-work deadlines;
+test arrivals behind a captured cursor, after its upper cut and while remote work
+is held. Immediate continuation must not manufacture a new dirty input. The
+[local recovery owner](../crates/mesh-talk-core/src/node/channels.rs) and its actual
+periodic-worker controls own this boundary; helper-only empty selection tests do
+not establish that the producer stopped running. A bounded cache miss is not a
+new durable fact: publish readiness from the source-checked materialization
+transition, not from read-only hydration. Exercise more valid groups than the
+cache can retain, and preserve a distinct UI wake after actual failed-read recovery.
 
 Trace every consumer of a scheduling projection: relay-control retries, file
 continuations, profile publication, account access and receive maintenance must

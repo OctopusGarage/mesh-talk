@@ -188,3 +188,94 @@ test("roster reception updates presence without reloading unrelated state", asyn
     .poll(async () => (await snapshot()).counts.get_account_documents ?? 0)
     .toBeGreaterThan(after.get_account_documents ?? 0);
 });
+
+test.describe("live date display", () => {
+  test.use({ timezoneId: "" });
+
+  test("date display cache follows live timezone, midnight, and locale changes", async ({
+    page,
+    context,
+  }) => {
+    await page.goto("/");
+    await page.clock.install({ time: new Date("2030-03-08T04:30:00Z") });
+    const session = await context.newCDPSession(page);
+    try {
+      // Keep the same document and ESM module/cache throughout zone changes,
+      // including DST boundaries and local dates on opposite sides of midnight.
+      for (const timezoneId of [
+        "UTC",
+        "Asia/Shanghai",
+        "America/New_York",
+        "UTC",
+      ]) {
+        await session.send("Emulation.setTimezoneOverride", { timezoneId });
+        for (const language of ["en", "ko", "pt-BR"]) {
+          const results = await page.evaluate(async (language) => {
+            const formatPath = "/src/lib/format.ts";
+            const i18nPath = "/src/lib/i18n.ts";
+            const { formatTime, formatDay } = await import(
+              /* @vite-ignore */ formatPath
+            );
+            const { default: i18n } = await import(/* @vite-ignore */ i18nPath);
+            await i18n.changeLanguage(language);
+            const instants = [
+              "2020-01-01T00:30:00Z",
+              "2020-06-01T00:30:00Z",
+              "2026-03-08T06:30:00Z",
+              "2026-03-08T07:30:00Z",
+              "2026-11-01T05:30:00Z",
+              "2026-11-01T06:30:00Z",
+            ];
+            const comparisons = instants.map((instant) => {
+              const date = new Date(instant);
+              return {
+                time: formatTime(date.getTime()),
+                expectedTime: date.toLocaleTimeString(i18n.resolvedLanguage, {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+                day: formatDay(date.getTime()),
+                expectedDay: date.toLocaleDateString(i18n.resolvedLanguage, {
+                  month: "short",
+                  day: "numeric",
+                }),
+              };
+            });
+            const relative = new Intl.RelativeTimeFormat(
+              i18n.resolvedLanguage,
+              {
+                numeric: "auto",
+                style: "narrow",
+              },
+            );
+            for (const offset of [0, -1]) {
+              const date = new Date();
+              date.setDate(date.getDate() + offset);
+              const label = relative
+                .format(offset, "day")
+                .replace(/^./u, (initial) =>
+                  initial.toLocaleUpperCase(i18n.resolvedLanguage),
+                );
+              comparisons.push({
+                time: formatTime(date.getTime()),
+                expectedTime: date.toLocaleTimeString(i18n.resolvedLanguage, {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+                day: formatDay(date.getTime()),
+                expectedDay: label,
+              });
+            }
+            return comparisons;
+          }, language);
+          for (const result of results) {
+            expect(result.time).toBe(result.expectedTime);
+            expect(result.day).toBe(result.expectedDay);
+          }
+        }
+      }
+    } finally {
+      await session.detach();
+    }
+  });
+});

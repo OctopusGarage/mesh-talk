@@ -175,6 +175,108 @@ async fn evicted_preferred_route_falls_back_to_current_authenticated_peer_route(
 }
 
 #[tokio::test]
+async fn periodic_private_probes_reuse_fresh_signed_discovery_but_network_change_forces_noise() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&directory.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", address.port());
+    bob.configure_privacy(
+        &directory.path().join("bob"),
+        "pw",
+        &proof,
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    {
+        let mut state = alice.privacy.state.write().unwrap();
+        let state = state.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        state.routes.record(&proof.public(), address.ip()).unwrap();
+    }
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, address.ip(), &alice.user_id());
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (authenticated, mut arrivals) = mpsc::unbounded_channel();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let server = {
+        let accepted = accepted.clone();
+        tokio::spawn(async move {
+            let mut exchanges = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    incoming = listener.accept() => {
+                        let (socket, _) = incoming.unwrap();
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                        let bob = bob.clone();
+                        let authenticated = authenticated.clone();
+                        exchanges.spawn(async move {
+                            if bob.privacy_accept(socket).await.is_ok() {
+                                let _ = authenticated.send(());
+                            }
+                        });
+                    }
+                }
+            }
+            exchanges.shutdown().await;
+        })
+    };
+    let probes = tokio::spawn(alice.clone().run_private_route_probes());
+    // Exercise startup and the actual five-second periodic owner, while ordinary
+    // signed discovery renews independently of any TCP authentication.
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        alice
+            .roster
+            .lock()
+            .unwrap()
+            .update(&proof, address.ip(), &alice.user_id());
+    }
+    let periodic_accepts = accepted.load(Ordering::SeqCst);
+    while arrivals.try_recv().is_ok() {}
+    alice
+        .network_changes
+        .send_modify(|generation| *generation += 1);
+    let forced = tokio::time::timeout(DEADLINE, arrivals.recv()).await;
+    // The last signed observation was at six seconds. Its 15-second lease
+    // requires recovery at eleven, between the ordinary ten/fifteen ticks.
+    // Waiting only for the next five-second tick would spend four seconds of
+    // the ten-second authentication budget after public evidence expires.
+    let recovery = tokio::time::timeout(Duration::from_secs(6), arrivals.recv()).await;
+    probes.abort();
+    let _ = probes.await;
+    let _ = stop.send(());
+    server.await.unwrap();
+    assert_eq!(
+        periodic_accepts, 0,
+        "fresh matching signed discovery must avoid redundant periodic Noise handshakes"
+    );
+    assert!(
+        matches!(forced, Ok(Some(()))),
+        "an explicit network change must still force a real authenticated probe"
+    );
+    assert!(
+        matches!(recovery, Ok(Some(()))),
+        "signed discovery silence must recover at deadline minus handshake budget, before the next periodic tick"
+    );
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn private_probe_refreshes_public_presence_before_its_lease_expires() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("alice");

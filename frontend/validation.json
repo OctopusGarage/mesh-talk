@@ -1623,7 +1623,8 @@
         "frontend/e2e/language-settings.spec.ts",
         "frontend/e2e/login-recovery.spec.ts",
         "frontend/e2e/ui-audit-shell.spec.ts",
-        "docs/help/topics/language.md"
+        "docs/help/topics/language.md",
+        "frontend/src/lib/formatPerformance.test.ts"
       ],
       "frontend": [
         "src/lib/i18n.test.ts",
@@ -1632,7 +1633,8 @@
         "src/lib/settingsTranslations.test.ts",
         "src/lib/privacyTranslations.test.ts",
         "src/lib/presenceLabels.test.ts",
-        "src/features/auth/LoginScreen.test.ts"
+        "src/features/auth/LoginScreen.test.ts",
+        "src/lib/formatPerformance.test.ts"
       ],
       "capability": {
         "summary": "Select and persist one of eight complete interface languages across desktop UI, including Portuguese and Korean.",
@@ -1645,6 +1647,10 @@
           {
             "name": "Saved desktop choice wins over supported system/browser languages; regional Portuguese maps to pt-BR and regional Korean to ko. Immediate switching updates document language even if preference storage is unavailable; conversation dates and elapsed-time labels follow the selected language. Public language preference remains separate; automatic website language detection does not persist a fixed preference, explicit choices do, native language names carry their language tags, and English-authored articles disclose their fallback.",
             "reference": "docs/help/topics/language.md"
+          },
+          {
+            "name": "Repeated date/time presentation reuses at most 256 display strings under current locale and fresh local calendar fields; live timezone, DST and today/yesterday classification remain native-equivalent without retaining message identities or starting timers.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },

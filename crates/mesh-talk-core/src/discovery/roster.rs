@@ -130,6 +130,22 @@ impl PeerRecord {
         let fallback = (!routes.iter().any(|(addr, _)| *addr == preferred)).then_some(preferred);
         (routes, fallback)
     }
+    /// Scheduling evidence from a signed direct observation of this exact endpoint.
+    /// This neither authenticates a connection nor renews the observation.
+    pub(crate) fn direct_discovery_deadline(&self, address: SocketAddr) -> Option<Instant> {
+        self.routes
+            .iter()
+            .filter(|route| {
+                route.addr == address
+                    && matches!(
+                        route.source,
+                        RouteSource::Lan | RouteSource::Discovery | RouteSource::RoutedQuery
+                    )
+            })
+            .filter_map(PeerEndpoint::public_presence_deadline)
+            .max()
+    }
+
     /// Fresh public observations, independently of preferred route or TCP success.
     /// The third value is the remaining monotonic lifetime in seconds.
     pub fn presence_evidence(&self, now: Instant) -> Vec<(RouteSource, u64, u64)> {

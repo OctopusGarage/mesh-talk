@@ -31,6 +31,23 @@ const CHANNEL_RECOVERY_WAKE_BATCH: usize = 8;
 const CHANNEL_RECOVERY_MAX_INTERVAL: Duration = Duration::from_secs(60);
 const CHANNEL_RECOVERY_GROUP_CONCURRENCY: usize = 2;
 
+/// Scheduling evidence only: no pending row or cached authority grants progress.
+#[derive(Default)]
+pub(super) struct LocalRecoveryWork {
+    pub(super) more: bool,
+    pub(super) retry_after: Option<Duration>,
+}
+impl LocalRecoveryWork {
+    fn merge(&mut self, other: Self) {
+        self.more |= other.more;
+        self.retry_after = match (self.retry_after, other.retry_after) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+    }
+}
+const CHANNEL_RECOVERY_QUIET_INTERVAL: Duration = Duration::from_secs(300);
+
 /// Bounded peer children retain participant admission through actual retirement.
 /// A completed applied page cancels and joins the remaining sessions.
 pub(super) async fn complete_channel_peer_rounds<F>(
@@ -739,7 +756,7 @@ impl Node {
     ) {
         let custody = Arc::clone(&self).run_channel_custody_recovery_loop(periodic);
         tokio::select! {
-            _ = self.run_local_channel_recovery_loop(changes, periodic) => {}
+            _ = Box::pin(self.run_local_channel_recovery_loop(changes, periodic)) => {}
             _ = maintenance => {}
             _ = custody => {}
         }
@@ -795,27 +812,49 @@ impl Node {
         }
     }
 
-    fn prepare_local_channel_recovery_turn(&self) {
-        self.retry_channel_plaintext();
+    fn note_local_channel_recovery_input(&self) {
+        self.note_channel_plaintext_recovery_input();
+        self.note_group_metadata_recovery_input();
+        self.note_join_history_recovery_input();
+    }
+
+    fn prepare_local_channel_recovery_turn(&self) -> LocalRecoveryWork {
+        let work = match self.retry_channel_plaintext_turn() {
+            Ok(work) => work,
+            Err(error) => {
+                log::warn!("channel work discovery deferred: {error}");
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_local_failure".into()
+                });
+                LocalRecoveryWork {
+                    more: false,
+                    retry_after: Some(CHANNEL_RECOVERY_INTERVAL),
+                }
+            }
+        };
         #[cfg(test)]
         self.trace_account_client(&self.identity.public(), || {
             "channel_recovery_plaintext_done".into()
         });
+        work
     }
 
     /// Keep one remote turn and its leases alive while notified local work advances.
     /// The outer selection is inactive here, so this Notify has one consumer.
     async fn complete_channel_recovery_turn(
         &self,
-        mut remote: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
-    ) {
+        mut remote: std::pin::Pin<&mut impl std::future::Future<Output = LocalRecoveryWork>>,
+    ) -> LocalRecoveryWork {
+        let mut work = LocalRecoveryWork::default();
         let mut consumed_notification = false;
         loop {
             tokio::select! {
-                () = remote.as_mut() => break,
+                result = remote.as_mut() => { work.merge(result); break; },
                 () = self.channel_recovery_notify.notified() => {
                     consumed_notification = true;
-                    self.prepare_local_channel_recovery_turn();
+                    self.note_local_channel_recovery_input();
+                    work.merge(self.prepare_local_channel_recovery_turn());
                     tokio::task::yield_now().await;
                 }
             }
@@ -825,6 +864,7 @@ impl Node {
         if consumed_notification {
             self.channel_recovery_notify.notify_one();
         }
+        work
     }
 
     // Independent subscriptions never consume the local recovery Notify permit.
@@ -978,17 +1018,26 @@ impl Node {
         changes: Arc<Notify>,
         periodic: bool,
     ) {
-        let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursor = 0usize;
         let mut last_target = None;
+        let mut fallback_remaining = 0usize;
+        let mut fallback_failed = false;
+        let mut fallback_resweep = false;
+        let mut fallback_retry = false;
         let node = &self;
         let mut metadata = self.subscribe_channel_changes();
         let mut network = self.network_changes.subscribe();
         let mut backoff = ChannelRecoveryBackoff::default();
         let mut fallback_at = tokio::time::Instant::now();
+        let mut local_at = Some(fallback_at);
+        let mut local_continuation = false;
+        let mut membership_needed = true;
+        let mut history_retry_at = None;
+        let mut metadata_retry_at = None;
+        let mut membership_retry_at = None;
         loop {
             let mut discovered = false;
+            let mut input = true;
             tokio::select! {
                 _ = changes.notified() => { discovered = true; },
                 _ = network.changed() => { discovered = true; },
@@ -998,8 +1047,8 @@ impl Node {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => discovered = true,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
-                _ = tick.tick(), if self.channel_recovery_periodic_enabled(periodic) => {},
-                _ = tokio::time::sleep_until(fallback_at), if self.channel_recovery_periodic_enabled(periodic) => {},
+                _ = tokio::time::sleep_until(local_at.unwrap_or_else(tokio::time::Instant::now)), if local_at.is_some() => { input = !local_continuation; },
+                _ = tokio::time::sleep_until(fallback_at), if self.channel_recovery_periodic_enabled(periodic) || fallback_retry => { input = fallback_remaining == 0; },
             }
             loop {
                 match metadata.try_recv() {
@@ -1010,39 +1059,98 @@ impl Node {
                     Err(_) => break,
                 }
             }
-            self.prepare_local_channel_recovery_turn();
+            if input {
+                self.note_local_channel_recovery_input();
+                membership_needed = true;
+                history_retry_at = None;
+                metadata_retry_at = metadata_retry_at.map(|_| tokio::time::Instant::now());
+                membership_retry_at = None;
+            }
+            let mut work = self.prepare_local_channel_recovery_turn();
             let remote = async {
-                match self.retry_join_history_new() {
-                    Ok(channels) => {
-                        for channel in channels {
-                            let members = self.channel_members(channel);
-                            self.distribute_channel(channel, &members).await;
+                let mut result = LocalRecoveryWork::default();
+                let mut failure_delay = None;
+                if history_retry_at.is_none_or(|at| tokio::time::Instant::now() >= at) {
+                    history_retry_at = None;
+                    match self.retry_join_history_owned() {
+                        Ok((channels, more)) => {
+                            result.more |= more;
+                            for channel in channels {
+                                let members = self.channel_members(channel);
+                                self.distribute_channel(channel, &members).await;
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!("channel history recovery deferred: {error}");
+                            history_retry_at =
+                                Some(tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL);
                         }
                     }
-                    Err(error) => log::warn!("channel history recovery deferred: {error}"),
                 }
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
                     "channel_recovery_join_history_done".into()
                 });
-                match self.retry_group_metadata() {
-                    Ok(channels) => {
-                        for channel in channels {
-                            let members = self.channel_members(channel);
-                            self.distribute_channel(channel, &members).await;
+                if metadata_retry_at.is_none_or(|at| tokio::time::Instant::now() >= at) {
+                    let recovering = metadata_retry_at.take().is_some();
+                    match self.retry_group_metadata_turn() {
+                        Ok((channels, more)) => {
+                            if recovering {
+                                if more {
+                                    // An EOF/tail-only continuation has not yet
+                                    // reexamined the failed row in its next cut.
+                                    metadata_retry_at = Some(tokio::time::Instant::now());
+                                } else {
+                                    self.note_ui_change();
+                                }
+                            }
+                            result.more |= more;
+                            for channel in channels {
+                                let members = self.channel_members(channel);
+                                self.distribute_channel(channel, &members).await;
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!("channel metadata recovery deferred: {error}");
+                            #[cfg(test)]
+                            self.trace_account_client(&self.identity.public(), || {
+                                "channel_recovery_metadata_failed".into()
+                            });
+                            metadata_retry_at =
+                                Some(tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL);
                         }
                     }
-                    Err(error) => log::warn!("channel metadata recovery deferred: {error}"),
                 }
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
                     "channel_recovery_group_metadata_done".into()
                 });
-                if let Err(error) = self.auto_enroll_one_channel_sibling().await {
-                    log::warn!("linked channel invitation failed; will retry: {error}");
-                }
-                if let Err(error) = self.auto_accept_one_linked_invite().await {
-                    log::warn!("linked channel acceptance failed; will retry: {error}");
+                if membership_needed
+                    && membership_retry_at.is_none_or(|at| tokio::time::Instant::now() >= at)
+                {
+                    membership_needed = false;
+                    membership_retry_at = None;
+                    for (name, outcome) in [
+                        ("invitation", self.auto_enroll_one_channel_sibling().await),
+                        ("acceptance", self.auto_accept_one_linked_invite().await),
+                    ] {
+                        match outcome {
+                            Ok(changed) => {
+                                result.more |= changed;
+                                membership_needed |= changed;
+                            }
+                            Err(error) => {
+                                log::warn!("linked channel {name} failed; will retry: {error}");
+                                membership_retry_at =
+                                    Some(tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL);
+                                membership_needed = true;
+                            }
+                        }
+                    }
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        "channel_recovery_membership_entered".into()
+                    });
                 }
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
@@ -1062,18 +1170,20 @@ impl Node {
                 let active = discovered || !targets.is_empty();
                 if active {
                     backoff.reset();
-                    fallback_at =
-                        fallback_at.min(tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL);
                 }
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
                     format!("channel_recovery_targets_begin count={}", targets.len())
                 });
+                let failed = std::sync::atomic::AtomicBool::new(false);
+                let failed_ref = &failed;
                 stream::iter(targets)
                     .for_each_concurrent(
                         CHANNEL_RECOVERY_GROUP_CONCURRENCY,
                         |(channel, cycle)| async move {
-                            node.pull_channel_from_members(channel, cycle, false).await;
+                            if node.pull_channel_from_members(channel, cycle, false).await {
+                                failed_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
                         },
                     )
                     .await;
@@ -1082,37 +1192,96 @@ impl Node {
                     "channel_recovery_targets_done".into()
                 });
                 // Notification-only tests exclude discovery-triggered repair as well.
-                if self.channel_recovery_periodic_enabled(periodic)
-                    && (discovered || tokio::time::Instant::now() >= fallback_at)
+                if (self.channel_recovery_periodic_enabled(periodic)
+                    && (discovered || tokio::time::Instant::now() >= fallback_at))
+                    || (fallback_retry && tokio::time::Instant::now() >= fallback_at)
                 {
                     #[cfg(test)]
                     self.trace_account_client(&self.identity.public(), || {
                         "channel_recovery_fallback_begin".into()
                     });
 
-                    let batch = self.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH);
+                    if discovered && fallback_remaining != 0 {
+                        fallback_resweep = true;
+                    }
+                    if fallback_remaining == 0 {
+                        fallback_remaining = self.joined_channel_count();
+                    }
+                    let batch = fallback_remaining.min(CHANNEL_RECOVERY_WAKE_BATCH);
+                    fallback_remaining -= batch;
                     let start = cursor;
                     cursor = cursor.wrapping_add(batch);
                     stream::iter(start..start.saturating_add(batch))
                         .for_each_concurrent(
                             CHANNEL_RECOVERY_GROUP_CONCURRENCY,
                             |index| async move {
-                                node.pull_one_channel_from_member(index).await;
+                                if node.pull_one_channel_from_member(index).await {
+                                    failed_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
                             },
                         )
                         .await;
                     // Independent bounded jitter prevents synchronized idle repair bursts.
                     let jitter =
                         (now_millis() ^ u64::from(self.identity.public().ed25519_pub[0])) as u8;
-                    fallback_at = tokio::time::Instant::now() + backoff.next_delay(jitter);
+                    fallback_failed |= failed.load(std::sync::atomic::Ordering::Relaxed);
+                    let delay = if fallback_remaining != 0 || std::mem::take(&mut fallback_resweep)
+                    {
+                        result.more = true;
+                        Duration::ZERO
+                    } else if fallback_failed {
+                        fallback_failed = false;
+                        let delay = backoff.next_delay(jitter);
+                        failure_delay = Some(delay);
+                        delay
+                    } else {
+                        fallback_retry = false;
+                        CHANNEL_RECOVERY_QUIET_INTERVAL
+                    };
+                    fallback_at = tokio::time::Instant::now() + delay;
                 }
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
                     "channel_recovery_fallback_done".into()
                 });
+                if failure_delay.is_none()
+                    && fallback_remaining == 0
+                    && failed.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    failure_delay = Some(backoff.next_delay(0));
+                }
+                if let Some(delay) = failure_delay {
+                    // Only failed attempted work owns an early repair deadline.
+                    // Successful target invalidations do not rearm quiet scans.
+                    fallback_retry = true;
+                    fallback_at = fallback_at.min(tokio::time::Instant::now() + delay);
+                }
+                result.merge(LocalRecoveryWork {
+                    more: false,
+                    retry_after: failure_delay,
+                });
+                for deadline in [history_retry_at, metadata_retry_at, membership_retry_at]
+                    .into_iter()
+                    .flatten()
+                {
+                    result.merge(LocalRecoveryWork {
+                        more: false,
+                        retry_after: Some(
+                            deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        ),
+                    });
+                }
+                result
             };
             tokio::pin!(remote);
-            self.complete_channel_recovery_turn(remote.as_mut()).await;
+            work.merge(self.complete_channel_recovery_turn(remote.as_mut()).await);
+            local_continuation = work.more;
+            local_at = if work.more {
+                Some(tokio::time::Instant::now())
+            } else {
+                work.retry_after
+                    .map(|delay| tokio::time::Instant::now() + delay)
+            };
             // Notify can remain immediately ready after bounded local work.
             // Yield so the other owned recovery futures can always be polled.
             tokio::task::yield_now().await;
@@ -3472,7 +3641,10 @@ impl Node {
     /// every channel and member a turn without making the background loop dial the
     /// full group. Any member holding an event can serve it, even if its author is
     /// offline. The ordinary sync store enforces membership and validates events.
-    pub(in crate::node) async fn pull_one_channel_from_member(self: &Arc<Self>, cursor: usize) {
+    pub(in crate::node) async fn pull_one_channel_from_member(
+        self: &Arc<Self>,
+        cursor: usize,
+    ) -> bool {
         let channels = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let mut channels: Vec<_> = book
@@ -3487,9 +3659,11 @@ impl Node {
             channels
         };
         if let Some(channel) = channels.get(cursor % channels.len().max(1)) {
-            self.pull_channel_from_members(*channel, cursor / channels.len(), true)
+            return self
+                .pull_channel_from_members(*channel, cursor / channels.len(), true)
                 .await;
         }
+        false
     }
 
     async fn pull_channel_from_members(
@@ -3497,16 +3671,16 @@ impl Node {
         channel: ConversationId,
         cursor: usize,
         reconcile_controls: bool,
-    ) {
+    ) -> bool {
         let channel_id = &channel;
         let me = self.user_id();
         let members = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let Some(state) = book.state(channel_id) else {
-                return;
+                return false;
             };
             if !state.is_member(&me) || state.is_dissolved() {
-                return;
+                return false;
             }
             state
                 .members()
@@ -3523,8 +3697,12 @@ impl Node {
             format!("channel_recovery_local_begin channel={channel:?}")
         });
         // Local projection repair is independent of a reachable remote holder.
-        self.process_channel_reception(*channel_id, "catch_up");
-        self.process_file_events_reception(*channel_id, "catch_up");
+        let local_failed = if let Err(error) = self.process_channel_recovery_local(*channel_id) {
+            log::warn!("channel local recovery deferred: {error}");
+            true
+        } else {
+            false
+        };
         #[cfg(test)]
         self.trace_account_client(&self.identity.public(), || {
             format!("channel_recovery_local_done channel={channel:?}")
@@ -3539,7 +3717,7 @@ impl Node {
             .collect();
         if peers.is_empty() {
             self.record_channel_recovery(*channel_id, "waiting_for_peer", false);
-            return;
+            return local_failed;
         }
         self.record_channel_recovery(*channel_id, "catching_up", false);
         // Identity/channel-specific rotation spreads simultaneous gossip wakes
@@ -3698,6 +3876,7 @@ impl Node {
             },
             checked,
         );
+        local_failed || !checked || !clean
     }
 }
 
@@ -3894,6 +4073,716 @@ mod fanout_tests {
     #[tokio::test]
     async fn channel_custody_noop_recheck_does_not_notify_delivery_status() {
         custody_notification_probe_fixture(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_channel_owner_notify_advances_local_work_without_restarting_held_remote() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use futures_util::FutureExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let entered = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let entered = entered.clone();
+            move |_, phase| {
+                if phase == "channel_recovery_plaintext_done" {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let (release, held) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn({
+            let node = node.clone();
+            async move {
+                let remote = async {
+                    let _ = held.await;
+                    LocalRecoveryWork::default()
+                };
+                tokio::pin!(remote);
+                node.complete_channel_recovery_turn(remote.as_mut()).await
+            }
+        });
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        node.channel_recovery_notify.notify_one();
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        let local_progress = entered.load(Ordering::SeqCst);
+        let held_alive = !worker.is_finished();
+        release.send(()).unwrap();
+        let _ = worker.await.unwrap();
+        assert!(
+            local_progress > 0,
+            "local SQL work progresses before remote release"
+        );
+        assert!(
+            held_alive,
+            "the same remote remains owned until explicitly released"
+        );
+        assert!(
+            node.channel_recovery_notify
+                .notified()
+                .now_or_never()
+                .is_some(),
+            "held-turn notification retains an outer turn"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_channel_owner_drains_history_tail_and_metadata_cache_capacity_then_settles() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        for _ in 0..65 {
+            let channel = node
+                .create_channel("bounded maintenance", Vec::new())
+                .await
+                .unwrap();
+            node.set_channel_announcement_if(
+                channel,
+                Some("tiny current publication"),
+                None,
+                |commit| commit(),
+            )
+            .await
+            .unwrap();
+        }
+        let entered = Arc::new(AtomicUsize::new(0));
+        let history = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let lanes = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let entered = entered.clone();
+            let history = history.clone();
+            let lanes = lanes.clone();
+            move |_, phase| {
+                if (phase.ends_with("_entered") && phase.starts_with("channel_recovery_"))
+                    || phase == "channel_recovery_fallback_begin"
+                {
+                    *lanes.lock().unwrap().entry(phase.to_owned()).or_default() += 1;
+                }
+                if phase == "channel_recovery_plaintext_done" {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                }
+                if let Some(channel) = phase.strip_prefix("channel_recovery_history_selected ") {
+                    history.lock().unwrap().insert(channel.to_owned());
+                }
+            }
+        }));
+        let worker = tokio::spawn(
+            node.clone()
+                .run_local_channel_recovery_loop(Arc::new(Notify::new()), true),
+        );
+        for _ in 0..4096 {
+            tokio::task::yield_now().await;
+        }
+        let before = entered.load(Ordering::SeqCst);
+        let visited = history.lock().unwrap().len();
+        let before_lanes = lanes.lock().unwrap().clone();
+        let indexed: i64 = node
+            .channel_checkpoints
+            .profile()
+            .database()
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT COUNT(*) FROM group_metadata_index", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(9)).await;
+        for _ in 0..512 {
+            tokio::task::yield_now().await;
+        }
+        let after = entered.load(Ordering::SeqCst);
+        let after_lanes = lanes.lock().unwrap().clone();
+        worker.abort();
+        let _ = worker.await;
+        eprintln!(
+            "valid65 owner turns {before}->{after}; entered lanes before={before_lanes:?} after={after_lanes:?}"
+        );
+        assert_eq!(
+            indexed, 65,
+            "the actual metadata index exceeds its 64-entry reconciliation cache; fixture cannot skip the v5 owner"
+        );
+        assert_eq!(
+            visited, 65,
+            "all history rows drain before sparse repair, not only the first channel"
+        );
+        assert_eq!(
+            before, after,
+            "65 reconciled metadata channels must reach a fixed point despite the 64-entry cache"
+        );
+        assert_eq!(
+            before_lanes, after_lanes,
+            "every local lane retains its completed fixed point"
+        );
+        let history_turns = before_lanes
+            .get("channel_recovery_history_entered")
+            .copied()
+            .unwrap_or(0);
+        let membership_turns = before_lanes
+            .get("channel_recovery_membership_entered")
+            .copied()
+            .unwrap_or(0);
+        assert!(history_turns >= 65);
+        assert!(
+            membership_turns > 0 && membership_turns < history_turns,
+            "settled membership is not re-enumerated for every history continuation"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_channel_owner_retries_real_discovery_failure_then_recovers_on_notify() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.create_channel("discovery failure", Vec::new())
+            .await
+            .unwrap();
+        node.channel_checkpoints.profile().database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER fail_channel_discovery BEFORE UPDATE ON channel_source_scan BEGIN SELECT RAISE(ABORT,'injected discovery failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        let failures = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let failures = failures.clone();
+            let entered = entered.clone();
+            move |_, phase| {
+                if phase == "channel_recovery_local_failure" {
+                    failures.fetch_add(1, Ordering::SeqCst);
+                }
+                if phase.starts_with("channel_recovery_runtime_queue ") {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let worker = tokio::spawn(
+            node.clone()
+                .run_local_channel_recovery_loop(Arc::new(Notify::new()), false),
+        );
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        let first = failures.load(Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let early = failures.load(Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let retried = failures.load(Ordering::SeqCst);
+        node.channel_checkpoints
+            .profile()
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_channel_discovery")?;
+                Ok(())
+            })
+            .unwrap();
+        node.channel_recovery_notify.notify_one();
+        for _ in 0..512 {
+            tokio::task::yield_now().await;
+        }
+        let recovered = entered.load(Ordering::SeqCst);
+        let settled = failures.load(Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(9)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let final_failures = failures.load(Ordering::SeqCst);
+        worker.abort();
+        let _ = worker.await;
+        assert!(first > 0, "a real SQL error was injected");
+        assert_eq!(early, first, "failure backoff does not admit an early turn");
+        assert!(
+            retried > early,
+            "failure retries at its owned three-second deadline"
+        );
+        assert!(
+            recovered > 0,
+            "Notify resumes successful discovery without waiting for quiet repair"
+        );
+        assert_eq!(final_failures, settled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_channel_owner_revisits_existing_lower_row_and_postcut_arrival_without_spinning()
+    {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let mut channels = Vec::new();
+        for _ in 0..3 {
+            channels.push(
+                node.create_channel("blocked current channel", Vec::new())
+                    .await
+                    .unwrap(),
+            );
+        }
+        channels.sort_by_key(|id| *id.as_bytes());
+        for channel in &channels {
+            node.channel_checkpoints.queue_runtime(*channel).unwrap();
+            node.defer_channel_plaintext_for_test(
+                *channel,
+                std::time::Instant::now() + Duration::from_secs(60),
+            );
+        }
+        let after_cut = ConversationId::new([255; 32]);
+        assert!(after_cut.as_bytes() > channels.last().unwrap().as_bytes());
+        let visits = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
+        let injected = Arc::new(AtomicBool::new(false));
+        let turns = Arc::new(AtomicUsize::new(0));
+        let weak = Arc::downgrade(&node);
+        let second = format!("{:?}", channels[1]);
+        let first_channel = channels[0];
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let visits = visits.clone();
+            let injected = injected.clone();
+            let turns = turns.clone();
+            move |_, phase| {
+                if phase == "channel_recovery_plaintext_done" {
+                    turns.fetch_add(1, Ordering::SeqCst);
+                }
+                if let Some(channel) = phase.strip_prefix("channel_recovery_plaintext_selected ") {
+                    *visits
+                        .lock()
+                        .unwrap()
+                        .entry(channel.to_owned())
+                        .or_default() += 1;
+                    if channel == second && !injected.swap(true, Ordering::SeqCst) {
+                        let node = weak.upgrade().unwrap();
+                        // Existing blocked identity: enqueue is deliberately a durable no-op.
+                        node.channel_checkpoints
+                            .queue_runtime(first_channel)
+                            .unwrap();
+                        node.channel_checkpoints.queue_runtime(after_cut).unwrap();
+                        node.channel_recovery_notify.notify_one();
+                    }
+                }
+            }
+        }));
+        let worker = tokio::spawn(
+            node.clone()
+                .run_local_channel_recovery_loop(Arc::new(Notify::new()), true),
+        );
+        for _ in 0..2048 {
+            tokio::task::yield_now().await;
+        }
+        let before = turns.load(Ordering::SeqCst);
+        let observed = visits.lock().unwrap().clone();
+        tokio::time::advance(Duration::from_secs(9)).await;
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        let after = turns.load(Ordering::SeqCst);
+        worker.abort();
+        let _ = worker.await;
+        assert!(injected.load(Ordering::SeqCst));
+        assert!(
+            observed
+                .get(&format!("{first_channel:?}"))
+                .copied()
+                .unwrap_or(0)
+                >= 2,
+            "already visited existing work is revisited after a held cut"
+        );
+        assert!(
+            observed.contains_key(&format!("{after_cut:?}")),
+            "post-cut demand owns a later finite sweep"
+        );
+        assert_eq!(
+            before, after,
+            "blocked rows do not turn pending into immediate progress forever"
+        );
+    }
+    #[tokio::test]
+    async fn local_channel_owner_retains_file_discovery_failure_and_recovers_without_new_source() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("file failure demand", Vec::new())
+            .await
+            .unwrap();
+        node.channel_checkpoints.profile().database().transaction(|c| {
+            c.execute_batch("UPDATE file_receive_scan SET after_commit=NULL; CREATE TEMP TRIGGER fail_channel_file_scan BEFORE UPDATE ON file_receive_scan BEGIN SELECT RAISE(ABORT,'injected file discovery failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        let failures = Arc::new(AtomicUsize::new(0));
+        let turns = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let failures = failures.clone();
+            let turns = turns.clone();
+            move |_, phase| {
+                if phase == "channel_recovery_file_failure" {
+                    failures.fetch_add(1, Ordering::SeqCst);
+                }
+                if phase == "channel_recovery_plaintext_done" {
+                    turns.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let worker = tokio::spawn(
+            node.clone()
+                .run_local_channel_recovery_loop(Arc::new(Notify::new()), false),
+        );
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        let first = failures.load(Ordering::SeqCst);
+        let retained = node
+            .channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_some_and(|(queued, _)| queued == channel);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let early = failures.load(Ordering::SeqCst);
+        let retried = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let count = failures.load(Ordering::SeqCst);
+                if count > first {
+                    break count;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let retried_count = retried.as_ref().copied().unwrap_or(first);
+        node.channel_checkpoints
+            .profile()
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_channel_file_scan")?;
+                Ok(())
+            })
+            .unwrap();
+        node.channel_recovery_notify.notify_one();
+        let completed = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if node
+                    .channel_checkpoints
+                    .next_runtime(None)
+                    .unwrap()
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let before = turns.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let after = turns.load(Ordering::SeqCst);
+        worker.abort();
+        let _ = worker.await;
+        assert!(
+            first > 0,
+            "a real file-discovery SQL error reached the owner"
+        );
+        assert!(
+            retained,
+            "file failure restores durable demand even after plaintext completes"
+        );
+        assert_eq!(
+            early, first,
+            "a real per-channel deadline prevents early I/O retry"
+        );
+        assert!(
+            retried_count > first,
+            "file I/O failure retains its own retry without periodic repair"
+        );
+        assert!(
+            completed,
+            "successful retry retires the exact queued demand"
+        );
+        assert_eq!(
+            before, after,
+            "successful repair reaches a quiet fixed point"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_channel_owner_field_read_failure_recovery_publishes_one_ui_refresh() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("field recovery", Vec::new())
+            .await
+            .unwrap();
+        node.set_channel_announcement_if(channel, Some("visible after recovery"), None, |commit| {
+            commit()
+        })
+        .await
+        .unwrap();
+        for _ in 0..128 {
+            node.retry_channel_plaintext();
+        }
+        let mut ready = false;
+        for _ in 0..128 {
+            if !node.channel_metadata(channel).unwrap().query_pending {
+                ready = true;
+                break;
+            }
+        }
+        assert!(
+            ready,
+            "the durable index has already published its ready transition"
+        );
+        let source = node.channel_checkpoints.source_binding(channel).unwrap();
+        node.channel_checkpoints
+            .profile()
+            .database()
+            .transaction(|c| {
+                c.execute_batch(
+                    "ALTER TABLE group_metadata_publications RENAME TO held_metadata_publications;",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        node.clear_metadata_display_values_for_test();
+        let consumer_failed = node.channel_metadata(channel).is_err();
+        let failures = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let failures = failures.clone();
+            move |_, phase| {
+                if phase == "channel_recovery_metadata_failed" {
+                    failures.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let mut ui = node.subscribe_ui_changes();
+        let worker = tokio::spawn(
+            node.clone()
+                .run_local_channel_recovery_loop(Arc::new(Notify::new()), true),
+        );
+        for _ in 0..512 {
+            tokio::task::yield_now().await;
+        }
+        let failed = failures.load(Ordering::SeqCst);
+        ui.borrow_and_update();
+        node.channel_checkpoints
+            .profile()
+            .database()
+            .transaction(|c| {
+                c.execute_batch(
+                    "ALTER TABLE held_metadata_publications RENAME TO group_metadata_publications;",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        for _ in 0..512 {
+            tokio::task::yield_now().await;
+        }
+        let recovered_ui = ui.has_changed().unwrap();
+        let metadata = node.channel_metadata(channel).unwrap();
+        ui.borrow_and_update();
+        tokio::time::advance(Duration::from_secs(9)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let repeated_ui = ui.has_changed().unwrap();
+        let after_source = node.channel_checkpoints.source_binding(channel).unwrap();
+        worker.abort();
+        let _ = worker.await;
+        assert!(
+            consumer_failed,
+            "the actual display query encountered the field I/O failure"
+        );
+        assert!(
+            failed > 0,
+            "a real field hydration SELECT failed after index readiness"
+        );
+        assert!(
+            recovered_ui,
+            "successful owner retry refreshes consumers that swallowed the first field error"
+        );
+        assert!(!metadata.query_pending);
+        assert_eq!(
+            metadata.announcement.unwrap().content.as_deref(),
+            Some("visible after recovery")
+        );
+        assert!(
+            source == after_source,
+            "recovery is not fabricated source change"
+        );
+        assert!(
+            !repeated_ui,
+            "read-only successful followups emit no UI feedback"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settled_local_channel_owner_does_not_reenter_business_between_repair_deadlines() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture peer",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        assert_eq!(node.joined_channel_count(), 0);
+        let entered = Arc::new(AtomicUsize::new(0));
+        let fallbacks = Arc::new(AtomicUsize::new(0));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let entered = entered.clone();
+            let fallbacks = fallbacks.clone();
+            move |_, phase| {
+                // This existing hook runs only after orphan/discovery/resume and
+                // next-runtime SQL completed; it is not a scheduler mirror count.
+                if phase.starts_with("channel_recovery_runtime_queue ") {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                }
+                if phase == "channel_recovery_fallback_begin" {
+                    fallbacks.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let worker = tokio::spawn(
+            node.clone()
+                .run_local_channel_recovery_loop(Arc::new(Notify::new()), true),
+        );
+        async fn drain_ready() {
+            for _ in 0..64 {
+                tokio::task::yield_now().await;
+            }
+        }
+        drain_ready().await;
+        // Permit all legitimate cold-start work. The old repair backoff grows
+        // through 3/6/12/24 seconds; four 60-second steps put its next repair beyond the
+        // following nine-second measurement. A settled 300-second owner has no due repair either.
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(60)).await;
+            drain_ready().await;
+        }
+        let baseline = entered.load(Ordering::SeqCst);
+        let before_fallbacks = fallbacks.load(Ordering::SeqCst);
+        let empty = node
+            .channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_none()
+            && node.channel_recovery_pending.lock().unwrap().is_empty();
+        for _ in 0..3 {
+            tokio::time::advance(CHANNEL_RECOVERY_INTERVAL).await;
+            drain_ready().await;
+        }
+        let after = entered.load(Ordering::SeqCst);
+        let after_fallbacks = fallbacks.load(Ordering::SeqCst);
+        worker.abort();
+        let _ = worker.await;
+        eprintln!(
+            "settled local owner measured postSQL turns {baseline}->{after}, fallback turns {before_fallbacks}->{after_fallbacks}, empty={empty}"
+        );
+        assert!(
+            baseline > 0,
+            "Actual owner startup must have entered business work"
+        );
+        assert!(
+            empty,
+            "Measure only after durable and in-memory queues are empty"
+        );
+        assert_eq!(
+            after_fallbacks, before_fallbacks,
+            "No real repair deadline falls within the measured interval"
+        );
+        assert_eq!(
+            after, baseline,
+            "An empty settled owner must not reenter post-SQL business work on quiet three-second ticks"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -4544,7 +5433,7 @@ mod fanout_tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn group_recovery_reconnect_resets_idle_backoff_immediately() {
         let dir = tempfile::tempdir().unwrap();
         let (dm, _) = tokio::sync::mpsc::unbounded_channel();
@@ -4571,32 +5460,63 @@ mod fanout_tests {
             node.clone()
                 .run_channel_recovery_loop(Arc::new(Notify::new())),
         );
-        // Observe three distinct timer-driven attempts. The next idle retry is
-        // at least twelve seconds away, so a sub-second repair proves the
-        // network revision interrupted idle backoff rather than a timer race.
-        for _ in 0..3 {
-            tokio::time::timeout(Duration::from_secs(10), async {
-                while !node.channel_recovery.lock().unwrap().contains_key(&channel) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("bounded idle fallback must run");
-            node.channel_recovery.lock().unwrap().clear();
+        // Establish the real owner's settled startup before observing its
+        // sparse quiet-repair deadline. No peer/transport failure owns a retry.
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
         }
+        let startup = node.channel_recovery.lock().unwrap().contains_key(&channel);
+        node.channel_recovery.lock().unwrap().clear();
+        tokio::time::advance(CHANNEL_RECOVERY_QUIET_INTERVAL - Duration::from_secs(1)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let early = node.channel_recovery.lock().unwrap().contains_key(&channel);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        let repaired = node.channel_recovery.lock().unwrap().contains_key(&channel);
+        node.channel_recovery.lock().unwrap().clear();
+        tokio::time::advance(CHANNEL_RECOVERY_QUIET_INTERVAL - Duration::from_secs(1)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let before_network = node.channel_recovery.lock().unwrap().contains_key(&channel);
+        let notified_at = tokio::time::Instant::now();
         node.network_changes
             .send_modify(|revision| *revision = revision.wrapping_add(1));
-        tokio::time::timeout(Duration::from_millis(500), async {
-            while !node.channel_recovery.lock().unwrap().contains_key(&channel) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("network restoration must repair immediately despite idle backoff");
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        let restored = node.channel_recovery.lock().unwrap().contains_key(&channel);
+        let completed_at = tokio::time::Instant::now();
         worker.abort();
+        let _ = worker.await;
+        assert!(startup, "startup repair visits the joined channel");
+        assert!(
+            !early,
+            "settled owner does not repair before its quiet deadline"
+        );
+        assert!(
+            repaired,
+            "the fallback at 300 seconds still repairs without notifications"
+        );
+        assert!(
+            !before_network,
+            "the next quiet deadline has not yet arrived"
+        );
+        assert!(
+            restored,
+            "network restoration repairs immediately despite the quiet deadline"
+        );
+        assert_eq!(
+            notified_at, completed_at,
+            "network wake requires no timer advancement"
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn group_recovery_targets_coalesced_wakes_and_rotates_after_lost_notifications() {
         let dir = tempfile::tempdir().unwrap();
         let (dm, _) = tokio::sync::mpsc::unbounded_channel();
@@ -4627,47 +5547,71 @@ mod fanout_tests {
             );
         }
         channels.sort_unstable_by_key(|id| *id.as_bytes());
-        // All creation notifications precede subscription. Startup is bounded,
-        // and later timer-driven anti-entropy must still visit the other groups.
+        // Creation notifications precede subscription. Startup must drain the
+        // captured sweep of 12 groups in bounded turns of 8 and 4 groups before it can settle.
         let worker = tokio::spawn(
             node.clone()
                 .run_channel_recovery_loop(Arc::new(Notify::new())),
         );
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while node.channel_recovery.lock().unwrap().len() < CHANNEL_RECOVERY_WAKE_BATCH {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        for _ in 0..512 {
+            tokio::task::yield_now().await;
+        }
+        let startup = node.channel_recovery.lock().unwrap().len();
+        node.channel_recovery.lock().unwrap().clear();
         let target = channels[11];
-        assert!(!node.channel_recovery.lock().unwrap().contains_key(&target));
         for _ in 0..1000 {
             node.schedule_channel_recovery(target);
         }
-        assert_eq!(node.channel_recovery_pending.lock().unwrap().len(), 1);
-        tokio::time::timeout(Duration::from_millis(500), async {
-            while !node.channel_recovery.lock().unwrap().contains_key(&target) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("targeted wake must visit its group before the next rotating timer batch");
-        assert!(
-            !node
-                .channel_recovery
-                .lock()
-                .unwrap()
-                .contains_key(&channels[10])
-        );
-        tokio::time::timeout(Duration::from_secs(9), async {
-            while node.channel_recovery.lock().unwrap().len() < channels.len() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("timer fallback must reconcile groups whose notifications were lost");
+        let coalesced = node.channel_recovery_pending.lock().unwrap().len();
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        let targeted = node.channel_recovery.lock().unwrap().contains_key(&target);
+        let unrelated = node
+            .channel_recovery
+            .lock()
+            .unwrap()
+            .contains_key(&channels[10]);
+        tokio::time::advance(CHANNEL_RECOVERY_QUIET_INTERVAL - Duration::from_secs(1)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let early_unrelated = node
+            .channel_recovery
+            .lock()
+            .unwrap()
+            .contains_key(&channels[10]);
+        // No further notification is sent. At the owned repair deadline the
+        // rotating fallback must still visit every group, including the tail.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..512 {
+            tokio::task::yield_now().await;
+        }
+        let repaired = node.channel_recovery.lock().unwrap().len();
         worker.abort();
+        let _ = worker.await;
+        assert_eq!(
+            startup,
+            channels.len(),
+            "all lost startup notifications are covered by the finite sweep"
+        );
+        assert_eq!(
+            coalesced, 1,
+            "1,000 wakes for one group retain one pending target"
+        );
+        assert!(
+            targeted,
+            "targeted wake visits its group before rotating repair"
+        );
+        assert!(
+            !unrelated && !early_unrelated,
+            "target priority does not create early unrelated repair"
+        );
+        assert_eq!(
+            repaired,
+            channels.len(),
+            "deadline repair reconciles all groups without new notifications"
+        );
     }
 
     #[tokio::test]

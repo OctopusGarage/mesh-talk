@@ -525,7 +525,8 @@
         "crates/mesh-talk-core/src/node/outgoing_message.rs",
         "crates/mesh-talk-core/src/node/call.rs",
         "crates/mesh-talk-core/src/node/linking.rs",
-        "crates/mesh-talk-core/src/node/privacy_routes.rs"
+        "crates/mesh-talk-core/src/node/privacy_routes.rs",
+        "crates/mesh-talk-core/src/discovery/roster.rs"
       ],
       "rust": [
         {
@@ -590,7 +591,8 @@
             "unchanged_direct_custody_does_not_keep_destination_retry_hot",
             "node::call::tests::",
             "node::linking::pairing_selection_tests::",
-            "two_nodes_exchange_a_call_signal_and_bind_from_to_the_authenticated_peer"
+            "two_nodes_exchange_a_call_signal_and_bind_from_to_the_authenticated_peer",
+            "periodic_private_probes_reuse_fresh_signed_discovery_but_network_change_forces_noise"
           ]
         }
       ],
@@ -645,6 +647,10 @@
           {
             "name": "A failed unchanged historical endpoint waits five minutes across background callers; cancellation and local pressure do not learn remote failure. Exact identity/endpoint, privacy/network generations, fresh discovery and successful authentication retain prompt recovery.",
             "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Periodic private probes reuse only sufficiently fresh direct signed discovery for the exact full binding and endpoint; deadline-minus-handshake-budget recovery, forced network/manual probes, authenticated-only lease renewal and fair cancellation ownership remain intact.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           }
         ]
       },
@@ -2507,7 +2513,9 @@
         "crates/mesh-talk-core/src/eventlog/sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
         "crates/mesh-talk-core/src/node/node.rs",
-        "crates/mesh-talk-core/src/node/group_metadata/**"
+        "crates/mesh-talk-core/src/node/group_metadata/**",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs"
       ],
       "rust": [
         {
@@ -2518,7 +2526,12 @@
             "node::session::tests::",
             "eventlog::event::tests::",
             "eventlog::persist::legacy::tests::",
-            "node::join_history::tests::"
+            "node::join_history::tests::",
+            "settled_local_channel_owner_does_not_reenter_business_between_repair_deadlines",
+            "node::channels::fanout_tests::local_channel_owner_",
+            "final_selected_metadata_rank_is_ready_in_its_exhausted_paid_turn",
+            "final_rejected_metadata_rank_is_ready_in_its_exhausted_paid_turn",
+            "empty_metadata_index_initialization_publishes_ready_once"
           ]
         }
       ],
@@ -2533,6 +2546,10 @@
           {
             "name": "Announcement deletion tombstones and bounded group artwork survive replay; metadata event kind 19 requires appended V5 sync envelopes before transfer to older decoders.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "One event/deadline-owned local recovery lane parks settled work for five minutes, drains finite plaintext/history/metadata tails promptly, retains real I/O retry deadlines and arrivals behind its cut, and publishes actual metadata readiness without cache-eviction feedback.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },

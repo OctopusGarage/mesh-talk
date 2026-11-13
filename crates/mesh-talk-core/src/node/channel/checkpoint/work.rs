@@ -144,6 +144,39 @@ impl ChannelCheckpointStore {
             .map_err(Into::into)
         })
     }
+    pub(in crate::node) fn current_upper(&self) -> Result<Option<ConversationId>, LogError> {
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            let id: Option<Vec<u8>> = c.prepare_cached("SELECT MAX(s.channel) FROM channel_current s JOIN event_conversations e ON e.domain=?1 AND e.conversation=s.channel AND e.lifecycle=0 WHERE s.owner_account=?2 AND s.known_local=1")?.query_row(rusqlite::params![b"MeshPartEventsV1".as_slice(),self.account.as_slice()], |r| r.get(0))?;
+            id.map(|id| Ok(ConversationId::new(id.try_into().map_err(|_|invalid("invalid current channel"))?))).transpose()
+        })
+    }
+    pub(in crate::node) fn runtime_upper(&self) -> Result<Option<ConversationId>, LogError> {
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            let id: Option<Vec<u8>> = c
+                .prepare_cached("SELECT MAX(channel) FROM channel_runtime_work")?
+                .query_row([], |r| r.get(0))?;
+            id.map(|id| {
+                Ok(ConversationId::new(
+                    id.try_into()
+                        .map_err(|_| invalid("invalid runtime channel"))?,
+                ))
+            })
+            .transpose()
+        })
+    }
+    pub(in crate::node) fn next_runtime_through(
+        &self,
+        after: Option<ConversationId>,
+        upper: ConversationId,
+    ) -> Result<Option<(ConversationId, bool)>, LogError> {
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            let row: Option<(Vec<u8>, bool)> = c.prepare_cached("SELECT channel,reopening OR opened<COALESCE((SELECT opened FROM channel_runtime_owner WHERE singleton=1),0) FROM channel_runtime_work WHERE (?1 IS NULL OR channel>?1) AND channel<=?2 ORDER BY channel LIMIT 1")?.query_row(rusqlite::params![after.as_ref().map(|id|id.as_bytes().as_slice()),upper.as_bytes().as_slice()], |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            row.map(|(id,reopening)|Ok((ConversationId::new(id.try_into().map_err(|_|invalid("invalid runtime channel"))?),reopening))).transpose()
+        })
+    }
     pub(in crate::node) fn next_runtime(
         &self,
         after: Option<ConversationId>,

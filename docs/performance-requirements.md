@@ -107,6 +107,12 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    explicit sparse-repair discovery limit.
    Native delivery, discovery leases, calls and real expiry retain their own
    timing contracts; never slow them merely to meet an idle chart.
+   Reuse independent fresh discovery before optional authentication probes, with
+   exact identity/endpoint qualification and a deadline that reserves the whole
+   handshake budget. A skipped probe cannot extend presence or grant access.
+   Gate quiet recovery before entering its business queries. Replace a blanket
+   tick only after the owner exposes bounded continuation, failure retry and
+   dependency-blocked outcomes; unfinished pages must still drain promptly.
 3. **Read metadata before payloads.** Compare revision/digest/cursor and query
    pending keys before reading, decrypting, cloning or decoding bodies. Paginate
    changes; drain available pages promptly in bounded batches. A slower fallback
@@ -168,6 +174,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    to their own current expiry checks.
    Compressed file size is not decoded image memory. Avoid keeping archives,
    base64 strings, Blobs and decoded originals together without a measured need.
+   Reuse expensive unchanged presentation work with bounded semantic keys. Locale
+   and fresh local calendar fields must still qualify date/time results; a cached
+   formatter's original timezone must not pin later output. Cache display strings
+   without retaining message identity or adding another timer.
 5. **Write only durable changes.** No-op reads/heartbeats must not rewrite logs,
    snapshots or indexes. Checking a blocked retry must not persist another scheduling ticket.
    Keep immutable admission/completion facts and bound runtime retry cursors;
@@ -232,6 +242,7 @@ and regression reference; do not append incident histories, benchmark diaries or
 duplicate feature contracts. Follow the [validation protocol](testing-feedback-loop.md).
 
 Primary references: [WebView2 performance](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/performance),
+[Repeated locale formatting](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleString),
 [Edge memory diagnosis](https://learn.microsoft.com/en-us/microsoft-edge/devtools/memory-problems/),
 [IndexedDB clone semantics](https://developer.mozilla.org/en-US/docs/Web/API/IDBObjectStore/getAll),
 [SQLite WAL](https://www.sqlite.org/wal.html),

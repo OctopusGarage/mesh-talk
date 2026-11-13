@@ -20,6 +20,23 @@ pub(in crate::node) fn private_probe_retries() -> PrivateProbeRetries {
     PrivateProbeRetries::with_failure_ceiling(Duration::from_secs(300))
 }
 
+fn private_probe_repair_due(
+    current: &PeerRecord,
+    candidate: &PeerRecord,
+    now: Instant,
+) -> Option<Instant> {
+    if current.public != candidate.public
+        || current.account_id != candidate.account_id
+        || current.post_office != candidate.post_office
+    {
+        return None;
+    }
+    current
+        .direct_discovery_deadline(candidate.addr)
+        .and_then(|deadline| deadline.checked_sub(super::transport::HANDSHAKE_TIMEOUT))
+        .filter(|due| *due > now)
+}
+
 fn finish_private_probe(
     retries: &mut PrivateProbeRetries,
     key: ProbeIdentity,
@@ -223,6 +240,7 @@ impl Node {
             .next()
     }
 
+    #[cfg(test)]
     pub(in crate::node) async fn probe_private_routes(self: &Arc<Self>) {
         self.probe_private_routes_with_budget(super::transport::HANDSHAKE_TIMEOUT)
             .await;
@@ -232,22 +250,41 @@ impl Node {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut network = self.network_changes.subscribe();
+        let mut repair = None;
         loop {
             // Schedule from the start of a round. Sleeping after a slow ten-
             // second handshake used to leave a twenty-second refresh gap for
             // fifteen-second public evidence, even on a reachable path.
-            tokio::select! {
-                _ = tick.tick() => {},
-                _ = network.changed() => {},
-            }
-            self.probe_private_routes().await;
+            let forced = tokio::select! {
+                _ = tick.tick() => false,
+                _ = async {
+                    match repair {
+                        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => false,
+                _ = network.changed() => true,
+            };
+            repair = self
+                .probe_private_routes_round(super::transport::HANDSHAKE_TIMEOUT, forced)
+                .await;
         }
     }
 
+    #[cfg(test)]
     pub(in crate::node) async fn probe_private_routes_with_budget(
         self: &Arc<Self>,
         budget: Duration,
     ) {
+        self.probe_private_routes_round(budget, true).await;
+    }
+
+    async fn probe_private_routes_round(
+        self: &Arc<Self>,
+        budget: Duration,
+        forced: bool,
+    ) -> Option<Instant> {
+        let mut repair: Option<Instant> = None;
         if self.cached_peer_snapshot_async().await.is_err() {
             log::warn!("verified discovery cache update failed");
         }
@@ -258,7 +295,7 @@ impl Node {
         let mut devices = HashSet::new();
         peers.retain(|peer| devices.insert(peer.public.user_id()));
         if peers.is_empty() {
-            return;
+            return None;
         }
         // Advance only launched or deliberately deferred devices. Cancellation
         // must not skip the suffix that this round never examined.
@@ -282,6 +319,26 @@ impl Node {
                     let Some(peer) = peers.next() else {
                         break;
                     };
+                    if !forced {
+                        let due = self
+                            .roster
+                            .lock()
+                            .expect("roster lock")
+                            .get(&peer.public.user_id())
+                            .and_then(|current| {
+                                private_probe_repair_due(current, &peer, Instant::now())
+                            });
+                        if let Some(due) = due {
+                            repair = Some(repair.map_or(due, |previous| previous.min(due)));
+                            // Fresh devices consume their fair position too; a
+                            // signed prefix must not hide later private peers.
+                            self.privacy
+                                .route_probe_cursor
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            advanced += 1;
+                            continue;
+                        }
+                    }
                     let key = (peer.public.ed25519_pub, peer.public.x25519_pub);
                     let announcement = self
                         .roster
@@ -405,6 +462,7 @@ impl Node {
                 .expect("probe retry lock")
                 .complete(&key, token, false, Instant::now());
         }
+        repair
     }
 }
 
@@ -453,6 +511,71 @@ mod tests {
         assert!(retired.is_ok(), "lookup worker panicked");
         assert!(dispatched.is_ok(), "lookup worker was not admitted");
         observed.expect("point lookup must not wait for unrelated routing/authority owners")
+    }
+
+    #[test]
+    fn periodic_probe_requires_exact_signed_endpoint_and_recovery_budget() {
+        use crate::discovery::{Announce, roster::RouteSource};
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&identity, &account, "peer", 47479);
+        let mut roster = crate::discovery::Roster::default();
+        roster.update(&proof, "127.0.0.1".parse().unwrap(), "owner");
+        let signed = roster.get(&proof.user_id).unwrap().clone();
+        let now = signed.routes[0].last_seen;
+        let due = now + Duration::from_secs(5);
+        assert_eq!(private_probe_repair_due(&signed, &signed, now), Some(due));
+        assert_eq!(private_probe_repair_due(&signed, &signed, due), None);
+        for source in [
+            RouteSource::Lan,
+            RouteSource::Discovery,
+            RouteSource::RoutedQuery,
+        ] {
+            let mut observation = signed.clone();
+            observation.routes[0].source = source;
+            assert_eq!(
+                private_probe_repair_due(&observation, &signed, now),
+                Some(due)
+            );
+        }
+        let mut adaptive = signed.clone();
+        adaptive.routes[0].source = RouteSource::RoutedQuery;
+        adaptive.routes[0].presence_expires_at = Some(now + Duration::from_secs(45));
+        assert_eq!(
+            private_probe_repair_due(&adaptive, &signed, now),
+            Some(now + Duration::from_secs(35))
+        );
+        for remaining in [Duration::ZERO, super::super::transport::HANDSHAKE_TIMEOUT] {
+            adaptive.routes[0].presence_expires_at = Some(now + remaining);
+            assert_eq!(private_probe_repair_due(&adaptive, &signed, now), None);
+        }
+        for source in [
+            RouteSource::Authenticated,
+            RouteSource::PostOffice,
+            RouteSource::Gateway,
+        ] {
+            let mut observation = signed.clone();
+            observation.routes[0].source = source;
+            observation.routes[0].presence_expires_at = Some(now + Duration::from_secs(60));
+            assert_eq!(private_probe_repair_due(&observation, &signed, now), None);
+        }
+        let mut changed = signed.clone();
+        changed.addr.set_port(47480);
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
+        changed = signed.clone();
+        let replacement = DeviceIdentity::generate().public();
+        changed.public.ed25519_pub = replacement.ed25519_pub;
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
+        changed = signed.clone();
+        changed.public.x25519_pub = replacement.x25519_pub;
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
+        changed = signed.clone();
+        changed.account_id = None;
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
+        changed = signed.clone();
+        changed.post_office = !changed.post_office;
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
     }
 
     #[test]
