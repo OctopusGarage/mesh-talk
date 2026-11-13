@@ -662,6 +662,12 @@ nor endless bulk retries. Scope private authenticated availability to the exact
 identity, current authority and a finite deadline; public invisibility must not
 disable authorized private recovery. A repeated live heartbeat is not new data,
 while expired-to-fresh evidence at the same endpoint is a reconnect. Preserve
+the previous lease deadline and refresh it on unchanged observations too; a
+sampled online boolean alone can miss the intervening expiry. Every semantic
+hash dependency needs a subscribed producer, including policy-only changes.
+The real accept-owner controls in [channel recovery](../crates/mesh-talk-core/src/node/channels.rs)
+cover these edges and metadata progress while actual control I/O remains held.
+Preserve
 receiver-owned partial comparisons while offline, and renew productive work only
 from admitted current-scope evidence. Local publication should hint receivers,
 not restart pulls from every sibling. The availability and local-notification
@@ -1540,6 +1546,15 @@ use `Debug` to log whole tuples or containers containing identifiers. The
 retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
+
+When replacing a background owner, inspect every producer started by the actual
+runtime. A lower-level loop can become quiet while a legacy sibling keeps
+scanning the same durable facts. Exercise the production parent with unchanged
+sources across the old retry interval and verify actual business scans, then
+retain event, failure, finite-tail and explicit-retry controls. The
+[accept-owner regressions](../crates/mesh-talk-core/src/node/channels.rs) cover the
+[serving runtime](../crates/mesh-talk-core/src/node/serving.rs), including the
+absence of a duplicate producer and preservation of signed-control recovery.
 
 Emit independently captured diagnostics before acquiring optional supplemental
 owners. A busy lock is not corruption, and failure to read a repository page

@@ -6361,14 +6361,35 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn channel_departure_retry_preserves_original_event_after_owner_reconnects() {
+    departure_retry_after_owner_reconnects(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_departure_automatic_recovery_preserves_original_event_after_owner_reconnects() {
+    departure_retry_after_owner_reconnects(true).await;
+}
+
+async fn departure_retry_after_owner_reconnects(automatic: bool) {
     use crate::identity::account::Account;
     use crate::node::test_support::IndependentPeerRuntime;
-    async fn serve(node: Arc<Node>, listener: TcpListener) -> IndependentPeerRuntime {
-        let mut peer =
-            IndependentPeerRuntime::start_multithreaded_with(node, listener, |node, listener| {
-                node.run_inbound_connections_for_test(listener)
-            })
-            .await;
+    use futures_util::FutureExt;
+    async fn serve(
+        node: Arc<Node>,
+        listener: TcpListener,
+        automatic: bool,
+    ) -> IndependentPeerRuntime {
+        let mut peer = IndependentPeerRuntime::start_multithreaded_with(
+            node,
+            listener,
+            move |node, listener| async move {
+                if automatic {
+                    node.run_accept_loop_without_account_repair(listener).await;
+                } else {
+                    node.run_inbound_connections_for_test(listener).await;
+                }
+            },
+        )
+        .await;
         peer.launch();
         peer
     }
@@ -6404,98 +6425,151 @@ async fn channel_departure_retry_preserves_original_event_after_owner_reconnects
             &observer.user_id(),
         );
     }
-    let owner_host = serve(owner.clone(), owner_listener).await;
-    let member_host = serve(member.clone(), member_listener).await;
-    tokio::time::timeout(Duration::from_secs(30), async {
-        let public = member.identity.public();
-        let mut connection = owner.privacy_dial(member_addr, &public).await.unwrap();
-        let store = owner.sync_store(&public);
-        crate::node::session::request_round_paged(&mut connection, &store, group)
-            .await
-            .unwrap();
-        member.await_channel_metadata(group).await.unwrap();
-    })
-    .await
-    .expect("real signed membership must prepare before the owner goes offline");
-    assert_eq!(member.channel_owner(group), owner.user_id());
-    owner_host.pause().await;
-    member.leave_channel(group).await.unwrap();
-    let departure = member
-        .log
-        .lock()
-        .unwrap()
-        .events(&group)
-        .unwrap()
-        .into_iter()
-        .find(|event| {
-            event.kind == EventKind::ChannelLeave && event.author.user_id() == member.user_id()
+    // Preparation has one explicit sync owner: both providers are inbound-only.
+    // Autonomous member work starts only after this canonical membership cut.
+    let mut owner_host = Some(serve(owner.clone(), owner_listener, false).await);
+    let mut member_host = Some(serve(member.clone(), member_listener, false).await);
+    let mut resumed = None;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let public = member.identity.public();
+            let mut connection = owner.privacy_dial(member_addr, &public).await.unwrap();
+            let store = owner.sync_store(&public);
+            crate::node::session::request_round_paged(&mut connection, &store, group)
+                .await
+                .unwrap();
+            member.await_channel_metadata(group).await.unwrap();
         })
-        .expect("the offline leave retains its original signed event");
-    assert!(
-        departure.ciphertext.is_empty()
-            && departure.verify_signature()
-            && departure.verify_integrity()
-    );
-    assert!(
-        owner
+        .await
+        .expect("real signed membership must prepare before the owner goes offline");
+        assert_eq!(member.channel_owner(group), owner.user_id());
+        owner_host.take().unwrap().pause().await;
+        if automatic {
+            // Pause joins the actual inbound provider without closing this Node's
+            // admission owner. Relaunch the same member on its production host;
+            // do not race cold membership preparation with autonomous work.
+            member_host.take().unwrap().pause().await;
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            add_peer(
+                &owner.roster,
+                &member.identity,
+                "departure peer",
+                address.port(),
+                &owner.user_id(),
+            );
+            member_host = Some(serve(member.clone(), listener, true).await);
+        }
+        member.leave_channel(group).await.unwrap();
+        if automatic {
+            assert_eq!(
+                member.joined_channel_count(),
+                0,
+                "the departed member must retain no joined lane"
+            );
+        }
+        let departure = member
             .log
             .lock()
             .unwrap()
-            .get(&departure.id)
+            .events(&group)
             .unwrap()
-            .is_none()
-    );
-    assert!(
-        owner
-            .channel_members(group)
-            .iter()
-            .any(|peer| peer.user_id() == member.user_id())
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let resumed = serve(owner.clone(), listener).await;
-    add_peer(
-        &member.roster,
-        &owner.identity,
-        "reconnected owner",
-        address.port(),
-        &member.user_id(),
-    );
-    // A completed retry is not a remote receipt. Keep the original functional
-    // budget and require both canonical authorization and displayed membership.
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            member.retry_channel_departures().await;
-            // This fixture serves inbound sessions without the participant's
-            // metadata owner. Finish the received cut before reading roles.
-            owner.await_channel_metadata(group).await.unwrap();
-            match owner.account_group_projection(group) {
-                Ok(projection)
-                    if projection.is_authorized(departure.id).unwrap()
-                        && projection
-                            .state
-                            .as_ref()
-                            .is_some_and(|state| !state.is_member(&member.user_id()))
-                        && owner
-                            .channel_members(group)
-                            .iter()
-                            .all(|peer| peer.user_id() != member.user_id()) =>
-                {
-                    break;
+            .into_iter()
+            .find(|event| {
+                event.kind == EventKind::ChannelLeave && event.author.user_id() == member.user_id()
+            })
+            .expect("the offline leave retains its original signed event");
+        assert!(
+            departure.ciphertext.is_empty()
+                && departure.verify_signature()
+                && departure.verify_integrity()
+        );
+        assert!(
+            owner
+                .log
+                .lock()
+                .unwrap()
+                .get(&departure.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            owner
+                .channel_members(group)
+                .iter()
+                .any(|peer| peer.user_id() == member.user_id())
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        resumed = Some(serve(owner.clone(), listener, false).await);
+        add_peer(
+            &member.roster,
+            &owner.identity,
+            "reconnected owner",
+            address.port(),
+            &member.user_id(),
+        );
+        // A completed retry is not a remote receipt. Keep the original functional
+        // budget and require both canonical authorization and displayed membership.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if !automatic {
+                    member.retry_channel_departures().await;
                 }
-                Ok(_) | Err(LogError::StaleCursor) => {}
-                Err(error) => panic!("departure projection failed: {error}"),
+                // This fixture serves inbound sessions without the participant's
+                // metadata owner. Finish the received cut before reading roles.
+                owner.await_channel_metadata(group).await.unwrap();
+                match owner.account_group_projection(group) {
+                    Ok(projection)
+                        if projection.is_authorized(departure.id).unwrap()
+                            && projection
+                                .state
+                                .as_ref()
+                                .is_some_and(|state| !state.is_member(&member.user_id()))
+                            && owner
+                                .channel_members(group)
+                                .iter()
+                                .all(|peer| peer.user_id() != member.user_id()) =>
+                    {
+                        break;
+                    }
+                    Ok(_) | Err(LogError::StaleCursor) => {}
+                    Err(error) => panic!("departure projection failed: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        })
+        .await
+        .expect("reconnection must deliver the original offline departure and its parent cut");
+        assert_eq!(
+            owner.log.lock().unwrap().get(&departure.id).unwrap(),
+            Some(departure)
+        );
     })
-    .await
-    .expect("reconnection must deliver the original offline departure and its parent cut");
-    assert_eq!(
-        owner.log.lock().unwrap().get(&departure.id).unwrap(),
-        Some(departure)
+    .catch_unwind()
+    .await;
+    // Retire and join every real host before either profile/tempdir drops, on
+    // failed preparation or observation as well as successful convergence.
+    owner.runtime_work.close();
+    member.runtime_work.close();
+    tokio::join!(
+        async {
+            if let Some(host) = owner_host {
+                host.stop().await;
+            }
+            if let Some(host) = resumed {
+                host.stop().await;
+            }
+        },
+        async {
+            if let Some(host) = member_host {
+                host.stop().await;
+            }
+        }
     );
-    tokio::join!(resumed.stop(), member_host.stop());
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 /// Forward-secrecy rig: Alice + Bob channel; Alice sends two messages; Bob reads

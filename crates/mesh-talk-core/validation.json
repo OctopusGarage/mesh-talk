@@ -1219,6 +1219,47 @@
       "consumers": ["core-node"]
     },
     {
+      "id": "core-channel-control-recovery",
+      "paths": [
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/serving.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::channels::fanout_tests::accept_owner_",
+            "node::work_observation::tests::distribution_origins_record_actual_first_poll_not_construction_and_keep_variants",
+            "channel_departure_retry_preserves_original_event_after_owner_reconnects",
+            "channel_departure_automatic_recovery_preserves_original_event_after_owner_reconnects",
+            "signed_channel_replica_preference_survives_restart_and_ignores_outsiders",
+            "join_history_round_trip_over_noise_loopback_preserves_silent_provenance",
+            "local_channel_owner_notify_advances_local_work_without_restarting_held_remote",
+            "group_inventory_publication_progresses_while_unrelated_peer_sync_is_held"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Replay durable signed group controls through the existing recovery owner with finite fair cuts, semantic wakes and sparse settled repair.",
+        "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
+        "invariants": [
+          {
+            "name": "The production accept host has one control-recovery producer; unchanged source and identical presence do not rescan below five-minute repair, while semantic route or control changes retain recovery and explicit public retries remain immediate.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "A finite ordered cut visits at most 32 existing channel IDs and prepares/distributes at most one pending group per turn, retains an unfinished tail and coalesced resweep, rereads current recipients after preparation and retries only failed groups without restarting healthy or settled local lanes. Durable replay flags are not acknowledgements; departed-group outbound control, current authority, cancellation and held-remote local progress remain intact.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          }
+        ]
+      },
+      "consumers": ["core-node", "desktop-chat"],
+      "escalation": [
+        "Validate actual installed desktop and CLI idle behavior separately from unit timing. Require original signed-event offline/reconnect and held-remote progress evidence; pure-helper counters do not establish production-parent scheduling or physical cross-device convergence."
+      ]
+    },
+    {
       "id": "core-discovery",
       "paths": ["crates/mesh-talk-core/src/discovery/"],
       "rust": [

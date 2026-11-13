@@ -18,7 +18,7 @@ use crate::node::channel::seal_keys_for;
 use crate::node::session::{request_durable_have, request_round_paged as request_round};
 use futures_util::future::join_all;
 use futures_util::stream::{self, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -163,6 +163,99 @@ impl ChannelRecoveryBackoff {
         )
     }
 }
+type ChannelControlDeadlines = HashMap<([u8; 32], [u8; 32]), Option<Instant>>;
+
+/// One finite replay sweep. These are scheduling cursors, never remote ACKs.
+struct ChannelControlReplay {
+    active: bool,
+    upper: Option<[u8; 32]>,
+    after: Option<[u8; 32]>,
+    resweep: bool,
+    failed: BTreeSet<[u8; 32]>,
+    retrying: bool,
+    quiet: bool,
+    at: tokio::time::Instant,
+    backoff: ChannelRecoveryBackoff,
+}
+impl ChannelControlReplay {
+    fn new() -> Self {
+        Self {
+            active: false,
+            upper: None,
+            after: None,
+            resweep: false,
+            failed: BTreeSet::new(),
+            retrying: false,
+            quiet: false,
+            at: tokio::time::Instant::now(),
+            backoff: ChannelRecoveryBackoff::default(),
+        }
+    }
+    fn invalidate(&mut self) {
+        if self.active {
+            self.resweep = true;
+        } else {
+            self.retrying = false;
+            self.at = tokio::time::Instant::now();
+            self.quiet = false;
+        }
+    }
+}
+
+/// Independent retained inputs share the canonical recovery parent's task.
+/// Remembered leases are scheduling evidence only, never dial authorization.
+struct ChannelControlInputs {
+    metadata: tokio::sync::broadcast::Receiver<ConversationId>,
+    roster: tokio::sync::watch::Receiver<u64>,
+    network: tokio::sync::watch::Receiver<u64>,
+    availability: tokio::sync::watch::Receiver<u64>,
+    maintenance: tokio::sync::watch::Receiver<u64>,
+    input: [u8; 32],
+    deadlines: ChannelControlDeadlines,
+}
+impl ChannelControlInputs {
+    fn new(node: &Node) -> Self {
+        let metadata = node.subscribe_channel_changes();
+        let roster = node.subscribe_roster_changes();
+        let network = node.network_changes.subscribe();
+        let availability = node.subscribe_sibling_availability();
+        let maintenance = node.storage.database().subscribe_maintenance_changes();
+        let mut deadlines = HashMap::new();
+        let (input, _) = node.channel_control_route_input(&mut deadlines);
+        Self {
+            metadata,
+            roster,
+            network,
+            availability,
+            maintenance,
+            input,
+            deadlines,
+        }
+    }
+    async fn changed(&mut self, node: &Node) -> Option<bool> {
+        let force = tokio::select! {
+            change = self.metadata.recv() => match change {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            },
+            change = self.network.changed() => { change.ok()?; true },
+            change = self.roster.changed() => { change.ok()?; false },
+            change = self.availability.changed() => { change.ok()?; false },
+            change = self.maintenance.changed() => { change.ok()?; false },
+        };
+        let (input, renewed) = node.channel_control_route_input(&mut self.deadlines);
+        let changed = force || renewed || input != self.input;
+        self.input = input;
+        Some(changed)
+    }
+}
+
+#[derive(Default)]
+struct ChannelDistributionOutcome {
+    deferred: bool,
+    failed: bool,
+}
+
 const SMALL_CHANNEL_MEMBER_LIMIT: usize = 5;
 const LARGE_CHANNEL_INITIAL_FANOUT: usize = 2;
 const CHANNEL_CONTROL_FANOUT_CONCURRENCY: usize = 4;
@@ -747,7 +840,7 @@ impl Node {
         }
     }
 
-    /// One parent owns all three futures; cancellation drops them without detached work.
+    /// One parent owns all four futures; cancellation drops them without detached work.
     pub(super) async fn run_channel_recovery_with_maintenance(
         self: Arc<Self>,
         changes: Arc<Notify>,
@@ -755,7 +848,9 @@ impl Node {
         maintenance: impl std::future::Future<Output = ()>,
     ) {
         let custody = Arc::clone(&self).run_channel_custody_recovery_loop(periodic);
+        let controls = Arc::clone(&self).run_channel_control_recovery_loop(periodic);
         tokio::select! {
+            _ = Box::pin(controls) => {}
             _ = Box::pin(self.run_local_channel_recovery_loop(changes, periodic)) => {}
             _ = maintenance => {}
             _ = custody => {}
@@ -1010,6 +1105,224 @@ impl Node {
                 recheck_at = tokio::time::Instant::now() + CHANNEL_CUSTODY_RECHECK_INTERVAL;
             }
             tokio::task::yield_now().await;
+        }
+    }
+
+    // Raw observations do not grant replay credit. Canonical routing facts,
+    // actual availability and privacy changes do; each dial still authorizes now.
+    fn channel_control_route_input(
+        &self,
+        deadlines: &mut ChannelControlDeadlines,
+    ) -> ([u8; 32], bool) {
+        use sha2::{Digest, Sha256};
+        let now = Instant::now();
+        let mut current_deadlines = HashMap::new();
+        let mut renewed = false;
+        let mut peers: Vec<_> = self
+            .roster
+            .lock()
+            .expect("roster mutex")
+            .peers()
+            .into_iter()
+            .map(|peer| {
+                let endpoints = peer.scheduling_endpoints();
+                let identity = (peer.public.ed25519_pub, peer.public.x25519_pub);
+                let deadline = peer.presence_deadline(now);
+                // Same rule as FanoutRoutes: refresh remembered leases without
+                // granting ordinary heartbeats retry credit. An expired lease
+                // followed by fresh evidence is a new availability edge even
+                // when no intermediate observation saw the peer offline.
+                renewed |= deadlines.get(&identity).is_some_and(|old| {
+                    old.is_none_or(|at| at <= now) && deadline.is_some_and(|at| at > now)
+                });
+                current_deadlines.insert(identity, deadline);
+                let online = deadline.is_some();
+                (
+                    peer.public,
+                    peer.account_id,
+                    peer.post_office,
+                    endpoints,
+                    online,
+                )
+            })
+            .collect();
+        peers.sort_unstable_by_key(|peer| (peer.0.ed25519_pub, peer.0.x25519_pub));
+        let (mut routes, proof_revision) = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy state")
+            .as_ref()
+            .map(|state| (state.routes.routes(), Some(state.proofs.revision())))
+            .unwrap_or_default();
+        routes.sort_unstable_by_key(|(public, ip)| (public.ed25519_pub, public.x25519_pub, *ip));
+        let bytes = bincode::serialize(&(
+            peers,
+            routes,
+            proof_revision,
+            self.privacy
+                .generation
+                .load(std::sync::atomic::Ordering::Acquire),
+            self.sibling_availability_revision(),
+        ))
+        .expect("routing scheduling input serializes");
+        *deadlines = current_deadlines;
+        (Sha256::digest(bytes).into(), renewed)
+    }
+
+    async fn replay_channel_controls_turn(&self, replay: &mut ChannelControlReplay) {
+        if !replay.active {
+            replay.upper = if replay.retrying {
+                replay.failed.last().copied()
+            } else {
+                self.channels
+                    .lock()
+                    .expect("channels mutex")
+                    .control_replay_upper()
+            };
+            replay.after = None;
+            replay.active = true;
+        }
+        let (page, _, mut more) = replay
+            .upper
+            .map(|upper| {
+                if replay.retrying {
+                    use std::ops::Bound::{Excluded, Included, Unbounded};
+                    let mut rows = replay
+                        .failed
+                        .range((replay.after.map_or(Unbounded, Excluded), Included(upper)));
+                    let ids: Vec<_> = rows.by_ref().take(32).copied().collect();
+                    let more = rows.next().is_some();
+                    let last = ids.last().copied().or(replay.after);
+                    (
+                        ids.into_iter().map(ConversationId::new).collect(),
+                        last,
+                        more,
+                    )
+                } else {
+                    self.channels
+                        .lock()
+                        .expect("channels mutex")
+                        .control_replay_page(replay.after, upper)
+                }
+            })
+            .unwrap_or_default();
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("channel_control_retry_selected count={}", page.len())
+        });
+        let mut after = replay.after;
+        let page_len = page.len();
+        for (offset, channel) in page.into_iter().enumerate() {
+            after = Some(*channel.as_bytes());
+            // Do not retain a recipient/authority view while preparation awaits.
+            if self
+                .channels
+                .lock()
+                .expect("channels mutex")
+                .pending_control_state(channel, &self.user_id())
+                .is_none()
+            {
+                replay.failed.remove(channel.as_bytes());
+                continue;
+            }
+            // One preparation/distribution per owner turn. Unvisited book rows
+            // stay behind this cursor, so other local/remote lanes get a turn.
+            more |= offset + 1 < page_len;
+            if let Err(error) = self.await_channel_metadata(channel).await {
+                log::warn!("channel replay preparation deferred: {error}");
+                replay.failed.insert(*channel.as_bytes());
+                break;
+            }
+            let members = self
+                .channels
+                .lock()
+                .expect("channels mutex")
+                .pending_control_members(channel, &self.user_id());
+            if let Some(members) = members {
+                self.observe_distribution_origin(std::panic::Location::caller(), false);
+                let outcome = self
+                    .distribute_channel_targets_outcome(channel, &members, None, true, None)
+                    .await;
+                if outcome.failed || outcome.deferred {
+                    replay.failed.insert(*channel.as_bytes());
+                } else {
+                    replay.failed.remove(channel.as_bytes());
+                }
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    format!("channel_control_retry_distributed {channel:?}")
+                });
+            } else {
+                replay.failed.remove(channel.as_bytes());
+            }
+            break;
+        }
+        replay.after = after;
+        if more {
+            replay.at = tokio::time::Instant::now();
+            return;
+        }
+        replay.active = false;
+        if std::mem::take(&mut replay.resweep) {
+            // Do not acknowledge a notification received during the captured cut.
+            replay.retrying = false;
+            replay.at = tokio::time::Instant::now();
+            replay.quiet = false;
+        } else if !replay.failed.is_empty() {
+            replay.retrying = true;
+            replay.at = tokio::time::Instant::now() + replay.backoff.next_delay(0);
+            replay.quiet = false;
+        } else {
+            replay.retrying = false;
+            replay.backoff.reset();
+            replay.at = tokio::time::Instant::now() + CHANNEL_RECOVERY_QUIET_INTERVAL;
+            replay.quiet = true;
+        }
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "channel_control_retry_complete".into()
+        });
+    }
+
+    async fn run_channel_control_recovery_loop(self: Arc<Self>, periodic: bool) {
+        let mut replay = ChannelControlReplay::new();
+        let mut inputs = ChannelControlInputs::new(&self);
+        loop {
+            if tokio::time::Instant::now() >= replay.at
+                && (!replay.quiet || self.channel_recovery_periodic_enabled(periodic))
+            {
+                let mut dirty = false;
+                {
+                    let step = self.replay_channel_controls_turn(&mut replay);
+                    tokio::pin!(step);
+                    loop {
+                        tokio::select! {
+                            () = &mut step => break,
+                            changed = inputs.changed(&self) => match changed {
+                                Some(changed) => dirty |= changed,
+                                None => return,
+                            },
+                        }
+                    }
+                }
+                // Inputs are captured before/while work, never acknowledged by
+                // its completion. Preserve one follow-up without restarting I/O.
+                if dirty {
+                    replay.invalidate();
+                }
+                tokio::task::yield_now().await;
+            } else {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(replay.at),
+                        if !replay.quiet || self.channel_recovery_periodic_enabled(periodic) => {},
+                    changed = inputs.changed(&self) => match changed {
+                        Some(true) => replay.invalidate(),
+                        Some(false) => {},
+                        None => return,
+                    },
+                }
+            }
         }
     }
 
@@ -2476,12 +2789,20 @@ impl Node {
         };
         pending.sort_by_key(|(id, _)| *id.as_bytes());
         let len = pending.len();
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("channel_control_retry_selected count={len}")
+        });
         if len == 0 {
             return;
         }
         let offset = (now_millis() / 10_000) as usize % len;
         for (channel, members) in pending.into_iter().cycle().skip(offset).take(len.min(32)) {
             self.distribute_channel(channel, &members).await;
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!("channel_control_retry_distributed {channel:?}")
+            });
         }
     }
 
@@ -3519,6 +3840,26 @@ impl Node {
         replicate_to_post_office: bool,
         confirming: Option<EventId>,
     ) -> bool {
+        self.distribute_channel_targets_outcome(
+            channel,
+            members,
+            fanout,
+            replicate_to_post_office,
+            confirming,
+        )
+        .await
+        .deferred
+    }
+
+    async fn distribute_channel_targets_outcome(
+        &self,
+        channel: ConversationId,
+        members: &[PublicIdentity],
+        fanout: Option<usize>,
+        replicate_to_post_office: bool,
+        confirming: Option<EventId>,
+    ) -> ChannelDistributionOutcome {
+        let failed = std::sync::atomic::AtomicBool::new(false);
         let result: Result<bool, NodeError> = async {
             let me = self.identity.public().user_id();
             let peers: Vec<PeerRecord> = {
@@ -3548,6 +3889,7 @@ impl Node {
             stream::iter(targets)
                 .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| {
                     let deferred = &deferred;
+                    let failed = &failed;
                     async move {
                         let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
                             if let Some(event) = confirming {
@@ -3592,6 +3934,16 @@ impl Node {
                                     }
                                     .into()
                                 });
+                                if round.as_ref().is_err_and(|error| {
+                                    !matches!(
+                                        error,
+                                        super::session::SessionError::Transport(
+                                            crate::transport::TransportError::AdmissionDenied
+                                        )
+                                    )
+                                }) {
+                                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
                                 if round.is_ok() {
                                     self.recycle_sync_channel(ch);
                                 } else if round.as_ref().is_err_and(|error| {
@@ -3609,6 +3961,12 @@ impl Node {
                             }
                         })
                         .await;
+                        if !matches!(
+                            &result,
+                            Ok(Ok(())) | Ok(Err(crate::transport::TransportError::AdmissionDenied))
+                        ) {
+                            failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                         if let Ok(Err(error)) = result
                             && super::session_pool::local_capacity_busy(&error)
                         {
@@ -3619,7 +3977,7 @@ impl Node {
                 .await;
             if replicate_to_post_office {
                 let result = self
-                    .replicate_to_post_office_targets_confirming(
+                    .replicate_to_post_office_targets_observing(
                         channel,
                         members
                             .iter()
@@ -3627,8 +3985,12 @@ impl Node {
                             .cloned()
                             .collect(),
                         confirming,
+                        Some(&failed),
                     )
                     .await;
+                if result.is_err() {
+                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 if let Err(super::session::SessionError::Transport(error)) = result
                     && super::session_pool::local_capacity_busy(&error)
                 {
@@ -3639,10 +4001,16 @@ impl Node {
         }
         .await;
         match result {
-            Ok(deferred) => deferred,
+            Ok(deferred) => ChannelDistributionOutcome {
+                deferred,
+                failed: failed.load(std::sync::atomic::Ordering::Relaxed),
+            },
             Err(error) => {
                 log::warn!("channel distribution deferred: {error}");
-                true
+                ChannelDistributionOutcome {
+                    deferred: true,
+                    failed: true,
+                }
             }
         }
     }
@@ -4073,6 +4441,812 @@ mod fanout_tests {
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }
+    }
+
+    struct ControlRetryProbe {
+        scans: Arc<std::sync::atomic::AtomicUsize>,
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+        groups: Arc<std::sync::Mutex<HashSet<String>>>,
+        per_group: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+        local_lanes: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+        distributed: tokio::sync::mpsc::UnboundedReceiver<()>,
+        completed: tokio::sync::mpsc::UnboundedReceiver<()>,
+        selected: tokio::sync::mpsc::UnboundedReceiver<()>,
+    }
+
+    fn control_retry_probe(node: &Node) -> ControlRetryProbe {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let scans = Arc::new(AtomicUsize::new(0));
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let groups = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let per_group = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
+        let local_lanes = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
+        let (distributed, distribution_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (completed, completion_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (selected, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let scans = scans.clone();
+            let dispatches = dispatches.clone();
+            let groups = groups.clone();
+            let per_group = per_group.clone();
+            let local_lanes = local_lanes.clone();
+            move |_, phase| {
+                if phase.starts_with("channel_recovery_") && phase.ends_with("_entered") {
+                    *local_lanes
+                        .lock()
+                        .unwrap()
+                        .entry(phase.to_owned())
+                        .or_default() += 1;
+                }
+                if phase == "channel_control_retry_complete" {
+                    let _ = completed.send(());
+                }
+                if let Some(channel) = phase.strip_prefix("channel_control_retry_distributed ") {
+                    dispatches.fetch_add(1, Ordering::SeqCst);
+                    groups.lock().unwrap().insert(channel.to_owned());
+                    *per_group
+                        .lock()
+                        .unwrap()
+                        .entry(channel.to_owned())
+                        .or_default() += 1;
+                    let _ = distributed.send(());
+                }
+                if phase.starts_with("channel_control_retry_selected count=") {
+                    scans.fetch_add(1, Ordering::SeqCst);
+                    let _ = selected.send(());
+                }
+            }
+        }));
+        ControlRetryProbe {
+            scans,
+            dispatches,
+            groups,
+            per_group,
+            local_lanes,
+            distributed: distribution_receiver,
+            completed: completion_receiver,
+            selected: receiver,
+        }
+    }
+
+    fn control_retry_node(path: &std::path::Path) -> Arc<Node> {
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (messages, _) = tokio::sync::mpsc::unbounded_channel();
+        let (files, _) = tokio::sync::mpsc::unbounded_channel();
+        Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(std::sync::Mutex::new(
+                crate::discovery::roster::Roster::default(),
+            )),
+            dm,
+            messages,
+            files,
+            &path.join("events.log"),
+            &path.join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    }
+
+    async fn stop_control_retry_owner(node: &Arc<Node>, worker: tokio::task::JoinHandle<()>) {
+        worker.abort();
+        let _ = worker.await;
+        node.runtime_work.close();
+        node.sessions.clear();
+        node.runtime_work.drain().await;
+    }
+
+    #[tokio::test]
+    async fn accept_owner_held_control_keeps_background_metadata_publication_progressing() {
+        use std::sync::atomic::Ordering;
+        // Explicit legacy-Core factory: no modern account auto-enrollment can
+        // prepare this metadata on behalf of the recovery owner under test.
+        let dir = tempfile::tempdir().unwrap();
+        let node = control_retry_node(dir.path());
+        let peer = DeviceIdentity::generate();
+        let channel = node
+            .create_channel("held control metadata", vec![peer.public()])
+            .await
+            .unwrap();
+        node.set_channel_replica_enabled(channel, true)
+            .await
+            .unwrap();
+        node.set_channel_announcement_if(channel, Some("signed metadata"), None, |commit| commit())
+            .await
+            .unwrap();
+        let publication = node
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == EventKind::ChannelMetadata)
+            .unwrap();
+        // Finish initial local preparation BEFORE introducing the held remote.
+        for _ in 0..128 {
+            node.retry_channel_plaintext();
+            let _ = node.retry_group_metadata().unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proof = Announce::new(&peer, "held control peer", address.port());
+        let (accepted, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (release, mut held) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            loop {
+                tokio::select! {
+                    _ = &mut held => break,
+                    incoming = listener.accept(), if sockets.len() < 16 => {
+                        let (socket, _) = incoming.unwrap();
+                        // Hold the actual TCP/Noise handshake owner. No fake
+                        // future stands in for the production control exchange.
+                        sockets.push(socket);
+                        let _ = accepted.send(());
+                    }
+                }
+            }
+            drop(sockets);
+        });
+        let mut probe = control_retry_probe(&node);
+        let original_hook = node
+            .account_client_test_hook
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
+        let (local_done, mut local_completions) = tokio::sync::mpsc::unbounded_channel();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            if phase == "channel_recovery_group_metadata_done" {
+                let _ = local_done.send(());
+            }
+            original_hook(peer, phase);
+        }));
+        // Keep BOTH actual local/control children under their production parent,
+        // but exclude independent account and periodic joined-group networking.
+        let roster_changes = node.roster.lock().unwrap().changes();
+        let worker = tokio::spawn(node.clone().run_channel_recovery_with_maintenance(
+            roster_changes,
+            false,
+            std::future::pending(),
+        ));
+        let local_settled =
+            tokio::time::timeout(Duration::from_secs(3), local_completions.recv()).await;
+        let controls_settled =
+            tokio::time::timeout(Duration::from_secs(3), probe.completed.recv()).await;
+        let before = probe.dispatches.load(Ordering::SeqCst);
+        while probe.selected.try_recv().is_ok() {}
+        // Keep the production roster source attached. Notification-only mode
+        // prevents an unrelated periodic pull from owning the held endpoint.
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, address.ip(), &node.user_id());
+        let selected = tokio::time::timeout(Duration::from_secs(3), probe.selected.recv()).await;
+        let connected = tokio::time::timeout(Duration::from_secs(3), arrivals.recv()).await;
+        // Reuse a valid owner-signed publication envelope with a fresh signed
+        // event/ancestry. The mutator does NOT call a metadata display getter,
+        // set_channel_announcement, retry_group_metadata, or await_metadata.
+        node.append_event(
+            channel,
+            EventKind::ChannelMetadata,
+            publication.ciphertext.clone(),
+        )
+        .unwrap();
+        let pending = node
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == EventKind::ChannelMetadata && event.id != publication.id)
+            .unwrap();
+        node.process_channel(channel); // Canonical reception only; no field index preparation.
+        let database = node.channel_checkpoints.profile().database();
+        let published = || {
+            database
+                .read(|c| {
+                    Ok(c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM group_metadata_publications WHERE event=?1)",
+                        [pending.id.as_bytes().as_slice()],
+                        |row| row.get::<_, bool>(0),
+                    )?)
+                })
+                .unwrap()
+        };
+        let initially_unpublished = !published();
+        // Actual retained wake after a real source append. Read-only SQL is the
+        // oracle; observing metadata must never prepare it in this fixture.
+        node.channel_recovery_notify.notify_one();
+        let progress = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if published() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let control_still_held = probe.dispatches.load(Ordering::SeqCst) == before;
+        let server_still_held = !server.is_finished();
+        // Preserve the observation BEFORE releasing the real control socket.
+        let _ = release.send(());
+        server.await.unwrap();
+        worker.abort();
+        let _ = worker.await;
+        // Validation only AFTER preserving the before-release result. This is
+        // not the progress oracle: it diagnoses an invalid publication fixture.
+        for _ in 0..128 {
+            let _ = node.retry_group_metadata().unwrap();
+        }
+        let valid_after_release = published();
+        node.runtime_work.close();
+        node.sessions.clear();
+        node.runtime_work.drain().await;
+        eprintln!(
+            "held metadata: local_settled={} controls_settled={} before_release={} after_release_valid={valid_after_release}",
+            matches!(local_settled, Ok(Some(()))),
+            matches!(controls_settled, Ok(Some(()))),
+            progress.is_ok()
+        );
+        assert!(
+            matches!(local_settled, Ok(Some(()))) && matches!(controls_settled, Ok(Some(()))),
+            "both real child owners must settle before introducing the held peer"
+        );
+        assert!(
+            valid_after_release,
+            "manual post-release validation must accept the actual signed publication fixture"
+        );
+        assert!(
+            matches!(selected, Ok(Some(()))),
+            "actual control owner must select its durable replay"
+        );
+        assert!(
+            matches!(connected, Ok(Some(()))),
+            "actual pending control must reach a TCP/Noise owner"
+        );
+        assert!(
+            initially_unpublished,
+            "foreground source mutation must not satisfy the field-index oracle"
+        );
+        assert!(
+            control_still_held && server_still_held,
+            "control network ownership must remain held during local observation"
+        );
+        assert!(
+            progress.is_ok(),
+            "background metadata publication must finish before held control release"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_owner_control_retry_is_quiet_before_its_repair_deadline() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let node = control_retry_node(dir.path());
+        let mut probe = control_retry_probe(&node);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker = tokio::spawn(
+            node.clone()
+                .run_accept_loop_without_account_repair(listener),
+        );
+        let started = tokio::time::timeout(Duration::from_secs(5), probe.selected.recv())
+            .await
+            .is_ok_and(|value| value.is_some());
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let before = probe.scans.load(Ordering::SeqCst);
+        let source = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .source_revision()
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let after = probe.scans.load(Ordering::SeqCst);
+        let after_source = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .source_revision()
+            .unwrap();
+        stop_control_retry_owner(&node, worker).await;
+        eprintln!(
+            "actual accept-owner control scans {before}->{after}; source {source}->{after_source}"
+        );
+        assert!(
+            started && before > 0,
+            "actual production accept owner completes its initial real control selection"
+        );
+        assert_eq!(
+            source, after_source,
+            "no source change qualifies another scan"
+        );
+        assert_eq!(
+            after, before,
+            "settled controls must not be rescanned on legacy ten-second ticks before sparse repair"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_owner_pending_control_parks_but_explicit_manual_retry_still_runs() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let node = control_retry_node(dir.path());
+        let channel = node
+            .create_account_channel_invited_if("durable replica control", Vec::new(), |commit| {
+                commit()
+            })
+            .await
+            .unwrap();
+        node.set_channel_replica_enabled(channel, false)
+            .await
+            .unwrap();
+        let durable = node
+            .channels
+            .lock()
+            .unwrap()
+            .pending_replica_preferences(&node.user_id())
+            .iter()
+            .any(|(id, _)| *id == channel);
+        let mut probe = control_retry_probe(&node);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker = tokio::spawn(
+            node.clone()
+                .run_accept_loop_without_account_repair(listener),
+        );
+        let started = tokio::time::timeout(Duration::from_secs(5), probe.selected.recv())
+            .await
+            .is_ok_and(|value| value.is_some());
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        let before = probe.dispatches.load(Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let after = probe.dispatches.load(Ordering::SeqCst);
+        while probe.selected.try_recv().is_ok() {}
+        while probe.completed.try_recv().is_ok() {}
+        let changed_at = tokio::time::Instant::now();
+        // This foreground operation distributes too; only the actual owner
+        // selector/completion witness can establish retained replay admission.
+        node.set_channel_replica_enabled(channel, true)
+            .await
+            .unwrap();
+        let value_selected = tokio::time::timeout(Duration::from_secs(1), probe.selected.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        let value_completed = tokio::time::timeout(Duration::from_secs(1), probe.completed.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let changed = probe.dispatches.load(Ordering::SeqCst);
+        let change_elapsed = changed_at.elapsed();
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let parked = probe.dispatches.load(Ordering::SeqCst);
+        node.retry_channel_controls().await;
+        let manual = probe.dispatches.load(Ordering::SeqCst);
+        let still_durable = node
+            .channels
+            .lock()
+            .unwrap()
+            .pending_replica_preferences(&node.user_id())
+            .iter()
+            .any(|(id, _)| *id == channel);
+        stop_control_retry_owner(&node, worker).await;
+        eprintln!("actual pending-control dispatches {before}->{after}; explicit manual {manual}");
+        assert!(
+            durable && still_durable,
+            "a successful pass never clears signed durable replay facts as if they were remote ACKs"
+        );
+        assert!(
+            started && before > 0,
+            "valid retained replica preference is actually offered by the accept owner"
+        );
+        assert!(
+            manual > parked,
+            "the explicit public retry API remains forceful"
+        );
+        assert!(
+            value_selected
+                && value_completed
+                && changed > after
+                && change_elapsed < CHANNEL_RECOVERY_QUIET_INTERVAL,
+            "a real replica preference value change promptly admits an owner replay, without periodic rescue"
+        );
+        assert_eq!(
+            parked, changed,
+            "the changed control settles again after its finite replay"
+        );
+        assert_eq!(
+            after, before,
+            "unchanged retained control facts do not require continuous background redistribution"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_owner_pending_control_tail_drains_beyond_thirty_two_before_parking() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = control_retry_node(dir.path());
+        for _ in 0..33 {
+            let channel = node
+                .create_account_channel_invited_if("bounded control tail", Vec::new(), |commit| {
+                    commit()
+                })
+                .await
+                .unwrap();
+            node.set_channel_replica_enabled(channel, false)
+                .await
+                .unwrap();
+        }
+        let mut probe = control_retry_probe(&node);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker = tokio::spawn(
+            node.clone()
+                .run_accept_loop_without_account_repair(listener),
+        );
+        let started = tokio::time::timeout(Duration::from_secs(5), probe.selected.recv())
+            .await
+            .is_ok_and(|value| value.is_some());
+        // Wait on the actual owner's finite continuation, bounded strictly below
+        // the legacy ten-second timer and the new sparse repair deadline.
+        let drained = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if probe.groups.lock().unwrap().len() == 33 {
+                    break;
+                }
+                if probe.distributed.recv().await.is_none() {
+                    break;
+                }
+            }
+        })
+        .await
+        .is_ok();
+        let actual = probe.groups.lock().unwrap().len();
+        stop_control_retry_owner(&node, worker).await;
+        eprintln!("actual accept-owner pending-control tail visited {actual}/33");
+        assert!(
+            started,
+            "the real accept owner starts its pending-control cut"
+        );
+        assert!(
+            drained && actual == 33,
+            "all retained controls, including the thirty-third, own a prompt finite continuation"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_owner_identical_presence_is_quiet_and_new_route_replays_controls() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let node = control_retry_node(dir.path());
+        let channel = node
+            .create_account_channel_invited_if("retained control", Vec::new(), |commit| commit())
+            .await
+            .unwrap();
+        node.set_channel_replica_enabled(channel, false)
+            .await
+            .unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new(&peer, "route input", 9);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.2".parse().unwrap(), &node.user_id());
+        let mut probe = control_retry_probe(&node);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker = tokio::spawn(
+            node.clone()
+                .run_accept_loop_without_account_repair(listener),
+        );
+        let started = tokio::time::timeout(Duration::from_secs(5), probe.completed.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        while probe.completed.try_recv().is_ok() {}
+        let before = probe.dispatches.load(Ordering::SeqCst);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.2".parse().unwrap(), &node.user_id());
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let identical = probe.dispatches.load(Ordering::SeqCst);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.3".parse().unwrap(), &node.user_id());
+        let changed = tokio::time::timeout(Duration::from_secs(1), probe.completed.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        let after = probe.dispatches.load(Ordering::SeqCst);
+        stop_control_retry_owner(&node, worker).await;
+        assert!(started && before > 0);
+        assert_eq!(
+            identical, before,
+            "unchanged signed presence does not earn replay credit"
+        );
+        assert!(
+            changed && after > identical,
+            "new route fact promptly replays durable controls"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_owner_failed_control_retries_without_replaying_healthy_or_local_lanes() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let node = control_retry_node(dir.path());
+        let peer = DeviceIdentity::generate();
+        let failed = node
+            .create_channel("unreachable control", vec![peer.public()])
+            .await
+            .unwrap();
+        node.set_channel_replica_enabled(failed, false)
+            .await
+            .unwrap();
+        let healthy = node
+            .create_account_channel_invited_if("settled control", Vec::new(), |commit| commit())
+            .await
+            .unwrap();
+        node.set_channel_replica_enabled(healthy, false)
+            .await
+            .unwrap();
+        // Keep ownership of the listener: an accepted Noise preamble followed
+        // by EOF proves a real failed attempt, unlike an unreserved free port.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = tokio::spawn({
+            let attempts = attempts.clone();
+            async move {
+                use tokio::io::AsyncReadExt;
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut byte = [0u8; 1];
+                    if tokio::time::timeout(Duration::from_secs(1), socket.read(&mut byte))
+                        .await
+                        .is_ok_and(|read| read.is_ok_and(|count| count > 0))
+                    {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                    }
+                    // Dropping the accepted socket ends the real handshake.
+                }
+            }
+        });
+        let proof = Announce::new(&peer, "EOF route", port);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+        let mut probe = control_retry_probe(&node);
+        // Keep the canonical control/local parent while excluding unrelated
+        // account migration and sparse network repair for this deadline case.
+        let worker = tokio::spawn(node.clone().run_channel_recovery_with_maintenance(
+            Arc::new(Notify::new()),
+            false,
+            std::future::pending(),
+        ));
+        let started = tokio::time::timeout(Duration::from_secs(5), probe.completed.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        while probe.completed.try_recv().is_ok() {}
+        let before = probe.per_group.lock().unwrap().clone();
+        let local_before = probe.local_lanes.lock().unwrap().clone();
+        let scans = probe.scans.load(Ordering::SeqCst);
+        let failure_at = tokio::time::Instant::now();
+        let attempted = attempts.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let early = probe.scans.load(Ordering::SeqCst);
+        tokio::time::sleep_until(failure_at + Duration::from_secs(3)).await;
+        let retried = tokio::time::timeout(Duration::from_millis(500), probe.completed.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        let after = probe.per_group.lock().unwrap().clone();
+        let local_after = probe.local_lanes.lock().unwrap().clone();
+        stop_control_retry_owner(&node, worker).await;
+        server.abort();
+        let _ = server.await;
+        eprintln!(
+            "control failure startup={started} retry={retried} actual_TCP_attempts={attempted} scans={scans}->{early}"
+        );
+        assert!(
+            attempted > 0,
+            "the owned EOF listener observed an actual Noise handshake attempt"
+        );
+        assert!(
+            started && retried,
+            "actual failed TCP control attempt retains its three-second retry"
+        );
+        assert!(
+            before.get(&format!("{healthy:?}")).copied().unwrap_or(0) > 0
+                && before.get(&format!("{failed:?}")).copied().unwrap_or(0) > 0,
+            "both healthy and failed controls were actually selected before retry"
+        );
+        assert_eq!(early, scans, "no retry before the owned failure deadline");
+        assert_eq!(
+            before.get(&format!("{healthy:?}")),
+            after.get(&format!("{healthy:?}")),
+            "a failed group cannot reset successful group replay"
+        );
+        assert!(
+            after.get(&format!("{failed:?}")).copied().unwrap_or(0)
+                > before.get(&format!("{failed:?}")).copied().unwrap_or(0),
+            "failed signed control is actually offered again"
+        );
+        assert_eq!(
+            local_before, local_after,
+            "control retry cannot restart settled history/metadata/membership lanes"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_owner_same_endpoint_expired_presence_replays_retained_control() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let node = control_retry_node(dir.path());
+        let channel = node
+            .create_account_channel_invited_if("retained replay", Vec::new(), |commit| commit())
+            .await
+            .unwrap();
+        node.set_channel_replica_enabled(channel, false)
+            .await
+            .unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new(&peer, "returning peer", 9);
+        let ip = "127.0.0.2".parse().unwrap();
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, ip, &node.user_id());
+        let mut probe = control_retry_probe(&node);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker = tokio::spawn(
+            node.clone()
+                .run_accept_loop_without_account_repair(listener),
+        );
+        let started = tokio::time::timeout(Duration::from_secs(5), probe.completed.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        while probe.completed.try_recv().is_ok() {}
+        let before = probe.scans.load(Ordering::SeqCst);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, ip, &node.user_id());
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        let ordinary = probe.scans.load(Ordering::SeqCst);
+        // These authoritative leases use std::Instant. Real time deliberately
+        // crosses15s public expiry while staying below30s route pruning.
+        tokio::time::sleep(crate::discovery::roster::PUBLIC_PRESENCE_TTL + Duration::from_secs(1))
+            .await;
+        let before_refresh = probe.scans.load(Ordering::SeqCst);
+        let expired = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&peer.public().user_id())
+            .is_some_and(|record| record.presence_deadline(Instant::now()).is_none());
+        let fresh_at = tokio::time::Instant::now();
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, ip, &node.user_id());
+        let renewed = tokio::time::timeout(Duration::from_secs(1), probe.completed.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        let after = probe.scans.load(Ordering::SeqCst);
+        stop_control_retry_owner(&node, worker).await;
+        assert!(started && before > 0);
+        assert_eq!(
+            ordinary, before,
+            "an unexpired identical heartbeat is quiet"
+        );
+        assert!(
+            expired && before_refresh == ordinary,
+            "the owner did not observe/replay an intermediate offline state"
+        );
+        assert!(
+            renewed
+                && after > before_refresh
+                && fresh_at.elapsed() < CHANNEL_RECOVERY_QUIET_INTERVAL,
+            "identical endpoint/proof with newly renewed availability promptly replays retained controls"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_owner_policy_only_change_replays_retained_control_without_public_roster_wake() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let node = control_retry_node(dir.path());
+        node.configure_privacy(
+            dir.path(),
+            "pw",
+            &node.signed_announce("owner", 9),
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        let channel = node
+            .create_account_channel_invited_if("policy replay", Vec::new(), |commit| commit())
+            .await
+            .unwrap();
+        node.set_channel_replica_enabled(channel, false)
+            .await
+            .unwrap();
+        let mut probe = control_retry_probe(&node);
+        let mut maintenance = node.storage.database().subscribe_maintenance_changes();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker = tokio::spawn(
+            node.clone()
+                .run_accept_loop_without_account_repair(listener),
+        );
+        let started = tokio::time::timeout(Duration::from_secs(5), probe.completed.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        while probe.completed.try_recv().is_ok() {}
+        maintenance.borrow_and_update();
+        let before = probe.scans.load(Ordering::SeqCst);
+        let generation = node.privacy.generation.load(Ordering::Acquire);
+        let changed_at = tokio::time::Instant::now();
+        node.set_invisible(true).await.unwrap();
+        let committed = node.privacy.generation.load(Ordering::Acquire) > generation;
+        let retained = maintenance.has_changed().unwrap();
+        let empty_roster = node.roster.lock().unwrap().peers().is_empty();
+        let replayed = tokio::time::timeout(Duration::from_secs(1), probe.completed.recv())
+            .await
+            .is_ok_and(|v| v.is_some());
+        let after = probe.scans.load(Ordering::SeqCst);
+        stop_control_retry_owner(&node, worker).await;
+        assert!(
+            started && before > 0 && committed && retained && empty_roster,
+            "actual privacy commit publishes retained dependency wake without public presence"
+        );
+        assert!(
+            replayed && after > before && changed_at.elapsed() < CHANNEL_RECOVERY_QUIET_INTERVAL,
+            "policy-only changes promptly revalidate retained control replay before sparse repair"
+        );
     }
 
     #[tokio::test]

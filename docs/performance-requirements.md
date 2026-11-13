@@ -95,6 +95,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    independent deadlines for transport leases, active delivery and real expiry;
    trace dependencies before sharing a worker to avoid cross-lane wait cycles.
    Serial execution bounds peaks; unchanged inputs must still avoid the work.
+   Retire superseded producers when consolidating maintenance. Check the actual
+   runtime wiring: an unchanged legacy timer can keep duplicating an otherwise
+   event-driven replacement. Durable historical facts do not themselves mean
+   that another retry is due; scheduling owns its separate completion/deadline.
    A fallback repairs missed events; it is not the
    main data path. Back off failures, stop with the owner and refresh on return.
    A stored address or linked-device certificate is not current availability.

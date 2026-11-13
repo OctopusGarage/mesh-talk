@@ -805,6 +805,28 @@ Metadata readiness comes from source-checked index completion, never a read-only
 cache miss. A successful retry after a failed read separately refreshes the UI
 without creating another channel-recovery input.
 
+The same recovery owner drains outbound signed control replay through finite
+pages of at most 32 channel IDs. It rereads current eligibility and recipients
+after metadata preparation. Each turn prepares and distributes at most one
+pending group's controls; unvisited IDs retain their continuation. Acceptance,
+departure, transfer and replica-policy
+facts remain durable replay facts, never delivery acknowledgements. Completed
+controls park for five-minute repair; semantic metadata, route, availability or
+privacy changes retain prompt recovery. Identical heartbeats do not restart the
+cut. Failed groups retry with three-to-sixty-second backoff without replaying
+healthy groups or restarting settled history and metadata lanes. Departed groups
+retain their outbound control route even though joined-group pulls exclude them.
+Public explicit retry APIs remain available; the accept host starts no separate
+ten-second global control scanner. The ordered index and failed-ID set retain
+only IDs of existing channel states, with no payload or recipient snapshot cache.
+Control and local-recovery futures share this parent task but remain independently
+polled: waiting for a remote control exchange cannot gate local metadata or join
+recovery. No worker or connection allowance is added. Independent subscriptions
+include retained policy-maintenance changes. Prior presence deadlines are updated
+even for unchanged observations, so an expired-to-fresh lease at the same
+endpoint retains recovery credit. During an active exchange, input observations
+coalesce one follow-up without restarting transport.
+
 The inbound listener runs as one separately scheduled, parent-owned child of the
 accept-loop host. Synchronous maintenance in the parent's other branches cannot
 prevent an available worker from polling inbound Noise authentication. Connection
@@ -3368,7 +3390,7 @@ overflow returns the revision to its durable journal cursor. Successful rounds
 remain deduplicated, and retry never invents custody or recipient confirmation.
 Other transport failures keep their existing recovery policy. This
 continuation preserves the original operation, effect and journal sequence; it
-does not replace the independent ten-second departure retry or change peer and
+does not replace the event-owned signed-control replay lane or change peer and
 foreground-operation deadlines.
 
 Historical-route rounds launch at most two device probes concurrently. All

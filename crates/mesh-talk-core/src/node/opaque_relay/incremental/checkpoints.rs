@@ -1120,6 +1120,72 @@ mod tests {
             );
             assert_eq!(node.opaque_upload_cache.lock().unwrap().observed_len(), 1);
         }
+        // Warm the full protocol decision once, not just adapter initialization.
+        // Every later iteration still opens a fresh Noise channel and completes
+        // the actual receive/upload/confirmation owner against the real relay.
+        let (mut channel, task) = connection(&node, office.clone(), &relay).await;
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let uploaded = node
+            .opaque_mailbox_round_confirmed(
+                &mut channel,
+                &remote.public(),
+                Some(conversation),
+                mailbox,
+                None,
+                MailboxIntent::Duplex,
+            )
+            .await
+            .unwrap();
+        drop(channel);
+        assert_eq!(task.await.unwrap(), 0);
+        assert!(uploaded.is_empty());
+        let warmed_checkpoint = node
+            .opaque_receive_cache
+            .lock()
+            .unwrap()
+            .get_checkpoint(&key)
+            .unwrap()
+            .unwrap();
+        let database = node.storage.database();
+        let main_before = database.main_write_stamp().unwrap().unwrap();
+        let commits_before = database.successful_write_commits();
+        for round in 0..3 {
+            let (mut channel, task) = connection(&node, office.clone(), &relay).await;
+            let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+            let uploaded = node
+                .opaque_mailbox_round_confirmed(
+                    &mut channel,
+                    &remote.public(),
+                    Some(conversation),
+                    mailbox,
+                    None,
+                    MailboxIntent::Duplex,
+                )
+                .await
+                .unwrap();
+            drop(channel);
+            assert_eq!(task.await.unwrap(), 0);
+            assert!(uploaded.is_empty());
+            assert_eq!(
+                node.opaque_receive_cache
+                    .lock()
+                    .unwrap()
+                    .get_checkpoint(&key)
+                    .unwrap()
+                    .as_ref(),
+                Some(&warmed_checkpoint),
+                "quiet complete round {round} must preserve exact signed checkpoint bytes"
+            );
+            assert!(
+                main_before.unchanged_since(&database.main_write_stamp().unwrap().unwrap()),
+                "quiet complete round {round} must not dirty MAIN transport hints"
+            );
+            assert_eq!(
+                database.successful_write_commits(),
+                commits_before,
+                "quiet complete round {round} must not commit changed local rows"
+            );
+        }
     }
 
     #[tokio::test]

@@ -336,6 +336,17 @@ impl Node {
         targets: Vec<crate::identity::device::PublicIdentity>,
         confirm: Option<EventId>,
     ) -> Result<bool, SessionError> {
+        self.replicate_to_post_office_targets_observing(conv, targets, confirm, None)
+            .await
+    }
+
+    pub(in crate::node) async fn replicate_to_post_office_targets_observing(
+        &self,
+        conv: ConversationId,
+        targets: Vec<crate::identity::device::PublicIdentity>,
+        confirm: Option<EventId>,
+        failure: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<bool, SessionError> {
         if targets.is_empty() {
             return Ok(false);
         }
@@ -346,14 +357,20 @@ impl Node {
                 self.post_office_candidates_for(&roster, recipient)
             };
             let mut complete = false;
+            let mut attempted = false;
             let mut capacity_error = None;
             for po in candidates {
                 if !self.relay_send_allowed(&po.public) {
                     continue;
                 }
                 let mut channel = match self.privacy_sync_dial(po.addr, &po.public).await {
-                    Ok(channel) => channel,
+                    Ok(channel) => {
+                        attempted = true;
+                        channel
+                    }
                     Err(error) => {
+                        attempted |=
+                            !matches!(error, crate::transport::TransportError::AdmissionDenied);
                         if super::session_pool::local_capacity_busy(&error) {
                             capacity_error = Some(error);
                         }
@@ -430,6 +447,9 @@ impl Node {
                 break;
             }
             if !complete {
+                if attempted && let Some(failure) = failure {
+                    failure.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 if let Some(error) = capacity_error {
                     return Err(SessionError::Transport(error));
                 }
@@ -508,7 +528,6 @@ impl Node {
         tokio::select! {
             _ = Arc::clone(&self).run_profile_compaction_loop() => {}
             _ = Arc::clone(&self).run_delivery_loop() => {}
-            _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
             _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
             _ = account_history => {}
             _ = Arc::clone(&self).run_account_wake_loop() => {}
@@ -549,13 +568,6 @@ impl Node {
                 Ok(Err(error)) => log::warn!("message expiry cleanup failed: {error}"),
                 Err(error) => log::warn!("message expiry task failed: {error}"),
             }
-        }
-    }
-
-    async fn run_channel_control_retry_loop(self: Arc<Self>) {
-        loop {
-            self.retry_channel_controls().await;
-            tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
 
