@@ -14,7 +14,7 @@ import { usePacks, type StoredPack } from "@/store/packs";
 import { archivePack } from "./packArchive";
 import { parsePack } from "./pack";
 import { verifyPackImages } from "./packImages";
-import { subscribeSyncInvalidation } from "./syncInvalidation";
+import { subscribeDocumentInvalidation } from "./syncInvalidation";
 import { readWithDeadline } from "./readDeadline";
 const keyFor = (id: string): AccountDocumentKey => ({
   kind: "customization_pack",
@@ -218,8 +218,8 @@ export function startLinkedCustomizationPacks(
     )
       void reconcile();
   });
-  const unlisten = subscribeSyncInvalidation((change) => {
-    if (change.owner === owner && change.kind === "state") void reconcile();
+  const unlisten = subscribeDocumentInvalidation(owner, () => {
+    void reconcile();
   });
   void reconcile();
   const stopRecovery = startRecoveryRefresh(() => void reconcile());

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  NodeStateChangedEvent,
   CallSignalEvent,
   ChannelMessageEvent,
   DmReceivedEvent,
@@ -20,10 +21,18 @@ export type HostReception =
   | { kind: "progress"; event: FileProgressEvent }
   | {
       kind: "state";
-      event?: { kinds: Array<"state" | "roster" | "delivery" | "files"> };
+      event?: { kinds: ReceptionKind[] };
     };
 
-export type ReceptionKind = "state" | "roster" | "delivery" | "files";
+export type ReceptionKind = NodeStateChangedEvent["kind"];
+const RECEPTION_KINDS: readonly string[] = [
+  "state",
+  "roster",
+  "delivery",
+  "files",
+  "documents",
+  "sync_status",
+];
 
 /** Older hosts omit metadata; malformed or future domains need conservative repair. */
 export function receptionKinds(event: unknown): ReceptionKind[] {
@@ -33,11 +42,9 @@ export function receptionKinds(event: unknown): ReceptionKind[] {
       : undefined;
   if (
     !Array.isArray(kinds) ||
-    kinds.length > 4 ||
+    kinds.length > RECEPTION_KINDS.length ||
     !kinds.every(
-      (kind) =>
-        typeof kind === "string" &&
-        ["state", "roster", "delivery", "files"].includes(kind),
+      (kind) => typeof kind === "string" && RECEPTION_KINDS.includes(kind),
     )
   )
     return ["state"];

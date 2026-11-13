@@ -223,7 +223,30 @@ mod tests {
         status.phase = SyncPhase::Error;
         status.pending_attachments = 9;
         status.error = Some("old transport failure".into());
+        let legacy = receiver.subscribe_ui_changes();
+        let desktop = receiver.subscribe_desktop_ui_changes();
+        let desktop_before = *desktop.borrow();
+        receiver.set_account_sync_status(source.user_id(), status.clone());
+        assert!(
+            legacy.has_changed().unwrap(),
+            "status commits must retain legacy worker wakes"
+        );
+        let desktop_after = *desktop.borrow();
+        assert_eq!(
+            desktop_after.state, desktop_before.state,
+            "a status-only commit must not invalidate desktop group state"
+        );
+        assert_eq!(desktop_after.documents, desktop_before.documents);
+        assert!(
+            desktop_after.sync_status > desktop_before.sync_status,
+            "the actual status setter must invalidate status consumers"
+        );
         receiver.set_account_sync_status(source.user_id(), status);
+        assert_eq!(
+            *desktop.borrow(),
+            desktop_after,
+            "an unchanged status must remain a notification no-op"
+        );
         let status = receiver.device_sync_status().remove(0);
         assert_eq!(status.phase, SyncPhase::Offline);
         assert_eq!(status.pending_attachments, 9);

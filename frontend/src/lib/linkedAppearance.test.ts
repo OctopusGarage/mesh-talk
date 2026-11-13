@@ -553,3 +553,28 @@ it("applies a hydrated remote theme without publishing feedback edits", async ()
     stop();
   }
 });
+
+it("does not query appearance preferences for qualified sync-status invalidations", async () => {
+  const { notifySyncInvalidation } = await import("./syncInvalidation");
+  const stop = startLinkedAppearance("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.getPreferences).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.getPreferences.mockClear();
+    notifySyncInvalidation({
+      owner: "owner",
+      kind: "state",
+      scope: "sync_status",
+    } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.getPreferences).not.toHaveBeenCalled();
+    for (const scope of ["documents", "future-unknown", undefined]) {
+      mocks.getPreferences.mockClear();
+      notifySyncInvalidation({ owner: "owner", kind: "state", scope } as never);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.getPreferences).toHaveBeenCalledOnce();
+    }
+  } finally {
+    stop();
+  }
+});

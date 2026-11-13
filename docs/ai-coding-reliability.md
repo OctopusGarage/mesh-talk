@@ -1292,6 +1292,13 @@ Retain bounded invalidation domains through pending-page ACKs; do not turn a ros
 progress update or empty read into a global refresh. The native reception gate
 and registered IPC tests, together with the [chat consumer](../frontend/src/store/chat.test.ts),
 exercise quiet pages and changes arriving during acknowledgement.
+Keep scope through the whole producer-to-consumer path: renaming a narrow event
+to a generic auxiliary notification can restore the same broad query fan-out.
+Use cumulative domain revisions rather than the last event kind, capture the
+subscription baseline before installation waits, and retain conservative repair
+for unknown inputs. Actual document/status producer controls, the native reception
+gate and chat/document consumers must prove both quiet unrelated reads and prompt
+mixed changes; preserving legacy observers is a separate compatibility obligation.
 
 Filter lightweight metadata before cloning large payloads. An empty final result
 does not prove that a query avoided full-record reads. Persistent indexes of

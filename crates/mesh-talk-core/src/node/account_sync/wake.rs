@@ -620,11 +620,19 @@ mod tests {
             .insert(source.user_id(), status);
         let documents = node.subscribe_account_documents();
         let ui = node.subscribe_ui_changes();
+        let legacy_before = *ui.borrow();
+        let desktop = node.subscribe_desktop_ui_changes();
+        let desktop_before = *desktop.borrow();
         let before = node.account_wake.revision.load(Ordering::Acquire);
         let revision = node.device_sync_policy_snapshot().1;
-        node.commit_imported_document_for_test(meta, payload.clone(), revision, source_public)
-            .await
-            .unwrap();
+        node.commit_imported_document_for_test(
+            meta.clone(),
+            payload.clone(),
+            revision,
+            source_public.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             node.account_document(&key).unwrap().unwrap().payload(),
             payload
@@ -634,6 +642,25 @@ mod tests {
             "import must notify local document readers"
         );
         assert!(ui.has_changed().unwrap(), "import must notify the local UI");
+        let desktop_after = *desktop.borrow();
+        assert_eq!(
+            *ui.borrow(),
+            legacy_before.wrapping_add(1),
+            "document and phase changes share exactly one legacy wake"
+        );
+        assert_eq!(
+            desktop_after.sync_status,
+            desktop_before.sync_status.wrapping_add(1),
+            "the actual UpToDate to CatchingUp transition accompanies documents"
+        );
+        assert_eq!(
+            desktop_after.state, desktop_before.state,
+            "a signed draft import must not invalidate desktop group state"
+        );
+        assert!(
+            desktop_after.documents > desktop_before.documents,
+            "the real signed import must invalidate desktop document consumers"
+        );
         assert_eq!(
             node.account_sync_status
                 .lock()
@@ -650,6 +677,17 @@ mod tests {
             before,
             "an incoming sibling row must not originate another publisher wake"
         );
+        let before_replay = *desktop.borrow();
+        let legacy_before_replay = *ui.borrow();
+        node.commit_imported_document_for_test(meta, payload.clone(), revision, source_public)
+            .await
+            .unwrap();
+        assert_eq!(
+            *desktop.borrow(),
+            before_replay,
+            "unchanged signed import is a UI no-op"
+        );
+        assert_eq!(*ui.borrow(), legacy_before_replay);
         node.put_account_document_if(
             AccountDocumentKey::Draft {
                 conversation: DocumentConversation::Account("b".repeat(32)),
@@ -663,6 +701,58 @@ mod tests {
             node.account_wake.revision.load(Ordering::Acquire) > before,
             "locally authored publication must still wake certified siblings"
         );
+        let local_draft = *desktop.borrow();
+        assert_eq!(local_draft.state, desktop_after.state);
+        assert_eq!(
+            local_draft.documents,
+            desktop_after.documents.wrapping_add(1)
+        );
+        assert_eq!(
+            local_draft.sync_status, desktop_after.sync_status,
+            "already CatchingUp must not manufacture another status change"
+        );
+        node.put_account_document_if(
+            AccountDocumentKey::CustomizationPack {
+                pack_id: "test.library".into(),
+            },
+            b"account library payload".to_vec(),
+            None,
+            |write| write(),
+        )
+        .unwrap();
+        let pack = *desktop.borrow();
+        assert_eq!(pack.state, local_draft.state);
+        assert_eq!(pack.documents, local_draft.documents.wrapping_add(1));
+        node.mark_account_message_seen_if(
+            DocumentConversation::Account("c".repeat(32)),
+            "seen-message".into(),
+            |write| write(),
+        )
+        .unwrap();
+        let receipt = *desktop.borrow();
+        assert_eq!(
+            receipt.state,
+            pack.state.wrapping_add(1),
+            "read receipts remain broad even after narrow library changes"
+        );
+        assert_eq!(
+            receipt.documents, pack.documents,
+            "a later broad publication must not erase coalesced document evidence"
+        );
+        assert_eq!(receipt.sync_status, pack.sync_status);
+        let legacy_receipt = *ui.borrow();
+        node.mark_account_message_seen_if(
+            DocumentConversation::Account("c".repeat(32)),
+            "seen-message".into(),
+            |write| write(),
+        )
+        .unwrap();
+        assert_eq!(
+            *desktop.borrow(),
+            receipt,
+            "existing read receipt is a no-op"
+        );
+        assert_eq!(*ui.borrow(), legacy_receipt);
     }
 
     #[test]

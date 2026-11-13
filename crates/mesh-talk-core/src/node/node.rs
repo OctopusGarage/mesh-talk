@@ -447,7 +447,7 @@ pub struct Node {
     pub(super) group_file_delivery: super::group_file_delivery::GroupFileDelivery,
     pub(in crate::node) relay_retry_after: Mutex<HashMap<String, std::time::Instant>>,
     pub(in crate::node) relay_drain_cursor: Mutex<HashMap<String, usize>>,
-    pub(in crate::node) ui_changes: tokio::sync::watch::Sender<u64>,
+    pub(in crate::node) ui_changes: super::ui_state::UiChanges,
     pub(in crate::node) file_changes: tokio::sync::watch::Sender<u64>,
     /// Encrypted, account-local attachment receive preferences and exact offer decisions.
     pub(in crate::node) attachment_consent:
@@ -757,7 +757,7 @@ impl Node {
             password,
         } = request;
         let legacy_delivery = targets.is_some();
-        let ui_changes = tokio::sync::watch::channel(0).0;
+        let ui_changes = super::ui_state::UiChanges::default();
         let (incoming, channel_incoming, file_incoming) = match targets {
             Some(targets) => (
                 super::runtime_delivery::HostPayload::legacy(targets.incoming, ui_changes.clone()),

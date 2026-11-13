@@ -12,7 +12,7 @@ import {
   type ReceptionLedger,
 } from "@/store/reception";
 import { captureRuntimeOwner } from "@/store/ownership";
-import { subscribeSyncInvalidation } from "./syncInvalidation";
+import { subscribeDocumentInvalidation } from "./syncInvalidation";
 import { readWithDeadline } from "./readDeadline";
 
 interface ReceiptPorts {
@@ -185,8 +185,8 @@ export function startLinkedReadReceipts(owner: string): () => void {
       accountDocuments.markSeen(owner, accountId, conversation, id),
   });
   const stopRecovery = startRecoveryRefresh(() => void sync.poll());
-  const unsubscribe = subscribeSyncInvalidation((change) => {
-    if (change.owner === owner && change.kind === "state") void sync.poll();
+  const unsubscribe = subscribeDocumentInvalidation(owner, () => {
+    void sync.poll();
   });
   void sync.poll();
   return () => {

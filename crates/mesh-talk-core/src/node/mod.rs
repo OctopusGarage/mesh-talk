@@ -210,6 +210,7 @@ pub use runtime::{
 };
 pub use search::{RecentSearchResults, ReferencedSearchHit, SearchContext, SearchReference};
 pub use session::request_round;
+pub use ui_state::DesktopUiRevisions;
 
 mod outgoing_message;
 pub use outgoing_message::{MessageAcceptance, MessageDestination, OutgoingMessageRequest};

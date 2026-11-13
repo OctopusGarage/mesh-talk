@@ -407,3 +407,28 @@ it("publishes a new absent-pack tombstone after the local edit token retires", a
     stop();
   }
 });
+
+it("does not query library documents for qualified sync-status invalidations", async () => {
+  const { notifySyncInvalidation } = await import("./syncInvalidation");
+  const stop = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.list.mockClear();
+    notifySyncInvalidation({
+      owner: "owner",
+      kind: "state",
+      scope: "sync_status",
+    } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.list).not.toHaveBeenCalled();
+    for (const scope of ["documents", "future-unknown", undefined]) {
+      mocks.list.mockClear();
+      notifySyncInvalidation({ owner: "owner", kind: "state", scope } as never);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.list).toHaveBeenCalledOnce();
+    }
+  } finally {
+    stop();
+  }
+});

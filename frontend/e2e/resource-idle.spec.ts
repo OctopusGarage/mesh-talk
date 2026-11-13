@@ -22,17 +22,17 @@ test("roster reception updates presence without reloading unrelated state", asyn
       __resourceProbe: {
         counts: Record<string, number>;
         pending: number;
-        next: "roster" | "state" | null;
+        next: "roster" | "state" | "documents" | "sync_status" | null;
         scope?: Scope;
-        wake: (kind: "roster" | "state") => void;
+        wake: (kind: "roster" | "state" | "documents" | "sync_status") => void;
       };
     };
     const probe = {
       counts: {} as Record<string, number>,
       pending: 0,
-      next: null as "roster" | "state" | null,
+      next: null as "roster" | "state" | "documents" | "sync_status" | null,
       scope: undefined as Scope | undefined,
-      wake(kind: "roster" | "state") {
+      wake(kind: "roster" | "state" | "documents" | "sync_status") {
         if (!probe.scope) throw new Error("No installed reception scope");
         probe.next = kind;
         host.__mockEmit("node-reception-wake", probe.scope);
@@ -125,6 +125,54 @@ test("roster reception updates presence without reloading unrelated state", asyn
     "set_call_active",
   ]) {
     expect(after[command] ?? 0, command).toBe(before[command] ?? 0);
+  }
+  // Exercise the same acknowledged reception path for qualified local changes.
+  for (const kind of ["sync_status", "documents"] as const) {
+    const narrowBefore = (await snapshot()).counts;
+    await page.evaluate((kind) => {
+      (
+        window as unknown as {
+          __resourceProbe: {
+            wake: (kind: "sync_status" | "documents") => void;
+          };
+        }
+      ).__resourceProbe.wake(kind);
+    }, kind);
+    await expect
+      .poll(async () => (await snapshot()).counts.owner_reception_ack ?? 0)
+      .toBeGreaterThan(narrowBefore.owner_reception_ack ?? 0);
+    if (kind === "documents") {
+      await expect
+        .poll(
+          async () => (await snapshot()).counts.load_conversation_drafts ?? 0,
+        )
+        .toBeGreaterThan(narrowBefore.load_conversation_drafts ?? 0);
+    }
+    await expect.poll(async () => (await snapshot()).pending).toBe(0);
+    await page.evaluate(
+      () => new Promise<void>((done) => requestAnimationFrame(() => done())),
+    );
+    await expect.poll(async () => (await snapshot()).pending).toBe(0);
+    const narrowAfter = (await snapshot()).counts;
+    for (const command of [
+      "list_channels",
+      "channel_members",
+      "owner_personal_conversation_states",
+    ]) {
+      expect(narrowAfter[command] ?? 0, `${kind}: ${command}`).toBe(
+        narrowBefore[command] ?? 0,
+      );
+    }
+    if (kind === "sync_status") {
+      for (const command of [
+        "get_account_documents",
+        "load_conversation_drafts",
+      ]) {
+        expect(narrowAfter[command] ?? 0, `${kind}: ${command}`).toBe(
+          narrowBefore[command] ?? 0,
+        );
+      }
+    }
   }
   await page.evaluate(() => {
     (

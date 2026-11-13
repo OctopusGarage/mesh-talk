@@ -1132,7 +1132,14 @@
         "frontend/src/store/privacy.ts",
         "frontend/src/store/privacy.test.ts",
         "frontend/src/lib/recoveryRefresh.ts",
-        "frontend/src/lib/recoveryRefresh.test.ts"
+        "frontend/src/lib/recoveryRefresh.test.ts",
+        "frontend/src/lib/linkedCustomizationPacks.ts",
+        "frontend/src/lib/linkedCustomizationPacks.test.ts",
+        "frontend/src/lib/linkedAvatarOverrides.ts",
+        "frontend/src/lib/linkedAvatarOverrides.test.ts",
+        "frontend/src/lib/linkedReadReceipts.ts",
+        "frontend/src/lib/linkedReadReceipts.test.ts",
+        "frontend/src/store/drafts.test.ts"
       ],
       "frontend": [
         "src/lib/readDeadline.test.ts",
@@ -1148,7 +1155,11 @@
         "src/lib/api.test.ts",
         "src/features/chat/LinkDeviceDialog.test.ts",
         "src/store/privacy.test.ts",
-        "src/lib/recoveryRefresh.test.ts"
+        "src/lib/recoveryRefresh.test.ts",
+        "src/lib/linkedCustomizationPacks.test.ts",
+        "src/lib/linkedAvatarOverrides.test.ts",
+        "src/lib/linkedReadReceipts.test.ts",
+        "src/store/drafts.test.ts"
       ],
       "consumers": [
         "frontend-chat",
@@ -1183,6 +1194,10 @@
           {
             "name": "Semantic invalidations and coalesced activation remain prompt; modern quiet projections use sparse recovery, presentation-only hidden owners park timers, and legacy reads preserve bounded progress.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Qualified document/status notifications skip group and personal-state hydration; document-only listeners ignore known sync-status scope while absent/unknown scope keeps legacy repair and mixed domains remain independently observable.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },
@@ -2029,11 +2044,11 @@
         "src/features/chat/MembersDialog.test.ts"
       ],
       "capability": {
-        "summary": "Remove personal chats and optional history across linked devices without changing other accounts’ membership or copies.",
+        "summary": "Remove personal chats and optional history across linked devices without changing other accounts\u2019 membership or copies.",
         "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
         "invariants": [
           {
-            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account’s data.",
+            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account\u2019s data.",
             "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
           },
           {

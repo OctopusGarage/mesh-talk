@@ -4580,7 +4580,7 @@ impl Node {
         if statuses.get(&id) != Some(&status) {
             statuses.insert(id, status);
             drop(statuses);
-            self.note_ui_change();
+            self.ui_changes.sync_status();
         }
     }
 }

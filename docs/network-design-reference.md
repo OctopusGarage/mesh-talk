@@ -3538,8 +3538,8 @@ stop with their exact runtime authority. Invalidations carry host owner, account
 device and domain; locked sessions suppress emission and frontend consumers reject
 retired scopes. Boot/unlock and periodic reconciliation repair missed notifications.
 
-The bounded reception bridge preserves the fixed state, roster, delivery and file
-invalidation domains. A demand page acknowledges only the domain versions it
+The bounded reception bridge preserves six fixed invalidation domains: state,
+roster, delivery, files, documents and sync status. A demand page acknowledges only the domain versions it
 observed; newer changes remain dirty until a later acknowledged page. Initial
 installation and renderer reset request a full state repair once. Empty pages
 and file progress do not manufacture global state changes. A legacy state receipt
@@ -3547,6 +3547,19 @@ without domain metadata still requests full reconciliation. Roster-only changes
 refresh people without reloading groups, drafts, preferences or read-receipt
 inventories; a concurrent full refresh retains its independent work and cannot
 roll newer roster facts back. Focus and sparse recovery remain available.
+
+Core desktop observations retain independent cumulative state, document and sync
+status revisions; coalescing cannot replace an earlier broad change with a later
+narrow one. Draft and customization-pack commits invalidate documents; actual
+sync-status changes invalidate status. Authority-bearing documents and unknown
+changes retain broad state repair. A document import that also changes sync
+status retains both domains. Existing core UI subscribers still receive every
+legacy wake. The native bridge captures revisions before its installation wait
+and forwards them only under the current runtime authority. Narrow status or
+document events do not reload group summaries, members or personal conversation
+state. Document-only consumers also ignore known status-only events; absent or
+unknown scope keeps conservative reconciliation. These are observation hints,
+not cached permissions or durable progress.
 
 The [performance requirements](performance-requirements.md) own cross-cutting
 idle measurement and demand-driven-work rules. Modern desktop projection recovery

@@ -438,7 +438,7 @@ it("keeps repeated roster pages out of document and full group refreshes", async
       "roster",
       ["unknown"],
       { roster: true },
-      ["roster", "roster", "roster", "roster", "roster"],
+      Array(7).fill("roster"),
     ]) {
       kinds = malformed;
       invoke.mockClear();
@@ -7093,3 +7093,108 @@ it("keeps roster reconciliation quiet with native push after startup", async () 
     vi.useRealTimers();
   }
 });
+
+it.each(["documents", "sync_status"])(
+  "keeps qualified %s reception changes out of settled group and personal queries",
+  async (domain) => {
+    vi.useFakeTimers();
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    });
+    const scope = {
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      runtime_id: "installed",
+    };
+    const cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "0" };
+    let kinds: unknown = ["state"];
+    const changes: string[] = [];
+    const scopes: unknown[] = [];
+    const unsubscribe = subscribeSyncInvalidation((change) => {
+      changes.push(change.kind);
+      scopes.push(change.scope);
+    });
+    invoke.mockImplementation((command: string) => {
+      if (command === "owner_node_identity")
+        return Promise.resolve({
+          ...scope,
+          supports_bounded_delivery: true,
+          supports_push_state: true,
+        });
+      if (command === "list_channels")
+        return Promise.resolve(
+          ["first", "second"].map((channel_id) => ({
+            channel_id,
+            name: channel_id,
+            owner: "me",
+            member_count: 1,
+          })),
+        );
+      if (command === "channel_members")
+        return Promise.resolve({
+          owner: "me",
+          members: [{ user_id: "me", name: "Owner" }],
+          history_policy: "off",
+        });
+      if (command === "owner_reception_page")
+        return Promise.resolve({
+          scope,
+          token: "page",
+          after: cursor,
+          next: cursor,
+          through: cursor,
+          complete: true,
+          receipts: [{ kind: "state", event: { kinds } }],
+        });
+      if (command === "owner_reception_ack") return Promise.resolve(false);
+      return Promise.resolve([]);
+    });
+    const stop = useChat.getState().start();
+    const groupCalls = () => ({
+      groups: invoke.mock.calls.filter(([name]) => name === "list_channels")
+        .length,
+      members: invoke.mock.calls.filter(([name]) => name === "channel_members")
+        .length,
+      personal: invoke.mock.calls.filter(
+        ([name]) => name === "owner_personal_conversation_states",
+      ).length,
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(Object.keys(useChat.getState().channelMembersById).sort()).toEqual(
+        ["first", "second"],
+      );
+      invoke.mockClear();
+      changes.length = 0;
+      scopes.length = 0;
+      kinds = [domain];
+      captured.current!.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(groupCalls()).toEqual({ groups: 0, members: 0, personal: 0 });
+      expect(changes).toEqual(["state"]);
+      expect(scopes).toEqual([domain]);
+      // A broad arrival in the same page must still refresh current authority.
+      invoke.mockClear();
+      kinds = [domain, "state"];
+      captured.current!.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(groupCalls()).toEqual({ groups: 1, members: 2, personal: 1 });
+      // Future direct-event domains also retain conservative legacy recovery.
+      invoke.mockClear();
+      captured.current!.onStateChanged({
+        ...scope,
+        kind: "unknown-future-domain",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(groupCalls()).toEqual({ groups: 1, members: 2, personal: 1 });
+    } finally {
+      stop();
+      unsubscribe();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  },
+);

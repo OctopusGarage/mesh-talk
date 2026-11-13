@@ -24,7 +24,7 @@ import { ease, useMotionOK } from "@/lib/motion";
 import { startLinkedContacts } from "@/lib/linkedContacts";
 import { useDrafts } from "@/store/drafts";
 import { startLinkedReadReceipts } from "@/lib/linkedReadReceipts";
-import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
+import { subscribeDocumentInvalidation } from "@/lib/syncInvalidation";
 
 import { DeliveryRecoveryProvider } from "./DeliveryRecoveryProvider";
 
@@ -54,9 +54,8 @@ export function ChatApp() {
       },
       { background: false },
     );
-    const unsubscribe = subscribeSyncInvalidation((change) => {
-      if (change.owner === owner && change.kind === "state")
-        void useDrafts.getState().refresh();
+    const unsubscribe = subscribeDocumentInvalidation(owner, () => {
+      void useDrafts.getState().refresh();
     });
     const flush = () => {
       void useDrafts.getState().flush();

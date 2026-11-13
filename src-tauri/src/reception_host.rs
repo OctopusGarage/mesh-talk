@@ -327,7 +327,7 @@ pub(crate) async fn owner_reception_page(
         receipts.extend(handle.take_call_signals(16,256*1024)?.into_iter().map(|signal|Receipt::Call(crate::events::CallSignalEvent{from:signal.from,payload:String::from_utf8_lossy(&signal.payload).into_owned()})));
         receipts.extend(delivery.progress.values().map(|(_,event)|Receipt::Progress(event.clone())));
         let domains = delivery.gate.domains;
-        let kinds = ["state", "roster", "delivery", "files"].into_iter().zip(domains).filter_map(|(kind, version)| (version != 0).then_some(kind)).collect::<Vec<_>>();
+        let kinds = ["state", "roster", "delivery", "files", "documents", "sync_status"].into_iter().zip(domains).filter_map(|(kind, version)| (version != 0).then_some(kind)).collect::<Vec<_>>();
         if !kinds.is_empty() { receipts.push(Receipt::State { kinds }); }
         let token=format!("{:032x}",rand::random::<u128>());
         let after:Cursor=page.after.into();let next:Cursor=page.next.into();
@@ -415,6 +415,52 @@ mod tests {
         }
     }
     #[test]
+    fn qualified_non_group_emitter_preserves_domains_and_unknown_fallback() {
+        let app = tauri::test::mock_app();
+        let state = ReceptionHostState::default();
+        let scope = scope();
+        state.install(scope.clone());
+        app.manage(state.clone());
+        state
+            .0
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .gate
+            .domains
+            .fill(0);
+        for kind in ["documents", "sync_status"] {
+            crate::events::emit_node_state_changed(
+                app.handle(),
+                crate::events::NodeStateChangedEvent {
+                    owner: scope.owner.clone(),
+                    account_id: scope.account_id.clone(),
+                    device_id: scope.device_id.clone(),
+                    kind,
+                },
+            );
+        }
+        let domains = state.0.lock().unwrap().as_ref().unwrap().gate.domains;
+        assert_eq!(
+            domains.first().copied(),
+            Some(0),
+            "Qualified narrow producers must not dirty broad group state"
+        );
+        assert!(domains.get(4).is_some_and(|revision| *revision != 0));
+        assert!(domains.get(5).is_some_and(|revision| *revision != 0));
+        crate::events::emit_node_state_changed(
+            app.handle(),
+            crate::events::NodeStateChangedEvent {
+                owner: scope.owner,
+                account_id: scope.account_id,
+                device_id: scope.device_id,
+                kind: "future-unknown",
+            },
+        );
+        assert_ne!(state.0.lock().unwrap().as_ref().unwrap().gate.domains[0], 0);
+    }
+    #[test]
     fn actual_emitter_coalesces_stalled_renderer_state_and_progress() {
         let app = tauri::test::mock_app();
         let state = ReceptionHostState::default();
@@ -435,7 +481,7 @@ mod tests {
         }
         {
             let mut guard = state.0.lock().unwrap();
-            guard.as_mut().unwrap().gate.domains = [0; 4];
+            guard.as_mut().unwrap().gate.domains = [0; 6];
         }
         for n in 0..10_000 {
             crate::events::emit_node_state_changed(
@@ -461,7 +507,7 @@ mod tests {
         let domains = state.0.lock().unwrap().as_ref().unwrap().gate.domains;
         assert_eq!(domains[0], 0);
         assert_ne!(domains[1], 0);
-        assert_eq!(domains[2..], [0, 0]);
+        assert_eq!(domains[2..], [0, 0, 0, 0]);
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
         assert_eq!(old_pushes.load(Ordering::Relaxed), 0);
         assert_eq!(state.0.lock().unwrap().as_ref().unwrap().progress.len(), 64);

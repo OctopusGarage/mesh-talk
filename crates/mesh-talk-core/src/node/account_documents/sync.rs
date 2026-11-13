@@ -1746,7 +1746,8 @@ impl Node {
             {
                 return Ok(());
             }
-            let public_profile = meta.key.domain() == AccountDocumentDomain::PublicProfile;
+            let domain = meta.key.domain();
+            let public_profile = domain == AccountDocumentDomain::PublicProfile;
             let private_control = meta.key.is_private_control();
             let changed = node
                 .account_documents
@@ -1761,7 +1762,7 @@ impl Node {
                 }
             }
             if changed {
-                node.documents_imported();
+                node.documents_imported_domain(Some(domain));
                 if private_control {
                     node.delivery_status_notify.notify_waiters();
                     node.note_account_history_change();

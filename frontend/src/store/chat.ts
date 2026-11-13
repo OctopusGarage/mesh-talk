@@ -1435,9 +1435,18 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     });
     scheduleControl();
 
-    const applyInvalidation = (
-      kind: "state" | "roster" | "delivery" | "files",
-    ) => {
+    const applyInvalidation = (rawKind: unknown) => {
+      const kind = receptionKinds({ kinds: [rawKind] })[0] ?? "state";
+      if (kind === "documents" || kind === "sync_status") {
+        // Qualified producers changed no group/personal inputs. Existing auxiliary
+        // readers retain their broad compatibility wake without a chat-wide scan.
+        notifySyncInvalidation({
+          owner: lease.owner!,
+          kind: "state",
+          scope: kind,
+        });
+        return;
+      }
       notifySyncInvalidation({ owner: lease.owner!, kind });
       if (kind === "state") {
         void refreshRoster(true);

@@ -7,7 +7,7 @@ pub(super) struct Pending {
     pub next: Cursor,
     pub generation: u64,
     pub profiles: ProfilePosition,
-    pub domains: [u64; 4],
+    pub domains: [u64; 6],
 }
 /// Current values are paged again after renderer replacement or a revision
 /// change. Advancing this cursor requires the same renderer ACK as the page.
@@ -33,9 +33,9 @@ pub(super) struct Gate {
     pub pending: Option<Pending>,
     pub last_ack: Option<Pending>,
     pub profiles: ProfilePosition,
-    // Fixed slots: full state, roster, delivery, files. Nonzero versions stay
+    // Fixed slots: state, roster, delivery, files, documents, sync status. Versions stay
     // dirty until an ACK observes that exact version, including while a page waits.
-    pub domains: [u64; 4],
+    pub domains: [u64; 6],
     wake_outstanding: bool,
 }
 impl Gate {
@@ -46,7 +46,7 @@ impl Gate {
             pending: None,
             last_ack: None,
             profiles: ProfilePosition::default(),
-            domains: [1, 0, 0, 0],
+            domains: [1, 0, 0, 0, 0, 0],
             wake_outstanding: false,
         }
     }
@@ -60,6 +60,8 @@ impl Gate {
                 "roster" => 1,
                 "delivery" => 2,
                 "files" => 3,
+                "documents" => 4,
+                "sync_status" => 5,
                 _ => 0,
             };
             self.domains[index] = self.generation.wrapping_add(1);
@@ -128,7 +130,7 @@ mod tests {
                 sequence: "1".into(),
             },
             generation,
-            domains: [0; 4],
+            domains: [0; 6],
             profiles: ProfilePosition {
                 complete: true,
                 ..Default::default()
@@ -150,7 +152,7 @@ mod tests {
         let mut first = pending(gate.generation);
         first.domains = gate.domains;
         gate.acknowledge(first, false);
-        assert_eq!(gate.domains, [0; 4]);
+        assert_eq!(gate.domains, [0; 6]);
         for _ in 0..10_000 {
             gate.invalidate_kind(Some("roster"));
         }
@@ -166,11 +168,34 @@ mod tests {
         let mut page = pending(gate.generation);
         page.domains = gate.domains;
         assert!(!gate.acknowledge(page, false));
-        assert_eq!(gate.domains, [0; 4]);
+        assert_eq!(gate.domains, [0; 6]);
         gate.invalidate();
-        assert_eq!(gate.domains, [0; 4]);
+        assert_eq!(gate.domains, [0; 6]);
         gate.begin(true).unwrap();
         assert_ne!(gate.domains[0], 0);
+    }
+    #[test]
+    fn qualified_domains_survive_mixed_pending_acknowledgements() {
+        let mut gate = Gate::new(scope());
+        gate.domains.fill(0);
+        gate.invalidate_kind(Some("documents"));
+        assert_eq!(
+            gate.domains[0], 0,
+            "Narrow documents must not alias broad state"
+        );
+        let mut first = pending(gate.generation);
+        first.domains = gate.domains;
+        gate.invalidate_kind(Some("sync_status"));
+        gate.invalidate_kind(Some("state"));
+        gate.invalidate_kind(Some("documents"));
+        assert!(gate.acknowledge(first, false));
+        assert_ne!(gate.domains[0], 0);
+        assert!(gate.domains.get(4).is_some_and(|revision| *revision != 0));
+        assert!(gate.domains.get(5).is_some_and(|revision| *revision != 0));
+        let mut second = pending(gate.generation);
+        second.domains = gate.domains;
+        assert!(!gate.acknowledge(second, false));
+        assert!(gate.domains.iter().all(|revision| *revision == 0));
     }
     #[test]
     fn stalled_consumer_has_one_wake_and_one_page_reservation() {

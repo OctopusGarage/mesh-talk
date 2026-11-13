@@ -2838,7 +2838,10 @@
             "node::node::tests::channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance",
             "channel_hot_source_queries_reuse_prepared_vms_and_read_fresh_state",
             "completed_channel_receive_callbacks_are_quiet_and_new_messages_resume",
-            "completed_channel_metadata_retains_demand_when_source_changes_before_install"
+            "completed_channel_metadata_retains_demand_when_source_changes_before_install",
+            "node::ui_state::tests::",
+            "node::account_sync::wake::tests::imported_signed_sibling_document_notifies_locally_without_originating_wake",
+            "node::account_sync::availability::tests::private_evidence_rejects_network_policy_and_identity_replacement"
           ]
         }
       ],
@@ -2874,6 +2877,10 @@
           {
             "name": "Settled fixed-consumer retirement performs no SQL mutation; retained committed ACKs continue bounded pending retirement after failure and reopen, with current account/lifetime validation on idle calls.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Desktop cumulative observation domains retain mixed changes and narrow document/status updates without suppressing legacy core wakes; unknown or authority-bearing changes retain broad reconciliation.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },

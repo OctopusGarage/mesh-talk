@@ -1378,6 +1378,10 @@
           {
             "name": "ACK-qualified fixed invalidation domains preserve newer pending changes; empty/progress pages do not create global state, roster-only pages avoid unrelated payload reloads and legacy receipts retain full repair.",
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Six fixed reception domains preserve document/status scope through coalescing and pending ACKs; installation captures cumulative revisions before waiting and never loses a broad change behind a narrow one.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },

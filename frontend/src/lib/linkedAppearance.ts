@@ -15,7 +15,7 @@ import { asRingtoneId } from "./ringtones";
 import { captureRuntimeOwner } from "@/store/ownership";
 import { useChat } from "@/store/chat";
 import { readWithDeadline } from "./readDeadline";
-import { subscribeSyncInvalidation } from "./syncInvalidation";
+import { subscribeDocumentInvalidation } from "./syncInvalidation";
 import { chat } from "@/lib/api/chat";
 import {
   appearanceValues,
@@ -232,8 +232,8 @@ export function startLinkedAppearance(owner: string): () => void {
       }
     }
   };
-  const unlisten = subscribeSyncInvalidation((change) => {
-    if (change.owner === owner && change.kind === "state") void reconcile();
+  const unlisten = subscribeDocumentInvalidation(owner, () => {
+    void reconcile();
   });
   void reconcile();
   const stopRecovery = startRecoveryRefresh(() => void reconcile());

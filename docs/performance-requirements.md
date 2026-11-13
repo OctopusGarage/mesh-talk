@@ -60,6 +60,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Preserve invalidation domains through batching and acknowledgement; a roster
    heartbeat must not reload unrelated settings or history. Empty pages do not
    imply a global change. Presentation metadata does not renew user activity.
+   Keep semantic scope through auxiliary listeners too: document and sync-status
+   changes must not query every group, and status-only changes must not reload
+   document inventories. Mixed changes retain every affected domain; unknown
+   inputs use conservative repair rather than silently dropping work.
    Retry fairness is scheduling state, not durable progress. Use a bounded
    runtime order where possible; retain durable pending/completion evidence and
    an explicit capacity fallback. Rechecking blocked work must not itself renew
