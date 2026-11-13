@@ -3036,6 +3036,8 @@
     {
       "id": "core-incremental-opaque-mailbox",
       "paths": [
+        "crates/mesh-talk-core/src/eventlog/repository/network.rs",
+        "crates/mesh-talk-core/src/node/session/paged_tests.rs",
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
         "crates/mesh-talk-core/src/node/relay_policy.rs",
         "crates/mesh-talk-core/src/node/file_consent.rs",
@@ -3078,6 +3080,9 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "peer_known_export_ids_skip_sql_membership_and_preserve_unknown_authority",
+            "hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh",
+            "guarded_default_fingerprint_quiet_path_survives_unrelated_source_append",
             "node::opaque_relay::",
             "node::session::mailbox::tests::",
             "requester_have_selection_reuse_loopback",
@@ -3140,6 +3145,10 @@
         "summary": "Reconcile opaque mailboxes through finite indexed deltas and bounded on-demand participant exports, preserving current authority and durable retry evidence.",
         "guide": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization",
         "invariants": [
+          {
+            "name": "Peer-known IDs skip export membership SQL and body hydration while preserving current view/owner validation, examined-row accounting and cursor progression; unknown IDs retain fresh outgoing authorization. Fixed hot revision SELECTs reuse bounded compiled statements without caching values, preserving fresh source/control/destructive revisions and corruption errors. Real Guarded default-progress quiet rounds use fingerprint-only exchange despite unrelated appends, and a shared append requires reconciliation.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
           {
             "name": "Unchanged scoped versions precede historical body access; finite cursor windows bind store, mailbox, arrival incarnation and destructive epoch. A requester can reuse its ready Have selection after response admission only under fresh complete source/authority stamp equality; changed or unknown stamps and unsupported backends prepare afresh, retaining peer-Have closure and per-page/final-send validation.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"

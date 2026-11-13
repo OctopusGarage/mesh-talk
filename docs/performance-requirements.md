@@ -93,6 +93,11 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    changes; drain available pages promptly in bounded batches. A slower fallback
    must not delay each already-available page by another interval.
    A memo that still hydrates its input on every wake is not an I/O optimization.
+   Reject exact peer-known IDs before per-item export lookup or body hydration;
+   still validate the current view/owner and charge examined rows/cursor progress.
+   Use the existing bounded SQLite statement cache for fixed hot queries. Rebind
+   parameters and read current rows each time; compiled statements are not cached
+   authority values or permission decisions.
    Place the cheap revision gate before routing filters, list hydration and
    authority projections. Mark a cycle settled only when every selected item
    has matching successful evidence; preserve continuation and retry deadlines.

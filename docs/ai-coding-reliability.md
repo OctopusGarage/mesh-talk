@@ -1209,6 +1209,15 @@ bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
 do not remove backpressure to make a benchmark look faster.
 
+Apply cheap exact-ID rejection before per-row export queries without skipping
+current view, owner, budget or cursor checks. Reuse compiled fixed SQL through the
+existing bounded statement cache; always execute it against current parameters
+and rows. The [repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
+`peer_known_export_ids_skip_sql_membership_and_preserve_unknown_authority` and
+`hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh` count
+actual SQLite preparation work while preserving unknown-item authorization,
+fresh revisions and corruption failures.
+
 Check read granularity as well as file size: streaming JSON parsers can turn
 each byte into an OS read. Use bounded buffering for files, as required by the
 [serde_json reader contract](https://docs.rs/serde_json/latest/serde_json/fn.from_reader.html),

@@ -316,11 +316,13 @@ impl EventRepository {
             }
             let ordinal = nonnegative(row.get(0)?)?;
             let id = EventId::new(blob(row, 1)?);
-            let allowed = match selection {
-                Some(selection) => c.query_row("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_rows WHERE view=?1 AND id=?2 AND outgoing=1)", params![selection.as_slice(), id.as_bytes().as_slice()], |r| r.get::<_, bool>(0))?,
+            // Peer-known IDs cannot contribute an export. Charge/advance their
+            // cursor below without preparing per-ID authorization SQL or bodies.
+            let allowed = !have.contains(&id) && match selection {
+                Some(selection) => c.prepare_cached("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_rows WHERE view=?1 AND id=?2 AND outgoing=1)")?.query_row(params![selection.as_slice(), id.as_bytes().as_slice()], |r| r.get::<_, bool>(0))?,
                 None => true,
             };
-            if allowed && !have.contains(&id) {
+            if allowed {
                 let header = self.network_header_on(c, &id)?;
                 if header.conversation != view.binding.conversation {
                     return Err(corrupt("network header conversation differs"));

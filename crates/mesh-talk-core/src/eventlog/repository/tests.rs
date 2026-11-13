@@ -2576,3 +2576,341 @@ fn authenticated_receipt_retirement_marker_preserves_ordinary_receive_work_and_o
         "stale participant owner cannot complete another account's pending work"
     );
 }
+
+// Test-only observation of actual SQLite statement preparation. Callbacks are
+// installed outside selection-work writes and share the same guarded lifetime.
+struct RepositoryReadCompiles<'a> {
+    database: &'a EncryptedDatabase,
+    count: Option<Box<std::sync::atomic::AtomicUsize>>,
+}
+type ReadCompileObserver = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    std::ffi::c_int,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+) -> std::ffi::c_int;
+impl<'a> RepositoryReadCompiles<'a> {
+    fn install(database: &'a EncryptedDatabase) -> Self {
+        Self::install_with(database, export_membership_compile)
+    }
+    fn install_with(database: &'a EncryptedDatabase, callback: ReadCompileObserver) -> Self {
+        let count = Box::new(std::sync::atomic::AtomicUsize::new(0));
+        database
+            .read(|c| {
+                // SAFETY: the database guard owns the live handle. The boxed
+                // callback context remains stable until Drop unregisters it.
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_set_authorizer(
+                        c.handle(),
+                        Some(callback),
+                        (&*count as *const std::sync::atomic::AtomicUsize)
+                            .cast_mut()
+                            .cast(),
+                    )
+                };
+                assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                Ok(())
+            })
+            .unwrap();
+        Self {
+            database,
+            count: Some(count),
+        }
+    }
+    fn reset(&self) {
+        self.count
+            .as_ref()
+            .unwrap()
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn count(&self) -> usize {
+        self.count
+            .as_ref()
+            .unwrap()
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+impl Drop for RepositoryReadCompiles<'_> {
+    fn drop(&mut self) {
+        let result = self.database.read(|c| {
+            // SAFETY: remove the callback under its connection guard before
+            // releasing the boxed userdata, including assertion unwinding.
+            let rc = unsafe {
+                rusqlite::ffi::sqlite3_set_authorizer(c.handle(), None, std::ptr::null_mut())
+            };
+            assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+            Ok(())
+        });
+        if result.is_err() {
+            Box::leak(self.count.take().unwrap());
+        }
+    }
+}
+unsafe extern "C" fn export_membership_compile(
+    userdata: *mut std::ffi::c_void,
+    action: std::ffi::c_int,
+    table: *const std::ffi::c_char,
+    column: *const std::ffi::c_char,
+    _database: *const std::ffi::c_char,
+    _view: *const std::ffi::c_char,
+) -> std::ffi::c_int {
+    if action == rusqlite::ffi::SQLITE_READ && !table.is_null() && !column.is_null() {
+        // SAFETY: SQLite provides live C strings and install retains this exact
+        // stable atomic for the entire registered callback lifetime.
+        let (table, column, count) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(table).to_bytes(),
+                std::ffi::CStr::from_ptr(column).to_bytes(),
+                &*userdata.cast::<std::sync::atomic::AtomicUsize>(),
+            )
+        };
+        if table == b"participant_sync_rows" && column == b"outgoing" {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    rusqlite::ffi::SQLITE_OK
+}
+
+#[test]
+fn peer_known_export_ids_skip_sql_membership_and_preserve_unknown_authority() {
+    use super::selection::SelectionRow;
+    use crate::eventlog::sync::network::{ExportPageBudget, NetworkSyncStore, PreparationBudget};
+    use std::collections::HashSet;
+    let directory = tempfile::tempdir().unwrap();
+    let db = database(&directory);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    repository.initialize_selections().unwrap();
+    let signer = DeviceIdentity::generate();
+    let events: Vec<_> = (1..=64)
+        .map(|sequence| event(&signer, sequence, vec![], sequence, EventKind::Message))
+        .collect();
+    for event in &events {
+        repository.append(event).unwrap();
+    }
+    let conversation = events[0].conversation_id;
+    let view = NetworkSyncStore::open_view(&repository, &conversation).unwrap();
+    let selection = repository.begin_selection(&view, 2, 128).unwrap().unwrap();
+    let rows: Vec<_> = events
+        .iter()
+        .enumerate()
+        .map(|(rank, event)| SelectionRow {
+            header: repository.header(&event.id).unwrap().unwrap(),
+            rank: rank as i64,
+            candidate: rank != 63,
+            selected: rank != 63,
+            own: true,
+            receipt: false,
+        })
+        .collect();
+    repository
+        .save_selection_batch(&selection, &view, &rows, b"export-membership-regression")
+        .unwrap();
+    let preparation = PreparationBudget::default();
+    while !repository
+        .reset_selected_export_step(&selection, &view, preparation)
+        .unwrap()
+        .ready
+    {}
+    while !repository
+        .selected_export_step(&selection, &view, false, false, preparation)
+        .unwrap()
+        .ready
+    {}
+    let budget = ExportPageBudget {
+        examined: 16,
+        events: 16,
+        encoded_bytes: 1024 * 1024,
+        allocated_bytes: 4 * 1024 * 1024,
+    };
+    let all: HashSet<_> = events.iter().map(|event| event.id).collect();
+    let observer = RepositoryReadCompiles::install(&db);
+    let before = repository.body_read_counts();
+    let mut after = None;
+    let mut examined = 0;
+    loop {
+        let page = repository
+            .selected_export_page(&selection, &view, &all, after.as_ref(), budget)
+            .unwrap();
+        assert!(page.events.is_empty());
+        examined += page.examined;
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        examined, 64,
+        "skipped peer-known IDs must retain bounded cursor accounting"
+    );
+    assert_eq!(
+        repository.body_read_counts(),
+        before,
+        "peer-known IDs cannot hydrate payloads"
+    );
+    assert_eq!(
+        observer.count(),
+        0,
+        "peer-known raw IDs must not prepare any outgoing-membership SQL"
+    );
+    observer.reset();
+    let mut partial = all.clone();
+    partial.remove(&events[0].id);
+    partial.remove(&events[63].id);
+    let before = repository.body_read_counts();
+    let mut after = None;
+    let mut exported = Vec::new();
+    loop {
+        let page = repository
+            .selected_export_page(&selection, &view, &partial, after.as_ref(), budget)
+            .unwrap();
+        exported.extend(page.events);
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        exported,
+        vec![events[0].clone()],
+        "unknown allowed event must export; unknown denied row must remain withheld"
+    );
+    assert_eq!(
+        repository.body_read_counts().0 - before.0,
+        1,
+        "only the unknown allowed payload may be hydrated"
+    );
+    assert!(
+        observer.count() > 0,
+        "unknown IDs must still execute fresh SQL selection authorization"
+    );
+    eprintln!(
+        "known_export_sql known_membership_preparations=0 known_body_reads=0 examined={examined} unknown_membership_preparations={} unknown_body_reads={}",
+        observer.count(),
+        repository.body_read_counts().0 - before.0
+    );
+    let invalid = ExportPageBudget {
+        examined: 0,
+        ..budget
+    };
+    assert!(matches!(
+        repository.selected_export_page(&selection, &view, &all, None, invalid),
+        Err(LogError::InvalidPageBudget)
+    ));
+    drop(observer);
+    let foreign = EventRepository::new(db.clone(), repository.domain).unwrap();
+    assert!(
+        matches!(
+            foreign.selected_export_page(&selection, &view, &all, None, budget),
+            Err(LogError::StaleCursor)
+        ),
+        "even all-known input must reject a foreign selection owner"
+    );
+    repository.drop_conversation(&conversation).unwrap();
+    assert!(
+        matches!(
+            repository.selected_export_page(&selection, &view, &all, None, budget),
+            Err(LogError::StaleCursor)
+        ),
+        "even all-known input must reject a destructively stale source view"
+    );
+}
+
+unsafe extern "C" fn scalar_revision_compile(
+    userdata: *mut std::ffi::c_void,
+    action: std::ffi::c_int,
+    table: *const std::ffi::c_char,
+    _column: *const std::ffi::c_char,
+    _database: *const std::ffi::c_char,
+    _view: *const std::ffi::c_char,
+) -> std::ffi::c_int {
+    if action == rusqlite::ffi::SQLITE_READ && !table.is_null() {
+        // SAFETY: SQLite supplies a live C string. The shared observer guard
+        // retains this stable boxed atomic until unregistering the callback.
+        let (table, count) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(table).to_bytes(),
+                &*userdata.cast::<std::sync::atomic::AtomicUsize>(),
+            )
+        };
+        if matches!(
+            table,
+            b"event_domains"
+                | b"participant_kind_scan"
+                | b"participant_policy_revisions"
+                | b"participant_destructive_revisions"
+                | b"participant_semantic_compaction_revisions"
+        ) {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    rusqlite::ffi::SQLITE_OK
+}
+
+#[test]
+fn hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = database(&directory);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    repository.initialize_selections().unwrap();
+    let signer = DeviceIdentity::generate();
+    let first = event(&signer, 1, vec![], 1, EventKind::Message);
+    repository.append(&first).unwrap();
+    let observer = RepositoryReadCompiles::install_with(&db, scalar_revision_compile);
+    let read = || {
+        (
+            repository.source_revision().unwrap(),
+            repository.raw_policy_revisions().unwrap().unwrap(),
+            repository.receive_repair_revision().unwrap(),
+        )
+    };
+    let bodies = repository.body_read_counts();
+    let baseline = read();
+    let compiled = observer.count();
+    assert!(compiled > 0, "observe real first-pass SQL preparation");
+    for _ in 0..100 {
+        assert_eq!(read(), baseline);
+    }
+    eprintln!(
+        "scalar_revision_sql first_pass_read_preparations={compiled} after_100_repeat_preparations={}",
+        observer.count()
+    );
+    assert_eq!(
+        observer.count(),
+        compiled,
+        "same four scalar SELECTs must reuse their compiled statements"
+    );
+    assert_eq!(repository.body_read_counts(), bodies);
+    // Only normal profile transactions occur under this test observer. The
+    // production selection-work authorizer is never replaced during its work.
+    let second = event(&signer, 2, vec![first.id], 2, EventKind::Message);
+    repository.append(&second).unwrap();
+    let appended = read();
+    assert!(appended.0 > baseline.0);
+    assert!(appended.1[EventKind::Message as usize] > baseline.1[EventKind::Message as usize]);
+    assert_eq!(appended.2, baseline.2);
+    let control = event(&signer, 3, vec![second.id], 3, EventKind::Delete);
+    repository.append(&control).unwrap();
+    let controlled = read();
+    assert!(controlled.0 > appended.0);
+    assert!(controlled.1[EventKind::Delete as usize] > appended.1[EventKind::Delete as usize]);
+    repository
+        .drop_conversation(&first.conversation_id)
+        .unwrap();
+    let destroyed = read();
+    assert!(destroyed.0 > controlled.0);
+    assert!(
+        destroyed.2 > controlled.2,
+        "real destructive publication must remain visible through the cached VM"
+    );
+    db.transaction(|c| {
+        c.execute("INSERT INTO participant_semantic_compaction_revisions(domain,counter) VALUES(?1,?2) ON CONFLICT(domain) DO UPDATE SET counter=excluded.counter",params![repository.domain.0.as_slice(),destroyed.2+1])?;
+        Ok(())
+    }).unwrap();
+    assert!(
+        repository.receive_repair_revision().is_err(),
+        "fresh corrupt compaction classification cannot reuse an old result"
+    );
+    drop(observer);
+}

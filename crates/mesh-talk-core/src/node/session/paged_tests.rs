@@ -2849,3 +2849,214 @@ fn unsupported_selection_reuse_stays_conservative() {
     let view = backend.open_view(&conversation).unwrap();
     assert!(!backend.reusable_view(&view).unwrap());
 }
+
+#[tokio::test]
+async fn guarded_default_fingerprint_quiet_path_survives_unrelated_source_append() {
+    use crate::{discovery::Announce, identity::account::Account};
+    let left_directory = tempfile::tempdir().unwrap();
+    let right_directory = tempfile::tempdir().unwrap();
+    let left_identity = DeviceIdentity::generate();
+    let right_identity = DeviceIdentity::generate();
+    let left_account = Account::generate();
+    let right_account = Account::generate();
+    let left_proof = Announce::new_with_account(&left_identity, &left_account, "Left", 9);
+    let right_proof = Announce::new_with_account(&right_identity, &right_account, "Right", 9);
+    let (left, _, _) = super::super::test_support::node_with_files(
+        left_directory.path(),
+        left_identity,
+        left_account,
+        &right_proof,
+    );
+    let (right, _, _) = super::super::test_support::node_with_files(
+        right_directory.path(),
+        right_identity,
+        right_account,
+        &left_proof,
+    );
+    left.cached_peer_snapshot_async().await.unwrap();
+    right.cached_peer_snapshot_async().await.unwrap();
+    let conversation = super::super::conversation::dm_conversation_id(
+        &left.identity.public(),
+        &right.identity.public(),
+    );
+    let mut ids = Vec::new();
+    for sequence in 1..=32 {
+        let event = Event::new(
+            &left.identity,
+            conversation,
+            sequence,
+            vec![],
+            sequence,
+            0,
+            EventKind::Message,
+            vec![7; 128],
+        );
+        ids.push(event.id);
+        for node in [&left, &right] {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(event.clone())
+                .unwrap();
+        }
+    }
+    let expected = crate::eventlog::sync::fingerprint(ids.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let responder = right.clone();
+    let peer = left.identity.public();
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let server: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(socket, &responder.identity)
+                .await
+                .unwrap();
+            let store = responder.serve_sync_store(&peer);
+            let mut fingerprints = 0;
+            let mut requests = 0;
+            while let Ok(bytes) = channel.recv().await {
+                match decode(&bytes).unwrap() {
+                    SyncWire::FpRequest(_)
+                    | SyncWire::FpRequestV2(_)
+                    | SyncWire::FpRequestV3(_)
+                    | SyncWire::FpRequestV4(_)
+                    | SyncWire::FpRequestV5(_) => fingerprints += 1,
+                    SyncWire::Request(_)
+                    | SyncWire::RequestV2(_)
+                    | SyncWire::RequestV3(_)
+                    | SyncWire::RequestV4(_)
+                    | SyncWire::RequestV5(_) => requests += 1,
+                    _ => {}
+                }
+                serve_wire_bytes_paged(&mut channel, &store, &bytes)
+                    .await
+                    .unwrap();
+            }
+            let metadata =
+                NetworkSyncStore::probe_metadata(&*store.lock().unwrap(), &conversation).unwrap();
+            drop(store);
+            sent.send((fingerprints, requests, metadata)).unwrap();
+        }
+    });
+    let experiment = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut observations = Vec::new();
+        let mut positive = None;
+        for round in 0..14 {
+            if round == 6 {
+                let unrelated = Event::new(
+                    &left.identity,
+                    ConversationId::new([89; 32]),
+                    1,
+                    vec![],
+                    1,
+                    0,
+                    EventKind::Message,
+                    vec![9; 128],
+                );
+                left.log.lock().unwrap().append_durable(unrelated)?;
+            }
+            if round == 12 {
+                let tail = Event::new(
+                    &right.identity,
+                    conversation,
+                    1,
+                    vec![ids[31]],
+                    33,
+                    0,
+                    EventKind::Message,
+                    vec![8; 128],
+                );
+                positive = Some(tail.id);
+                ids.push(tail.id);
+                right.log.lock().unwrap().append_durable(tail)?;
+            }
+            let source = (
+                left.log.lock().unwrap().repository()?.source_revision()?,
+                right.log.lock().unwrap().repository()?.source_revision()?,
+            );
+            let socket = tokio::net::TcpStream::connect(address)
+                .await
+                .map_err(LogError::Io)?;
+            let mut channel =
+                SecureChannel::connect(socket, &left.identity, Some(&right.identity.public()))
+                    .await?;
+            let store = left.sync_store(&right.identity.public());
+            let mut progress = SyncProgress::default();
+            while !progress
+                .step_burst_paged(&mut channel, &store, conversation, 1)
+                .await?
+            {}
+            let metadata =
+                NetworkSyncStore::probe_metadata(&*store.lock().unwrap(), &conversation)?;
+            let applied = progress.total.applied;
+            let rounds = progress.rounds;
+            drop(store);
+            drop(channel);
+            let (fingerprints, requests, remote_metadata) = received
+                .recv()
+                .await
+                .ok_or(SessionError::UnexpectedMessage)?;
+            observations.push((
+                round,
+                source,
+                fingerprints,
+                requests,
+                rounds,
+                applied,
+                metadata,
+                remote_metadata,
+            ));
+        }
+        let converged = left.log.lock().unwrap().has(&positive.unwrap())?;
+        Ok::<_, SessionError>((
+            observations,
+            converged,
+            crate::eventlog::sync::fingerprint(ids),
+        ))
+    })
+    .await;
+    // Join the one owner before assessing failures; it owns its only live
+    // socket/adapter directly and has no detached connection tasks.
+    server.abort();
+    let cleanup = server.await;
+    if let Err(error) = cleanup {
+        assert!(error.is_cancelled(), "responder failed: {error}");
+    }
+    let (observations, converged, changed) = experiment
+        .expect("guarded fingerprint experiment deadline")
+        .unwrap();
+    for (round, source, fingerprints, requests, rounds, applied, metadata, remote_metadata) in
+        &observations
+    {
+        let expected = if *round < 12 { expected } else { changed };
+        assert!(
+            metadata.is_some_and(|m| m.fingerprint == Some(expected)),
+            "round{round}: requester metadata fingerprint must be present/current; source={source:?} metadata={metadata:?}"
+        );
+        assert!(
+            remote_metadata.is_some_and(|m| m.fingerprint == Some(expected)),
+            "round{round}: responder metadata fingerprint must be present/current; source={source:?} metadata={remote_metadata:?}"
+        );
+        if *round == 12 {
+            assert!(
+                *requests > 0 && *rounds > 0 && *applied == 1,
+                "new shared source must reconcile, not match stale fingerprints: round{round} fp={fingerprints} requests={requests} rounds={rounds} applied={applied}"
+            );
+        } else {
+            assert!(
+                *fingerprints > 0 && *requests == 0 && *rounds == 0 && *applied == 0,
+                "identical selected scope must use fingerprint-only exchange: round{round} source={source:?} fp={fingerprints} requests={requests} rounds={rounds} applied={applied}"
+            );
+        }
+    }
+    assert_ne!(
+        observations[5].1.0, observations[6].1.0,
+        "unrelated append must actually change the global source input"
+    );
+    assert_eq!(observations[5].1.1, observations[6].1.1);
+    assert!(
+        converged,
+        "the remote's new signed event must actually arrive"
+    );
+}
