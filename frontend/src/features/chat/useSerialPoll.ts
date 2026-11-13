@@ -14,11 +14,12 @@ export function useSerialPoll<T>(
   onResult: (result: T) => void,
   onError: (error: unknown) => void,
   wakeOn?: SyncInvalidation["kind"],
+  acceptsInvalidation?: (change: SyncInvalidation) => boolean,
 ) {
-  const handlers = useRef({ request, onResult, onError });
+  const handlers = useRef({ request, onResult, onError, acceptsInvalidation });
   useEffect(() => {
-    handlers.current = { request, onResult, onError };
-  }, [request, onResult, onError]);
+    handlers.current = { request, onResult, onError, acceptsInvalidation };
+  }, [request, onResult, onError, acceptsInvalidation]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -53,7 +54,11 @@ export function useSerialPoll<T>(
     };
     poll();
     const unlisten = subscribeSyncInvalidation((change) => {
-      if (change.kind === wakeOn) poll(true);
+      if (
+        change.kind === wakeOn &&
+        (handlers.current.acceptsInvalidation?.(change) ?? true)
+      )
+        poll(true);
     });
     const timer = setInterval(() => {
       if (!wakeOn || !supportsPushState() || performance.now() >= nextFallback)

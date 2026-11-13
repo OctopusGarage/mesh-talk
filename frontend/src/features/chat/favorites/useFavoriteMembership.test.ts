@@ -152,3 +152,31 @@ it("recovers a failed inspection on activation without clearing known membership
   await act(async () => window.dispatchEvent(new Event("focus")));
   expect(ids.size).toBe(0);
 });
+
+it("ignores pure sync status but retains same-owner document and legacy membership wakes", async () => {
+  await mount();
+  const baseline = mock.inspect.mock.calls.length;
+  await act(async () =>
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "sync_status",
+    }),
+  );
+  expect(mock.inspect).toHaveBeenCalledTimes(baseline);
+  await act(async () =>
+    notifySyncInvalidation({ owner: "bob", kind: "state" }),
+  );
+  expect(mock.inspect).toHaveBeenCalledTimes(baseline);
+  for (const scope of ["documents", undefined] as const) {
+    await act(async () =>
+      notifySyncInvalidation({ owner: "alice", kind: "state", scope }),
+    );
+  }
+  expect(mock.inspect).toHaveBeenCalledTimes(baseline + 2);
+  mock.epoch++;
+  await act(async () =>
+    notifySyncInvalidation({ owner: "alice", kind: "state" }),
+  );
+  expect(mock.inspect).toHaveBeenCalledTimes(baseline + 2);
+});

@@ -1541,6 +1541,15 @@ retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
 
+Emit independently captured diagnostics before acquiring optional supplemental
+owners. A busy lock is not corruption, and failure to read a repository page
+must not discard already captured counters. Keep diagnostic hooks opt-in, bounded
+and free of authority changes. For async work, distinguish future construction
+from actual first poll; a dropped unpolled future did no business work. The
+[work-observation controls](../crates/mesh-talk-core/src/node/work_observation.rs)
+exercise held-owner reporting, disabled hooks, cancellation and bounded static
+call-site counts without adding a background task or reporting timer.
+
 For browser compatibility changes, inspect the actual embedded engine's feature
 support and resolved production CSS. A JavaScript target or installed browser
 version does not prove CSS compatibility. A fallback that loses alpha can make

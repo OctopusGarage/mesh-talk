@@ -296,3 +296,38 @@ it("repairs a missed modern file event at the sparse fallback deadline", async (
     vi.useRealTimers();
   }
 });
+
+it("ignores pure sync status but retains actual file and document availability wakes", async () => {
+  const { watchFileAvailability } = await import("./fileAvailability");
+  const { notifySyncInvalidation, setPushStateSupport } =
+    await import("@/lib/syncInvalidation");
+  vi.mocked(chat.fileStatuses).mockResolvedValue([]);
+  setPushStateSupport("alice");
+  const stop = watchFileAvailability("a");
+  const settle = async () => {
+    for (let n = 0; n < 12; n++) await Promise.resolve();
+  };
+  try {
+    await settle();
+    const baseline = vi.mocked(chat.fileStatuses).mock.calls.length;
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "sync_status",
+    });
+    await settle();
+    expect(chat.fileStatuses).toHaveBeenCalledTimes(baseline);
+    for (const change of [
+      { owner: "alice", kind: "files" as const },
+      { owner: "alice", kind: "state" as const, scope: "documents" as const },
+      { owner: "alice", kind: "state" as const },
+    ]) {
+      notifySyncInvalidation(change);
+      await settle();
+    }
+    expect(chat.fileStatuses).toHaveBeenCalledTimes(baseline + 3);
+  } finally {
+    stop();
+    setPushStateSupport(null);
+  }
+});

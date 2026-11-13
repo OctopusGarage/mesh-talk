@@ -1336,6 +1336,10 @@
           {
             "name": "Shared-login profile publication retains runtime retirement, while native saved-login I/O retains only authentication ordering; cancellation and retirement cannot publish stale metadata or events after runtime, session or app-lock revision changes.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Shared-login reconciliation subscribes before initial observation, retains a coalesced follow-up during application and uses five-minute settled repair; locked, failed and unadmitted work retain two-second recovery and fresh session/runtime/app-lock authority.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
       },

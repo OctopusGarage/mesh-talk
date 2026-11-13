@@ -2668,33 +2668,43 @@ impl Node {
 
     /// Push a control event to every known member, including on large channels.
     /// Membership changes and key rotations must not depend on gossip convergence.
-    pub(in crate::node) async fn distribute_channel(
-        &self,
+    #[track_caller]
+    pub(in crate::node) fn distribute_channel<'a>(
+        &'a self,
         channel: ConversationId,
-        members: &[PublicIdentity],
-    ) {
-        if let Err(error) = self.await_channel_metadata(channel).await {
-            log::warn!("accepted channel control preparation deferred: {error}");
-            return;
+        members: &'a [PublicIdentity],
+    ) -> impl std::future::Future<Output = ()> + Send + 'a {
+        let origin = std::panic::Location::caller();
+        async move {
+            self.observe_distribution_origin(origin, false);
+            if let Err(error) = self.await_channel_metadata(channel).await {
+                log::warn!("accepted channel control preparation deferred: {error}");
+                return;
+            }
+            self.distribute_channel_targets(channel, members, None, true, None)
+                .await;
         }
-        self.distribute_channel_targets(channel, members, None, true, None)
-            .await;
     }
 
     /// Full control distribution with one exact-message custody probe on each
     /// existing sync exchange. Account operations retain all-member fanout.
-    pub(in crate::node) async fn distribute_channel_confirming(
-        &self,
+    #[track_caller]
+    pub(in crate::node) fn distribute_channel_confirming<'a>(
+        &'a self,
         channel: ConversationId,
-        members: &[PublicIdentity],
+        members: &'a [PublicIdentity],
         event: Option<EventId>,
-    ) -> bool {
-        if let Err(error) = self.await_channel_metadata(channel).await {
-            log::warn!("accepted channel control preparation deferred: {error}");
-            return false;
+    ) -> impl std::future::Future<Output = bool> + Send + 'a {
+        let origin = std::panic::Location::caller();
+        async move {
+            self.observe_distribution_origin(origin, true);
+            if let Err(error) = self.await_channel_metadata(channel).await {
+                log::warn!("accepted channel control preparation deferred: {error}");
+                return false;
+            }
+            self.distribute_channel_targets(channel, members, None, true, event)
+                .await
         }
-        self.distribute_channel_targets(channel, members, None, true, event)
-            .await
     }
 
     /// Finish direct offer/chunk fanout before optional relay custody. Waiting

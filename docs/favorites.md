@@ -96,6 +96,10 @@ observation. Frontend typed IPC and `store/messageFavorites.ts` own reactive
 queries; `features/chat/favorites/` owns selection, editing and browsing.
 Selections and drafts retire on conversation/session replacement; late search or
 mutation completions cannot disclose another owner's state.
+Favorite-membership observations refresh for same-owner document or legacy broad
+invalidations, while known pure sync-status changes leave the saved-membership
+query quiet. Retired owner/runtime callbacks remain ineligible; status observation
+must not substitute for document or mutation ownership.
 
 Focused journal and loopback tests establish persistence, atomicity, stale edits,
 replay, policy intersections and unrelated-account rejection. Registered IPC tests

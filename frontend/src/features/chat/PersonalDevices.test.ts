@@ -211,3 +211,35 @@ it("discards a pending private hostname read after account replacement", async (
   expect(panel.textContent).not.toContain("Previous-account-private-host");
   expect(panel.textContent).toContain("This device");
 });
+
+it("pure sync status refreshes device status without rereading hostnames", async () => {
+  const { notifySyncInvalidation } = await import("@/lib/syncInvalidation");
+  await render();
+  await open();
+  const statuses = vi.mocked(chat.getDeviceSyncStatus).mock.calls.length;
+  const names = vi.mocked(chat.getDeviceHostnames).mock.calls.length;
+  await act(async () =>
+    notifySyncInvalidation({
+      owner: "owner",
+      kind: "state",
+      scope: "sync_status",
+    }),
+  );
+  expect(chat.getDeviceSyncStatus).toHaveBeenCalledTimes(statuses + 1);
+  expect(chat.getDeviceHostnames).toHaveBeenCalledTimes(names);
+  await act(async () =>
+    notifySyncInvalidation({
+      owner: "other",
+      kind: "state",
+      scope: "sync_status",
+    }),
+  );
+  expect(chat.getDeviceSyncStatus).toHaveBeenCalledTimes(statuses + 1);
+  for (const scope of ["documents", undefined] as const) {
+    await act(async () =>
+      notifySyncInvalidation({ owner: "owner", kind: "state", scope }),
+    );
+  }
+  expect(chat.getDeviceHostnames).toHaveBeenCalledTimes(names + 2);
+  expect(chat.getDeviceSyncStatus).toHaveBeenCalledTimes(statuses + 3);
+});

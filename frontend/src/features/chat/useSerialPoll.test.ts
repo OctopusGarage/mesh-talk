@@ -49,3 +49,34 @@ it("skips overlapping polls and ignores a response after close", async () => {
   expect(received).toEqual([1]);
   await act(async () => root.unmount());
 });
+
+it("preserves qualified status wakes for existing default state subscribers", async () => {
+  const { notifySyncInvalidation } = await import("@/lib/syncInvalidation");
+  const request = vi.fn().mockResolvedValue(1);
+  const root = createRoot(document.createElement("div"));
+  function Probe() {
+    useSerialPoll(
+      true,
+      30000,
+      request,
+      () => {},
+      () => {},
+      "state",
+    );
+    return null;
+  }
+  try {
+    await act(async () => root.render(createElement(Probe)));
+    expect(request).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      notifySyncInvalidation({
+        owner: "alice",
+        kind: "state",
+        scope: "sync_status",
+      }),
+    );
+    expect(request).toHaveBeenCalledTimes(2);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

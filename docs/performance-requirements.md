@@ -79,6 +79,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    inside the committing owner and notify after releasing its guard.
    Replacing an identical binding map is not invalidation; actual removal and
    later restoration must each invalidate their preceding observation.
+   Subscribe before the initial read, retain one follow-up for changes during
+   work, and gate settled credential reconciliation before secret decoding and
+   applied-marker I/O. Pending, locked and failed work retain recovery; event
+   hints never replace fresh authorization at application and commit.
 
 2. **Use recovery deliberately.** Ordinary fallback maintenance should drain a
    bounded, coalescing queue serially through its existing lifecycle owner.

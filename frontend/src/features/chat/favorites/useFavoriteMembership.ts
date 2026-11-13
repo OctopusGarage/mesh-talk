@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { startRecoveryRefresh } from "@/lib/recoveryRefresh";
 import { readWithDeadline } from "@/lib/readDeadline";
 import { messageFavorites } from "@/lib/api/messageFavorites";
-import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
+import {
+  isDocumentInvalidation,
+  subscribeSyncInvalidation,
+} from "@/lib/syncInvalidation";
 import { captureRuntimeOwner } from "@/store/ownership";
 import type { ChatMessage, Conversation } from "@/store/conversationModel";
 const EMPTY = new Set<string>();
@@ -97,7 +100,8 @@ export function useFavoriteMembership(
     };
     scheduleExpiry();
     const stop = subscribeSyncInvalidation((change) => {
-      if (change.owner === lease.owner && change.kind === "state") void load();
+      if (change.owner === lease.owner && isDocumentInvalidation(change))
+        void load();
     });
     return () => {
       active = false;

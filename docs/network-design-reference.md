@@ -1680,6 +1680,14 @@ never substitutes for credential authority. Nickname edits preserve other card
 fields and follow the existing signed revision ordering; a joining device cannot publish its old
 local nickname as the adopted account's initial profile.
 
+Desktop shared-login reconciliation subscribes to the account-access revision
+before its initial observation. A source change schedules fresh admission; changes
+arriving during application retain one coalesced follow-up. Successful application
+or unchanged credentials park until a source event or five-minute repair. Locked,
+unadmitted and failed work retain a two-second recovery deadline. Every attempt
+rechecks the live runtime, desktop session and app-lock authority; a notification
+never grants credential access or permits a stale commit.
+
 Contact presentation prefers the verified nickname recorded from device
 announcements, including the durable nickname retained while offline. A legacy
 public trust card can contain an older login/display label; importing or reading
@@ -3141,6 +3149,12 @@ Receive classification, hint/GET, receipt reuse/rejection and upload-view/stamp
 reasons do not replace or repeat protocol authorization. Counter snapshots and
 cursor reservations release the observer guard before storage access or logging.
 A cursor result is installed only for its matching observation reservation.
+Already captured mailbox/query counters are emitted independently of optional
+repository-page access. A busy repository owner skips that page without implying
+corruption or discarding those counters. At most 64 static distribution call sites
+plus a saturating overflow counter identify actual first-polled work; constructing
+an unpolled future is not execution. These diagnostics remain opt-in and add no
+task, timer, persistence or protocol authority.
 
 New commit-kind counts anchor at the latest ordinal on their first observation,
 then inspect at most 64 indexed headers per interval without reading bodies or

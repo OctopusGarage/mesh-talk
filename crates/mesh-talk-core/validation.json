@@ -3259,6 +3259,10 @@
           {
             "name": "Channel queue-only writes cannot invalidate settled consent work; account/source/reopen changes retain ordinary fences, closed SQL purposes cannot mutate each other, and absent/duplicate queue operations preserve cached read plans.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Opt-in work observation emits captured counters even when supplemental repository ownership is busy; static distribution origins count first-polled work only, retain at most 64 sites plus overflow, and add no task, timer, persistence or authority.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           }
         ]
       },

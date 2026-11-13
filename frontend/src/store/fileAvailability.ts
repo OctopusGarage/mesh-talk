@@ -3,6 +3,7 @@ import {
   RECOVERY_REFRESH_MS,
 } from "@/lib/recoveryRefresh";
 import {
+  isDocumentInvalidation,
   subscribeSyncInvalidation,
   supportsPushState,
 } from "@/lib/syncInvalidation";
@@ -118,7 +119,8 @@ export function watchFileAvailability(fileConv: string) {
       intervalMs: () => (supportsPushState() ? RECOVERY_REFRESH_MS : 5000),
     });
     invalidationCleanup = subscribeSyncInvalidation((change) => {
-      if (change.kind === "files" || change.kind === "state") void poll(true);
+      if (change.kind === "files" || isDocumentInvalidation(change))
+        void poll(true);
     });
   }
   void poll(true);

@@ -457,6 +457,10 @@
           {
             "name": "Favorite list reads have bounded observation waits, including refresh after a successful mutation; an unavailable projection cannot conceal or duplicate durable collection acceptance.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Favorite membership ignores known pure sync-status invalidations, retains same-owner document and legacy broad refresh, and rejects retired owner/runtime callbacks.",
+            "reference": "docs/favorites.md#ownership-and-acceptance"
           }
         ]
       },
@@ -1197,6 +1201,10 @@
           },
           {
             "name": "Qualified document/status notifications skip group and personal-state hydration; document-only listeners ignore known sync-status scope while absent/unknown scope keeps legacy repair and mixed domains remain independently observable.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Same-owner pure sync-status notifications refresh device status without rereading presence, watched-file availability, favorite membership or hostnames; document, file and legacy/unknown broad invalidations retain their existing recovery and ownership guards. Default serial-poll state subscribers retain status notifications unless the consumer supplies a narrower matcher.",
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
@@ -3355,7 +3363,17 @@
         "frontend/src/store/chat.ts",
         "src-tauri/src/reception_host.rs",
         "src-tauri/src/reception_host/",
-        "frontend/e2e/resource-idle.spec.ts"
+        "frontend/e2e/resource-idle.spec.ts",
+        "frontend/src/store/presence.ts",
+        "frontend/src/store/presence.test.ts",
+        "frontend/src/store/fileAvailability.ts",
+        "frontend/src/store/fileAvailability.test.ts",
+        "frontend/src/features/chat/favorites/useFavoriteMembership.ts",
+        "frontend/src/features/chat/favorites/useFavoriteMembership.test.ts",
+        "frontend/src/features/chat/useSerialPoll.ts",
+        "frontend/src/features/chat/useSerialPoll.test.ts",
+        "frontend/src/features/chat/PersonalDevices.tsx",
+        "frontend/src/features/chat/PersonalDevices.test.ts"
       ],
       "browser": ["e2e/resource-idle.spec.ts"],
       "native": ["host"]

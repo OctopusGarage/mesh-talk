@@ -88,12 +88,36 @@ fn record_churn(
     }
 }
 
+const DISTRIBUTION_ORIGINS: usize = 64;
+
+#[derive(Clone, Debug)]
+struct DistributionOriginCount {
+    file: &'static str,
+    line: u32,
+    column: u32,
+    confirming: bool,
+    count: u64,
+}
+
+// Location is a trusted compile-time input. Keep no private build-root prefix.
+fn source_file_tail(file: &'static str) -> &'static str {
+    if file.starts_with("src/") || file.starts_with("src\\") {
+        return file;
+    }
+    if let Some(start) = file.rfind("/src/").or_else(|| file.rfind("\\src\\")) {
+        return &file[start + 1..];
+    }
+    file.rsplit(['/', '\\']).next().unwrap_or(file)
+}
+
 pub(super) struct OrderWorkObserver {
     started: Instant,
     last: Option<Instant>,
     cursor: Option<OrderWorkCursor>,
     header_cursor: Option<i64>,
     churn: ChurnObservation,
+    distribution_origins: Vec<DistributionOriginCount>,
+    distribution_origin_overflow: u64,
 }
 
 impl OrderWorkObserver {
@@ -105,8 +129,38 @@ impl OrderWorkObserver {
             cursor: None,
             header_cursor: None,
             churn: ChurnObservation::default(),
+            distribution_origins: Vec::new(),
+            distribution_origin_overflow: 0,
         })
     }
+    fn record_distribution_origin(
+        &mut self,
+        file: &'static str,
+        line: u32,
+        column: u32,
+        confirming: bool,
+    ) {
+        let file = source_file_tail(file);
+        if let Some(site) = self.distribution_origins.iter_mut().find(|site| {
+            site.file == file
+                && site.line == line
+                && site.column == column
+                && site.confirming == confirming
+        }) {
+            site.count = site.count.saturating_add(1);
+        } else if self.distribution_origins.len() < DISTRIBUTION_ORIGINS {
+            self.distribution_origins.push(DistributionOriginCount {
+                file,
+                line,
+                column,
+                confirming,
+                count: 1,
+            });
+        } else {
+            self.distribution_origin_overflow = self.distribution_origin_overflow.saturating_add(1);
+        }
+    }
+
     pub(super) fn from_env() -> Option<Mutex<Self>> {
         (std::env::var_os("MESH_TALK_TRACE_WORK").as_deref() == Some(std::ffi::OsStr::new("1")))
             .then(|| {
@@ -116,6 +170,8 @@ impl OrderWorkObserver {
                     cursor: None,
                     header_cursor: None,
                     churn: ChurnObservation::default(),
+                    distribution_origins: Vec::new(),
+                    distribution_origin_overflow: 0,
                 })
             })
     }
@@ -233,9 +289,31 @@ impl Node {
         }
     }
 
+    pub(super) fn observe_distribution_origin(
+        &self,
+        origin: &'static std::panic::Location<'static>,
+        confirming: bool,
+    ) {
+        let Some(slot) = &self.order_work_observation else {
+            return;
+        };
+        if let Ok(mut observer) = slot.try_lock() {
+            observer.record_distribution_origin(
+                origin.file(),
+                origin.line(),
+                origin.column(),
+                confirming,
+            );
+        }
+    }
+
     /// Called only by the admitted blocking maintenance owner. Disabled nodes
     /// perform no observation query; an active observer retains one cursor.
     pub(in crate::node) fn observe_order_work(&self) {
+        self.observe_order_work_with_logger(log::logger());
+    }
+
+    fn observe_order_work_with_logger(&self, logger: &dyn log::Log) {
         let Some(slot) = &self.order_work_observation else {
             return;
         };
@@ -258,22 +336,42 @@ impl Node {
         let receive = observer.churn.receive;
         let repeats = observer.churn.repeats;
         let recent = observer.churn.recent.len();
+        let distribution_origins = observer.distribution_origins.clone();
+        let distribution_origin_overflow = observer.distribution_origin_overflow;
         drop(observer);
         emit_info(
-            log::logger(),
+            logger,
             format_args!(
-                "receive_work best_effort=true counts={:?} labels=drain_start,drain_success,drain_failed,drain_empty,negotiate_supported,negotiate_legacy,negotiate_error,scope_limit,rearm_ok,rearm_error,wait_changed,wait_equal,wait_error,drain_dirty,source_wake,network_restart,policy_restart,topology_cancel,explicit_restart,watch_abort,drain_receive_gate,drain_group_lookup_failed,drain_no_progress,drain_transport_failed,drain_store_failed,drain_protocol_or_resource_failed,drain_timeout,channel_sync_ok_zero,channel_sync_ok_applied,channel_sync_no_progress,channel_sync_transport_failed,channel_sync_timeout,channel_sync_store_failed,channel_sync_protocol_or_resource_failed age_ms={}",
-                receive, age_ms
+                "receive_work best_effort=true counts={:?} labels=drain_start,drain_success,drain_failed,drain_empty,negotiate_supported,negotiate_legacy,negotiate_error,scope_limit,rearm_ok,rearm_error,wait_changed,wait_equal,wait_error,drain_dirty,source_wake,network_restart,policy_restart,topology_cancel,explicit_restart,watch_abort,drain_receive_gate,drain_group_lookup_failed,drain_no_progress,drain_transport_failed,drain_store_failed,drain_protocol_or_resource_failed,drain_timeout,channel_sync_ok_zero,channel_sync_ok_applied,channel_sync_no_progress,channel_sync_transport_failed,channel_sync_timeout,channel_sync_store_failed,channel_sync_protocol_or_resource_failed mailbox_counts={:?} query_counts={:?} mailbox_recent={} mailbox_repeats={} distribution_origins={:?} distribution_origin_overflow={} age_ms={}",
+                receive,
+                counts,
+                queries,
+                recent,
+                repeats,
+                distribution_origins,
+                distribution_origin_overflow,
+                age_ms
             ),
         );
         if let Some(pages) = crate::storage::database::observe_page_writes() {
-            emit_info(log::logger(), format_args!("{pages}"));
+            emit_info(logger, format_args!("{pages}"));
         }
-        let page = self
-            .log
-            .try_lock()
-            .map_err(|_| LogError::CorruptFile("order observation owner unavailable".into()))
-            .and_then(|log| {
+        let page = {
+            let log = match self.log.try_lock() {
+                Ok(log) => log,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    emit_info(
+                        logger,
+                        format_args!("order_work_page skipped=owner_busy age_ms={age_ms}"),
+                    );
+                    return;
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    log::warn!("order work observation unavailable: observation owner poisoned");
+                    return;
+                }
+            };
+            (|| -> Result<_, LogError> {
                 let repository = log.repository()?;
                 let source = repository.source_revision()?;
                 let destructive = repository.destructive_policy_revision()?;
@@ -288,12 +386,13 @@ impl Node {
                     profile,
                     repository.observe_committed_kinds(header_cursor)?,
                 ))
-            });
+            })()
+        };
         match page {
             Ok((page, source, destructive, repair, profile, headers)) => {
                 if let Some(job) = profile.job {
                     emit_info(
-                        log::logger(),
+                        logger,
                         format_args!(
                             "profile_work source={} selected={} complete={} candidates={} candidate_bytes={} cursor={} requests_pending={}",
                             profile.source_revision,
@@ -307,7 +406,7 @@ impl Node {
                     );
                 } else {
                     emit_info(
-                        log::logger(),
+                        logger,
                         format_args!(
                             "profile_work source={} job=absent requests_pending={}",
                             profile.source_revision, profile.requests_pending
@@ -315,7 +414,7 @@ impl Node {
                     );
                 }
                 emit_info(
-                    log::logger(),
+                    logger,
                     format_args!(
                         "order_work_page age_ms={} rows={} more={} source={} destructive={} receive_repair={}",
                         age_ms,
@@ -332,7 +431,7 @@ impl Node {
                         CausalOrder::WallClock => "wall",
                     };
                     emit_info(
-                        log::logger(),
+                        logger,
                         format_args!(
                             "order_work scope={} job={} kind={} phase={} revision={} target={} base={} cutoff={} seeded={} rank={} seed_after={} child_after={} tail_after={} pop={}",
                             hex::encode(row.scope_tag),
@@ -369,21 +468,21 @@ impl Node {
                     .ok()
                     .map(|cache| (cache.observed_len(), cache.observed_control_hints()));
                 emit_info(
-                    log::logger(),
+                    logger,
                     format_args!(
                         "mailbox_cache usage_retained_records_bytes_session_records_checkpoints_records_bytes_wrappers_records_bytes={:?} hot_len={:?}",
                         cache_usage, hot_len
                     ),
                 );
                 emit_info(
-                    log::logger(),
+                    logger,
                     format_args!(
                         "mailbox_work best_effort=true recent_window={} repeats={} counts={:?} header_kinds={:?} header_more={} header_reset={} labels=outer,open_failed,identity_handled,identity_deferred,consent_handled,consent_deferred,semantic_profile,retained_duplicate,admitted_retained,admitted_nonretained,admission_failed,staged,retained_hit,session_hit,get,get_retry,receipt_hot,receipt_durable,receipt_rejected,receipt_missing,view_skip,view_absent,view_stale,stamp_unknown,stamp_changed,view_resumed,view_new,upload_reset,semantic_hit,pull_advanced,pull_quiet,pull_deferred",
                         recent, repeats, counts, headers.1, headers.2, headers.3
                     ),
                 );
                 emit_info(
-                    log::logger(),
+                    logger,
                     format_args!(
                         "profile_header_work count={} oldest_wall_clock={:?} newest_wall_clock={:?} processed_current_account={}",
                         headers.4.count,
@@ -421,7 +520,7 @@ impl Node {
                 // Keep both counter families and their observation age in one
                 // bounded record: file rotation can discard preceding rows.
                 emit_info(
-                    log::logger(),
+                    logger,
                     format_args!(
                         "query_work counts={:?} labels=stamp_unknown,metadata_hit,metadata_miss,metadata_evicted,view_new,view_absent,scope_miss,stamp_miss,view_invalid,view_reused,view_retained,consent_hit,consent_main_changed,consent_policy_changed,consent_remote_changed,consent_floor_changed,consent_expired,consent_absent,consent_learned,consent_prepare_moved,file_waiting,file_preparing,file_allowed,completion_missing,completion_stamp_unknown,completion_local_changed,completion_remote_changed,completion_remote_cleared entries={:?} privacy={} projection={} file_scopes={:?} proofs={:?} controls={:?} device_policy={} hot_views_and_consent_hints={:?} profile_sql_observer_and_total_changes={:?} mailbox_counts={:?} mailbox_recent={} mailbox_repeats={} age_ms={}",
                         queries,
@@ -460,6 +559,228 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct OwnerCapture(Mutex<Vec<String>>);
+    impl log::Log for OwnerCapture {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            self.0.lock().unwrap().push(record.args().to_string());
+        }
+        fn flush(&self) {}
+    }
+
+    #[test]
+    fn held_log_keeps_captured_work_counts_and_disabled_owner_emits_nothing() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+            node::test_support::node_with_files,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (mut node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        std::sync::Arc::get_mut(&mut node)
+            .unwrap()
+            .order_work_observation = Some(OrderWorkObserver::for_test());
+        node.observe_mailbox_work(reason::OUTER, None);
+        node.observe_mailbox_work(reason::QUERY_META_HIT, None);
+        node.observe_mailbox_work(reason::RECEIVE_DRAIN_START, None);
+        let capture = OwnerCapture(Mutex::new(Vec::new()));
+        let held = node.log.lock().unwrap();
+        node.observe_order_work_with_logger(&capture);
+        drop(held);
+        let rows = capture.0.lock().unwrap().clone();
+        let receive = rows
+            .iter()
+            .find(|row| row.starts_with("receive_work "))
+            .expect("actual owner emits receive snapshot while log is held");
+        assert!(
+            receive.contains("mailbox_counts=[1, 0,"),
+            "captured mailbox counters must survive unrelated held repository"
+        );
+        assert!(
+            receive.contains("query_counts=[0, 1,"),
+            "captured query counters must survive unrelated held repository"
+        );
+        assert!(receive.contains("age_ms="));
+        assert!(
+            rows.iter().any(|row| row.contains("skipped=owner_busy")),
+            "busy diagnostic skip is explicit"
+        );
+        assert!(!rows.iter().any(|row| row.contains("corrupt log file")));
+        let (mut disabled, _, _) = node_with_files(
+            &dir.path().join("disabled"),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        std::sync::Arc::get_mut(&mut disabled)
+            .unwrap()
+            .order_work_observation = None;
+        let capture = OwnerCapture(Mutex::new(Vec::new()));
+        let held = disabled.log.lock().unwrap();
+        disabled.observe_mailbox_work(reason::OUTER, None);
+        disabled.observe_order_work_with_logger(&capture);
+        drop(held);
+        assert!(
+            capture.0.lock().unwrap().is_empty(),
+            "disabled observer has no query or log path"
+        );
+    }
+
+    #[tokio::test]
+    async fn distribution_origins_record_actual_first_poll_not_construction_and_keep_variants() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+            node::test_support::node_with_files,
+        };
+        use futures_util::FutureExt;
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (mut node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        std::sync::Arc::get_mut(&mut node)
+            .unwrap()
+            .order_work_observation = None;
+        let channel = node
+            .create_channel("origin cancellation", Vec::new())
+            .await
+            .unwrap();
+        // A real signed source tail needs bounded canonical preparation, so the
+        // first actual poll can be cancelled before distribution reaches I/O.
+        for _ in 0..256 {
+            node.append_event(channel, crate::eventlog::EventKind::Message, vec![0; 8])
+                .unwrap();
+        }
+        std::sync::Arc::get_mut(&mut node)
+            .unwrap()
+            .order_work_observation = Some(OrderWorkObserver::for_test());
+        drop(node.distribute_channel(channel, &[]));
+        drop(node.distribute_channel_confirming(channel, &[], None));
+        assert!(
+            node.order_work_observation
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .distribution_origins
+                .is_empty()
+        );
+        let first = node.distribute_channel(channel, &[]).now_or_never();
+        assert!(
+            first.is_none(),
+            "actual bounded metadata work leaves the first poll pending; dropping it cancels the same future"
+        );
+        let unknown = ConversationId::new([251; 32]);
+        assert_eq!(
+            node.distribute_channel_confirming(unknown, &[], None)
+                .now_or_never(),
+            Some(false)
+        );
+        let sites = node
+            .order_work_observation
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .distribution_origins
+            .clone();
+        assert_eq!(
+            sites.iter().map(|site| site.count).sum::<u64>(),
+            2,
+            "each actually polled future records exactly once"
+        );
+        assert!(sites.iter().any(|site| site.confirming && site.count == 1));
+        assert!(sites.iter().any(|site| !site.confirming && site.count == 1));
+        assert!(
+            sites
+                .iter()
+                .all(|site| site.file.ends_with("work_observation.rs")
+                    && site.line > 0
+                    && site.column > 0),
+            "factory captures its caller, not channels.rs or an async poll wrapper"
+        );
+        let capture = OwnerCapture(Mutex::new(Vec::new()));
+        let held = node.log.lock().unwrap();
+        node.observe_order_work_with_logger(&capture);
+        drop(held);
+        assert!(
+            capture
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|row| row.starts_with("receive_work ")
+                    && row.contains("distribution_origins=[DistributionOriginCount")
+                    && row.contains("work_observation.rs")),
+            "static origins survive a busy supplemental repository"
+        );
+        std::sync::Arc::get_mut(&mut node)
+            .unwrap()
+            .order_work_observation = None;
+        assert_eq!(
+            node.distribute_channel_confirming(unknown, &[], None)
+                .now_or_never(),
+            Some(false)
+        );
+        let capture = OwnerCapture(Mutex::new(Vec::new()));
+        node.observe_order_work_with_logger(&capture);
+        assert!(
+            capture.0.lock().unwrap().is_empty(),
+            "trace-off factories retain and emit no origins"
+        );
+    }
+
+    #[test]
+    fn distribution_origin_bounds_saturates_and_removes_private_build_prefixes() {
+        assert_eq!(
+            source_file_tail(
+                "/Users/private-user/build/crates/mesh-talk-core/src/node/channels.rs"
+            ),
+            "src/node/channels.rs"
+        );
+        assert_eq!(
+            source_file_tail(r"C:\Users\private-user\build\src\node\channels.rs"),
+            r"src\node\channels.rs"
+        );
+        assert_eq!(source_file_tail("channels.rs"), "channels.rs");
+        let slot = OrderWorkObserver::for_test();
+        let mut observer = slot.lock().unwrap();
+        for line in 0..DISTRIBUTION_ORIGINS as u32 {
+            observer.record_distribution_origin("src/node/fixture.rs", line, 1, false);
+        }
+        observer.record_distribution_origin("src/node/overflow.rs", 99, 1, false);
+        assert_eq!(observer.distribution_origins.len(), DISTRIBUTION_ORIGINS);
+        assert_eq!(observer.distribution_origin_overflow, 1);
+        observer.distribution_origins[0].count = u64::MAX;
+        observer.record_distribution_origin("src/node/fixture.rs", 0, 1, false);
+        assert_eq!(observer.distribution_origins[0].count, u64::MAX);
+        observer.distribution_origin_overflow = u64::MAX;
+        observer.record_distribution_origin("src/node/overflow.rs", 100, 1, true);
+        assert_eq!(observer.distribution_origin_overflow, u64::MAX);
+    }
 
     #[test]
     fn explicit_work_diagnostics_honor_target_filter_without_info_macro() {

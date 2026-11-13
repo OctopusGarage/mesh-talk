@@ -3,6 +3,7 @@ import {
   RECOVERY_REFRESH_MS,
 } from "@/lib/recoveryRefresh";
 import {
+  isDocumentInvalidation,
   subscribeSyncInvalidation,
   supportsPushState,
 } from "@/lib/syncInvalidation";
@@ -517,7 +518,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
     const unlisten = subscribeSyncInvalidation((change) => {
       if (
         change.owner === lease.owner &&
-        (change.kind === "roster" || change.kind === "state")
+        (change.kind === "roster" || isDocumentInvalidation(change))
       )
         void poll(true);
     });

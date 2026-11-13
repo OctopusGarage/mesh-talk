@@ -1155,3 +1155,31 @@ it("an older omitted-groups reply cannot roll back a newer full revision", async
     stop();
   }
 });
+
+it("ignores pure sync status while preserving roster and document presence wakes", async () => {
+  getPresence.mockResolvedValue({});
+  setPushStateSupport("alice");
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const baseline = getPresence.mock.calls.length;
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "sync_status",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPresence).toHaveBeenCalledTimes(baseline);
+    for (const change of [
+      { owner: "alice", kind: "roster" as const },
+      { owner: "alice", kind: "state" as const, scope: "documents" as const },
+      { owner: "alice", kind: "state" as const },
+    ]) {
+      notifySyncInvalidation(change);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(getPresence).toHaveBeenCalledTimes(baseline + 3);
+  } finally {
+    stop();
+  }
+});
