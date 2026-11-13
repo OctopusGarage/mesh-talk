@@ -25,6 +25,15 @@ admission fails retryably. A retired queued reader starts no disk work unless
 another current reader needs the same payload. Admitted work retains its slot
 until actual settlement. Pending publication selects metadata first and reads one
 archive at a time, so an offline backlog does not retain every pending payload.
+Only the active account and public library retain IndexedDB connections. Scope
+replacement/logout, browser version changes and unexpected closure retire those
+connections; already-admitted operations release their retired connection after
+the last lease settles. Legacy reads stay ephemeral and failed opens remain
+retryable. This bounds retained connections, not every in-flight browser request.
+Equal linked versions use fresh compact metadata before read-write admission;
+actual mutations recheck current scope, version and local edits in their atomic
+transaction. Theme selection and remote catalog projection do not trigger local
+publication; committed local edits retain their own invalidation.
 There is no inactive full-pack cache. The selected theme and open library still
 use a full legal pack in this stage: the 24 MiB extracted-content limit can expand
 to roughly 32 MiB of base64 characters, with further string/runtime overhead.

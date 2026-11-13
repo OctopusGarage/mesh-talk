@@ -3079,8 +3079,8 @@ Historical authentication failure pacing is shared by all background producers i
 `node/session_pool.rs`, using the existing bounded retry owner. At most 256 hints
 match the complete signing/key-agreement identity and canonical endpoint, with
 privacy and network generations as recovery inputs. Only an actual failed
-TCP/Noise attempt learns a 30-second minimum, exponential recovery delay capped
-at five minutes. Reservations, local capacity and cancellation do not learn
+TCP/Noise attempt parks the unchanged historical endpoint for five minutes.
+Fresh evidence still interrupts that sparse recovery interval. Reservations, local capacity and cancellation do not learn
 remote failures. Changed generations, untried endpoints, current eligible signed
 discovery and explicit interactive call/link operations retain prompt admission;
 all existing privacy, identity and socket checks still apply. A failed endpoint

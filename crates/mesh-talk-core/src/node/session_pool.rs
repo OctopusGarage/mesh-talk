@@ -332,7 +332,7 @@ impl Default for SessionPool {
             capacity_diagnostics: Mutex::new(CapacityDiagnostics::default()),
             historical_authentication_retries: Mutex::new(
                 HistoricalAuthenticationRetries::with_failure_bounds(
-                    Duration::from_secs(30),
+                    Duration::from_secs(300),
                     Duration::from_secs(300),
                 ),
             ),
@@ -1249,6 +1249,27 @@ mod tests {
     }
 
     #[test]
+    fn failed_unchanged_historical_authentication_waits_for_sparse_repair() {
+        let pool = SessionPool::default();
+        let key = historical_key();
+        let now = Instant::now();
+        let mut attempt = pool.historical_authentication(&key, 1, now).unwrap();
+        attempt.complete(false, now);
+        for elapsed in [31, 60, 120, 299] {
+            assert!(
+                pool.historical_authentication(&key, 1, now + Duration::from_secs(elapsed))
+                    .is_err(),
+                "unchanged failed historical endpoint retried after {elapsed}s"
+            );
+        }
+        assert!(
+            pool.historical_authentication(&key, 1, now + Duration::from_secs(301))
+                .is_ok(),
+            "sparse repair must still recover an endpoint without new discovery"
+        );
+    }
+
+    #[test]
     fn historical_authentication_retains_cancelled_work_without_learning_failure() {
         let pool = SessionPool::default();
         let key = historical_key();
@@ -1264,7 +1285,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            pool.historical_authentication(&key, 1, now + Duration::from_secs(37))
+            pool.historical_authentication(&key, 1, now + Duration::from_secs(307))
                 .is_ok()
         );
     }

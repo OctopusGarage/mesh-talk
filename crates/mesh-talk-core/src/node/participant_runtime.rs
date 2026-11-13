@@ -173,6 +173,16 @@ impl Node {
     }
 }
 
+// Keep the disclosure observation boundary explicit: its invalidation belongs
+// to the source refresh decision, not to a later publication or probe.
+pub(super) async fn observe_candidate_disclosure(
+    changes: &mut tokio::sync::watch::Receiver<u64>,
+    observe: impl std::future::Future<Output = bool>,
+) -> bool {
+    changes.borrow_and_update();
+    observe.await
+}
+
 /// Network inventory supplied by the host; identity and roster come from Node.
 pub struct ParticipantConfig {
     /// UDP discovery port; zero asks the OS to assign a port owned by this participant.
@@ -241,6 +251,7 @@ impl PreparedParticipant {
         let _ = node.update_presence(&current_announce);
         let announce = shared_announce(&current_announce);
         let discovery_trigger = Arc::new(Notify::new());
+        let candidate_refresh = Arc::new(Notify::new());
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
         let discovery = spawn_discovery_with_network_changes(
             Arc::clone(&socket),
@@ -275,24 +286,73 @@ impl PreparedParticipant {
             let socket_v6 = socket_v6.clone();
             let visibility = Arc::clone(&visibility);
             let routed = Arc::clone(&routed);
-            let trigger = Arc::clone(&discovery_trigger);
+            let trigger = Arc::clone(&candidate_refresh);
+            // Subscribe before the first snapshot. Changes during source/probe
+            // work retain one follow-up instead of depending on a Notify waiter.
+            let mut network = node.network_changes.subscribe();
+            let mut disclosure = visibility.subscribe_changes();
+            let mut topology = source.subscribe_changes();
             tasks.push(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(5));
+                use futures_util::FutureExt;
+                let mut probes = tokio::time::interval(Duration::from_secs(5));
+                probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                probes.tick().await; // Startup refresh already sends the first probes.
+                let mut refresh = true;
+                let mut refresh_at = tokio::time::Instant::now();
+                let mut hints = Vec::new();
                 loop {
-                    tokio::select! {
-                        _ = tick.tick() => {},
-                        _ = trigger.notified() => {},
+                    refresh |= trigger.notified().now_or_never().is_some()
+                        || network.has_changed().unwrap_or(false)
+                        || disclosure.has_changed().unwrap_or(false);
+                    if let Some(changes) = topology.as_ref() {
+                        match changes.has_changed() {
+                            Ok(changed) => refresh |= changed,
+                            Err(_) => {
+                                topology = None;
+                                refresh = true;
+                            }
+                        }
                     }
-                    if visibility.routed_allowed().await
-                        && let Ok(candidates) =
-                            tokio::time::timeout(Duration::from_secs(3), source.snapshot()).await
-                    {
-                        let mut unique = std::collections::HashSet::new();
-                        for endpoint in candidates
-                            .into_iter()
-                            .filter(|addr| unique.insert(*addr))
-                            .take(256)
-                        {
+                    if refresh {
+                        // Capture all pending demand before the first visibility
+                        // await. Any later change must retain another turn.
+                        let _ = trigger.notified().now_or_never();
+                        network.borrow_and_update();
+                        if let Some(changes) = topology.as_mut() {
+                            changes.borrow_and_update();
+                        }
+                    }
+                    let allowed = if refresh {
+                        observe_candidate_disclosure(&mut disclosure, visibility.routed_allowed())
+                            .await
+                    } else {
+                        visibility.routed_allowed().await
+                    };
+                    if refresh {
+                        if allowed {
+                            if let Ok(candidates) =
+                                tokio::time::timeout(Duration::from_secs(3), source.snapshot())
+                                    .await
+                            {
+                                let mut unique = std::collections::HashSet::new();
+                                hints = candidates
+                                    .into_iter()
+                                    .filter(|addr| unique.insert(*addr))
+                                    .take(256)
+                                    .collect();
+                            }
+                            // An outer timeout retains only address hints, never
+                            // presence or authority. A successful empty read clears.
+                        } else {
+                            hints.clear();
+                        }
+                        refresh_at = tokio::time::Instant::now() + Duration::from_secs(300);
+                        // This refresh already sends current probes; discard any
+                        // overdue idle tick instead of duplicating that sweep.
+                        probes.reset();
+                    }
+                    if allowed {
+                        for endpoint in &hints {
                             if !visibility.routed_allowed().await {
                                 break;
                             }
@@ -301,15 +361,39 @@ impl PreparedParticipant {
                                 std::net::SocketAddr::V6(_) => socket_v6.as_ref(),
                             } {
                                 let _ = visibility
-                                    .with_routed_send(routed.probe(sender, endpoint))
+                                    .with_routed_send(routed.probe(sender, *endpoint))
                                     .await;
                             }
                             tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                     }
+                    refresh = false;
+                    tokio::select! {
+                        _ = probes.tick(), if allowed && !hints.is_empty() => {},
+                        _ = tokio::time::sleep_until(refresh_at) => refresh = true,
+                        _ = trigger.notified() => refresh = true,
+                        change = network.changed() => {
+                            if change.is_err() { return; }
+                            refresh = true;
+                        },
+                        change = disclosure.changed() => {
+                            if change.is_err() { return; }
+                            refresh = true;
+                        },
+                        change = async {
+                            match topology.as_mut() {
+                                Some(changes) => changes.changed().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            if change.is_err() { topology = None; }
+                            refresh = true;
+                        },
+                    }
                 }
             }));
         }
+
         tasks.push(tokio::spawn(Arc::clone(&node).run_accept_loop(listener)));
         {
             let node = Arc::clone(&node);
@@ -398,6 +482,7 @@ impl PreparedParticipant {
             routed_discovery: routed,
             visibility,
             discovery_trigger,
+            candidate_refresh,
             discovery_health,
             tasks,
             graceful_host_tasks: Vec::new(),
@@ -421,6 +506,7 @@ pub struct ParticipantRuntime {
     routed_discovery: Arc<RoutedDiscovery>,
     pub(super) visibility: Arc<DiscoveryVisibility>,
     discovery_trigger: Arc<Notify>,
+    candidate_refresh: Arc<Notify>,
     discovery_health: Vec<tokio::task::AbortHandle>,
     pub(super) tasks: Vec<JoinHandle<()>>,
     graceful_host_tasks: Vec<GracefulHostTask>,
@@ -624,6 +710,7 @@ impl ParticipantRuntime {
     }
 
     pub fn trigger_discovery(&self) {
+        self.candidate_refresh.notify_one();
         self.discovery_trigger.notify_waiters();
     }
 

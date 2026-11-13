@@ -100,6 +100,11 @@ function catalogRow(row: StoredPack): PackCatalogRow {
   };
 }
 export interface PackStorage {
+  setScope?(scope: PackScope | null): void;
+  getCatalog?(
+    scope: PackScope,
+    id: string,
+  ): Promise<PackCatalogRow | undefined>;
   publicCatalog?(): Promise<PackCatalogEntry[]>;
   catalog?(scope: PackScope): Promise<PackCatalogRow[]>;
   publicGet?(id: string): Promise<CustomizationPack | undefined>;
@@ -118,6 +123,8 @@ interface PacksState {
   scope: PackScope | null;
   packs: PackCatalogEntry[];
   loaded: boolean;
+  /** A local edit released its token; durable pending work may now be eligible. */
+  localEditRevision: number;
   selectedTheme: CustomizationPack | undefined;
   readPack(
     id: string,
@@ -195,7 +202,7 @@ function compareVersions(a: DocumentVersion, b: DocumentVersion): number {
 function dbName(scope: PackScope) {
   return `mesh-talk-customization-account:${encodeURIComponent(scope.owner)}:${encodeURIComponent(scope.account)}`;
 }
-function database(
+function openDatabase(
   name: string,
   existingOnly = false,
 ): Promise<IDBDatabase | null> {
@@ -251,13 +258,75 @@ function database(
     request.onsuccess = () => resolve(request.result);
   });
 }
+type PackConnection = {
+  name: string;
+  task: Promise<IDBDatabase | null>;
+  db: IDBDatabase | null;
+  users: number;
+  retired: boolean;
+};
+// Only the public database and current account may retain a connection. Retired
+// operations retain their own lease until their already-admitted work finishes.
+const connections = new Map<string, PackConnection>();
+let activeAccountDatabase: string | null = null;
+function retireConnection(slot: PackConnection) {
+  slot.retired = true;
+  if (connections.get(slot.name) === slot) connections.delete(slot.name);
+  if (!slot.users) slot.db?.close();
+}
+function setDatabaseScope(scope: PackScope | null) {
+  for (const slot of connections.values()) retireConnection(slot);
+  activeAccountDatabase = scope ? dbName(scope) : null;
+}
+async function database(name: string, existingOnly = false) {
+  const retain =
+    !existingOnly && (name === PUBLIC_DB || name === activeAccountDatabase);
+  let slot = retain ? connections.get(name) : undefined;
+  if (!slot) {
+    slot = {
+      name,
+      task: openDatabase(name, existingOnly),
+      db: null,
+      users: 0,
+      retired: !retain,
+    };
+    const opened = slot;
+    if (retain) connections.set(name, opened);
+    void opened.task.then(
+      (db) => {
+        opened.db = db;
+        if (db) {
+          db.onversionchange = () => retireConnection(opened);
+          db.onclose = () => retireConnection(opened);
+        }
+        if (opened.retired && !opened.users) db?.close();
+      },
+      () => retireConnection(opened),
+    );
+  }
+  const leased = slot;
+  leased.users++;
+  const release = () => {
+    leased.users--;
+    if (leased.retired && !leased.users) leased.db?.close();
+  };
+  try {
+    return { db: await leased.task, release };
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
 async function all<T>(
   name: string,
   existingOnly = false,
   storeName = STORE,
 ): Promise<T[]> {
-  const db = await database(name, existingOnly);
-  if (!db) return [];
+  const { db, release } = await database(name, existingOnly);
+  if (!db) {
+    release();
+    return [];
+  }
   try {
     if (!db.objectStoreNames.contains(storeName)) return [];
     return await new Promise<T[]>((resolve, reject) => {
@@ -269,7 +338,7 @@ async function all<T>(
       request.onerror = () => reject(request.error);
     });
   } finally {
-    db.close();
+    release();
   }
 }
 async function update<T extends { id: string }>(
@@ -277,8 +346,11 @@ async function update<T extends { id: string }>(
   id: string,
   mutate: (previous: T | undefined) => T | undefined,
 ): Promise<T | undefined> {
-  const db = await database(name);
-  if (!db) throw new Error("Pack storage unavailable");
+  const { db, release } = await database(name);
+  if (!db) {
+    release();
+    throw new Error("Pack storage unavailable");
+  }
   try {
     return await new Promise<T | undefined>((resolve, reject) => {
       const tx = db.transaction([STORE, CATALOG], "readwrite");
@@ -315,25 +387,34 @@ async function update<T extends { id: string }>(
       tx.onabort = () => reject(failure ?? tx.error);
     });
   } finally {
-    db.close();
+    release();
   }
 }
-async function point<T>(name: string, id: string): Promise<T | undefined> {
-  const db = await database(name);
-  if (!db) throw new Error("Pack storage unavailable");
+async function point<T>(
+  name: string,
+  id: string,
+  storeName = STORE,
+): Promise<T | undefined> {
+  const { db, release } = await database(name);
+  if (!db) {
+    release();
+    throw new Error("Pack storage unavailable");
+  }
   try {
     return await new Promise<T | undefined>((resolve, reject) => {
-      const tx = db.transaction(STORE, "readonly");
-      const request = tx.objectStore(STORE).get(id);
+      const tx = db.transaction(storeName, "readonly");
+      const request = tx.objectStore(storeName).get(id);
       tx.oncomplete = () => resolve(request.result as T | undefined);
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
     });
   } finally {
-    db.close();
+    release();
   }
 }
 export const indexedPackStorage: PackStorage = {
+  setScope: setDatabaseScope,
+  getCatalog: (scope, id) => point<PackCatalogRow>(dbName(scope), id, CATALOG),
   async publicCatalog() {
     const existing = await all<PackCatalogEntry>(PUBLIC_DB, false, CATALOG);
     const present = new Set(existing.map((pack) => pack.id));
@@ -368,8 +449,11 @@ export const indexedPackStorage: PackStorage = {
   },
   list: (scope) => all<StoredPack>(dbName(scope)),
   async pending(scope) {
-    const db = await database(dbName(scope));
-    if (!db) throw new Error("Pack storage unavailable");
+    const { db, release } = await database(dbName(scope));
+    if (!db) {
+      release();
+      throw new Error("Pack storage unavailable");
+    }
     try {
       return await new Promise<StoredPack[]>((resolve, reject) => {
         const tx = db.transaction(STORE, "readonly");
@@ -379,7 +463,7 @@ export const indexedPackStorage: PackStorage = {
         tx.onabort = () => reject(tx.error);
       });
     } finally {
-      db.close();
+      release();
     }
   },
   get: (scope, id) => point<StoredPack>(dbName(scope), id),
@@ -492,6 +576,7 @@ export function createPacksStore(
       scope: null,
       packs: [],
       loaded: false,
+      localEditRevision: 0,
       selectedTheme: undefined,
       preparedThemeId: null,
       setScope(owner, account, session) {
@@ -504,6 +589,7 @@ export function createPacksStore(
           return;
         if (!previous && (!owner || !account)) return;
         epoch++;
+        io.setScope?.(owner && account ? { owner, account, session } : null);
         loading = undefined;
         busy.clear();
         rowsSnapshot = [];
@@ -691,7 +777,11 @@ export function createPacksStore(
           await reload();
           return pack;
         } finally {
-          if (busy.get(pack.id) === token) busy.delete(pack.id);
+          if (busy.get(pack.id) === token) {
+            busy.delete(pack.id);
+            if (lease.current())
+              set({ localEditRevision: get().localEditRevision + 1 });
+          }
         }
       },
       async remove(id) {
@@ -717,7 +807,11 @@ export function createPacksStore(
           lease.requireCurrent();
           await reload();
         } finally {
-          if (busy.get(id) === token) busy.delete(id);
+          if (busy.get(id) === token) {
+            busy.delete(id);
+            if (lease.current())
+              set({ localEditRevision: get().localEditRevision + 1 });
+          }
         }
       },
       async forEachPending(visit, current = () => true) {
@@ -776,6 +870,26 @@ export function createPacksStore(
           throw new Error("Linked library ID mismatch");
         if (pack) await verifyPackImages(pack);
         if (!lease.current() || !current() || busy.has(id)) return false;
+        // Fresh metadata is an admission optimization, never a stored authority
+        // result. Mutations still reread the row atomically in the write transaction.
+        const inspect = io.getCatalog ?? io.get;
+        if (inspect) {
+          const revision = revisions.get(id);
+          const previous = await inspect.call(io, lease.scope, id);
+          if (
+            !lease.current() ||
+            !current() ||
+            busy.has(id) ||
+            revisions.get(id) !== revision
+          )
+            return false;
+          if (previous?.pending) return false;
+          if (
+            previous?.version &&
+            compareVersions(previous.version, version) >= 0
+          )
+            return true;
+        }
         invalidate(id);
         let applied = false;
         let retained = false;

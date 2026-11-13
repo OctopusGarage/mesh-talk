@@ -456,6 +456,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "node::participant_runtime_tests::routed_inventory_",
             "shared_local_repair_actual_owners",
             "startup_identity_precedes_blocked_durable_store_and_matches_runtime",
             "startup_identity_rejection_stops_before_listener_and_durable_stores",
@@ -492,6 +493,10 @@
           {
             "name": "Participant event publication authenticates legacy owners before first authority, resumes under the held profile lease before journal recovery, rejects retired-source fallback, and warm-opens only persisted publication metadata and the exact downgrade barrier.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Routed provider inventories refresh serially at startup, explicit rescan, network/disclosure or optional topology changes, coalescing in-flight demand and using five-minute repair. At most 256 endpoint hints retain independent five-second protocol probes; timeout hints grant no authority, empty results clear them and runtime retirement cancels the active source. CLI-only unseen topology may wait for repair.",
+            "reference": "docs/routed-network-discovery.md"
           }
         ]
       },
@@ -636,6 +641,10 @@
           {
             "name": "Repeated positive custody does not accelerate an awaiting destination; delivery retry progress requires durable queue advancement and failed destination/receipt retirement remains deferred. A newly accepted durable intent bypasses older retry hints, while idempotent acceptance of a pending intent does not manufacture a new demand generation. Generic projection/poll completion notifications never create new intent demand.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "A failed unchanged historical endpoint waits five minutes across background callers; cancellation and local pressure do not learn remote failure. Exact identity/endpoint, privacy/network generations, fresh discovery and successful authentication retain prompt recovery.",
+            "reference": "docs/network-design-reference.md"
           }
         ]
       },
@@ -2440,6 +2449,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "incremental_selected_identity_control_rechecks_current_binding",
             "node::file_message_identity::",
             "account_file_history_deduplicates_recipient_device_manifest_copies",
             "optional_file_message_identity_exchange_keeps_metadata_out_of_history",
@@ -2468,6 +2478,10 @@
           {
             "name": "Failed physical media cleanup retains its exact indexed candidate and retryable persistence status; a missing child is idempotent only within a usable storage directory.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "One current identity selection reuses its verified immutable event and decoded proof without caching permission; current peer policy, alias rows, expiry, erasure, suppression and source errors are still checked within every selection.",
+            "reference": "docs/ai-coding-reliability.md"
           }
         ]
       },

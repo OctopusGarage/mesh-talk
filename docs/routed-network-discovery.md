@@ -24,8 +24,18 @@ with independent 2.5-second deadlines, below the core's three-second snapshot
 budget. Results are interleaved, deduplicated, and capped at 256 total UDP endpoints
 so neither provider takes the entire candidate budget. Missing clients, denied
 RPC access, timeouts or incompatible JSON make that provider unavailable without
-discarding the other's results. Discovery starts automatically and refreshes
-every five seconds; **Connection → Rescan** also refreshes both inventories.
+discarding the other's results. Discovery reads both inventories immediately at
+startup, on **Connection → Rescan**, network/disclosure changes and optional
+provider topology notifications. One source snapshot runs at a time; changes
+while it is pending retain one coalesced follow-up. Unchanged or unavailable
+CLI-only providers use a five-minute repair interval rather than rerunning their
+commands every five seconds. At most 256 current endpoint hints retain the
+existing five-second, 20 ms-paced authenticated discovery probes, independently
+of inventory collection; hints grant no online status or access. Peer-initiated
+discovery remains active. Without a provider notification or another trigger,
+an unseen topology change may wait up to five minutes for collection. The current
+CLI adapters do not supply provider topology notifications. An outer collection
+timeout retains old hints; an accepted empty snapshot clears them.
 
 EasyTier JSON parsing is verified against CLI 2.6.4. Multiple network-instance
 results from the selected management endpoint are supported. A node on a

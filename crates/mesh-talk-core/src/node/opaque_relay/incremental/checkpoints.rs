@@ -2224,13 +2224,25 @@ mod tests {
             );
             let floor = state(&progress).remote_floor;
             state_mut(&mut progress).remote_floor = Some((0, 0));
-            let mut invalid =
-                Box::pin(node.resolve_opaque_confirmation(&mut progress, target, &|| true));
-            assert!(
-                futures_util::poll!(invalid.as_mut()).is_pending(),
-                "remote rollback must force selected proof preparation"
+            // This proof establishes current local selection, not relay custody.
+            // A remote rollback still requires the caller's fresh durable-HAVE,
+            // but must not rebuild unchanged local membership.
+            assert_eq!(
+                node.resolve_opaque_confirmation(&mut progress, target, &|| true)
+                    .await
+                    .unwrap(),
+                Some(outer)
             );
-            drop(invalid);
+            assert!(state(&progress).lease.0.lock().unwrap().view.is_none());
+            assert_eq!(HISTORY_METADATA_ROWS.with(|rows| rows.get()), 0);
+            assert_eq!(
+                node.storage
+                    .database()
+                    .read(|c| Ok(c.total_changes()))
+                    .unwrap(),
+                writes
+            );
+            assert!(state(&progress).receipt.completed.as_ref() == Some(&proof));
             state_mut(&mut progress).remote_floor = floor;
             state(&progress).lease.0.lock().unwrap().view = None;
             node.log

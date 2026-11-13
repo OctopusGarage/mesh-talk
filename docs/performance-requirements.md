@@ -97,6 +97,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    eligible evidence. Send bounded change hints to available siblings and let
    each receiver own its incremental pull. Local maintenance notifications and
    unchanged presence heartbeats must not restart every sibling's history scan.
+   Separate expensive provider inventory reads from lightweight protocol lease
+   probes; cached endpoint hints grant neither presence nor admission. Events
+   refresh the inventory promptly; providers without topology events need an
+   explicit sparse-repair discovery limit.
    Native delivery, discovery leases, calls and real expiry retain their own
    timing contracts; never slow them merely to meet an idle chart.
 3. **Read metadata before payloads.** Compare revision/digest/cursor and query

@@ -688,3 +688,122 @@ it("retires queued view demand without dropping a shared live reader or releasin
   expect((await live)?.id).toBe("pack.3");
   await second;
 });
+
+it("keeps idle library version confirmation outside write admission", async () => {
+  const { io } = memory();
+  io.get = async (scope, id) =>
+    (await io.list(scope)).find((row) => row.id === id);
+  const use = createPacksStore(io);
+  const store = use.getState();
+  store.setScope("owner", "account", "session");
+  await store.applyLinked("test.library", archive(), version, () => true);
+  const updates = vi.spyOn(io, "update");
+  expect(
+    await store.applyLinked("test.library", archive(), version, () => true),
+  ).toBe(true);
+  expect(updates).not.toHaveBeenCalled();
+  expect(use.getState().packs[0].id).toBe("test.library");
+});
+
+it("keeps an admitted library read current across an equal-version confirmation", async () => {
+  const { io } = memory();
+  const use = createPacksStore(io);
+  const store = use.getState();
+  store.setScope("owner", "account");
+  await store.applyLinked("test.library", archive(), version, () => true);
+  io.getCatalog = async (scope, id) =>
+    (await io.list(scope)).find((row) => row.id === id);
+  let finish!: () => void;
+  io.get = async (scope, id) => {
+    const row = (await io.list(scope)).find((row) => row.id === id);
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return row;
+  };
+  const reading = store.readPack("test.library");
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  await store.applyLinked("test.library", archive(), version, () => true);
+  finish();
+  expect((await reading)?.id).toBe("test.library");
+});
+
+it("revalidates local deletion after a held library metadata preflight", async () => {
+  const { io } = memory();
+  const use = createPacksStore(io);
+  const store = use.getState();
+  store.setScope("owner", "account");
+  await store.applyLinked("test.library", archive(), version, () => true);
+  let finish!: () => void;
+  io.getCatalog = async (scope, id) => {
+    const row = (await io.list(scope)).find((row) => row.id === id);
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return row;
+  };
+  const remote = store.applyLinked(
+    "test.library",
+    archive(),
+    { ...version, revision: 2 },
+    () => true,
+  );
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  await store.remove("test.library");
+  finish();
+  expect(await remote).toBe(false);
+  expect((await store.pendingChanges())[0]).toMatchObject({
+    pack: null,
+    pending: true,
+  });
+});
+
+it("rereads the current library row atomically after metadata changed elsewhere", async () => {
+  const { io } = memory();
+  const use = createPacksStore(io);
+  const store = use.getState();
+  const scope = { owner: "owner", account: "account" };
+  store.setScope(scope.owner, scope.account);
+  await store.applyLinked("test.library", archive(), version, () => true);
+  let finish!: () => void;
+  io.getCatalog = async (scope, id) => {
+    const row = (await io.list(scope)).find((row) => row.id === id);
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return row;
+  };
+  const remote = store.applyLinked(
+    "test.library",
+    archive(),
+    { ...version, revision: 2 },
+    () => true,
+  );
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  await io.update(scope, "test.library", (row) => ({
+    ...row!,
+    version: { ...version, revision: 3 },
+  }));
+  finish();
+  expect(await remote).toBe(true);
+  expect((await io.list(scope))[0].version?.revision).toBe(3);
+});
+
+it("retries a failed library metadata read without qualifying a write", async () => {
+  const { io } = memory();
+  const store = createPacksStore(io).getState();
+  store.setScope("owner", "account");
+  io.getCatalog = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("read failed"))
+    .mockResolvedValue(undefined);
+  const updates = vi.spyOn(io, "update");
+  await expect(
+    store.applyLinked("test.library", null, version, () => true),
+  ).rejects.toThrow("read failed");
+  expect(updates).not.toHaveBeenCalled();
+  expect(
+    await store.applyLinked("test.library", null, version, () => true),
+  ).toBe(true);
+  expect(updates).toHaveBeenCalledTimes(1);
+});

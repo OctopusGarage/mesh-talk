@@ -1332,8 +1332,11 @@ run often enough for pushed snapshots and shared two-second local evidence aging
 to show a stopped device Offline within 20 seconds. Older hosts retain polling. Private authenticated routing does not contribute.
 Directory v4 preserves the
 origin expiry across the final relay-to-client boundary; older directory replies
-remain route hints without eligible freshness. Routed inventories refresh every
-five seconds with 20 ms candidate pacing; local fallback scans use paced rotating
+remain route hints without eligible freshness. Routed inventory collection is
+serial and event driven, with five-minute repair for CLI-only providers. Current
+bounded endpoint hints retain five-second protocol probes with 20 ms pacing;
+inventory hints grant no presence. Unseen provider topology without notifications
+or another wake may wait for repair. Local fallback scans use paced rotating
 slices with capped jittered backoff, while bridge registration retains lease refresh. Wire layouts and admission limits
 remain unchanged.
 

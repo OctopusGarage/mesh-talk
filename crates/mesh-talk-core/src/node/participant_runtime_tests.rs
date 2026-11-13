@@ -526,3 +526,311 @@ async fn route_change_during_file_work_survives_until_the_next_wait() {
         "a route update during work must not be recaptured as an unchanged heartbeat"
     );
 }
+
+struct RoutedInventorySource {
+    calls: AtomicUsize,
+    active: AtomicUsize,
+    maximum: AtomicUsize,
+    endpoints: Vec<std::net::SocketAddr>,
+    changes: tokio::sync::watch::Sender<u64>,
+    first_gate: Option<tokio::sync::Semaphore>,
+    held_turn: usize,
+}
+impl RoutedInventorySource {
+    fn new(endpoints: Vec<std::net::SocketAddr>, held: bool) -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            active: AtomicUsize::new(0),
+            maximum: AtomicUsize::new(0),
+            endpoints,
+            changes: tokio::sync::watch::channel(0).0,
+            first_gate: held.then(|| tokio::sync::Semaphore::new(0)),
+            held_turn: 0,
+        })
+    }
+    fn changed(&self) {
+        self.changes.send_modify(|generation| *generation += 1);
+    }
+}
+struct RoutedInventoryRead<'a>(&'a AtomicUsize);
+impl Drop for RoutedInventoryRead<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+impl crate::discovery::candidates::CandidateSource for RoutedInventorySource {
+    fn snapshot(&self) -> futures_util::future::BoxFuture<'_, Vec<std::net::SocketAddr>> {
+        let turn = self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.maximum.fetch_max(active, Ordering::SeqCst);
+            let _read = RoutedInventoryRead(&self.active);
+            if turn == self.held_turn
+                && let Some(gate) = &self.first_gate
+            {
+                gate.acquire().await.unwrap().forget();
+            }
+            self.endpoints.clone()
+        })
+    }
+    fn subscribe_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.changes.subscribe())
+    }
+}
+
+async fn routed_inventory_participant(
+    directory: &std::path::Path,
+    source: Arc<RoutedInventorySource>,
+) -> (Arc<Node>, ParticipantRuntime) {
+    let node = open(directory);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut running = PreparedParticipant::prepare(
+        node.clone(),
+        listener,
+        Arc::new(DiscoveryVisibility::new(true)),
+        ParticipantConfig {
+            discovery_port: 0,
+            candidate_source: Some(source),
+        },
+    )
+    .unwrap()
+    .launch("Routed inventory owner");
+    let retired = running.retire_ambient_discovery_for_test().await;
+    assert!(retired.failures.is_empty());
+    (node, running)
+}
+async fn flush_routed_inventory() {
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn routed_inventory_empty_source_uses_sparse_repair() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = RoutedInventorySource::new(Vec::new(), false);
+    let (_node, running) = routed_inventory_participant(directory.path(), source.clone()).await;
+    flush_routed_inventory().await;
+    let startup = source.calls.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(299)).await;
+    flush_routed_inventory().await;
+    let idle = source.calls.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    flush_routed_inventory().await;
+    let repaired = source.calls.load(Ordering::SeqCst);
+    running.stop().await;
+    assert_eq!(startup, 1, "initial discovery must be immediate");
+    assert_eq!(
+        idle, 1,
+        "unchanged/absent provider must not rerun every five seconds"
+    );
+    assert_eq!(
+        repaired, 2,
+        "sparse repair must obtain a fresh provider snapshot"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn routed_inventory_cached_hints_keep_five_second_protocol_probes() {
+    let directory = tempfile::tempdir().unwrap();
+    let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let source = RoutedInventorySource::new(vec![receiver.local_addr().unwrap()], false);
+    let (_node, running) = routed_inventory_participant(directory.path(), source.clone()).await;
+    flush_routed_inventory().await;
+    let mut first = [0u8; 128];
+    let first_packet = receiver.try_recv(&mut first);
+    let startup = source.calls.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    flush_routed_inventory().await;
+    let mut second = [0u8; 128];
+    let second_packet = receiver.try_recv(&mut second);
+    let repeated = source.calls.load(Ordering::SeqCst);
+    running.stop().await;
+    let first_len = first_packet.expect("startup routed probe");
+    let second_len = second_packet.expect("cached candidate must retain its five-second probe");
+    let first_nonce = crate::discovery::query::decode_query(&first[..first_len]).unwrap();
+    let second_nonce = crate::discovery::query::decode_query(&second[..second_len]).unwrap();
+    assert_ne!(first_nonce, second_nonce, "liveness requires a fresh nonce");
+    assert_eq!(startup, 1);
+    assert_eq!(
+        repeated, 1,
+        "protocol liveness must reuse hints without re-running CLIs"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn routed_inventory_retains_coalesced_events_during_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = RoutedInventorySource::new(Vec::new(), true);
+    let (node, running) = routed_inventory_participant(directory.path(), source.clone()).await;
+    flush_routed_inventory().await;
+    let active = source.active.load(Ordering::SeqCst);
+    for _ in 0..64 {
+        source.changed();
+        running.trigger_discovery();
+    }
+    node.network_changes
+        .send_modify(|generation| *generation += 1);
+    source.first_gate.as_ref().unwrap().add_permits(1);
+    flush_routed_inventory().await;
+    let calls = source.calls.load(Ordering::SeqCst);
+    let maximum = source.maximum.load(Ordering::SeqCst);
+    running.stop().await;
+    assert_eq!(active, 1, "hold the actual startup source future");
+    assert_eq!(
+        calls, 2,
+        "events during a source read retain one coalesced follow-up"
+    );
+    assert_eq!(maximum, 1, "provider snapshots must remain serial");
+}
+
+#[tokio::test(start_paused = true)]
+async fn routed_inventory_retirement_drops_active_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = RoutedInventorySource::new(Vec::new(), true);
+    let (_node, running) = routed_inventory_participant(directory.path(), source.clone()).await;
+    flush_routed_inventory().await;
+    let active = source.active.load(Ordering::SeqCst);
+    running.stop().await;
+    source.changed();
+    source.first_gate.as_ref().unwrap().add_permits(1);
+    flush_routed_inventory().await;
+    assert_eq!(active, 1);
+    assert_eq!(source.active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        source.calls.load(Ordering::SeqCst),
+        1,
+        "retired source cannot resume"
+    );
+    assert_eq!(
+        source.changes.receiver_count(),
+        0,
+        "retirement drops topology subscription"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn routed_inventory_outer_timeout_keeps_only_hint_liveness() {
+    let directory = tempfile::tempdir().unwrap();
+    let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut source = RoutedInventorySource::new(vec![receiver.local_addr().unwrap()], true);
+    Arc::get_mut(&mut source).unwrap().held_turn = 1;
+    let (_node, running) = routed_inventory_participant(directory.path(), source.clone()).await;
+    flush_routed_inventory().await;
+    let mut packet = [0u8; 128];
+    let initial = receiver.try_recv(&mut packet);
+    tokio::time::advance(Duration::from_millis(20)).await;
+    flush_routed_inventory().await;
+    source.changed();
+    flush_routed_inventory().await;
+    let held = source.active.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    flush_routed_inventory().await;
+    let active_after_timeout = source.active.load(Ordering::SeqCst);
+    let after_timeout = receiver.try_recv(&mut packet);
+    let calls = source.calls.load(Ordering::SeqCst);
+    running.stop().await;
+    assert!(initial.is_ok());
+    assert_eq!(held, 1);
+    assert_eq!(
+        active_after_timeout, 0,
+        "whole-source timeout drops its future"
+    );
+    assert_eq!(calls, 2);
+    let length = after_timeout.expect("a provider timeout must not stop known hint probes");
+    assert!(crate::discovery::query::decode_query(&packet[..length]).is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn routed_inventory_visibility_network_and_provider_events_refresh_promptly() {
+    let directory = tempfile::tempdir().unwrap();
+    let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let source = RoutedInventorySource::new(vec![receiver.local_addr().unwrap()], false);
+    let (node, running) = routed_inventory_participant(directory.path(), source.clone()).await;
+    flush_routed_inventory().await;
+    let mut packet = [0u8; 128];
+    let startup = receiver.try_recv(&mut packet);
+    tokio::time::advance(Duration::from_millis(20)).await;
+    flush_routed_inventory().await;
+    running.visibility.set_public(false).await;
+    flush_routed_inventory().await;
+    source.changed();
+    running.trigger_discovery();
+    node.network_changes
+        .send_modify(|generation| *generation += 1);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    flush_routed_inventory().await;
+    let private_reads = source.calls.load(Ordering::SeqCst);
+    let private_packet = receiver.try_recv(&mut packet);
+    running.visibility.set_physical_lan_only(true).await;
+    running.visibility.set_public(true).await;
+    flush_routed_inventory().await;
+    let physical_reads = source.calls.load(Ordering::SeqCst);
+    running.visibility.set_physical_lan_only(false).await;
+    flush_routed_inventory().await;
+    let reactivated = source.calls.load(Ordering::SeqCst);
+    // The source owner is pacing its current UDP sweep here. Retain the event
+    // until that bounded sweep completes instead of requiring another timer.
+    node.network_changes
+        .send_modify(|generation| *generation += 1);
+    tokio::time::advance(Duration::from_millis(20)).await;
+    flush_routed_inventory().await;
+    let network = source.calls.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_millis(20)).await;
+    flush_routed_inventory().await;
+    running.trigger_discovery();
+    flush_routed_inventory().await;
+    let manual = source.calls.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_millis(20)).await;
+    flush_routed_inventory().await;
+    source.changed();
+    flush_routed_inventory().await;
+    let provider = source.calls.load(Ordering::SeqCst);
+    running.stop().await;
+    assert!(startup.is_ok());
+    assert!(matches!(private_packet, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    assert_eq!(
+        (private_reads, physical_reads),
+        (1, 1),
+        "privacy suppresses inventories and probes"
+    );
+    assert_eq!(
+        reactivated, 2,
+        "public routed activation refreshes immediately"
+    );
+    assert_eq!(network, 3, "network demand survives current probe pacing");
+    assert_eq!(manual, 4, "explicit rescan does not await sparse repair");
+    assert_eq!(
+        provider, 5,
+        "provider topology notification does not await sparse repair"
+    );
+}
+
+#[tokio::test]
+async fn routed_inventory_disclosure_change_during_read_remains_pending() {
+    let (updates, mut changes) = tokio::sync::watch::channel(0u64);
+    let (release, held) = tokio::sync::oneshot::channel();
+    let mut observation = Box::pin(super::participant_runtime::observe_candidate_disclosure(
+        &mut changes,
+        async {
+            // The visibility read captured false; activation occurs before the
+            // owner receives that result and decides whether to refresh.
+            let allowed = false;
+            held.await.unwrap();
+            allowed
+        },
+    ));
+    use std::{future::Future, task::Poll};
+    std::future::poll_fn(|cx| {
+        assert!(observation.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    updates.send_modify(|generation| *generation += 1);
+    release.send(()).unwrap();
+    assert!(!observation.await);
+    assert!(
+        changes.has_changed().unwrap(),
+        "activation after the visibility read must retain a fresh inventory turn"
+    );
+}

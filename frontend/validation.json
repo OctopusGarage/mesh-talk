@@ -316,6 +316,10 @@
           {
             "name": "Catalog and payload updates commit atomically; quiet catalog and unchanged linked-version reads do not hydrate archives, and pending publication streams one payload without losing failure fairness or exact-sequence acknowledgment.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#runtime-loading"
+          },
+          {
+            "name": "Only the active account and public pack database retain connections; owner/session replacement, versionchange and closure retire them while admitted operations retain their own leases. Fresh equal-version compact reads skip read-write admission, atomic edits recheck scope/version, and only committed local edits trigger publication rather than selection or remote projection.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#runtime-loading"
           }
         ]
       },

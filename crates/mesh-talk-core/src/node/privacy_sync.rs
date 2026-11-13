@@ -1387,17 +1387,13 @@ impl SyncStore for GuardedSyncStore<'_> {
         {
             return Ok(None);
         }
-        let Some(bundle) = self.node.file_message_identity_bundle(*manifest)? else {
+        let Some(bundle) = self.node.verified_file_message_identity_bundle(*manifest)? else {
             return Ok(None);
         };
-        if !super::file_message_identity::bundle_covers(&bundle, *file, *manifest) {
+        if !bundle.covers(*file, *manifest) {
             return Ok(None);
         }
-        let Some((source_account, recipient_account)) =
-            super::file_message_identity::bundle_accounts(&bundle)
-        else {
-            return Ok(None);
-        };
+        let (source_account, recipient_account) = bundle.accounts();
         let sibling = self.node.certified_sibling(&self.peer);
         if sibling {
             let policy = self.node.device_sync_policy();
@@ -1417,7 +1413,7 @@ impl SyncStore for GuardedSyncStore<'_> {
                 return Ok(None);
             }
         }
-        let references = super::file_message_identity::bundle_references(&bundle);
+        let references = bundle.references();
         let local_source = source_account == self.node.account_id();
         let host =
             super::conversation::account_conversation_id(&source_account, &recipient_account);
@@ -1437,9 +1433,7 @@ impl SyncStore for GuardedSyncStore<'_> {
             let Some(row) = row else {
                 continue;
             };
-            if !(super::file_message_identity::bundle_matches_row(&bundle, &row)
-                || local_source
-                    && super::file_message_identity::bundle_matches_source_row(&bundle, &row))
+            if !(bundle.matches_row(&row) || local_source && bundle.matches_source_row(&row))
                 || self
                     .node
                     .recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
@@ -1459,7 +1453,7 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .expect("suppression lock")
                 .contains(row.conversation, row.event_id)?
             {
-                return Ok(Some(bundle));
+                return Ok(Some(bundle.into_event()));
             }
         }
         Ok(None)

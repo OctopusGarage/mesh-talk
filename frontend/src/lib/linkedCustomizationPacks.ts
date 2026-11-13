@@ -209,7 +209,15 @@ export function startLinkedCustomizationPacks(
       }
     }
   };
-  const unsubscribe = usePacks.subscribe(() => void reconcile());
+  const unsubscribe = usePacks.subscribe((next, previous) => {
+    if (
+      next.localEditRevision !== previous.localEditRevision ||
+      next.scope?.owner !== previous.scope?.owner ||
+      next.scope?.account !== previous.scope?.account ||
+      next.scope?.session !== previous.scope?.session
+    )
+      void reconcile();
+  });
   const unlisten = subscribeSyncInvalidation((change) => {
     if (change.owner === owner && change.kind === "state") void reconcile();
   });

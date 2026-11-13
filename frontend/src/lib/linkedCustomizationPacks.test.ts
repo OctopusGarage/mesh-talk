@@ -373,3 +373,37 @@ it("continues later pending library publication when the first ID fails", async 
     warning.mockRestore();
   }
 });
+
+it("keeps idle library selection changes out of linked reconciliation", async () => {
+  const stop = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(0);
+    const settled = mocks.list.mock.calls.length;
+    await usePacks.getState().prepareTheme("dark");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.list).toHaveBeenCalledTimes(settled);
+  } finally {
+    stop();
+  }
+});
+
+it("publishes a new absent-pack tombstone after the local edit token retires", async () => {
+  const stop = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(0);
+    await usePacks.getState().remove("never.visible");
+    await vi.waitFor(() =>
+      expect(mocks.remove).toHaveBeenCalledWith(
+        "owner",
+        "crypto-account",
+        key("never.visible"),
+        null,
+      ),
+    );
+    expect(mocks.documents.get("never.visible")?.meta.tombstone).toBe(true);
+  } finally {
+    stop();
+  }
+});

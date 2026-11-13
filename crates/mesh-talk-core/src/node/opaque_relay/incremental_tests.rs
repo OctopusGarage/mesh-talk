@@ -891,10 +891,12 @@ async fn incremental_selected_identity_control_rechecks_current_binding() {
         Some(bundle.conversation_id),
         mailbox,
     );
+    let before = super::super::file_message_identity::verification_count();
     let current = node
         .selected_opaque_control(&progress, &selected, &|| true)
         .unwrap()
         .unwrap();
+    let verifications = super::super::file_message_identity::verification_count() - before;
     assert_eq!(current.id, bundle.id);
     assert_eq!(current.ciphertext, bundle.ciphertext);
     assert!(
@@ -973,6 +975,51 @@ async fn incremental_selected_identity_control_rechecks_current_binding() {
         node.selected_opaque_control(&progress, &selected, &|| true)
             .unwrap()
             .is_none()
+    );
+
+    // The queued descriptor is not authority: current persisted corruption and
+    // read failures must remain visible even after successful preparation.
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute("UPDATE file_identity_bodies SET signature=zeroblob(64)", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| true)
+            .is_err()
+    );
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute(
+                "UPDATE file_identity_bodies SET signature=?1",
+                [&bundle.sig],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| true)
+            .unwrap()
+            .is_none(),
+        "restoring the immutable proof must not restore erased current grants"
+    );
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TABLE file_identity_bodies")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| true)
+            .is_err()
+    );
+    assert_eq!(
+        verifications, 1,
+        "one current identity decision must verify its immutable proof once"
     );
 }
 

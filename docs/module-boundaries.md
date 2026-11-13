@@ -1481,7 +1481,13 @@ batches; owner retirement cancels queued continuation without claiming mutation
 completion. Full payload reads are scoped point lookups; view owners retain only required
 payloads, and the selected theme has its own readiness owner. Sequential native
 sticker-source preparation uses transient reads and compact registration receipts,
-not a renderer-wide image cache. See [pack loading](CUSTOMIZATION_PACKS.md#runtime-loading).
+not a renderer-wide image cache. The storage owner retains only active-account
+and public database connections, retiring old scope/session handles after their
+admitted operations settle. Unchanged linked versions stay outside read-write
+admission; atomic mutations retain fresh scope/version checks. Local edit
+revisions trigger publication after edit ownership is released; selected-theme
+changes and remote projection do not restart it. See
+[pack loading](CUSTOMIZATION_PACKS.md#runtime-loading).
 `settings/shared.rs` owns the allowlist mapping of portable settings onto existing
 per-key account preferences. Device paths, system permissions, autostart and
 local-agent grants stay outside the replicated allowlist.

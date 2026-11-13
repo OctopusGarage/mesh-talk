@@ -649,7 +649,12 @@ Keep independent reasons for continuing work separate. A worker can finish a
 history page and then fail an optional favorites exchange; reporting that error
 must not discard unfinished history or a refresh received during the exchange.
 Consume a coalesced wake only when its follow-up remains scheduled after every
-error branch. A failure without pending work must still avoid a busy retry loop.
+error branch. A failure without pending work must still avoid a busy retry loop. Acknowledge
+watch generations before reading an asynchronous eligibility predicate, never
+afterward: a concurrent enable must retain a follow-up rather than certify an
+older disabled observation. The participant regression
+`routed_inventory_disclosure_change_during_read_remains_pending` holds that read
+and advances activation before releasing it.
 
 Separate remembered routes, fresh availability and synchronization demand. A
 certificate or cached endpoint permits neither an assumption of online presence
@@ -1364,7 +1369,17 @@ Hot point reads should reuse bounded compiled statements without retaining
 results or weakening source checks. The [event repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
 count actual VM executions for repeated hit/miss reads and keep domain binding,
 new appends and schema failure/recovery observable. Body authentication and
-retirement checks still run after compilation reuse.
+retirement checks still run after compilation reuse. The current-avatar
+`avatar_revision_reuses_sql_compilation_but_reads_current_values_and_errors`
+regression counts real SQL compilation and retains changed values, invalid rows
+and schema failure/recovery after warming the scalar statement.
+
+A single file-identity selection should retain its verified immutable event and
+decoded identity through the existing decision instead of independently decoding
+for account, alias and row predicates. The selected opaque-control regression
+`incremental_selected_identity_control_rechecks_current_binding` counts one
+verification and preserves fresh policy, erasure, malformed-proof and source-read
+failure checks. This transient value grants no permission beyond that call.
 
 Intrinsic signature memos must key every verification input and retain no body
 or permission. Current reads, canonical/content checks and source errors still
