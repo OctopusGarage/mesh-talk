@@ -93,6 +93,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    work, and gate settled credential reconciliation before secret decoding and
    applied-marker I/O. Pending, locked and failed work retain recovery; event
    hints never replace fresh authorization at application and commit.
+   Reuse identical intrinsic signature facts in a bounded metadata owner, keyed
+   by every verification input and signature. Cache successful facts only; keep
+   live identity, policy, revocation and freshness checks at their owning boundary.
+   Contended or unavailable caches must not introduce a blocking dependency.
 
 2. **Use recovery deliberately.** Ordinary fallback maintenance should drain a
    bounded, coalescing queue serially through its existing lifecycle owner.

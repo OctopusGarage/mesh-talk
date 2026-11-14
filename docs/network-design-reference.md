@@ -209,6 +209,15 @@ current-device lease; it must not serialize a zero presentation expiry or inheri
 an older routed quality hint. This self observation ages normally if IPC stops. **Offline** means the bounded observation has expired
 here, not a global sign-out claim.
 
+Intrinsic announcement verification may reuse only a complete, successfully
+verified public proof under exact field equality, including both announcement
+and account-certificate signatures. The process-local owner retains at most 128
+proofs and 256 KiB of charged copies, never message bodies or negative results.
+Uncacheable input, contention and poisoned state use the original verifier; no
+crypto runs while holding the cache guard. Current presence expiry, account
+binding, visibility, revocation, fresh discovery challenges and Noise identity
+checks remain independent and mandatory. This memo has no wire or disk format.
+
 Presence IPC separates fresh people from the group projection. Incremental callers
 send an opaque group revision: unchanged inputs omit groups, an explicit empty
 group map withdraws them, and the returned token acknowledges only the inputs

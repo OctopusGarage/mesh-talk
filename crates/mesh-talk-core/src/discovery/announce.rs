@@ -4,6 +4,7 @@ use crate::identity::account::{Account, DeviceCertificate};
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
 
 /// Domain separator for announce signatures.
 const ANNOUNCE_DOMAIN: &[u8] = b"mesh-talk-announce-v1";
@@ -38,6 +39,58 @@ pub struct Announce {
     /// this cert cannot be swapped for one minting the device under another account.
     pub account_cert: Option<DeviceCertificate>,
     pub sig: Vec<u8>,
+}
+
+// Only immutable intrinsic proof facts live here. This is not evidence of current
+// presence, permission, revocation status, freshness or a Noise session binding.
+const VERIFIED_CAPACITY: usize = 128;
+const VERIFIED_MAX_BYTES: usize = 256 * 1024;
+static VERIFIED: OnceLock<Mutex<VerifiedAnnounces>> = OnceLock::new();
+
+struct VerifiedAnnounces {
+    entries: [Option<Announce>; VERIFIED_CAPACITY],
+    next: usize,
+}
+
+impl VerifiedAnnounces {
+    fn new() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| None),
+            next: 0,
+        }
+    }
+
+    fn contains(&self, announce: &Announce) -> bool {
+        self.entries.iter().flatten().any(|entry| entry == announce)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .entries
+                .iter()
+                .flatten()
+                .map(Self::heap_bytes)
+                .sum::<usize>()
+    }
+
+    fn heap_bytes(announce: &Announce) -> usize {
+        announce.user_id.capacity() + announce.name.capacity() + announce.sig.capacity()
+    }
+
+    fn insert(&mut self, announce: &Announce) {
+        if self.contains(announce) {
+            return;
+        }
+        // Clone only bounded lengths, then charge the actual cloned capacities.
+        let copy = announce.clone();
+        let old_bytes = self.entries[self.next].as_ref().map_or(0, Self::heap_bytes);
+        if self.retained_bytes() - old_bytes + Self::heap_bytes(&copy) > VERIFIED_MAX_BYTES {
+            return;
+        }
+        self.entries[self.next] = Some(copy);
+        self.next = (self.next + 1) % VERIFIED_CAPACITY;
+    }
 }
 
 /// Length-prefixed, domain-separated bytes the announce signs over (everything
@@ -151,6 +204,40 @@ impl Announce {
     /// fields including `post_office` and the bound account key); and, if an account
     /// cert is present, it certifies THIS device under the bound account.
     pub fn verify(&self) -> bool {
+        #[cfg(test)]
+        verification_observations::record();
+        self.verify_with_cache(VERIFIED.get_or_init(|| Mutex::new(VerifiedAnnounces::new())))
+    }
+
+    fn verify_with_cache(&self, cache: &Mutex<VerifiedAnnounces>) -> bool {
+        // SDK-created oversized values retain the original verification semantics,
+        // but cannot occupy retained state. Certificate storage is fixed-size.
+        let cacheable = self.name.len() <= MAX_NAME_BYTES
+            && self.user_id.len() == 32
+            && self
+                .user_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.sig.len() == 64;
+        if cacheable
+            && let Ok(facts) = cache.try_lock()
+            && facts.contains(self)
+        {
+            return true;
+        }
+        // Never perform cryptography under a cache guard. Contention and poison
+        // simply lose the optimization; concurrent misses may duplicate work.
+        let valid = self.verify_uncached();
+        if valid
+            && cacheable
+            && let Ok(mut facts) = cache.try_lock()
+        {
+            facts.insert(self);
+        }
+        valid
+    }
+
+    fn verify_uncached(&self) -> bool {
         if self.user_id != PublicIdentity::user_id_from(&self.ed25519_pub) {
             return false;
         }
@@ -250,9 +337,160 @@ fn decode_v2(body: &[u8]) -> Option<Announce> {
         .ok()
 }
 
+// Count public verification requests separately from actual certificate math:
+// roster reuse and intrinsic proof reuse have independent lifetimes.
+#[cfg(test)]
+pub(crate) mod verification_observations {
+    thread_local! {
+        static REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub(super) fn record() {
+        REQUESTS.with(|requests| requests.set(requests.get().saturating_add(1)));
+    }
+    pub(crate) fn reset() {
+        REQUESTS.with(|requests| requests.set(0));
+    }
+    pub(crate) fn count() -> usize {
+        REQUESTS.with(std::cell::Cell::get)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_account_announce_reuses_intrinsic_proof() {
+        use crate::identity::account::certificate_observations;
+        let id = DeviceIdentity::generate();
+        let account = Account::generate();
+        let a = Announce::new_with_account(&id, &account, "Fresh proof", 4000);
+        let cache = Mutex::new(VerifiedAnnounces::new());
+        certificate_observations::reset();
+        for _ in 0..4 {
+            assert!(a.verify_with_cache(&cache));
+        }
+        assert_eq!(certificate_observations::count(), 1);
+    }
+
+    #[test]
+    fn warm_proof_rejects_every_changed_field_and_accepts_new_signed_values() {
+        let id = DeviceIdentity::generate();
+        let account = Account::generate();
+        let original = Announce::new_with_account(&id, &account, "Alice", 4000);
+        let cache = Mutex::new(VerifiedAnnounces::new());
+        assert!(original.verify_with_cache(&cache));
+        let mut variants = vec![original.clone(); 11];
+        variants[0].user_id.push('0');
+        variants[1].ed25519_pub[0] ^= 1;
+        variants[2].x25519_pub[0] ^= 1;
+        variants[3].name.push('!');
+        variants[4].tcp_port += 1;
+        variants[5].post_office = true;
+        variants[6].account_cert = None;
+        variants[7].sig[0] ^= 1;
+        variants[8].account_cert.as_mut().unwrap().signature[0] ^= 1;
+        variants[9]
+            .account_cert
+            .as_mut()
+            .unwrap()
+            .device_ed25519_pub[0] ^= 1;
+        variants[10].account_cert = Some(Account::generate().certify(&id.public().ed25519_pub));
+        for (index, changed) in variants.iter().enumerate() {
+            assert!(!changed.verify_with_cache(&cache), "changed field {index}");
+        }
+        assert_eq!(cache.lock().unwrap().entries.iter().flatten().count(), 1);
+        for changed in [
+            Announce::new_with_account(&id, &account, "Bob", 4001),
+            Announce::new_post_office_with_account(&id, &account, "Relay", 4002),
+            Announce::new(&id, "Unbound", 4003),
+        ] {
+            assert!(changed.verify_with_cache(&cache));
+            assert!(changed.verify_with_cache(&cache));
+        }
+        // Public entry also rejects late corruption after warming its own owner.
+        assert!(original.verify());
+        let mut corrupt = original.clone();
+        corrupt.account_cert.as_mut().unwrap().signature[63] ^= 1;
+        assert!(!corrupt.verify());
+    }
+
+    #[test]
+    fn bounded_proofs_evict_and_reverify_without_retaining_input_capacity() {
+        use crate::identity::account::certificate_observations;
+        let id = DeviceIdentity::generate();
+        let account = Account::generate();
+        let cache = Mutex::new(VerifiedAnnounces::new());
+        let mut first = Announce::new_with_account(&id, &account, "x".repeat(MAX_NAME_BYTES), 4000);
+        first.name.reserve(1024 * 1024);
+        first.sig.reserve(1024 * 1024);
+        assert!(first.verify_with_cache(&cache));
+        for port in 1..=VERIFIED_CAPACITY {
+            let a =
+                Announce::new_with_account(&id, &account, "x".repeat(MAX_NAME_BYTES), port as u16);
+            assert!(a.verify_with_cache(&cache));
+        }
+        {
+            let facts = cache.lock().unwrap();
+            assert_eq!(facts.entries.iter().flatten().count(), VERIFIED_CAPACITY);
+            assert!(facts.retained_bytes() <= VERIFIED_MAX_BYTES);
+            assert!(!facts.contains(&first));
+        }
+        certificate_observations::reset();
+        assert!(first.verify_with_cache(&cache));
+        assert_eq!(certificate_observations::count(), 1);
+        assert!(first.verify_with_cache(&cache));
+        assert_eq!(certificate_observations::count(), 1);
+    }
+
+    #[test]
+    fn oversized_sdk_proofs_verify_without_admission() {
+        use crate::identity::account::certificate_observations;
+        let cache = Mutex::new(VerifiedAnnounces::new());
+        let a = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "x".repeat(MAX_NAME_BYTES + 1),
+            0,
+        );
+        certificate_observations::reset();
+        for _ in 0..2 {
+            assert!(a.verify_with_cache(&cache));
+        }
+        assert_eq!(certificate_observations::count(), 2);
+        assert!(!a.valid_presence());
+        assert!(cache.lock().unwrap().entries.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn contended_and_poisoned_proof_owner_falls_back_to_real_verification() {
+        use crate::identity::account::certificate_observations;
+        let cache = Mutex::new(VerifiedAnnounces::new());
+        let a = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Alice",
+            4000,
+        );
+        assert!(a.verify_with_cache(&cache));
+        let held = cache.lock().unwrap();
+        certificate_observations::reset();
+        assert!(a.verify_with_cache(&cache));
+        assert_eq!(certificate_observations::count(), 1);
+        let mut invalid = a.clone();
+        invalid.sig[0] ^= 1;
+        assert!(!invalid.verify_with_cache(&cache));
+        drop(held);
+        let _ = std::panic::catch_unwind(|| {
+            let _held = cache.lock().unwrap();
+            panic!("poison isolated intrinsic owner");
+        });
+        certificate_observations::reset();
+        assert!(a.verify_with_cache(&cache));
+        assert_eq!(certificate_observations::count(), 1);
+        assert!(!invalid.verify_with_cache(&cache));
+        assert!(cache.is_poisoned());
+    }
 
     #[test]
     fn new_announce_verifies() {

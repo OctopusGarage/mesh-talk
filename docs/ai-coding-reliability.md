@@ -831,13 +831,19 @@ The [profile publication regression](../crates/mesh-talk-core/src/node/account_p
 compares actual retained IDs and source revisions across retries and reopen.
 Measure repeated cryptographic work separately from writes: stable event IDs and
 zero SQL mutations do not prove quiet CPU. A positive intrinsic verification memo
-must bind the complete serialized input, including its signature, and be bounded
+must bind the complete verification input, including every signature, and be bounded
 independently of retained history. Read current ownership and selected data before
 lookup; recheck requested identities and mutable authorization on every use.
 The [indexed consent tests](../crates/mesh-talk-core/src/node/file_consent_store/indexed.rs)
 count real signature invocations and cover same-ID tampering, requested identity
 changes, fixed-capacity eviction and re-verification, alongside policy and owner
 recovery tests.
+The [announcement owner](../crates/mesh-talk-core/src/discovery/announce.rs) applies
+this rule to complete public proofs, including the account certificate signature.
+A cached intrinsic fact never renews presence, authorizes an account or validates
+a fresh transport challenge. Bound actual retained allocations; oversized inputs,
+cache contention and poison preserve the original verification path. Test real
+cryptographic call counts, every changed field and fixed-capacity recovery.
 Apply the same rule to empty selected federation slices: validate session,
 completion and resource authority, but do not rewrite unchanged session/global
 charges. The raw-selection regression in the
@@ -1472,10 +1478,12 @@ counts certificate verification and covers changed bytes, linking and reopen.
 A live roster may reuse its already-verified announcement only on full value
 identity, including both public keys, every advertised field, certificate and
 signature. Keep current account bindings, route scope and presence updates
-outside that reuse; forgotten/evicted announcements lose the evidence. The
-[roster regressions](../crates/mesh-talk-core/src/discovery/roster.rs) count actual
-certificate checks and exercise tampering, renamed proofs, binding transitions
-and live-proof retirement without adding a separate cache.
+outside that reuse; forgotten/evicted announcements lose live-roster evidence
+and must re-enter the current verification boundary. An independent bounded
+intrinsic memo may still reuse the deterministic signature fact. The
+[roster regressions](../crates/mesh-talk-core/src/discovery/roster.rs) distinguish
+verification requests from certificate math and exercise tampering, renamed
+proofs, binding transitions and live-proof retirement.
 
 Separate cache admission priorities when recomputable work can displace receive
 progress and repeatedly restart unchanged synchronization. Preserve shared hard

@@ -1292,6 +1292,16 @@
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
         "Pinned gateway queries must recover when another loopback client consumes the existing per-source UDP reply quota. Preserve the absolute four-second deadline, at most four datagrams, exact endpoint and signed pinned-identity validation, and cancellation ownership. Run the real responder quota regression and existing gateway lifecycle/security tests; repeat bridge_cross_lan and channel_peer_recovery against the production CLI."
       ],
+      "capability": {
+        "summary": "Authenticate bounded signed discovery proofs while preserving current presence, account and transport authority.",
+        "guide": "docs/network-design-reference.md#person-presence-contract",
+        "invariants": [
+          {
+            "name": "Exact complete successful announcement proofs, including both signatures, may reuse intrinsic verification in a process-local 128-entry, 256-KiB metadata owner. Invalid results are not retained; changed fields reverify. Oversized inputs, contention, poison and eviction preserve original verification semantics without waiting or crypto under a guard. Current presence, account binding, revocation, visibility, discovery challenges and Noise authorization remain fresh; wire, SDK and storage formats are unchanged.",
+            "reference": "docs/ai-coding-reliability.md#r08-durable-state-and-failure-semantics"
+          }
+        ]
+      },
       "consumers": ["core-node", "core-postoffice", "core-transport"]
     },
     {

@@ -1055,6 +1055,7 @@ impl Roster {
 mod routed_tests {
     #[test]
     fn identical_announcements_reuse_only_live_verified_proofs() {
+        use crate::discovery::announce::verification_observations;
         use crate::identity::account::certificate_observations;
         for relayed in [false, true] {
             let device = DeviceIdentity::generate();
@@ -1070,6 +1071,7 @@ mod routed_tests {
                 }
             };
             certificate_observations::reset();
+            verification_observations::reset();
             assert_eq!(update(&mut roster, &proof), UpdateOutcome::New);
             assert!(certificate_observations::count() > 0);
             let mut observations = roster.subscribe_changes();
@@ -1078,6 +1080,7 @@ mod routed_tests {
                 route.last_seen = old;
             }
             certificate_observations::reset();
+            verification_observations::reset();
             for _ in 0..8 {
                 assert_eq!(update(&mut roster, &proof), UpdateOutcome::Refreshed);
             }
@@ -1085,6 +1088,11 @@ mod routed_tests {
                 certificate_observations::count(),
                 0,
                 "identical already-verified heartbeats repeated certificate verification"
+            );
+            assert_eq!(
+                verification_observations::count(),
+                0,
+                "live roster proofs must avoid even intrinsic verification requests"
             );
             assert!(
                 roster
@@ -1102,10 +1110,11 @@ mod routed_tests {
             observations.borrow_and_update();
             roster.forget(&device.public());
             certificate_observations::reset();
+            verification_observations::reset();
             assert_eq!(update(&mut roster, &proof), UpdateOutcome::New);
             assert!(
-                certificate_observations::count() > 0,
-                "forgotten proof cannot authorize reuse"
+                verification_observations::count() > 0,
+                "forgotten presence must cross the verification boundary again"
             );
             let peer = roster.peers.get_mut(&proof.user_id).unwrap();
             peer.last_seen = old;
@@ -1115,10 +1124,11 @@ mod routed_tests {
             roster.evict_stale(Duration::ZERO);
             assert!(roster.announcement(&device.public()).is_none());
             certificate_observations::reset();
+            verification_observations::reset();
             assert_eq!(update(&mut roster, &proof), UpdateOutcome::New);
             assert!(
-                certificate_observations::count() > 0,
-                "evicted proof cannot authorize reuse"
+                verification_observations::count() > 0,
+                "evicted presence must cross the verification boundary again"
             );
         }
     }
