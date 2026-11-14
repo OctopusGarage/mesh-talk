@@ -769,15 +769,19 @@ Private route rounds launch at most two probes concurrently and advance their
 cursor for launched or deliberately deferred devices, including fresh discovery
 skips; canceled unexamined routes retain their next turn.
 
-Account maintenance, bounded local channel recovery and custody recovery are
-three futures owned by the same recovery task. A held maintenance peer exchange
+Account maintenance, bounded local channel recovery, signed-control replay and
+custody recovery are four futures owned by the same recovery task. A held maintenance peer exchange
 cannot delay local
 checkpoint/presentation progress or its mandatory Directory publication. The
 maintenance owner retains one state and uses independent broadcast/watch receivers
-plus the existing three-second Skip clock; it never consumes local recovery or
-roster Notify permits. Each bounded turn yields, and parent cancellation drops
-all three futures. Custody retains its own three-second Skip clock, one serial
-retry/recheck turn and existing rotating cursors. A held history or fallback
+and an owned next-work deadline; it never consumes local recovery or roster
+Notify permits. Even an incomplete cycle suppresses unchanged ordinary wakes
+until that deadline using scheduling observation rather than successful-cycle
+acknowledgment. Fresh semantics and failed observations remain live; explicit
+drivers and timer-disabled recovery preserve their separate progress contract.
+Each bounded turn yields, and parent cancellation drops all four futures.
+Custody retains its own next-work deadlines, one serial retry/recheck turn and
+existing rotating cursors. A held history or fallback
 exchange cannot prevent a healthy peer's exact durable-have report. Custody
 uses the existing transport admission and peer deadlines; it adds no task,
 queue or connection allowance. During an ordinary recovery network turn, the
@@ -1133,10 +1137,21 @@ Network failures and unavailable routes back off from three to sixty seconds;
 launch reserves a deadline before any await, and completed attempts measure their
 delay from completion. The outgoing producer retains the earliest future retry
 wake. Cooling jobs perform no repeated offer authorization. Completed discovery
-rests for sixty seconds, reopening immediately on changed file rows. Ordinary
-appends preserve unfinished ordinal scans; destructive rewrites restart them.
-Periodic repair still revisits eligibility changes without a new file row,
-including membership, consent and proof recovery for unsettled dispatches. Fresh
+rests for five minutes only while FILES revisions and its semantic scheduling
+input remain unchanged: group/identity/privacy projection, sharing pause state,
+file-change observations and attachment-policy generation. Changes reopen
+discovery immediately; pre/post comparisons prevent a completed page from
+acknowledging a concurrent change. Ordinary appends preserve unfinished ordinal
+scans; destructive rewrites restart them. Sparse repair still revisits eligibility
+changes without a new file row. A stale-checkpoint discovery failure keeps a
+separate three-second source-bound wait, never an EOF acknowledgment. Actual
+checkpoint and completed authorization preparation share a readiness publisher
+for discovery and matching jobs. It retains one notification after releasing
+owner guards, including before a job or failed-discovery waiter is registered.
+A readiness revision prevents a racing failed probe from reinstalling the wait. Finite registered preparation
+retains prompt continuation and never acquires the blocked-discovery hold. Expired
+waits are consumed before source reads so a storage error cannot retain a zero
+retry deadline. Fresh
 receiver requests enqueue bounded metadata work after their own ledger commit;
 active-queue overflow retains a rescan which an older EOF cannot overwrite.
 Failed preparation, failed scans

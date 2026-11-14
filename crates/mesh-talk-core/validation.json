@@ -954,7 +954,7 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route",
+            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route. Ordinary unchanged wakes respect retained retry deadlines even for incomplete cycles; scheduling observation never acknowledges success, while fresh semantics, failed observations, explicit drivers and timer-disabled recovery remain live.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -2696,6 +2696,10 @@
           },
           {
             "name": "Four heavy authorization views retain and advance finite pending work; bounded job qualifications compare current nonmissing authority versions before unchanged retries, without replacing fresh offer, consent or exact custody checks. Consent discovery coalesces replayable cursor checkpoints while preserving bounded fair rotation, restart progress and exact owner fencing. Indexed ordinary-message, group-control and group-file custody publication has an explicit outgoing intent and local checkpoint namespace: it performs no incoming ID processing, pending repair or unrelated consent sweep, preserves old duplex receipt bytes, retains identity supplements and renews group-file custody after a fresh signed receiver request following remote replacement, and consumes approvals/refusals from independent runtime drains. Legacy duplex fallback and global receive policy remain unchanged.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Completed group-file discovery parks for 300 seconds only with unchanged pre/post source and semantic inputs. Fresh eligibility changes and exact receiver demand remain prompt; finite preparation is distinct from blocked discovery, actual checkpoint/authorization readiness reaches discovery before job admission and survives concurrent failures, expired waits cannot leave zero-delay source-error loops, and errors or overflow never acknowledge EOF.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {

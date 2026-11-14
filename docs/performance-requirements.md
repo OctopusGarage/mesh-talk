@@ -49,6 +49,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    user navigation and foreground activation. Schedule the next actual expiry or
    retry deadline. Empty success is not progress and must not keep a fast retry
    hot. Coalesce duplicate wakes; retain bounded dirty work while a task is busy.
+   Pending work still owns its retry deadline. Suppress unchanged ordinary wakes
+   using scheduling evidence, independently of successful completion; preserve
+   explicit drivers and event-only progress when no timer owns continuation.
    A retained blocked task is not evidence of progress: keep its recovery fact
    while backing off, and resume promptly on dependency changes. Local pagination
    and actual received bytes retain prompt continuation.
@@ -57,6 +60,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    delivery and actual custody-loss recovery separate from that scheduling hint.
    A bounded historical scan must also become quiet after its complete sweep;
    preserve prompt unfinished pages and separate lightweight claim rechecks.
+   Qualify scan completion against current source and semantic inputs, before
+   and after work. Failed discovery keeps a separate bounded wait; it cannot
+   acknowledge EOF or repeatedly hydrate the same blocked item on observer wakes.
    Preserve invalidation domains through batching and acknowledgement; a roster
    heartbeat must not reload unrelated settings or history. Empty pages do not
    imply a global change. Presentation metadata does not renew user activity.

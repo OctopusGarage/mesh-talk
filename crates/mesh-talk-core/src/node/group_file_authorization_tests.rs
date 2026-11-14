@@ -415,6 +415,205 @@ async fn queued_fixture_with_size(bytes: usize) -> QueuedFixture {
 }
 
 #[tokio::test]
+async fn group_file_authorization_ready_resumes_cold_discovery_before_its_deadline() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    // Reconstruct the same durable offer with cold runtime-only scheduling state.
+    node.group_file_delivery.jobs.lock().unwrap().clear();
+    node.group_file_delivery
+        .authorization
+        .lock()
+        .unwrap()
+        .clear();
+    *node.group_file_delivery.scan.lock().unwrap() = GroupFileScan::default();
+    assert!(matches!(
+        node.refill_group_file_delivery(),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .deferred
+            .is_none(),
+        "actual finite preparation must not acquire a blocked discovery hold"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    assert!(node.group_file_delivery.jobs.lock().unwrap().is_empty());
+    assert!(
+        node.group_file_delivery
+            .authorization
+            .lock()
+            .unwrap()
+            .values()
+            .any(|view| !view.ready)
+    );
+    for _ in 0..512 {
+        node.retry_group_file_delivery().await;
+        if !node.group_file_delivery.jobs.lock().unwrap().is_empty() {
+            break;
+        }
+    }
+    assert!(
+        std::time::Instant::now() < deadline,
+        "local preparation must resume discovery before its blocked retry deadline"
+    );
+    assert!(
+        !node.group_file_delivery.jobs.lock().unwrap().is_empty(),
+        "actual authorization readiness must hand off to discovery without an existing job waiter"
+    );
+}
+
+#[tokio::test]
+async fn group_file_authorization_ready_fences_an_older_failed_discovery_probe() {
+    use futures_util::FutureExt;
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    node.group_file_delivery.jobs.lock().unwrap().clear();
+    node.group_file_delivery
+        .authorization
+        .lock()
+        .unwrap()
+        .clear();
+    *node.group_file_delivery.scan.lock().unwrap() = GroupFileScan::default();
+    append_history(node, fixture.channel, 1);
+    let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = published.clone();
+    let weak = Arc::downgrade(node);
+    let manifest = fixture.manifest;
+    let channel = fixture.channel;
+    let peer = fixture.peers[0].public();
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, stage| {
+        if stage != "group_file_discovery_deferred_before_publish" {
+            return;
+        }
+        let node = weak.upgrade().unwrap();
+        crate::node::test_support::settle_group_metadata(&node, channel);
+        while node.group_file_notify.notified().now_or_never().is_some() {}
+        for _ in 0..512 {
+            // Finish the exact real prepared view while the old failed queue
+            // probe has returned but before it can publish its blocked hold.
+            if node
+                .group_file_outgoing_contains(channel, manifest, &peer)
+                .unwrap_or(false)
+            {
+                observed.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
+    }));
+    assert!(matches!(
+        node.refill_group_file_delivery(),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(
+        published.load(Ordering::SeqCst),
+        "the inline authorization owner must actually publish readiness"
+    );
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .deferred
+            .is_none(),
+        "an older failed discovery probe cannot reinstall a hold after authorization readiness"
+    );
+    assert!(
+        node.group_file_notify.notified().now_or_never().is_some(),
+        "actual authorization readiness retains a wake without a job or deferred marker"
+    );
+    *node.account_client_test_hook.lock().unwrap() = None;
+    assert!(
+        node.group_file_outgoing_contains(channel, manifest, &fixture.peers[0].public())
+            .unwrap()
+    );
+    assert!(
+        node.group_file_notify.notified().now_or_never().is_none(),
+        "an unchanged warm authorization check must not republish readiness"
+    );
+}
+
+#[tokio::test]
+async fn group_file_checkpoint_only_readiness_retains_a_wake_before_deferred_installation() {
+    use futures_util::FutureExt;
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    node.group_file_delivery.jobs.lock().unwrap().clear();
+    node.group_file_delivery
+        .authorization
+        .lock()
+        .unwrap()
+        .clear();
+    *node.group_file_delivery.scan.lock().unwrap() = GroupFileScan::default();
+    append_history(node, fixture.channel, 1);
+    let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = published.clone();
+    let weak = Arc::downgrade(node);
+    let channel = fixture.channel;
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, stage| {
+        if stage != "group_file_discovery_deferred_before_publish" {
+            return;
+        }
+        let node = weak.upgrade().unwrap();
+        assert!(node.group_file_delivery.jobs.lock().unwrap().is_empty());
+        assert!(
+            node.group_file_delivery
+                .authorization
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            node.group_file_delivery
+                .scan
+                .lock()
+                .unwrap()
+                .deferred
+                .is_none()
+        );
+        while node.group_file_notify.notified().now_or_never().is_some() {}
+        // Only the canonical checkpoint owner publishes readiness here: there
+        // is no admitted job or authorization preparation to supply another wake.
+        crate::node::test_support::settle_group_metadata(&node, channel);
+        assert!(
+            node.group_file_delivery
+                .authorization
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        observed.store(true, Ordering::SeqCst);
+    }));
+    assert!(matches!(
+        node.refill_group_file_delivery(),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(published.load(Ordering::SeqCst));
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .deferred
+            .is_none(),
+        "the older failed probe cannot reinstall a hold after checkpoint readiness"
+    );
+    assert!(
+        node.group_file_notify.notified().now_or_never().is_some(),
+        "actual checkpoint publication must retain a discovery wake before a deferred marker exists"
+    );
+    *node.account_client_test_hook.lock().unwrap() = None;
+    let reads = node.received_files.lock().unwrap().body_reads();
+    let _ = node.refill_group_file_delivery();
+    assert!(
+        node.received_files.lock().unwrap().body_reads() > reads,
+        "the retained wake permits immediate recovery without waiting for sparse repair"
+    );
+}
+
+#[tokio::test]
 async fn group_file_full_queue_request_survives_older_discovery_eof() {
     let fixture = queued_fixture().await;
     let node = &fixture.node;
@@ -1350,6 +1549,18 @@ async fn group_file_stable_refill_eof_skips_unchanged_rows() {
         before,
         "unchanged EOF must sleep until its repair deadline or source revision changes"
     );
+    {
+        let mut scan = node.group_file_delivery.scan.lock().unwrap();
+        scan.repair_after = scan
+            .repair_after
+            .map(|at| at - std::time::Duration::from_secs(61));
+    }
+    node.refill_group_file_delivery().unwrap();
+    assert_eq!(
+        node.received_files.lock().unwrap().body_reads(),
+        before,
+        "an unrelated wake after 61 seconds must not rediscover unchanged historical offers"
+    );
     node.group_file_delivery.scan.lock().unwrap().repair_after =
         Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
     node.refill_group_file_delivery().unwrap();
@@ -1367,6 +1578,123 @@ async fn group_file_stable_refill_eof_skips_unchanged_rows() {
     assert!(
         node.received_files.lock().unwrap().body_reads() > before,
         "FILES append immediately reopens discovery"
+    );
+}
+
+#[tokio::test]
+async fn group_file_quiet_discovery_reopens_for_semantics_and_exact_request() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    node.refill_group_file_delivery().unwrap();
+    let mut before = node.received_files.lock().unwrap().body_reads();
+    node.set_network_cost(super::super::network_cost::NetworkCost::Restricted);
+    node.refill_group_file_delivery().unwrap();
+    assert!(
+        node.received_files.lock().unwrap().body_reads() > before,
+        "sharing changes reopen discovery before sparse repair"
+    );
+    before = node.received_files.lock().unwrap().body_reads();
+    node.set_attachment_global_auto(!node.attachment_global_auto().unwrap())
+        .unwrap();
+    node.refill_group_file_delivery().unwrap();
+    assert!(
+        node.received_files.lock().unwrap().body_reads() > before,
+        "committed attachment policy changes reopen discovery"
+    );
+    before = node.received_files.lock().unwrap().body_reads();
+    node.set_channel_announcement_if(
+        fixture.channel,
+        Some("new signed metadata"),
+        None,
+        |commit| commit(),
+    )
+    .await
+    .unwrap();
+    node.refill_group_file_delivery().unwrap();
+    assert!(
+        node.received_files.lock().unwrap().body_reads() > before,
+        "signed group metadata reopens discovery"
+    );
+    let (key, job) = node
+        .group_file_delivery
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .next()
+        .map(|(key, job)| (*key, job.clone()))
+        .unwrap();
+    let recipient = fixture
+        .peers
+        .iter()
+        .find(|peer| peer.public() == job.recipient)
+        .unwrap();
+    let proof = node.historical_author(&job.recipient.ed25519_pub).unwrap();
+    let request = Decision {
+        file: fixture.file,
+        manifest: fixture.manifest,
+        sender: node.identity.public(),
+        recipient: job.recipient.clone(),
+        sender_account: Some(node.account_id()),
+        recipient_account: proof.account_id().unwrap(),
+        decision: ReceiveDecision::Accepted,
+        completion: None,
+    }
+    .event(recipient, 1)
+    .unwrap();
+    node.group_file_delivery.jobs.lock().unwrap().remove(&key);
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .repair_after
+            .is_some()
+    );
+    assert!(
+        node.accept_file_consent_event(&request, &job.recipient)
+            .unwrap()
+    );
+    assert_eq!(
+        node.group_file_delivery.jobs.lock().unwrap()[&key].demand,
+        Some(request.id),
+        "authenticated exact demand enters immediately despite quiet discovery"
+    );
+}
+
+#[tokio::test]
+async fn group_file_discovery_does_not_acknowledge_a_concurrent_semantic_change() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let weak = Arc::downgrade(node);
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, stage| {
+        if stage == "group_file_refill_before_publish" {
+            weak.upgrade()
+                .unwrap()
+                .set_network_cost(super::super::network_cost::NetworkCost::Restricted);
+        }
+    }));
+    node.refill_group_file_delivery().unwrap();
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .repair_after
+            .is_none(),
+        "an older EOF cannot acknowledge a sharing change during discovery"
+    );
+    *node.account_client_test_hook.lock().unwrap() = None;
+    let before = node.received_files.lock().unwrap().body_reads();
+    node.refill_group_file_delivery().unwrap();
+    assert!(node.received_files.lock().unwrap().body_reads() > before);
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .repair_after
+            .is_some()
     );
 }
 
@@ -2140,6 +2468,150 @@ async fn group_file_blocked_checkpoint_keeps_backoff_without_repeated_offer_read
     assert!(
         !resumed.waiting_dependency && resumed.retry_after.is_some(),
         "finite preparation must converge and resume normal custody retry after recovery"
+    );
+}
+
+#[tokio::test]
+async fn group_file_deferred_discovery_without_jobs_resumes_on_checkpoint_publication() {
+    use futures_util::FutureExt;
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    node.refill_group_file_delivery().unwrap();
+    node.group_file_delivery.jobs.lock().unwrap().clear();
+    append_history(node, fixture.channel, 1);
+    assert!(matches!(
+        node.refill_group_file_delivery(),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(node.group_file_delivery.jobs.lock().unwrap().is_empty());
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .deferred
+            .is_some()
+    );
+    assert!(
+        node.group_file_retry_delay()
+            .is_some_and(|delay| delay > std::time::Duration::ZERO)
+    );
+    let reads = node.received_files.lock().unwrap().body_reads();
+    node.refill_group_file_delivery().unwrap();
+    assert_eq!(
+        node.received_files.lock().unwrap().body_reads(),
+        reads,
+        "failed discovery owns its short deadline even without an active job"
+    );
+    while node.group_file_notify.notified().now_or_never().is_some() {}
+    crate::node::test_support::settle_group_metadata(node, fixture.channel);
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .deferred
+            .is_none()
+    );
+    assert!(
+        node.group_file_notify.notified().now_or_never().is_some(),
+        "actual readiness wakes discovery even without a job waiter"
+    );
+    let _ = node.refill_group_file_delivery();
+    assert!(
+        node.received_files.lock().unwrap().body_reads() > reads,
+        "readiness bypasses the discovery hold before three seconds elapse"
+    );
+}
+
+#[tokio::test]
+async fn group_file_expired_discovery_hold_is_consumed_before_source_error() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    node.refill_group_file_delivery().unwrap();
+    node.group_file_delivery.jobs.lock().unwrap().clear();
+    append_history(node, fixture.channel, 1);
+    assert!(matches!(
+        node.refill_group_file_delivery(),
+        Err(LogError::StaleCursor)
+    ));
+    let old_input = {
+        let mut scan = node.group_file_delivery.scan.lock().unwrap();
+        scan.deferred.as_mut().unwrap().at =
+            std::time::Instant::now() - std::time::Duration::from_secs(1);
+        scan.input
+    };
+    let expected = node.group_file_discovery_input().unwrap();
+    let (schema, records) = node
+        .storage
+        .database()
+        .read(|c| {
+            let schema: String = c.query_row(
+                "SELECT sql FROM sqlite_master WHERE name='participant_destructive_revisions'",
+                [],
+                |row| row.get(0),
+            )?;
+            let mut statement =
+                c.prepare("SELECT domain,revision FROM participant_destructive_revisions")?;
+            let records = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((schema, records))
+        })
+        .unwrap();
+    // A real metadata read error precedes transcript discovery. No fault shim
+    // stands in for the source owner's failed read.
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TABLE participant_destructive_revisions")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(node.refill_group_file_delivery().is_err());
+    let scan = node.group_file_delivery.scan.lock().unwrap();
+    assert!(
+        scan.deferred.is_none(),
+        "a source error cannot retain an expired zero-delay retry hold"
+    );
+    assert_eq!(
+        scan.input, old_input,
+        "failed source reads never acknowledge discovery input"
+    );
+    drop(scan);
+    assert!(node.group_file_retry_delay().is_none());
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch(&schema)?;
+            for (domain, revision) in &records {
+                c.execute(
+                    "INSERT INTO participant_destructive_revisions VALUES(?1,?2)",
+                    rusqlite::params![domain, revision],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        node.group_file_discovery_input().unwrap(),
+        expected,
+        "restoring the real source permits a fresh valid observation"
+    );
+    let reads = node.received_files.lock().unwrap().body_reads();
+    assert!(
+        matches!(
+            node.refill_group_file_delivery(),
+            Err(LogError::StaleCursor)
+        ),
+        "source recovery resumes the actual still-blocked checkpoint attempt"
+    );
+    assert!(node.received_files.lock().unwrap().body_reads() > reads);
+    assert!(
+        node.group_file_retry_delay()
+            .is_some_and(|delay| delay > std::time::Duration::ZERO)
     );
 }
 

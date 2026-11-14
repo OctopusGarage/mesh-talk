@@ -903,7 +903,11 @@ impl Node {
             self.trace_account_client(&self.identity.public(), || {
                 "channel_recovery_maintenance_begin".into()
             });
-            self.maintain_account_channels(&mut work).await;
+            self.maintain_account_channels_after_wake(
+                &mut work,
+                self.channel_recovery_periodic_enabled(periodic),
+            )
+            .await;
             #[cfg(test)]
             self.trace_account_client(&self.identity.public(), || {
                 "channel_recovery_maintenance_done".into()

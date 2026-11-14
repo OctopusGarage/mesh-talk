@@ -138,6 +138,8 @@ pub(super) struct ChannelAccountMaintenance {
     #[cfg(test)]
     projection_reads: usize,
     #[cfg(test)]
+    eligibility_reads: usize,
+    #[cfg(test)]
     distribution_reads: usize,
     input: Option<[u8; 32]>,
     observed_input: Option<[u8; 32]>,
@@ -385,6 +387,24 @@ impl Node {
             .map(|member| member.membership_event))
     }
     /// One peer turn and one local channel turn; the existing recovery task owns all state.
+    pub(super) async fn maintain_account_channels_after_wake(
+        &self,
+        work: &mut ChannelAccountMaintenance,
+        timed_recovery: bool,
+    ) {
+        // An incomplete cycle is not a successful acknowledgment, but its
+        // unchanged notifications must still respect the owner's retry wait.
+        // Explicit drivers and event-only recovery have no timer to advance
+        // retained work, so their existing progress contract stays independent.
+        if timed_recovery && Instant::now() < work.deadline() {
+            let input = work.input(self).ok();
+            if input.is_some() && input == work.observed_input {
+                return;
+            }
+        }
+        self.maintain_account_channels(work).await;
+    }
+
     pub(super) async fn maintain_account_channels(&self, work: &mut ChannelAccountMaintenance) {
         let selected_input = work.input(self).ok();
         if selected_input.is_some()
@@ -415,6 +435,10 @@ impl Node {
         // Capture before work. Mutations during this turn remain dirty.
         let mut cycle_complete = false;
         let result: Result<(), NodeError> = async {
+            #[cfg(test)]
+            {
+                work.eligibility_reads += 1;
+            }
             let mut peers = self.routing_peers();
             // Capability maintenance serves existing group relationships and siblings,
             // not every discovery entry. Unrelated probes compete with ordinary DMs
@@ -2554,6 +2578,48 @@ mod tests {
         );
         assert!(
             work.deadline().saturating_duration_since(Instant::now()) <= Duration::from_secs(3)
+        );
+        let observed = work.input(node).unwrap();
+        assert_eq!(work.observed_input, Some(observed));
+        assert!(work.deadline() > Instant::now());
+        let eligibility = work.eligibility_reads;
+        for _ in 0..8 {
+            node.maintain_account_channels_after_wake(&mut work, true)
+                .await;
+        }
+        assert_eq!(
+            work.eligibility_reads, eligibility,
+            "unchanged ordinary notifications must respect the deferred owner's retry deadline"
+        );
+        assert!(
+            work.input.is_none(),
+            "parking cannot acknowledge deferred work"
+        );
+        work.run_at = Some(Instant::now());
+        node.maintain_account_channels_after_wake(&mut work, true)
+            .await;
+        assert!(
+            work.eligibility_reads > eligibility,
+            "a due retry must advance real eligibility"
+        );
+        let eligibility = work.eligibility_reads;
+        assert!(work.deadline() > Instant::now());
+        node.privacy
+            .projection_revision
+            .fetch_add(1, Ordering::SeqCst);
+        assert_ne!(work.input(node).unwrap(), observed);
+        node.maintain_account_channels_after_wake(&mut work, true)
+            .await;
+        assert!(
+            work.eligibility_reads > eligibility,
+            "fresh semantics bypass the retry wait"
+        );
+        let eligibility = work.eligibility_reads;
+        node.maintain_account_channels_after_wake(&mut work, false)
+            .await;
+        assert!(
+            work.eligibility_reads > eligibility,
+            "event-only recovery cannot wait on a disabled timer"
         );
         *node.account_channel_maintenance_test_hook.lock().unwrap() = None;
         for _ in 0..8 {

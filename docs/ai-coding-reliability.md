@@ -411,6 +411,13 @@ continue ready targets and local pages, and invalidate waits on meaningful
 changes without claiming completion. The custody owner in
 [channel recovery](../crates/mesh-talk-core/src/node/channels.rs) exercises failed
 peer backoff, independent group pagination and prompt new-generation recovery.
+A failed or incomplete cycle must not erase its scheduling observation merely
+because it cannot acknowledge success. Ordinary unchanged notifications still
+respect its retained retry deadline, before routing or eligibility preparation;
+fresh semantic inputs and failed observations remain live. Explicit drivers and
+event-only owners cannot park behind a timer that does not exist. The deferred
+channel regression in [account maintenance](../crates/mesh-talk-core/src/node/channel_account_maintenance.rs)
+counts entry into actual eligibility work, with due, changed-input and timer-disabled controls.
 A domain-wide paging upper is not a mailbox revision. Unrelated mailbox appends
 must not invalidate settled work when its exact mailbox binding/revision and
 local source remain unchanged; retain rollback rejection and the original
@@ -420,13 +427,19 @@ same-mailbox growth restores preparation. Trace classification must use the
 same predicate as ordinary scheduling because it can govern actual work.
 
 Do not interpret an unavailable dependency or a generic stale-cursor error as
-proof of finite preparation progress. Preserve the launch deadline when no rows,
+proof of finite preparation progress. Preserve an explicit finite-preparation
+outcome at the local decision boundary instead of erasing it into a generic
+stale error and then treating it as blocked. Preserve the launch deadline when no rows,
 edges or preparation phase advanced. Register dependency waiting before probing,
 so a concurrent readiness notification cannot be overwritten by the attempt.
 After consuming readiness, reserve the active network attempt's cancellation
 deadline before awaiting; an earlier wake must not erase its backoff.
 Publish scoped readiness hints after installing the state consumers observe and
 releasing source and cache guards; the next attempt still validates authority.
+Readiness has discovery consumers before job admission. Retain their notification
+even before a waiter is registered; waking only existing jobs can strand completed
+preparation. Fence racing probes so an older failure cannot reinstall the wait.
+Warm observations are not readiness transitions.
 An unchanged reception completion is not dependency publication and must not
 clear a blocked deadline. Keep queue-continuation booleans distinct from state
 change evidence: completing the last queued lane can still publish readiness.
