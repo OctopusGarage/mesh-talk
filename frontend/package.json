@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "check:build-syntax": "node --test scripts/check-build-syntax.test.mjs && node scripts/check-build-syntax.mjs",
+    "check:build-syntax": "node --test scripts/check-build-syntax.test.mjs scripts/theme-alpha.test.mjs && node scripts/check-build-syntax.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
     "audit:ci": "audit-ci --config audit-ci.json",

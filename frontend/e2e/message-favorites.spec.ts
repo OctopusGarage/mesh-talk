@@ -325,9 +325,13 @@ test("retained attachments preview real bytes and save independently of source h
   });
   expect(
     state.calls.some(({ command }) =>
-      ["read_media", "read_file", "save_file", "save_file_to_dir"].includes(
-        command,
-      ),
+      [
+        "read_media",
+        "read_media_preview",
+        "read_file",
+        "save_file",
+        "save_file_to_dir",
+      ].includes(command),
     ),
   ).toBe(false);
 
@@ -506,6 +510,8 @@ test("retained preview denies lost authorization without falling back to chat me
     calls.filter(({ command }) => command === "owner_read_favorite_file"),
   ).toHaveLength(1);
   expect(
-    calls.some(({ command }) => ["read_media", "read_file"].includes(command)),
+    calls.some(({ command }) =>
+      ["read_media", "read_media_preview", "read_file"].includes(command),
+    ),
   ).toBe(false);
 });

@@ -395,43 +395,317 @@ fn channel_invitees_exclude_post_office_nodes() {
     assert!(channel_invitee_identity(fake_peer(false)).is_some());
 }
 
+#[tokio::test]
+async fn profile_republish_master_relay_enable_bypasses_cooldown() {
+    profile_relay_dependency_change(true).await;
+}
+
+#[tokio::test]
+async fn profile_republish_new_relay_bypasses_cooldown() {
+    profile_relay_dependency_change(false).await;
+}
+
+async fn profile_relay_dependency_change(enable_existing: bool) {
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    let root = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let recipient_proof =
+        Announce::new_with_account(&recipient, &Account::generate(), "Recipient", 21212);
+    let (node, _, _) = crate::node::test_support::node_with_files(
+        root.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &recipient_proof,
+    );
+    let relay = DeviceIdentity::generate();
+    let relay_proof =
+        Announce::new_post_office_with_account(&relay, &Account::generate(), "Relay", 21213);
+    let recipient_peer = node
+        .roster
+        .lock()
+        .unwrap()
+        .get(&recipient.user_id())
+        .unwrap()
+        .clone();
+    if enable_existing {
+        node.roster.lock().unwrap().update(
+            &relay_proof,
+            "127.0.0.1".parse().unwrap(),
+            &node.user_id(),
+        );
+        node.set_post_office_enabled(false);
+    } else {
+        node.set_post_office_enabled(true);
+    }
+    let now = std::time::Instant::now();
+    let mut relay_observation = ProfileRelayObservation::default();
+    let scope = profile_publication_scope(&node, &mut relay_observation, now);
+    let mut published = std::collections::HashMap::new();
+    assert_eq!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&recipient_peer),
+            1,
+            scope,
+            now
+        )
+        .len(),
+        1
+    );
+    let owner = published[&recipient.user_id()].owner.clone();
+    finish_profile_publication(&mut published, &recipient.user_id(), &owner, false, now);
+    assert!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&recipient_peer),
+            1,
+            scope,
+            now
+        )
+        .is_empty()
+    );
+    if enable_existing {
+        node.set_post_office_enabled(true);
+    } else {
+        node.roster.lock().unwrap().update(
+            &relay_proof,
+            "127.0.0.1".parse().unwrap(),
+            &node.user_id(),
+        );
+    }
+    assert!(node.relay_send_allowed(&relay.public()));
+    assert_eq!(
+        profile_republish_targets(
+            &mut published,
+            &[recipient_peer],
+            1,
+            profile_publication_scope(&node, &mut relay_observation, now),
+            now
+        )
+        .len(),
+        1,
+        "newly available relay publication must not wait for an unchanged recipient's old cooldown"
+    );
+}
+
+#[tokio::test]
+async fn profile_republish_actual_relay_scope_preserves_heartbeats_and_admits_recovery() {
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    let root = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&recipient, &Account::generate(), "Recipient", 21212);
+    let (node, _, _) = crate::node::test_support::node_with_files(
+        root.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let relay = DeviceIdentity::generate();
+    let account = Account::generate();
+    let proof = Announce::new_post_office_with_account(&relay, &account, "Relay", 21213);
+    let ip = "127.0.0.1".parse().unwrap();
+    node.roster
+        .lock()
+        .unwrap()
+        .update_routed(&proof, ip, &node.user_id());
+    let now = std::time::Instant::now();
+    let original_deadline = node
+        .roster
+        .lock()
+        .unwrap()
+        .get(&relay.user_id())
+        .unwrap()
+        .presence_deadline(now)
+        .unwrap();
+    let mut relays = ProfileRelayObservation::default();
+    let scope = profile_publication_scope(&node, &mut relays, now);
+    let peer = fake_peer(false);
+    let uid = peer.public.user_id();
+    let mut published = std::collections::HashMap::new();
+    profile_republish_targets(&mut published, std::slice::from_ref(&peer), 1, scope, now);
+    let owner = published[&uid].owner.clone();
+    for _ in 0..5 {
+        finish_profile_publication(&mut published, &uid, &owner, false, now);
+    }
+    // The real routed-discovery owner can extend public evidence for a slow
+    // authenticated response. That lifetime is not new publication input.
+    node.roster.lock().unwrap().update_routed_with_latency(
+        &proof,
+        ip,
+        &node.user_id(),
+        Duration::from_millis(200),
+    );
+    let refreshed = profile_publication_scope(&node, &mut relays, now + Duration::from_secs(1));
+    assert!(
+        scope == refreshed,
+        "same signed relay heartbeat must not grant retry credit"
+    );
+    let crossed = original_deadline + Duration::from_secs(1);
+    let continuous = profile_publication_scope(&node, &mut relays, crossed);
+    assert!(
+        scope == continuous,
+        "crossing the original lease must not invent relay revival"
+    );
+    assert!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&peer),
+            1,
+            continuous,
+            crossed
+        )
+        .is_empty()
+    );
+    let renewed_deadline = node
+        .roster
+        .lock()
+        .unwrap()
+        .get(&relay.user_id())
+        .unwrap()
+        .presence_deadline(crossed)
+        .unwrap();
+    // Observe a later genuinely expired-to-fresh transition using the same
+    // production lifetime API, without changing private tracker state or sleeping.
+    let revived = renewed_deadline + Duration::from_secs(1);
+    node.roster.lock().unwrap().update_routed_with_latency(
+        &proof,
+        ip,
+        &node.user_id(),
+        Duration::from_secs(1),
+    );
+    let recovered = profile_publication_scope(&node, &mut relays, revived);
+    assert!(
+        recovered != continuous,
+        "actual relay revival must change admission input"
+    );
+    assert_eq!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&peer),
+            1,
+            recovered,
+            revived
+        )
+        .len(),
+        1
+    );
+    let owner = published[&uid].owner.clone();
+    finish_profile_publication(&mut published, &uid, &owner, false, revived);
+    let moved = Announce::new_post_office_with_account(&relay, &account, "Relay", 21214);
+    node.roster.lock().unwrap().update_routed_with_latency(
+        &moved,
+        ip,
+        &node.user_id(),
+        Duration::from_secs(1),
+    );
+    let rerouted = profile_publication_scope(&node, &mut relays, revived);
+    assert_eq!(
+        profile_republish_targets(&mut published, &[peer], 1, rerouted, revived).len(),
+        1,
+        "a new eligible relay endpoint must bypass the unchanged recipient cooldown"
+    );
+    node.roster.lock().unwrap().forget(&relay.public());
+    profile_publication_scope(&node, &mut relays, revived);
+    assert!(
+        relays.known.is_empty(),
+        "removed relay observations cannot accumulate"
+    );
+}
+
+#[test]
+fn profile_republish_recent_failure_waits_while_new_revision_remains_prompt() {
+    let peer = fake_peer(false);
+    let mut published = std::collections::HashMap::new();
+    let now = std::time::Instant::now();
+    let scope = ProfilePublicationScope::default();
+    assert_eq!(
+        profile_republish_targets(&mut published, std::slice::from_ref(&peer), 1, scope, now).len(),
+        1,
+        "first sight must be eligible"
+    );
+    let owner = published[&peer.public.user_id()].owner.clone();
+    prepare_profile_publication(
+        published.get_mut(&peer.public.user_id()).unwrap(),
+        now,
+        || Ok(Some(ConversationId::new([0; 32]))),
+    )
+    .unwrap();
+    // The network attempt lasts longer than its first retry delay. Only its
+    // completion, never its start, may begin the next wait.
+    let completed = now + Duration::from_secs(30);
+    finish_profile_publication(
+        &mut published,
+        &peer.public.user_id(),
+        &owner,
+        false,
+        completed,
+    );
+    assert!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&peer),
+            1,
+            scope,
+            completed + Duration::from_secs(4)
+        )
+        .is_empty(),
+        "an unchanged failed publication must wait for its retry deadline"
+    );
+    assert_eq!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&peer),
+            2,
+            scope,
+            completed
+        )
+        .len(),
+        1,
+        "new profile input must remain prompt despite the old failure"
+    );
+}
+
 #[test]
 fn profile_republish_targets_fires_on_first_sight_and_on_reconnect() {
     let bob = fake_peer(false);
     let mut published = std::collections::HashMap::new();
+    let now = std::time::Instant::now();
+    let scope = ProfilePublicationScope::default();
 
     // First sight → publish to Bob.
     assert_eq!(
-        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1).len(),
+        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1, scope, now).len(),
         1
     );
-    // Failed attempts remain eligible; only a successful publication is cached.
+    // Merely selecting a target cannot mark an unstarted attempt successful.
     assert_eq!(
-        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1).len(),
+        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1, scope, now).len(),
         1
     );
-    published.insert(
-        bob.public.user_id(),
-        ProfilePublication {
-            revision: 1,
-            conversation: ConversationId::new([0; 32]),
-            complete: true,
-            last_attempt: None,
-        },
-    );
+    let owner = published[&bob.public.user_id()].owner.clone();
+    finish_profile_publication(&mut published, &bob.public.user_id(), &owner, true, now);
     // Still present next round → no re-publish (no log churn).
-    assert!(profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1).is_empty());
+    assert!(
+        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1, scope, now)
+            .is_empty()
+    );
     assert_eq!(
-        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 2).len(),
+        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 2, scope, now).len(),
         1,
         "a newer public profile must reach an already-present peer"
     );
     // Bob goes offline (evicted from the roster).
-    assert!(profile_republish_targets(&mut published, &[], 1).is_empty());
+    assert!(profile_republish_targets(&mut published, &[], 1, scope, now).is_empty());
+    assert!(
+        published.is_empty(),
+        "retired peers cannot accumulate scheduling state"
+    );
     // Bob reconnects → published to AGAIN. The old monotonic `seen` set skipped him here,
     // so he kept showing our stale avatar until we manually re-set it.
     assert_eq!(
-        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1).len(),
+        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1, scope, now).len(),
         1,
         "a reconnecting peer must be re-published to"
     );
@@ -439,39 +713,259 @@ fn profile_republish_targets_fires_on_first_sight_and_on_reconnect() {
     // A post office is never a profile target.
     let mut p2 = std::collections::HashMap::new();
     assert!(
-        profile_republish_targets(&mut p2, std::slice::from_ref(&fake_peer(true)), 1).is_empty()
+        profile_republish_targets(
+            &mut p2,
+            std::slice::from_ref(&fake_peer(true)),
+            1,
+            scope,
+            now
+        )
+        .is_empty()
     );
 
     // A failing older peer cannot keep taking a bounded slot ahead of untouched
     // peers. Once both were attempted, the older failed attempt gets its turn.
     let charlie = fake_peer(false);
-    let older = std::time::Instant::now();
-    published.insert(
-        bob.public.user_id(),
-        ProfilePublication {
-            revision: 1,
-            conversation: ConversationId::new([0; 32]),
-            complete: false,
-            last_attempt: Some(older),
-        },
-    );
+    let owner = published[&bob.public.user_id()].owner.clone();
+    prepare_profile_publication(
+        published.get_mut(&bob.public.user_id()).unwrap(),
+        now,
+        || Ok(Some(ConversationId::new([0; 32]))),
+    )
+    .unwrap();
+    finish_profile_publication(&mut published, &bob.public.user_id(), &owner, false, now);
     let peers = [bob.clone(), charlie.clone()];
     assert_eq!(
-        profile_republish_targets(&mut published, &peers, 1)[0].public,
+        profile_republish_targets(&mut published, &peers, 1, scope, now)[0].public,
         charlie.public
     );
-    published.insert(
-        charlie.public.user_id(),
-        ProfilePublication {
-            revision: 1,
-            conversation: ConversationId::new([1; 32]),
-            complete: false,
-            last_attempt: Some(older + Duration::from_millis(1)),
-        },
+    let owner = published[&charlie.public.user_id()].owner.clone();
+    prepare_profile_publication(
+        published.get_mut(&charlie.public.user_id()).unwrap(),
+        now + Duration::from_millis(1),
+        || Ok(Some(ConversationId::new([1; 32]))),
+    )
+    .unwrap();
+    finish_profile_publication(
+        &mut published,
+        &charlie.public.user_id(),
+        &owner,
+        false,
+        now + Duration::from_millis(1),
     );
     assert_eq!(
-        profile_republish_targets(&mut published, &peers, 1)[0].public,
+        profile_republish_targets(
+            &mut published,
+            &peers,
+            1,
+            scope,
+            now + Duration::from_secs(6)
+        )[0]
+        .public,
         bob.public
+    );
+}
+
+#[test]
+fn profile_republish_preparation_failures_back_off_and_recover() {
+    let peer = fake_peer(false);
+    let uid = peer.public.user_id();
+    let scope = ProfilePublicationScope::default();
+    let mut published = std::collections::HashMap::new();
+    let mut now = std::time::Instant::now();
+    // Preparation errors and unavailable authorization must both wait. Exercise
+    // the same preparation/result owners as the runtime, without network I/O.
+    for (index, seconds) in [5, 10, 20, 40, 80, 160, 300, 300].into_iter().enumerate() {
+        assert_eq!(
+            profile_republish_targets(&mut published, std::slice::from_ref(&peer), 1, scope, now)
+                .len(),
+            1
+        );
+        let owner = published[&uid].owner.clone();
+        let result = prepare_profile_publication(published.get_mut(&uid).unwrap(), now, || {
+            if index % 2 == 0 {
+                Err(NodeError::InvalidInput(
+                    "fixture preparation failure".into(),
+                ))
+            } else {
+                Ok(None)
+            }
+        });
+        assert!(!matches!(result, Ok(Some(_))));
+        // Completion occurs after preparation starts, preserving its whole wait.
+        let completed = now + Duration::from_secs(2);
+        finish_profile_publication(&mut published, &uid, &owner, false, completed);
+        assert!(
+            profile_republish_targets(
+                &mut published,
+                std::slice::from_ref(&peer),
+                1,
+                scope,
+                completed + Duration::from_secs(seconds) - Duration::from_millis(1)
+            )
+            .is_empty()
+        );
+        now = completed + Duration::from_secs(seconds);
+    }
+    assert_eq!(
+        profile_republish_targets(&mut published, std::slice::from_ref(&peer), 1, scope, now).len(),
+        1
+    );
+    let owner = published[&uid].owner.clone();
+    let conversation = ConversationId::new([3; 32]);
+    assert_eq!(
+        prepare_profile_publication(published.get_mut(&uid).unwrap(), now, || Ok(Some(
+            conversation
+        )))
+        .unwrap(),
+        Some(conversation)
+    );
+    assert_eq!(
+        prepare_profile_publication(published.get_mut(&uid).unwrap(), now, || panic!(
+            "retained accepted preparation must be reused"
+        ))
+        .unwrap(),
+        Some(conversation)
+    );
+    finish_profile_publication(&mut published, &uid, &owner, true, now);
+    assert!(
+        profile_republish_targets(
+            &mut published,
+            &[peer],
+            1,
+            scope,
+            now + Duration::from_secs(1000)
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn profile_republish_changed_inputs_reject_stale_completion() {
+    let now = std::time::Instant::now();
+    for change in 0..8 {
+        let peer = fake_peer(false);
+        let uid = peer.public.user_id();
+        let mut published = std::collections::HashMap::new();
+        let mut scope = ProfilePublicationScope::default();
+        profile_republish_targets(&mut published, std::slice::from_ref(&peer), 1, scope, now);
+        let old = published[&uid].owner.clone();
+        finish_profile_publication(&mut published, &uid, &old, false, now);
+        let mut replacement = peer.clone();
+        let mut revision = 1;
+        match change {
+            0 => revision = 2,
+            1 => replacement.public.x25519_pub[0] ^= 1,
+            2 => replacement.addr.set_port(2),
+            3 => scope.privacy += 1,
+            4 => scope.network += 1,
+            5 => scope.bridge += 1,
+            6 => scope.device_policy += 1,
+            _ => {
+                profile_republish_targets(&mut published, &[], 1, scope, now);
+            }
+        }
+        assert_eq!(
+            profile_republish_targets(
+                &mut published,
+                std::slice::from_ref(&replacement),
+                revision,
+                scope,
+                now
+            )
+            .len(),
+            1,
+            "changed target/source/policy or reappearance must bypass old cooldown"
+        );
+        let current = published[&uid].owner.clone();
+        finish_profile_publication(&mut published, &uid, &old, true, now);
+        assert_eq!(
+            profile_republish_targets(
+                &mut published,
+                std::slice::from_ref(&replacement),
+                revision,
+                scope,
+                now
+            )
+            .len(),
+            1,
+            "an old successful completion cannot settle replacement work"
+        );
+        finish_profile_publication(&mut published, &uid, &current, true, now);
+        finish_profile_publication(&mut published, &uid, &old, false, now);
+        assert!(
+            profile_republish_targets(&mut published, &[replacement], revision, scope, now)
+                .is_empty(),
+            "an old failure cannot restart completed replacement work"
+        );
+    }
+}
+
+#[test]
+fn profile_republish_heartbeats_preserve_backoff_but_revival_is_prompt() {
+    use crate::discovery::roster::{PUBLIC_PRESENCE_TTL, PeerEndpoint, RouteSource};
+    let mut peer = fake_peer(false);
+    let uid = peer.public.user_id();
+    let scope = ProfilePublicationScope::default();
+    let now = std::time::Instant::now();
+    peer.routes.push(PeerEndpoint {
+        addr: peer.addr,
+        source: RouteSource::Lan,
+        last_seen: now,
+        last_authenticated: None,
+        presence_expires_at: None,
+        presence_origin_expires_at: None,
+        origin_hops: None,
+        registration_origin: None,
+    });
+    let mut published = std::collections::HashMap::new();
+    profile_republish_targets(&mut published, std::slice::from_ref(&peer), 1, scope, now);
+    let owner = published[&uid].owner.clone();
+    // Several immediate failures set a cooldown longer than public presence.
+    // Deadline comparisons use the real scheduler's injected observation time.
+    for _ in 0..5 {
+        finish_profile_publication(&mut published, &uid, &owner, false, now);
+    }
+    let refresh = now + PUBLIC_PRESENCE_TTL / 2;
+    peer.routes[0].last_seen = refresh;
+    peer.last_seen = refresh;
+    peer.name = "heartbeat display metadata".into();
+    assert!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&peer),
+            1,
+            scope,
+            refresh
+        )
+        .is_empty()
+    );
+    let crossed = now + PUBLIC_PRESENCE_TTL + Duration::from_secs(1);
+    peer.routes[0].last_seen = crossed;
+    assert!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&peer),
+            1,
+            scope,
+            crossed
+        )
+        .is_empty(),
+        "steady freshness must not manufacture reconnect credit at the original deadline"
+    );
+    let revived = crossed + PUBLIC_PRESENCE_TTL + Duration::from_secs(1);
+    peer.routes[0].last_seen = revived;
+    assert_eq!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&peer),
+            1,
+            scope,
+            revived
+        )
+        .len(),
+        1,
+        "genuine same-endpoint expiry then revival must be prompt"
     );
 }
 
@@ -1412,4 +1906,790 @@ async fn security_rekey_does_not_publish_linking_account_continuity() {
         "a compromised-account escape must not automatically carry the old account's trust or groups"
     );
     reopened.stop().await;
+}
+
+#[test]
+fn profile_publication_known_route_preference_renewals_preserve_owner_and_retry() {
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    for complete in [false, true] {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&identity, &account, "Recipient", 21212);
+        let mut roster = Roster::default();
+        for ip in ["127.0.0.1", "127.0.0.2"] {
+            roster.update(&proof, ip.parse().unwrap(), "local");
+        }
+        let now = std::time::Instant::now();
+        let scope = ProfilePublicationScope::default();
+        let mut published = std::collections::HashMap::new();
+        let uid = identity.user_id();
+        profile_republish_targets(&mut published, &roster.peers(), 1, scope, now);
+        let owner = published[&uid].owner.clone();
+        let conversation = ConversationId::new([9; 32]);
+        prepare_profile_publication(published.get_mut(&uid).unwrap(), now, || {
+            Ok(Some(conversation))
+        })
+        .unwrap();
+        finish_profile_publication(&mut published, &uid, &owner, complete, now);
+        let retry = published[&uid].retry_at;
+        let failures = published[&uid].failures;
+        for ip in ["127.0.0.1", "127.0.0.2", "127.0.0.1", "127.0.0.2"] {
+            roster.update(&proof, ip.parse().unwrap(), "local");
+            assert!(
+                profile_republish_targets(&mut published, &roster.peers(), 1, scope, now)
+                    .is_empty(),
+                "known route preference renewal must not grant publication credit"
+            );
+            let state = &published[&uid];
+            assert!(Arc::ptr_eq(&state.owner, &owner));
+            assert_eq!(state.complete, complete);
+            assert_eq!(state.retry_at, retry);
+            assert_eq!(state.failures, failures);
+            assert_eq!(state.conversation, Some(conversation));
+        }
+        if let Some(due) = retry {
+            let targets = profile_republish_targets(&mut published, &roster.peers(), 1, scope, due);
+            assert_eq!(targets.len(), 1);
+            assert_eq!(
+                targets[0].addr,
+                roster.peers()[0].addr,
+                "a new attempt must carry the current preferred dial route"
+            );
+        }
+        roster.update(&proof, "127.0.0.3".parse().unwrap(), "local");
+        assert_eq!(
+            profile_republish_targets(&mut published, &roster.peers(), 1, scope, now).len(),
+            1
+        );
+        assert!(!Arc::ptr_eq(&published[&uid].owner, &owner));
+        let owner = published[&uid].owner.clone();
+        let mut private_scope = scope;
+        private_scope.privacy += 1;
+        profile_republish_targets(&mut published, &roster.peers(), 1, private_scope, now);
+        assert!(!Arc::ptr_eq(&published[&uid].owner, &owner));
+        let owner = published[&uid].owner.clone();
+        let rebound =
+            Announce::new_with_account(&identity, &Account::generate(), "Recipient", 21212);
+        roster.update(&rebound, "127.0.0.3".parse().unwrap(), "local");
+        profile_republish_targets(&mut published, &roster.peers(), 1, private_scope, now);
+        assert!(
+            !Arc::ptr_eq(&published[&uid].owner, &owner),
+            "changed certified account binding must replace work owner"
+        );
+        let mut peer = roster.peers().remove(0);
+        peer.post_office = true;
+        assert!(
+            profile_republish_targets(&mut published, &[peer], 1, private_scope, now).is_empty()
+        );
+        assert!(
+            published.is_empty(),
+            "role replacement retires the publication owner"
+        );
+    }
+}
+
+#[tokio::test]
+async fn profile_relay_known_route_preference_renewals_preserve_scope() {
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    let root = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&recipient, &Account::generate(), "Recipient", 21212);
+    let (node, _, _) = crate::node::test_support::node_with_files(
+        root.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let relay = DeviceIdentity::generate();
+    let proof =
+        Announce::new_post_office_with_account(&relay, &Account::generate(), "Relay", 21213);
+    for ip in ["127.0.0.1", "127.0.0.2"] {
+        node.roster
+            .lock()
+            .unwrap()
+            .update_routed(&proof, ip.parse().unwrap(), &node.user_id());
+    }
+    let now = std::time::Instant::now();
+    let mut relays = ProfileRelayObservation::default();
+    let scope = profile_publication_scope(&node, &mut relays, now);
+    for ip in ["127.0.0.1", "127.0.0.2", "127.0.0.1", "127.0.0.2"] {
+        node.roster
+            .lock()
+            .unwrap()
+            .update_routed(&proof, ip.parse().unwrap(), &node.user_id());
+        assert!(
+            profile_publication_scope(&node, &mut relays, now) == scope,
+            "known relay preference renewal must not invalidate every recipient publication"
+        );
+    }
+    node.roster.lock().unwrap().update_routed(
+        &proof,
+        "127.0.0.3".parse().unwrap(),
+        &node.user_id(),
+    );
+    assert!(profile_publication_scope(&node, &mut relays, now) != scope);
+}
+
+fn profile_publisher_fixture(path: &Path) -> (Arc<Node>, Arc<Mutex<NameDirectory>>) {
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    let peer = DeviceIdentity::generate();
+    let proof =
+        crate::discovery::Announce::new_with_account(&peer, &Account::generate(), "Peer", 1);
+    let (node, _, _) = crate::node::test_support::node_with_files(
+        path,
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let names = Arc::new(Mutex::new(
+        NameDirectory::open(&path.join("publisher-names.log"), "pw").unwrap(),
+    ));
+    (node, names)
+}
+
+#[tokio::test]
+async fn profile_publisher_idle_does_not_read_on_a_three_second_poll() {
+    let root = tempfile::tempdir().unwrap();
+    let (node, names) = profile_publisher_fixture(root.path());
+    let (sent, mut reads) = tokio::sync::mpsc::unbounded_channel();
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+        if phase == "profile_publisher_read" {
+            let _ = sent.send(());
+        }
+    }));
+    let owner = tokio::spawn(run_profile_publisher(
+        node.clone(),
+        node.roster.clone(),
+        names,
+        Duration::from_secs(PROFILE_PUBLICATION_REPAIR_SECS),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), reads.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // Isolated actual owner and real time: no incidental startup producers or paused-clock mismatch.
+    let unexpected = tokio::time::timeout(Duration::from_secs(7), reads.recv())
+        .await
+        .is_ok();
+    node.set_profile_display_name("Changed without roster mutation")
+        .unwrap();
+    let source_woke = tokio::time::timeout(Duration::from_secs(1), reads.recv())
+        .await
+        .is_ok();
+    owner.abort();
+    let _ = owner.await;
+    assert!(
+        !unexpected,
+        "unchanged idle publisher must not query profile storage"
+    );
+    assert!(
+        source_woke,
+        "profile source change must wake publisher without a roster mutation"
+    );
+}
+
+#[tokio::test]
+async fn profile_publisher_repair_is_not_postponed_by_irrelevant_observations() {
+    let root = tempfile::tempdir().unwrap();
+    let (node, names) = profile_publisher_fixture(root.path());
+    let (sent, mut reads) = tokio::sync::mpsc::unbounded_channel();
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+        if phase == "profile_publisher_read" {
+            let _ = sent.send(());
+        }
+    }));
+    let owner = tokio::spawn(run_profile_publisher(
+        node.clone(),
+        node.roster.clone(),
+        names,
+        Duration::from_millis(200),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), reads.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let repaired = loop {
+        node.storage.database().maintenance_waker().notify();
+        tokio::select! {
+            _ = reads.recv() => break true,
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+        if start.elapsed() > Duration::from_secs(1) {
+            break false;
+        }
+    };
+    let elapsed = start.elapsed();
+    owner.abort();
+    let _ = owner.await;
+    assert!(
+        repaired,
+        "continuous irrelevant observations must not postpone repair"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(150),
+        "irrelevant maintenance observations must not query storage"
+    );
+}
+
+#[tokio::test]
+async fn profile_publisher_relay_policy_changes_publish_maintenance_observations() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = NodeRuntime::start(
+        root.path(),
+        "publisher-policy",
+        "Policy",
+        "pw",
+        0,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let changes = runtime
+        .node
+        .storage
+        .database()
+        .subscribe_maintenance_changes();
+    runtime.node.set_post_office_permissions(false, false);
+    let changed = changes.has_changed().unwrap();
+    runtime.stop().await;
+    assert!(
+        changed,
+        "actual relay policy change must wake independent publisher subscribers"
+    );
+}
+
+#[test]
+fn profile_publisher_semantic_input_retains_heartbeats_and_detects_actual_revival() {
+    use crate::discovery::roster::{PeerEndpoint, RouteSource};
+    let now = std::time::Instant::now();
+    let mut peer = fake_peer(false);
+    peer.routes.push(PeerEndpoint {
+        addr: peer.addr,
+        source: RouteSource::RoutedQuery,
+        last_seen: now,
+        last_authenticated: None,
+        presence_expires_at: Some(now + Duration::from_secs(10)),
+        presence_origin_expires_at: None,
+        origin_hops: None,
+        registration_origin: None,
+    });
+    let mut input = ProfilePublisherInput::default();
+    let scope = ProfilePublicationScope::default();
+    assert!(input.observe(std::slice::from_ref(&peer), scope, now));
+    // Refresh a lease before the original expires, then cross its old deadline.
+    peer.routes[0].presence_expires_at = Some(now + Duration::from_secs(20));
+    assert!(!input.observe(
+        std::slice::from_ref(&peer),
+        scope,
+        now + Duration::from_secs(5)
+    ));
+    assert!(!input.observe(
+        std::slice::from_ref(&peer),
+        scope,
+        now + Duration::from_secs(11)
+    ));
+    // Real expiry followed by new live evidence earns new work.
+    assert!(!input.observe(
+        std::slice::from_ref(&peer),
+        scope,
+        now + Duration::from_secs(21)
+    ));
+    peer.routes[0].presence_expires_at = Some(now + Duration::from_secs(40));
+    assert!(input.observe(
+        std::slice::from_ref(&peer),
+        scope,
+        now + Duration::from_secs(22)
+    ));
+    peer.public.x25519_pub[0] ^= 1;
+    assert!(input.observe(
+        std::slice::from_ref(&peer),
+        scope,
+        now + Duration::from_secs(22)
+    ));
+}
+
+#[tokio::test]
+async fn profile_publisher_read_failure_retries_without_dirty_wake_spin() {
+    let root = tempfile::tempdir().unwrap();
+    let (node, names) = profile_publisher_fixture(root.path());
+    let database = node.storage.database();
+    database
+        .read(|c| {
+            c.execute_batch(
+                "ALTER TABLE current_account_profile_headers RENAME TO unavailable_profile_headers",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (sent, mut reads) = tokio::sync::mpsc::unbounded_channel();
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+        if phase == "profile_publisher_read" {
+            let _ = sent.send(());
+        }
+    }));
+    let owner = tokio::spawn(run_profile_publisher(
+        node.clone(),
+        node.roster.clone(),
+        names,
+        Duration::from_secs(PROFILE_PUBLICATION_REPAIR_SECS),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), reads.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    database
+        .read(|c| {
+            c.execute_batch(
+                "ALTER TABLE unavailable_profile_headers RENAME TO current_account_profile_headers",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(200) {
+        database.maintenance_waker().notify();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let spun = reads.try_recv().is_ok();
+    let recovered = tokio::time::timeout(Duration::from_secs(6), reads.recv())
+        .await
+        .is_ok();
+    owner.abort();
+    let _ = owner.await;
+    assert!(
+        !spun,
+        "read failure owns cooldown independently of broad dirty wakes"
+    );
+    assert!(
+        recovered,
+        "unavailable storage must remain unfinished and retry after cooldown"
+    );
+}
+
+#[tokio::test]
+async fn profile_publisher_actual_futures_hold_capacity_and_release_queued_peers() {
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    use tokio::io::AsyncReadExt;
+    let root = tempfile::tempdir().unwrap();
+    let (node, names) = profile_publisher_fixture(root.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    *node.roster.lock().unwrap() = Roster::default();
+    for _ in 0..3 {
+        let proof = crate::discovery::Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Held",
+            port,
+        );
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    }
+    node.set_profile_display_name("Publisher").unwrap();
+    let owner = tokio::spawn(run_profile_publisher(
+        node.clone(),
+        node.roster.clone(),
+        names,
+        Duration::from_secs(PROFILE_PUBLICATION_REPAIR_SECS),
+    ));
+    let first = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let mut second = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let overbooked = tokio::time::timeout(Duration::from_millis(100), listener.accept())
+        .await
+        .is_ok();
+    drop(first);
+    let third = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
+    owner.abort();
+    let _ = owner.await;
+    let retired =
+        tokio::time::timeout(Duration::from_secs(1), second.read_to_end(&mut Vec::new())).await;
+    assert!(
+        !overbooked,
+        "two actual unfinished handshakes must retain both publication slots"
+    );
+    assert!(
+        third.is_ok(),
+        "completion must promptly admit the queued peer without waiting for repair"
+    );
+    assert!(
+        retired.is_ok(),
+        "retirement must drop the actual held connection"
+    );
+}
+
+#[tokio::test]
+async fn profile_publisher_avatar_source_reads_committed_value_without_roster_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let (node, names) = profile_publisher_fixture(root.path());
+    let (sent, mut revisions) = tokio::sync::mpsc::unbounded_channel();
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+        if let Some(revision) = phase.strip_prefix("profile_publisher_revision:") {
+            let _ = sent.send(revision.to_owned());
+        }
+    }));
+    let owner = tokio::spawn(run_profile_publisher(
+        node.clone(),
+        node.roster.clone(),
+        names,
+        Duration::from_secs(PROFILE_PUBLICATION_REPAIR_SECS),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), revisions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    node.set_avatar_if(Some(vec![1, 2, 3]), |commit| commit())
+        .await
+        .unwrap();
+    let expected = format!("{:?}", node.public_profile_revision().unwrap());
+    let observed = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(revision) = revisions.recv().await {
+            if revision == expected {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    owner.abort();
+    let _ = owner.await;
+    assert!(
+        observed.is_ok_and(|current| current),
+        "avatar source wake must read committed current value through profiles mutex fence"
+    );
+}
+
+#[test]
+fn profile_publisher_expired_queued_retry_waits_for_capacity_and_current_profile() {
+    let now = std::time::Instant::now() - Duration::from_secs(10);
+    let peer = fake_peer(false);
+    let id = peer.public.user_id();
+    let mut published = std::collections::HashMap::new();
+    profile_republish_targets(
+        &mut published,
+        &[peer],
+        1,
+        ProfilePublicationScope::default(),
+        now,
+    );
+    let owner = published[&id].owner.clone();
+    finish_profile_publication(&mut published, &id, &owner, false, now);
+    let due = published[&id].retry_at.unwrap();
+    assert!(
+        due < std::time::Instant::now(),
+        "fixture must contain an actually expired retry"
+    );
+    let repair = due + Duration::from_secs(PROFILE_PUBLICATION_REPAIR_SECS);
+    let in_flight = std::collections::HashSet::new();
+    for (revision, dirty, active) in [
+        (Some(1), false, MAX_PROFILE_PUBLICATIONS),
+        (None, false, 0),
+        (Some(1), true, 0),
+    ] {
+        let deadline =
+            pending_profile_retry_deadline(&published, &in_flight, revision, dirty, active)
+                .map_or(repair, |at| repair.min(at));
+        assert_eq!(
+            deadline, repair,
+            "expired queued work cannot wake a publisher unable to admit it: revision={revision:?} dirty={dirty} active={active}"
+        );
+    }
+    assert_eq!(
+        pending_profile_retry_deadline(
+            &published,
+            &in_flight,
+            Some(1),
+            false,
+            MAX_PROFILE_PUBLICATIONS - 1
+        ),
+        Some(due),
+        "released capacity must immediately reconsider overdue work"
+    );
+    let in_flight = std::collections::HashSet::from([id]);
+    assert_eq!(
+        pending_profile_retry_deadline(&published, &in_flight, Some(1), false, 1),
+        None,
+        "actual in-flight work must finish before it can retry"
+    );
+}
+
+#[tokio::test]
+async fn profile_publication_unchanged_relay_round_uses_quiet_deadline() {
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    use crate::postoffice::IndexedPostOffice;
+    use crate::storage::profile::ProfileStorageLease;
+    let root = tempfile::tempdir().unwrap();
+    let relay_root = tempfile::tempdir().unwrap();
+    let unreachable = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient = DeviceIdentity::generate();
+    let proof = crate::discovery::Announce::new_with_account(
+        &recipient,
+        &Account::generate(),
+        "Recipient",
+        unreachable.local_addr().unwrap().port(),
+    );
+    let (node, _, _) = crate::node::test_support::node_with_files(
+        root.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let direct_owner = tokio::spawn(async move {
+        loop {
+            let (stream, _) = unreachable.accept().await.unwrap();
+            drop(stream);
+        }
+    });
+    let relay = DeviceIdentity::generate();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_proof = crate::discovery::Announce::new_post_office_with_account(
+        &relay,
+        &Account::generate(),
+        "Relay",
+        listener.local_addr().unwrap().port(),
+    );
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&relay_proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    let office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_root.path()).unwrap(),
+        &relay_root.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    // The same indexed mailbox handler as the counted incremental fixtures,
+    // with a fault only at an actual authenticated protocol request boundary.
+    let fail_after = Arc::new(std::sync::atomic::AtomicIsize::new(-1));
+    let server_failure = fail_after.clone();
+    let relay_owner = tokio::spawn(async move {
+        let store = Mutex::new(office);
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let Ok(mut channel) = crate::transport::SecureChannel::accept(stream, &relay).await
+            else {
+                continue;
+            };
+            let budget = crate::node::session::RemoteHaveBudget::default();
+            let mut authorized = None;
+            while let Ok(bytes) = channel.recv().await {
+                // Warm publication scopes exchange only their existing legacy
+                // capability probe followed by modern delta metadata.
+                if !bytes.starts_with(b"MTOM1") {
+                    let left = server_failure.load(std::sync::atomic::Ordering::SeqCst);
+                    if left == 0 {
+                        server_failure.store(-1, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    if left > 0 {
+                        server_failure.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                if crate::node::session::mailbox::serve(
+                    &mut channel,
+                    &store,
+                    &bytes,
+                    &budget,
+                    &mut authorized,
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    });
+    node.set_bridge_discovery_enabled(true);
+    node.set_profile_display_name("Publisher").unwrap();
+    let peer = node
+        .profile_fanout_targets()
+        .into_iter()
+        .find(|p| p.public == recipient.public())
+        .unwrap();
+    let conversation = node
+        .prepare_current_profile_delivery(&peer)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        Box::pin(node.deliver_profile_observing(&peer, conversation)).await,
+        super::super::profile_io::ProfilePublicationOutcome::Complete
+    );
+    let second = Box::pin(node.deliver_profile_observing(&peer, conversation)).await;
+    assert_eq!(
+        second,
+        super::super::profile_io::ProfilePublicationOutcome::QualifiedQuiet
+    );
+    assert!(
+        !node.replicate_to_post_office(conversation).await.unwrap(),
+        "existing bool preserves selected-result semantics"
+    );
+    let now = std::time::Instant::now();
+    let mut published = std::collections::HashMap::new();
+    profile_republish_targets(
+        &mut published,
+        std::slice::from_ref(&peer),
+        1,
+        ProfilePublicationScope::default(),
+        now,
+    );
+    let uid = peer.public.user_id();
+    let owner = published[&uid].owner.clone();
+    finish_profile_publication(&mut published, &uid, &owner, second, now);
+    let (_, empty, _) = node
+        .replicate_profile_observing(conversation, Vec::new(), None, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        empty,
+        super::super::opaque_relay::PublicationObservation::Deferred
+    );
+    let other_recipient = DeviceIdentity::generate();
+    let (_, partial, _) = node
+        .replicate_profile_observing(
+            conversation,
+            vec![recipient.public(), other_recipient.public()],
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        partial,
+        super::super::opaque_relay::PublicationObservation::QualifiedUnchanged,
+        "a newly selected recipient scope cannot qualify as unchanged"
+    );
+    // Recipient one completes both required mailbox scopes; recipient two's
+    // first authenticated probe loses transport. No partial result is quiet.
+    fail_after.store(2, std::sync::atomic::Ordering::SeqCst);
+    let (selected, failed, _) = node
+        .replicate_profile_observing(
+            conversation,
+            vec![recipient.public(), other_recipient.public()],
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fail_after.load(std::sync::atomic::Ordering::SeqCst),
+        -1,
+        "the required recipient round must consume the injected transport closure"
+    );
+    assert!(!selected);
+    assert_eq!(
+        failed,
+        super::super::opaque_relay::PublicationObservation::Deferred
+    );
+    let observation = node.observe_profile_relay(conversation).await.unwrap();
+    assert_eq!(
+        observation.0,
+        super::super::opaque_relay::PublicationObservation::QualifiedUnchanged
+    );
+    node.set_post_office_permissions(false, false);
+    assert!(
+        !node.publication_proofs_current(&observation.1).unwrap(),
+        "permission revoked after captured proof cannot qualify"
+    );
+    node.set_post_office_permissions(true, true);
+    let observation = node.observe_profile_relay(conversation).await.unwrap();
+    node.set_profile_display_name("New source").unwrap();
+    node.prepare_current_profile_delivery(&peer)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !node.publication_proofs_current(&observation.1).unwrap(),
+        "a source change before the terminal report invalidates quiet"
+    );
+    node.set_post_office_permissions(false, false);
+    assert_eq!(
+        Box::pin(node.deliver_profile_observing(&peer, conversation)).await,
+        super::super::profile_io::ProfilePublicationOutcome::Retry
+    );
+    node.set_post_office_permissions(true, true);
+    relay_owner.abort();
+    let _ = relay_owner.await;
+    assert_eq!(
+        Box::pin(node.deliver_profile_observing(&peer, conversation)).await,
+        super::super::profile_io::ProfilePublicationOutcome::Retry,
+        "closed relay transport stays retryable"
+    );
+    *node.roster.lock().unwrap() = Roster::default();
+    assert_eq!(
+        node.observe_profile_relay(conversation).await.unwrap().0,
+        super::super::opaque_relay::PublicationObservation::Deferred,
+        "missing candidates never qualify"
+    );
+    direct_owner.abort();
+    let _ = direct_owner.await;
+    assert!(!published[&uid].complete);
+    assert_eq!(
+        published[&uid].retry_at,
+        Some(now + Duration::from_secs(300))
+    );
+    assert_eq!(published[&uid].failures, 0);
+}
+
+#[test]
+fn profile_publication_quiet_retains_recovery_and_rejects_stale_owner() {
+    use super::super::profile_io::ProfilePublicationOutcome::QualifiedQuiet;
+    let now = std::time::Instant::now();
+    let peer = fake_peer(false);
+    let uid = peer.public.user_id();
+    let scope = ProfilePublicationScope::default();
+    let mut published = std::collections::HashMap::new();
+    profile_republish_targets(&mut published, std::slice::from_ref(&peer), 1, scope, now);
+    let owner = published[&uid].owner.clone();
+    finish_profile_publication(&mut published, &uid, &owner, QualifiedQuiet, now);
+    assert!(!published[&uid].complete);
+    assert_eq!(published[&uid].failures, 0);
+    assert!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&peer),
+            1,
+            scope,
+            now + Duration::from_secs(299)
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        profile_republish_targets(
+            &mut published,
+            std::slice::from_ref(&peer),
+            1,
+            scope,
+            now + Duration::from_secs(300)
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        profile_republish_targets(&mut published, std::slice::from_ref(&peer), 2, scope, now).len(),
+        1
+    );
+    finish_profile_publication(&mut published, &uid, &owner, QualifiedQuiet, now);
+    assert_eq!(
+        published[&uid].retry_at, None,
+        "stale quiet cannot park the replacement"
+    );
 }

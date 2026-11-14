@@ -218,7 +218,15 @@ mod tests {
             mesh_talk_core::node::DEFAULT_DISCOVERY_PORT
         );
         assert!(!info.multicast_group.is_empty());
-        assert!(super::super::get_presence(state.clone()).await.unwrap()[&info.account_id].online);
+        assert_eq!(
+            serde_json::to_value(
+                super::super::get_presence(state.clone(), None)
+                    .await
+                    .unwrap()
+            )
+            .unwrap()[&info.account_id]["online"],
+            true
+        );
         rescan_peers(app.state::<AppState>(), state.clone())
             .await
             .unwrap();
@@ -273,7 +281,15 @@ mod tests {
                 .iter()
                 .any(|peer| peer.name == "Remote Diagnostics")
         );
-        assert!(super::super::get_presence(state.clone()).await.unwrap()[&remote_account].online);
+        assert_eq!(
+            serde_json::to_value(
+                super::super::get_presence(state.clone(), None)
+                    .await
+                    .unwrap()
+            )
+            .unwrap()[&remote_account]["online"],
+            true
+        );
 
         let node = managed.0.write().await.as_ref().unwrap().handle();
         let public = managed
@@ -296,8 +312,12 @@ mod tests {
             .create_channel("Accepted", vec![public, unbound])
             .await
             .unwrap();
-        let snapshot =
-            serde_json::to_value(super::super::get_presence(state.clone()).await.unwrap()).unwrap();
+        let snapshot = serde_json::to_value(
+            super::super::get_presence(state.clone(), None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let pending = &snapshot[hex::encode(pending_group.as_bytes())];
         assert_eq!(
             pending["member_count"], 1,
@@ -314,6 +334,119 @@ mod tests {
         assert_eq!(
             accepted["unbound_member_count"], 1,
             "an unbound device is never labeled a person"
+        );
+
+        // Read the real inventory explicitly: physical-group presence deliberately
+        // skips its inventory body. Maintenance must first publish the document.
+        // Observe actual caller-thread durable reads before testing matching tokens.
+        // This current-thread runtime executes the command projection synchronously;
+        // maintenance owns a separate blocking task and cannot pollute this counter.
+        let inventory_key = mesh_talk_core::node::AccountDocumentKey::GroupInventory {
+            channel: hex::encode(accepted_group.as_bytes()),
+            source_device: node.user_id(),
+        };
+        let initial_reads = node.test_group_inventory_body_read_count();
+        let full = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                node.account_document(&inventory_key).unwrap();
+                let snapshot = serde_json::to_value(
+                    super::super::get_presence(state.clone(), Some(String::new()))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                if node.test_group_inventory_body_read_count() > initial_reads {
+                    break snapshot;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("normal group publication must produce readable inventory");
+        assert!(
+            full["groups"]
+                .as_object()
+                .unwrap()
+                .contains_key(&hex::encode(accepted_group.as_bytes()))
+        );
+        let mut revision = full["groups_revision"].as_str().unwrap().to_owned();
+        let mut matched = 0;
+        for _ in 0..16 {
+            let reads = node.test_group_inventory_body_read_count();
+            let reply = serde_json::to_value(
+                super::super::get_presence(state.clone(), Some(revision.clone()))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let returned = reply["groups_revision"].as_str().unwrap();
+            if reply.get("groups").is_none() {
+                assert_eq!(returned, revision);
+                assert_eq!(
+                    node.test_group_inventory_body_read_count(),
+                    reads,
+                    "matching revision must skip all caller-thread durable inventory payload reads"
+                );
+                matched += 1;
+            } else {
+                // Parallel native fixtures may legitimately change the live roster.
+                assert_ne!(
+                    returned, revision,
+                    "full projection requires changed inputs"
+                );
+                revision = returned.to_owned();
+            }
+            assert!(
+                reply["people"][&info.account_id]["online"]
+                    .as_bool()
+                    .unwrap()
+            );
+            if matched == 3 {
+                break;
+            }
+        }
+        assert_eq!(
+            matched, 3,
+            "live inputs never allowed three matching-token reads"
+        );
+        let reads = node.test_group_inventory_body_read_count();
+        let repair = serde_json::to_value(
+            super::super::get_presence(state.clone(), Some(String::new()))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(repair.get("groups").is_some());
+        assert!(
+            repair["groups"]
+                .as_object()
+                .unwrap()
+                .contains_key(&hex::encode(accepted_group.as_bytes())),
+            "forced repair must return the current physical group projection"
+        );
+        assert_eq!(
+            node.test_group_inventory_body_read_count(),
+            reads,
+            "forced physical-group projection must not hydrate unused inventory"
+        );
+        // Explicit inventory consumers retain durable reads. Core inventory
+        // regressions separately reject missing/corrupt blobs after warming.
+        assert!(node.account_document(&inventory_key).unwrap().is_some());
+        assert!(
+            node.test_group_inventory_body_read_count() > reads,
+            "explicit inventory reads must still check the durable body"
+        );
+        node.set_account_display_name("Changed Diagnostics")
+            .unwrap();
+        let changed = serde_json::to_value(
+            super::super::get_presence(state.clone(), Some(revision))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            changed.get("groups").is_some(),
+            "profile changes invalidate the group projection hint"
         );
 
         for host in ["", "example.com/path", "host name", "127.0.0.1:47474"] {

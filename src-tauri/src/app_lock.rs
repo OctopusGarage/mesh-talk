@@ -371,8 +371,26 @@ pub(crate) async fn verify_session_identity(
         .map_err(CommandError::Authorization)
 }
 
+/// Cold saved-session verification has no live session lease yet. The caller
+/// revalidates its signed-out generation after this prompt and before login.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) async fn authenticate_startup(app: &AppState) -> Result<(), CommandError> {
+    #[cfg(test)]
+    {
+        let verifier = app.app_lock().0.lock().unwrap().identity_verifier.take();
+        verifier.map_or(Ok(()), |verify| verify())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = app;
+        authenticate_device_owner("restore your Mesh-Talk session").await
+    }
+}
+
 #[cfg(target_os = "macos")]
-async fn authenticate_device_owner(prompt_reason: &'static str) -> Result<(), CommandError> {
+pub(crate) async fn authenticate_device_owner(
+    prompt_reason: &'static str,
+) -> Result<(), CommandError> {
     tokio::task::spawn_blocking(move || {
         use block2::RcBlock;
         use objc2::runtime::Bool;
@@ -572,6 +590,7 @@ mod tests {
         assert!(allowed_while_locked("initial_presentation_ready"));
         assert!(!allowed_while_locked("account_history"));
         assert!(!allowed_while_locked("read_media"));
+        assert!(!allowed_while_locked("read_media_preview"));
         assert!(!allowed_while_locked("owner_enqueue_text"));
     }
 

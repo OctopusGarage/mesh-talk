@@ -16,8 +16,15 @@ impl Node {
             self.sessions.clear();
             self.clear_bridge_introductions();
         }
+        if !enabled {
+            self.opaque_upload_cache
+                .lock()
+                .expect("upload cache")
+                .clear_receive_repair_leases();
+        }
         if changed {
             self.post_office_receive_notify.notify_one();
+            self.storage.database().maintenance_waker().notify();
         }
         self.bridge_notify.notify_one();
         self.delivery_notify.notify_one();
@@ -38,6 +45,13 @@ impl Node {
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             self.sessions.clear();
             self.post_office_receive_notify.notify_one();
+            self.storage.database().maintenance_waker().notify();
+        }
+        if !receive {
+            self.opaque_upload_cache
+                .lock()
+                .expect("upload cache")
+                .clear_receive_repair_leases();
         }
         self.delivery_notify.notify_one();
     }

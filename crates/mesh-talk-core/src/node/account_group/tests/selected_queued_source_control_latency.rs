@@ -1,13 +1,78 @@
 //! A real short operation prefix leaves a queued suffix that cannot witness new demand.
 use super::selected_same_source_control_latency::{
     BTrace, ColdControlScope, ControlTestDispatch, ControlTestPages, record_b_trace,
-    record_control_frame, result_snapshot,
+    record_control_frame, result_snapshot, send_boundary_wake,
 };
 use super::*;
 use crate::node::account_documents::wire::DocumentRequest;
 use crate::node::account_sync_wire::AccountHistoryFrame;
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore, oneshot};
+
+/// A scope-complete event is historical until its actual page and any paired
+/// comparison retire. The original natural hold must start after this setup.
+#[derive(Default)]
+struct QueuedSetupComparison {
+    scope: ColdControlScope,
+    task: Option<tokio::task::Id>,
+    page_finished: bool,
+}
+
+impl QueuedSetupComparison {
+    fn observe(&mut self, phase: &str, task: Option<tokio::task::Id>) {
+        if phase.starts_with("control_task ") {
+            self.task = task;
+            self.page_finished = false;
+        } else if phase.starts_with("control_cancel ") {
+            self.page_finished = false;
+        }
+        if phase != "document_scope_settled scope=Control" || (task.is_some() && task == self.task)
+        {
+            self.scope.observe(phase, true);
+        }
+        if task.is_some()
+            && task == self.task
+            && phase.starts_with("page_end ")
+            && phase.contains("outcome=ok")
+        {
+            self.page_finished = true;
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.scope.ready() && self.page_finished
+    }
+}
+
+#[tokio::test]
+async fn queued_setup_retires_wake_replacement_before_arming_the_natural_hold() {
+    tokio::spawn(async {
+        let task = Some(tokio::task::id());
+        let mut comparison = QueuedSetupComparison::default();
+        comparison.observe("control_task paired=false protected=false ", task);
+        comparison.observe("document_scope_settled scope=Control", task);
+        assert!(
+            !comparison.ready(),
+            "scope completion still has an active page"
+        );
+        comparison.observe("control_cancel task=old reason=same_source", None);
+        comparison.observe("control_task paired=true protected=true ", task);
+        comparison.observe("document_scope_settled scope=Control", task);
+        comparison.observe("page_end outcome=ok", None);
+        assert!(!comparison.ready(), "a different task cannot finish setup");
+        comparison.observe("page_end outcome=ok", task);
+        assert!(
+            !comparison.ready(),
+            "the real Wake replacement still owes its pair"
+        );
+        comparison.observe("control_pair_retired", None);
+        assert!(comparison.ready());
+        comparison.observe("control_task paired=false protected=false ", task);
+        assert!(!comparison.ready(), "a new read invalidates old settlement");
+    })
+    .await
+    .unwrap();
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QueuedRecoverySnapshot {
@@ -138,8 +203,17 @@ fn record_setup_milestone(
     }
 }
 
+#[derive(Clone)]
+struct B2Publication {
+    started_at: std::time::Instant,
+    rows: Vec<crate::node::AccountDocumentMeta>,
+    continuation: crate::node::AccountDocumentKey,
+}
+
 #[derive(Default)]
 struct ProtectedBPageProgress {
+    request_task: Option<tokio::task::Id>,
+    partial_after: Option<crate::node::AccountDocumentKey>,
     server_task: Option<tokio::task::Id>,
     lifetime: std::sync::Weak<()>,
     nonce: [u8; 32],
@@ -675,55 +749,6 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             }
         }
     }
-    let mut servers = tokio::task::JoinSet::new();
-    for (target, listener) in listeners {
-        servers.spawn(async move {
-            Box::pin(target.run_accept_loop(listener)).await;
-        });
-    }
-    a.publish_account_group_access(&mut None);
-    b.publish_account_group_access(&mut None);
-    super::cold_account_control_setup(
-        super::observe_account_fixture_condition(|| {
-            [
-                (&reference, &a),
-                (&a, &reference),
-                (&reference, &b),
-                (&b, &reference),
-            ]
-            .into_iter()
-            .all(|(node, peer)| {
-                super::has_account_group_operation_support(
-                    node,
-                    peer,
-                    Some(AccountGroupOperationKind::Rename),
-                )
-            })
-        }),
-        async {
-            super::message_action_reference::pull_reference_action_control(
-                &reference,
-                &a,
-                endpoints[0],
-                group_a,
-            )
-            .await;
-            super::message_action_reference::pull_reference_action_control(
-                &reference,
-                &b,
-                endpoints[1],
-                group_b,
-            )
-            .await;
-        },
-    )
-    .await;
-    assert_eq!(
-        reference.account_group_access(group_b).unwrap().role,
-        AccountGroupRole::Owner
-    );
-    assert!(!reference.channel_can_manage(group_b).unwrap());
-
     let release = Arc::new(Semaphore::new(0));
     let _release = ReleaseQueuedReads(release.clone());
     let (first_tx, first_rx) = oneshot::channel();
@@ -734,6 +759,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let b_partial = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let paid_a_dispatch = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let b_page_progress = Arc::new(Mutex::new(ProtectedBPageProgress::default()));
+    let b2_publication = Arc::new(Mutex::new(None::<B2Publication>));
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saved_after = Arc::new(Mutex::new(None));
     let b_requests = Arc::new(Mutex::new(Vec::new()));
@@ -749,6 +775,13 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let setup_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
+    let setup_wake_observed = Arc::new(Mutex::new(None::<std::time::Instant>));
+    let setup_wake_min_revision = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let a_setup_comparison = Arc::new(Mutex::new(QueuedSetupComparison::default()));
+    let first_hold_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let first_rejections = Arc::new(Mutex::new([0_u64; 6]));
+    let setup_wake_ready = Arc::new(Semaphore::new(0));
+    let _release_setup_wake = ReleaseQueuedReads(setup_wake_ready.clone());
     let preparation_read = Arc::new(PreparationReadGate::default());
     let _release_preparation_read = ReleasePreparationRead(preparation_read.clone());
     // Independent bounded owner rings keep frequent requester maintenance from
@@ -759,7 +792,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let operation = Arc::new(Mutex::new(None));
     let pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let demand_dispatch = Arc::new(Mutex::new(None));
-    let b_readiness = Arc::new(Mutex::new(ColdControlScope::default()));
+    let b_readiness = Arc::new(Mutex::new(QueuedSetupComparison::default()));
     let first_foreground = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let foreground_after = Arc::new(Mutex::new(None::<crate::node::AccountDocumentKey>));
     let release_intent = Arc::new(Semaphore::new(0));
@@ -855,7 +888,14 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         }
     }));
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let b2_publication = b2_publication.clone();
+        let b_page_progress = b_page_progress.clone();
+        let source = Arc::downgrade(&b);
+        let requester = Arc::downgrade(&reference);
         let peer_a = a.identity.public();
+        let setup_wake_observed = setup_wake_observed.clone();
+        let setup_wake_min_revision = setup_wake_min_revision.clone();
+        let a_setup_comparison = a_setup_comparison.clone();
         let peer_b = b.identity.public();
         let own = reference.identity.public();
         let local_maintenance = local_maintenance.clone();
@@ -880,6 +920,36 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let setup_trace = setup_trace.clone();
         let first_held_task = first_held_task.clone();
         move |peer, phase| {
+            if peer == peer_a {
+                if phase.starts_with("wake_received ")
+                    || phase.starts_with("control_task ")
+                    || phase.starts_with("control_cancel ")
+                    || phase.starts_with("document_scope_")
+                    || phase.starts_with("page_end ")
+                    || phase == "control_pair_retired"
+                {
+                    record_b_trace(&setup_trace, clock, "requester_to_A", phase.clone());
+                }
+                if let Some(revision) = phase
+                    .strip_prefix("wake_received revision=")
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    let minimum =
+                        setup_wake_min_revision.load(std::sync::atomic::Ordering::Acquire);
+                    if minimum > 0 && revision >= minimum {
+                        setup_wake_observed
+                            .lock()
+                            .unwrap()
+                            .get_or_insert_with(std::time::Instant::now);
+                    }
+                }
+                if setup_wake_observed.lock().unwrap().is_some() {
+                    a_setup_comparison
+                        .lock()
+                        .unwrap()
+                        .observe(&phase, tokio::task::try_id());
+                }
+            }
             let held_task = *first_held_task.lock().unwrap();
             if peer == peer_a
                 && let Some(task) = held_task
@@ -930,7 +1000,18 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                     .get_or_insert(page.dispatched_at);
             }
             if peer == peer_b {
-                b_readiness.lock().unwrap().observe(&phase, true);
+                b_readiness
+                    .lock()
+                    .unwrap()
+                    .observe(&phase, tokio::task::try_id());
+                if phase.starts_with("control_task ")
+                    || phase.starts_with("control_cancel ")
+                    || phase.starts_with("document_scope_")
+                    || phase.starts_with("page_end ")
+                    || phase == "control_pair_retired"
+                {
+                    record_b_trace(&setup_trace, clock, "requester_to_B", phase.clone());
+                }
             }
             if gate_terminal && peer == peer_b {
                 if phase.starts_with("control_task ")
@@ -1000,24 +1081,46 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                 rows.push(phase.clone());
             }
             if peer == peer_b
-                && phase.starts_with("page_end")
+                && phase.starts_with("page_end ")
+                && phase.contains("outcome=ok")
                 && phase.contains("pending=true after=true")
             {
-                if let Some(page) = pages.lock().unwrap().task(tokio::task::id()) {
-                    record_setup_milestone(
-                        &setup_trace,
-                        clock,
-                        "first_B_partial",
-                        format!(
-                            "task={:?} nonce={} request_checkpoint={:?} origin={} validated={phase}",
-                            page.task,
-                            hex::encode(page.request.operation.as_ref().unwrap().nonce),
-                            effective_after(&page.request),
-                            page.origin
-                        ),
-                    );
+                let publication = b2_publication.lock().unwrap().clone();
+                let page = pages.lock().unwrap().task(tokio::task::id());
+                if let (Some(publication), Some(page), Some(source), Some(requester)) =
+                    (publication, page, source.upgrade(), requester.upgrade())
+                {
+                    let candidate_validated = {
+                        let progress = b_page_progress.lock().unwrap();
+                        progress.request_task == Some(page.task)
+                            && page
+                                .request
+                                .operation
+                                .as_ref()
+                                .is_some_and(|probe| probe.nonce == progress.nonce)
+                            && progress.lifetime.strong_count() > 0
+                            && progress.complete_attempted
+                            && progress.partial_after.as_ref() == Some(&publication.continuation)
+                    };
+                    let corpus_current = publication.rows.iter().all(|meta| {
+                        source.account_document_meta(&meta.key).as_ref() == Some(meta)
+                            && requester.account_document_meta(&meta.key).is_none()
+                    });
+                    if candidate_validated && corpus_current {
+                        record_setup_milestone(
+                            &setup_trace,
+                            clock,
+                            "first_B2_partial",
+                            format!(
+                                "task={:?} nonce={} continuation={:?} validated={phase}",
+                                page.task,
+                                hex::encode(page.request.operation.as_ref().unwrap().nonce),
+                                publication.continuation
+                            ),
+                        );
+                        b_partial.store(true, std::sync::atomic::Ordering::Release);
+                    }
                 }
-                b_partial.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             if peer == peer_b
                 && phase == "control_pair_retired"
@@ -1028,6 +1131,69 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             }
         }
     }));
+    // Retain the complete production hosts, including public channel recovery.
+    // Readiness observers precede startup; exact current comparisons and their
+    // real child retirement must finish before the natural A hold is armed.
+    let mut servers = tokio::task::JoinSet::new();
+    for (target, listener) in listeners {
+        servers.spawn(async move {
+            Box::pin(target.run_accept_loop(listener)).await;
+        });
+    }
+    a.publish_account_group_access(&mut None);
+    b.publish_account_group_access(&mut None);
+    {
+        let reference = reference.clone();
+        let a = a.clone();
+        let b = b.clone();
+        // The real control observer records Tokio task identity. Keep explicit
+        // bootstrap inside an awaited task, like the autonomous readers.
+        tokio::spawn(async move {
+            super::cold_account_control_setup(
+                super::observe_account_fixture_condition(|| {
+                    [
+                        (&reference, &a),
+                        (&a, &reference),
+                        (&reference, &b),
+                        (&b, &reference),
+                    ]
+                    .into_iter()
+                    .all(|(node, peer)| {
+                        super::has_account_group_operation_support(
+                            node,
+                            peer,
+                            Some(AccountGroupOperationKind::Rename),
+                        )
+                    })
+                }),
+                async {
+                    super::message_action_reference::pull_reference_action_control(
+                        &reference,
+                        &a,
+                        endpoints[0],
+                        group_a,
+                    )
+                    .await;
+                    super::message_action_reference::pull_reference_action_control(
+                        &reference,
+                        &b,
+                        endpoints[1],
+                        group_b,
+                    )
+                    .await;
+                },
+            )
+            .await;
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        reference.account_group_access(group_b).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    assert!(!reference.channel_can_manage(group_b).unwrap());
+
     *reference.account_document_read_test_hook.lock().unwrap() = Some(Arc::new({
         let exact = a.identity.public();
         let gate = preparation_read.clone();
@@ -1064,6 +1230,10 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     *a.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let paid_a_dispatch = paid_a_dispatch.clone();
         let expected = reference.identity.public();
+        let setup_wake_ready = setup_wake_ready.clone();
+        let setup_wake_observed = setup_wake_observed.clone();
+        let first_hold_armed = first_hold_armed.clone();
+        let first_rejections = first_rejections.clone();
         let release = release.clone();
         let first_tx = first_tx.clone();
         let resume_tx = resume_tx.clone();
@@ -1078,6 +1248,10 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         move |peer, frame| {
             let paid_a_dispatch = paid_a_dispatch.clone();
             let expected = expected.clone();
+            let setup_wake_ready = setup_wake_ready.clone();
+            let setup_wake_observed = setup_wake_observed.clone();
+            let first_hold_armed = first_hold_armed.clone();
+            let first_rejections = first_rejections.clone();
             let release = release.clone();
             let first_tx = first_tx.clone();
             let resume_tx = resume_tx.clone();
@@ -1115,19 +1289,51 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                     decided: false,
                 };
                 let first_pending = first_tx.lock().unwrap().is_some();
-                if first_pending
-                    && (!b_readiness.lock().unwrap().ready()
-                        || !pages.lock().unwrap().request(&request).is_some_and(|page| {
-                            page.dispatch()
-                                .is_some_and(|dispatch| !dispatch.paired && !dispatch.protected)
-                        }))
-                {
-                    return;
+                if first_pending {
+                    let rejected = if !first_hold_armed.load(std::sync::atomic::Ordering::Acquire) {
+                        Some(0)
+                    } else if !b_readiness.lock().unwrap().ready() {
+                        Some(1)
+                    } else if !pages.lock().unwrap().request(&request).is_some_and(|page| {
+                        page.dispatch()
+                            .is_some_and(|dispatch| !dispatch.paired && !dispatch.protected)
+                    }) {
+                        Some(2)
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = rejected {
+                        let mut counts = first_rejections.lock().unwrap();
+                        counts[reason] = counts[reason].saturating_add(1);
+                        return;
+                    }
                 }
+                // Only the initial qualified unpaired read waits for setup
+                // WakeAck. Paired/protected cold reads must finish above so B
+                // can become ready and the setup sender can deliver that Wake.
+                if first_pending {
+                    let _ = setup_wake_ready.acquire().await;
+                }
+                // Re-resolve after the wait: a pre-Wake child may have retired
+                // while the authenticated change was being processed.
                 let Some(page) = pages.lock().unwrap().live_request(&request) else {
+                    let mut counts = first_rejections.lock().unwrap();
+                    counts[3] = counts[3].saturating_add(1);
                     return;
                 };
+                if first_pending
+                    && !setup_wake_observed
+                        .lock()
+                        .unwrap()
+                        .is_some_and(|at| page.dispatched_at >= at)
+                {
+                    let mut counts = first_rejections.lock().unwrap();
+                    counts[4] = counts[4].saturating_add(1);
+                    return;
+                }
                 let Some(dispatch) = page.dispatch() else {
+                    let mut counts = first_rejections.lock().unwrap();
+                    counts[5] = counts[5].saturating_add(1);
                     return;
                 };
                 {
@@ -1165,7 +1371,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                     read_decision.decide(true);
                     let _ = first.send((page.task, lifetime));
                     let _ = release.acquire().await;
-                } else if b_partial.load(std::sync::atomic::Ordering::Relaxed)
+                } else if b_partial.load(std::sync::atomic::Ordering::Acquire)
                     && queued_background_resume(
                         dispatch,
                         *paid_a_dispatch.lock().unwrap() == Some(page.task),
@@ -1192,6 +1398,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         }
     }));
     *b.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let b2_publication = b2_publication.clone();
+        let requester = Arc::downgrade(&reference);
         let expected = reference.identity.public();
         let admitted = admitted.clone();
         let saved_after = saved_after.clone();
@@ -1225,6 +1433,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             let demand_dispatch = demand_dispatch.clone();
             let intent_entered = intent_entered.clone();
             let b_page_progress = b_page_progress.clone();
+            let b2_publication = b2_publication.clone();
+            let requester = requester.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
@@ -1243,14 +1453,33 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                                 .and_then(|request| {
                                     let observed = pages.lock().unwrap();
                                     let page = observed.live_request(&request)?;
-                                    if !page.dispatch()?.protected {
+                                    if !page.dispatch()?.protected
+                                        || effective_after(&request).is_some()
+                                    {
                                         return None;
                                     }
-                                    Some((request.operation?.nonce, observed.lifetime(page.task)?))
+                                    let lifetime = observed.lifetime(page.task)?;
+                                    drop(observed);
+                                    let publication = b2_publication.lock().unwrap().clone()?;
+                                    let source = source.upgrade()?;
+                                    let requester = requester.upgrade()?;
+                                    if page.dispatched_at < publication.started_at
+                                        || !publication.rows.iter().all(|meta| {
+                                            source.account_document_meta(&meta.key).as_ref()
+                                                == Some(meta)
+                                                && requester
+                                                    .account_document_meta(&meta.key)
+                                                    .is_none()
+                                        })
+                                    {
+                                        return None;
+                                    }
+                                    Some((page.task, request.operation?.nonce, lifetime))
                                 });
                             let mut progress = b_page_progress.lock().unwrap();
-                            if let Some((nonce, lifetime)) = candidate {
+                            if let Some((request_task, nonce, lifetime)) = candidate {
                                 *progress = ProtectedBPageProgress {
+                                    request_task: Some(request_task),
                                     server_task,
                                     lifetime,
                                     nonce,
@@ -1279,14 +1508,16 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                             }
                         }
                         AccountHistoryFrame::DocumentsComplete { body } => {
-                            let nonce = serde_json::from_slice::<serde_json::Value>(body)
-                                .ok()
-                                .and_then(|value| {
-                                    serde_json::from_value::<[u8; 32]>(
-                                        value["operation"]["nonce"].clone(),
-                                    )
-                                    .ok()
-                                });
+                            let value: serde_json::Value = serde_json::from_slice(body).unwrap();
+                            let nonce = serde_json::from_value::<[u8; 32]>(
+                                value["operation"]["nonce"].clone(),
+                            )
+                            .ok();
+                            let after = serde_json::from_value::<crate::node::AccountDocumentKey>(
+                                value["next"].clone(),
+                            )
+                            .ok();
+                            let publication = b2_publication.lock().unwrap().clone();
                             let mut progress = b_page_progress.lock().unwrap();
                             if server_task.is_some()
                                 && progress.server_task == server_task
@@ -1294,6 +1525,14 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                             {
                                 progress.complete_attempted = true;
                                 progress.last_elapsed_ms = Some(clock.elapsed().as_millis());
+                                if value["domain"] == "group_control"
+                                    && publication.as_ref().is_some_and(|publication| {
+                                        after.as_ref() == Some(&publication.continuation)
+                                    })
+                                {
+                                    progress.partial_after = after.clone();
+                                    *saved_after.lock().unwrap() = after;
+                                }
                             }
                         }
                         _ => {}
@@ -1348,19 +1587,6 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                     }
                 }
                 match frame {
-                    AccountHistoryFrame::DocumentsComplete { body }
-                        if !admitted.load(std::sync::atomic::Ordering::Relaxed) =>
-                    {
-                        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                        if value["domain"] == "group_control" && !value["next"].is_null() {
-                            let key: crate::node::AccountDocumentKey =
-                                serde_json::from_value(value["next"].clone()).unwrap();
-                            if matches!(key, crate::node::AccountDocumentKey::GroupOperation { .. })
-                            {
-                                *saved_after.lock().unwrap() = Some(key);
-                            }
-                        }
-                    }
                     AccountHistoryFrame::DocumentsRequest { body } => {
                         if let Some(request) = DocumentRequest::decode(&body)
                             .filter(|request| request.domain == AccountDocumentDomain::GroupControl)
@@ -1386,23 +1612,83 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             })
         }
     }));
-    reference.account_sync_notify.notify_one();
-    let (first_task, first_task_lifetime) = super::cold_account_setup(first_rx)
+    let (first_task, first_task_lifetime) = super::cold_account_setup(async {
+        // A real setup Wake may replace an active natural comparison. Let
+        // that exact signed comparison and its pair finish while the hold is
+        // unarmed, then open the original through receiver-owned demand only.
+        let key = crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+            &a,
+            ConversationId::new([67; 32]),
+        );
+        let (_, revision) = a.account_wake_token_for_test();
+        setup_wake_min_revision.store(revision.checked_add(1).unwrap(), std::sync::atomic::Ordering::Release);
+        a.note_account_local_change();
+        send_boundary_wake(&a, &reference).await;
+        reference.request_sibling_pull_for_test(&b.identity.public());
+        reference.request_sibling_pull_for_test(&a.identity.public());
+        let padding_key = crate::node::AccountDocumentKey::GroupOperation {
+            channel: hex::encode(padding_group.as_bytes()),
+            source_device: b.user_id(),
+        };
+        loop {
+            let a_ready = a_setup_comparison.lock().unwrap().ready();
+            let b_ready = b_readiness.lock().unwrap().ready();
+            let b_inputs_current = b.account_document_meta(&padding_key).is_some_and(|meta| {
+                reference.account_document_meta(&padding_key).as_ref() == Some(&meta)
+                    && reference.operation_input_consumed_for_test(&meta)
+            });
+            if a_ready && b_ready && b_inputs_current && reference.account_document_meta(&key) == a.account_document_meta(&key) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        setup_wake_ready.close();
+        first_hold_armed.store(true, std::sync::atomic::Ordering::Release);
+        reference.request_sibling_pull_for_test(&a.identity.public());
+        first_rx.await
+    })
         .await
         .unwrap_or_else(|error| {
             let ready = b_readiness.lock().unwrap().ready();
             let observed = pages.lock().unwrap().summary();
-            panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={ready} B_partial={}; pages={observed:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
+            let setup = setup_trace.lock().unwrap().clone();
+            let wake = *setup_wake_observed.lock().unwrap();
+            let (a_task, a_page_finished, a_ready) = {
+                let comparison = a_setup_comparison.lock().unwrap();
+                (comparison.task, comparison.page_finished, comparison.ready())
+            };
+            panic!("natural A read must precede real B publication: {error:?}; A_wake={wake:?} A_task={a_task:?} A_page_finished={a_page_finished}; B_unpaired_settled={ready} B_partial={}; A_setup_ready={}; armed={}; rejected_unarmed_B_unready_ineligible_not_live_pre_wake_missing_dispatch={:?}; pages={observed:?}; setup={setup:?}", b_partial.load(std::sync::atomic::Ordering::Acquire), a_ready, first_hold_armed.load(std::sync::atomic::Ordering::Acquire), *first_rejections.lock().unwrap());
         })
         .unwrap();
     let first_active = pages.lock().unwrap().is_active(first_task);
     assert!(
-        first_active,
+        first_active && first_task_lifetime.strong_count() > 0,
         "the exact natural A hold must remain live at canonical B publication"
     );
     let keys = super::cold_account_setup(async {
         record_setup_milestone(&setup_trace, clock, "B2_publication_begin", format!("first_A_task={first_task:?}"));
-        let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 2);
+        let publication_phase = b2_publication.lock().unwrap().as_ref().map(|publication| publication.started_at);
+        let partial_candidate = {
+            let progress = b_page_progress.lock().unwrap();
+            (progress.request_task, progress.partial_after.clone(), progress.complete_attempted)
+        };
+        assert!(publication_phase.is_none() && !b_partial.load(std::sync::atomic::Ordering::Acquire),
+            "startup cannot certify the later B2 partial page: publication_phase={publication_phase:?} candidate_task_after_complete={partial_candidate:?}");
+        // Pin the real publication before its owning notifier wakes readers.
+        let keys = crate::node::account_documents::sync::publish_legacy_control_page_before_notify_for_test(&b, 2, |keys| {
+            let rows = keys.iter().map(|key| {
+                assert!(reference.account_document_meta(key).is_none());
+                b.account_document_meta(key).unwrap()
+            }).collect();
+            *b2_publication.lock().unwrap() = Some(B2Publication {
+                started_at: std::time::Instant::now(),
+                rows,
+                continuation: crate::node::AccountDocumentKey::GroupOperation {
+                    channel: hex::encode(padding_group.as_bytes()),
+                    source_device: b.user_id(),
+                },
+            });
+        });
         // Keep the actual child's Weak separately from the bounded history;
         // never retain a strong Arc or accept retirement as a live hold.
         let (ledger_active, origin_retained) = {

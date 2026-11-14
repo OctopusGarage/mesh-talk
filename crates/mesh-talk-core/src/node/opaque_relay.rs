@@ -1,5 +1,7 @@
 //! Recipient-encrypted event-log projection for an opaque relay mailbox.
 
+pub(in crate::node) mod incremental;
+
 use super::*;
 use crate::eventlog::store::EventLog;
 use crate::eventlog::sync::SyncStore;
@@ -7,7 +9,7 @@ use crate::eventlog::{AppendOutcome, ConversationId, Event, EventId, EventKind, 
 use crate::identity::device::PublicIdentity;
 use crate::postoffice::opaque::RelayMailbox;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Mutex, atomic::Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 // IDs only, scoped to one mailbox operation. Exhaustion ends that operation;
@@ -181,6 +183,43 @@ impl SyncStore for OpaqueRoundStore<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) enum PublicationObservation {
+    SelectedResults,
+    QualifiedUnchanged,
+    Deferred,
+}
+pub(in crate::node) struct PublicationProof {
+    recipient: PublicIdentity,
+    relay: PublicIdentity,
+    conversation: ConversationId,
+    controls: incremental::QuietControlProof,
+    local: super::privacy_sync::HistorySyncStamp,
+    privacy: u64,
+    bridge: u64,
+    federated: bool,
+}
+struct PublicationRound {
+    selected: Vec<(EventId, EventId)>,
+    quiet: bool,
+    proofs: Vec<PublicationProof>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MailboxIntent {
+    Duplex,
+    HistoryPublication,
+    FileDispatch,
+}
+
+/// Transport progress is separate from retained event custody. Semantic
+/// completion survives restart only after its owning durable fact is proved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessedWrapper {
+    Retained(EventId),
+    DurableSemantic,
+    SessionOnly,
+}
+
 /// One mailbox projection retained only between complete protocol exchanges.
 /// Cancellation requires discarding this state together with its channel.
 /// Retains principal-bound IDs and a two-MiB wrapper cache. Outgoing pages are
@@ -188,6 +227,7 @@ impl SyncStore for OpaqueRoundStore<'_> {
 /// wrapper is generated for its ID and again only when its upload page misses
 /// the bounded cache; ordinary streamed transfer therefore performs O(N) wraps.
 pub(in crate::node) struct OpaqueMailboxProgress {
+    intent: MailboxIntent,
     mailbox: RelayMailbox,
     recipient: PublicIdentity,
     relay: PublicIdentity,
@@ -197,9 +237,13 @@ pub(in crate::node) struct OpaqueMailboxProgress {
     sync: super::session::SyncProgress,
     uploaded: Vec<(EventId, EventId)>,
     deferred_events: HashSet<EventId>,
-    processed_events: HashMap<EventId, Option<EventId>>,
+    missing_parents: Option<(EventId, Vec<EventId>)>,
+    required_parent: Option<EventId>,
+    processed_events: HashMap<EventId, ProcessedWrapper>,
     wrapper_ids: HashMap<EventId, EventId>,
     wrappers: Mutex<WrapperCache>,
+    incremental: incremental::Mode,
+    uninvited_channels: super::privacy_sync::UninvitedChannelStaging,
 }
 
 impl OpaqueMailboxProgress {
@@ -210,6 +254,7 @@ impl OpaqueMailboxProgress {
         mailbox: RelayMailbox,
     ) -> Self {
         Self {
+            intent: MailboxIntent::Duplex,
             mailbox,
             recipient: recipient.clone(),
             relay: relay.clone(),
@@ -219,10 +264,40 @@ impl OpaqueMailboxProgress {
             sync: super::session::SyncProgress::default(),
             uploaded: Vec::new(),
             deferred_events: HashSet::new(),
+            missing_parents: None,
+            required_parent: None,
             processed_events: HashMap::new(),
             wrapper_ids: HashMap::new(),
             wrappers: Mutex::new(WrapperCache::default()),
+            incremental: incremental::Mode::default(),
+            uninvited_channels: super::privacy_sync::UninvitedChannelStaging::new(relay),
         }
+    }
+
+    /// Publish one conversation without duplicating the dedicated inbox drain.
+    /// Legacy endpoints retain their existing duplex compatibility exchange.
+    pub(in crate::node) fn new_history_publication(
+        relay: &PublicIdentity,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+        mailbox: RelayMailbox,
+    ) -> Self {
+        let mut progress = Self::new(relay, recipient, Some(conversation), mailbox);
+        progress.intent = MailboxIntent::HistoryPublication;
+        progress
+    }
+
+    /// A genuine queued file request owns whole-file dispatch recovery. Its
+    /// source watermark must not alias archival publication or inbox progress.
+    pub(in crate::node) fn new_file_dispatch(
+        relay: &PublicIdentity,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+        mailbox: RelayMailbox,
+    ) -> Self {
+        let mut progress = Self::new(relay, recipient, Some(conversation), mailbox);
+        progress.intent = MailboxIntent::FileDispatch;
+        progress
     }
 
     pub(in crate::node) fn uploaded(&self) -> &[(EventId, EventId)] {
@@ -240,6 +315,31 @@ impl OpaqueMailboxProgress {
     }
 }
 
+struct SelectedOpaqueControl {
+    id: EventId,
+    kind: SelectedOpaqueControlKind,
+}
+
+enum SelectedOpaqueControlKind {
+    Identity(Vec<(ConversationId, EventId)>),
+    Consent(ConversationId, EventId),
+}
+
+impl SelectedOpaqueControl {
+    fn from_event(event: &Event) -> Result<Self, LogError> {
+        let kind = if super::file_message_identity::is_bundle(event) {
+            SelectedOpaqueControlKind::Identity(super::file_message_identity::bundle_references(
+                event,
+            ))
+        } else {
+            let decision = super::file_consent::Decision::open(event)
+                .ok_or_else(|| LogError::Serialization("invalid selected opaque control".into()))?;
+            SelectedOpaqueControlKind::Consent(decision.file, decision.manifest)
+        };
+        Ok(Self { id: event.id, kind })
+    }
+}
+
 impl Node {
     /// Reconcile one pairwise mailbox, uploading only events authorized for
     /// `recipient`. Every event returned by the relay is decrypted and passed
@@ -253,27 +353,197 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        self.opaque_relay_round_for(channel, recipient, conversation, None)
+            .await
+    }
+
+    pub(in crate::node) async fn opaque_relay_round_for<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        confirm: Option<EventId>,
+    ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.opaque_relay_round_with_intent(
+            channel,
+            recipient,
+            conversation,
+            confirm,
+            MailboxIntent::Duplex,
+        )
+        .await
+    }
+
+    /// Publish history without making every outgoing scope drain the same inbox.
+    pub(in crate::node) async fn opaque_history_publication_round_for<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+        confirm: Option<EventId>,
+    ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        if !self.relay_send_allowed(channel.peer_identity()) {
+            return Ok(Vec::new());
+        }
+        self.opaque_relay_round_with_intent(
+            channel,
+            recipient,
+            Some(conversation),
+            confirm,
+            MailboxIntent::HistoryPublication,
+        )
+        .await
+    }
+
+    pub(in crate::node) fn publication_proofs_current(
+        &self,
+        proofs: &[PublicationProof],
+    ) -> Result<bool, super::session::SessionError> {
+        for proof in proofs {
+            if !self.relay_send_allowed(&proof.relay)
+                || self.privacy.generation.load(Ordering::SeqCst) != proof.privacy
+                || self.bridge_generation.load(Ordering::SeqCst) != proof.bridge
+                || (proof.federated && !self.bridge_directory_allowed())
+            {
+                return Ok(false);
+            }
+            if !self.quiet_control_proof_current(&proof.controls, &proof.recipient)? {
+                return Ok(false);
+            }
+            let current = self
+                .sync_store(&proof.recipient)
+                .lock()
+                .expect("projection")
+                .history_sync_stamp(&proof.conversation)?;
+            if current.as_ref() != Some(&proof.local) {
+                return Ok(false);
+            }
+        }
+        Ok(!proofs.is_empty())
+    }
+
+    pub(in crate::node) async fn observe_history_publication<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+    ) -> Result<
+        (
+            Vec<(EventId, EventId)>,
+            PublicationObservation,
+            Vec<PublicationProof>,
+        ),
+        super::session::SessionError,
+    >
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        let result = self
+            .opaque_relay_round_with_intent_observing(
+                channel,
+                recipient,
+                Some(conversation),
+                None,
+                MailboxIntent::HistoryPublication,
+                true,
+            )
+            .await?;
+        let observation = if !result.selected.is_empty() {
+            PublicationObservation::SelectedResults
+        } else if result.quiet {
+            PublicationObservation::QualifiedUnchanged
+        } else {
+            PublicationObservation::Deferred
+        };
+        Ok((result.selected, observation, result.proofs))
+    }
+
+    async fn opaque_relay_round_with_intent<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        confirm: Option<EventId>,
+        intent: MailboxIntent,
+    ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        Ok(self
+            .opaque_relay_round_with_intent_observing(
+                channel,
+                recipient,
+                conversation,
+                confirm,
+                intent,
+                false,
+            )
+            .await?
+            .selected)
+    }
+
+    async fn opaque_relay_round_with_intent_observing<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        confirm: Option<EventId>,
+        intent: MailboxIntent,
+        observe: bool,
+    ) -> Result<PublicationRound, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         if !self.relay_send_allowed(channel.peer_identity())
             && !self.relay_receive_allowed(channel.peer_identity())
         {
-            return Ok(Vec::new());
+            return Ok(PublicationRound {
+                selected: Vec::new(),
+                quiet: false,
+                proofs: Vec::new(),
+            });
         }
         let legacy = RelayMailbox::new(&self.identity, recipient, channel.peer_identity())
             .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
         let mut uploaded = self
-            .opaque_mailbox_round(channel, recipient, conversation, legacy)
+            .opaque_mailbox_round_confirmed_observing(
+                channel,
+                recipient,
+                conversation,
+                legacy,
+                confirm,
+                intent,
+                observe,
+            )
             .await?;
         if self.bridge_directory_allowed() {
             let federated = RelayMailbox::federated(&self.identity, recipient)
                 .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
-            uploaded.extend(
-                self.opaque_mailbox_round(channel, recipient, conversation, federated)
-                    .await?,
-            );
+            let next = self
+                .opaque_mailbox_round_confirmed_observing(
+                    channel,
+                    recipient,
+                    conversation,
+                    federated,
+                    confirm,
+                    intent,
+                    observe,
+                )
+                .await?;
+            uploaded.quiet &= next.quiet;
+            uploaded.selected.extend(next.selected);
+            uploaded.proofs.extend(next.proofs);
         }
         Ok(uploaded)
     }
 
+    #[cfg(test)]
     async fn opaque_mailbox_round<IO>(
         &self,
         channel: &mut crate::transport::SecureChannel<IO>,
@@ -284,10 +554,172 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
-        let mut progress =
-            OpaqueMailboxProgress::new(channel.peer_identity(), recipient, conversation, mailbox);
+        self.opaque_mailbox_round_confirmed(
+            channel,
+            recipient,
+            conversation,
+            mailbox,
+            None,
+            MailboxIntent::Duplex,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn opaque_mailbox_round_confirmed<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        mailbox: RelayMailbox,
+        confirm: Option<EventId>,
+        intent: MailboxIntent,
+    ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        Ok(self
+            .opaque_mailbox_round_confirmed_observing(
+                channel,
+                recipient,
+                conversation,
+                mailbox,
+                confirm,
+                intent,
+                false,
+            )
+            .await?
+            .selected)
+    }
+
+    async fn opaque_mailbox_round_confirmed_observing<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        mailbox: RelayMailbox,
+        confirm: Option<EventId>,
+        intent: MailboxIntent,
+        observe: bool,
+    ) -> Result<PublicationRound, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        let privacy = self.privacy.generation.load(Ordering::SeqCst);
+        let bridge = self.bridge_generation.load(Ordering::SeqCst);
+        let mut progress = match intent {
+            MailboxIntent::Duplex => OpaqueMailboxProgress::new(
+                channel.peer_identity(),
+                recipient,
+                conversation,
+                mailbox,
+            ),
+            MailboxIntent::HistoryPublication => OpaqueMailboxProgress::new_history_publication(
+                channel.peer_identity(),
+                recipient,
+                conversation.ok_or(super::session::SessionError::UnexpectedMessage)?,
+                mailbox,
+            ),
+            MailboxIntent::FileDispatch => OpaqueMailboxProgress::new_file_dispatch(
+                channel.peer_identity(),
+                recipient,
+                conversation.ok_or(super::session::SessionError::UnexpectedMessage)?,
+                mailbox,
+            ),
+        };
         while !self.advance_opaque_mailbox(channel, &mut progress).await? {}
-        Ok(progress.uploaded)
+        if let Some(inner) = confirm {
+            if !channel.io_admitted() {
+                return Err(super::session::SessionError::UnexpectedMessage);
+            }
+            let relay = progress.relay.clone();
+            let federated = RelayMailbox::is_federated_id(&progress.mailbox.id());
+            let privacy = self.privacy.generation.load(Ordering::SeqCst);
+            let bridge = self.bridge_generation.load(Ordering::SeqCst);
+            let current = || {
+                self.relay_send_allowed(&relay)
+                    && self.privacy.generation.load(Ordering::SeqCst) == privacy
+                    && (!federated
+                        || (self.bridge_directory_allowed()
+                            && self.bridge_generation.load(Ordering::SeqCst) == bridge))
+            };
+            let modern_publication = intent == MailboxIntent::HistoryPublication
+                && matches!(progress.incremental, incremental::Mode::Active(_));
+            let source = if modern_publication {
+                let conversation = progress.conversation.ok_or(LogError::StaleCursor)?;
+                let owner = self.sync_store(&progress.recipient);
+                let stamp = owner
+                    .lock()
+                    .expect("projection")
+                    .history_sync_stamp(&conversation)?
+                    .ok_or(LogError::StaleCursor)?;
+                Some(stamp)
+            } else {
+                None
+            };
+            let outer = self
+                .resolve_opaque_confirmation(&mut progress, inner, &current)
+                .await?;
+            let outer = if modern_publication {
+                match outer {
+                    Some(outer) => Some(
+                        self.ensure_opaque_confirmation_custody(
+                            channel,
+                            &mut progress,
+                            (inner, outer),
+                            source.as_ref().ok_or(LogError::StaleCursor)?,
+                            &current,
+                        )
+                        .await?,
+                    ),
+                    None => {
+                        progress.uploaded.retain(|(id, _)| *id != inner);
+                        None
+                    }
+                }
+            } else {
+                outer
+            };
+            if !current() || !channel.io_admitted() {
+                return Err(super::session::SessionError::UnexpectedMessage);
+            }
+            if let Some(outer) = outer
+                && !progress.uploaded.contains(&(inner, outer))
+            {
+                if progress.uploaded.len() >= 64 {
+                    progress.uploaded.remove(0);
+                }
+                progress.uploaded.push((inner, outer));
+            }
+        }
+        let local = if observe
+            && confirm.is_none()
+            && channel.io_admitted()
+            && channel.peer_identity() == &progress.relay
+        {
+            self.qualified_unchanged_publication(&progress)?
+        } else {
+            None
+        };
+        let proofs = local
+            .into_iter()
+            .map(|(local, controls)| PublicationProof {
+                recipient: progress.recipient.clone(),
+                relay: progress.relay.clone(),
+                conversation: progress.conversation.expect("qualified history"),
+                local,
+                controls,
+                privacy,
+                bridge,
+                federated: RelayMailbox::is_federated_id(&progress.mailbox.id()),
+            })
+            .collect::<Vec<_>>();
+        let quiet = !proofs.is_empty() && self.publication_proofs_current(&proofs)?;
+        Ok(PublicationRound {
+            selected: progress.uploaded,
+            quiet,
+            proofs,
+        })
     }
 
     pub(in crate::node) async fn advance_opaque_mailbox<IO>(
@@ -315,6 +747,12 @@ impl Node {
         if channel.peer_identity() != &progress.relay {
             return Err(super::session::SessionError::UnexpectedMessage);
         }
+        if let Some(complete) = self
+            .advance_incremental_mailbox(channel, progress, authorize_upload)
+            .await?
+        {
+            return Ok(complete);
+        }
         let mut seen = self
             .opaque_receive_cache
             .lock()
@@ -329,10 +767,10 @@ impl Node {
         // identifier budget, so a disabled cache cannot pin the same page.
         {
             let log = self.log.lock().expect("log lock not poisoned");
-            for (outer, inner) in &progress.processed_events {
-                if match inner {
-                    Some(inner) => log.has(inner)?,
-                    None => true,
+            for (outer, outcome) in &progress.processed_events {
+                if match outcome {
+                    ProcessedWrapper::Retained(inner) => log.has(inner)?,
+                    ProcessedWrapper::DurableSemantic | ProcessedWrapper::SessionOnly => true,
                 } {
                     seen.insert(*outer);
                 }
@@ -348,43 +786,7 @@ impl Node {
                     .expect("projection lock not poisoned")
                     .authorized_event_ids(&conv)?;
             }
-            if progress.identity_controls.is_none() {
-                progress.identity_controls =
-                    Some(self.file_message_identity_controls_for(&progress.recipient, false)?);
-            }
-            if let Some(identities) = &progress.identity_controls {
-                let guarded = self.sync_store(&progress.recipient);
-                for bundle in identities {
-                    let mut authorized = false;
-                    for (file, manifest) in super::file_message_identity::bundle_references(bundle)
-                    {
-                        if guarded
-                            .lock()
-                            .expect("projection lock")
-                            .file_message_identity(&file, &manifest)?
-                            .is_some_and(|current| current.id == bundle.id)
-                        {
-                            authorized = true;
-                            break;
-                        }
-                    }
-                    if authorized {
-                        controls.insert(bundle.id, bundle.clone());
-                    }
-                }
-            }
-            if progress.consent_offers.is_none() {
-                progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
-            }
-            controls.extend(
-                self.file_consent_controls(
-                    &progress.recipient,
-                    progress.consent_offers.as_deref().unwrap_or(&[]),
-                    false,
-                )?
-                .into_iter()
-                .map(|event| (event.id, event)),
-            );
+            controls = self.opaque_controls(progress, authorize_upload)?;
         }
         let requested: HashSet<_> = source_ids.iter().copied().collect();
         source_ids.extend(controls.keys().copied());
@@ -458,13 +860,135 @@ impl Node {
             .cloned()
             .collect();
         drop(outer_store);
+        self.accept_opaque_wrappers(progress, wrappers)?;
+        if !self.relay_send_allowed(channel.peer_identity()) {
+            progress.uploaded.clear();
+        }
+        Ok(complete)
+    }
+    fn opaque_controls<F: Fn() -> bool + Sync>(
+        &self,
+        progress: &mut OpaqueMailboxProgress,
+        authorize_upload: &F,
+    ) -> Result<HashMap<EventId, Event>, LogError> {
+        let mut controls = HashMap::new();
+        if self.relay_send_allowed(&progress.relay) && authorize_upload() {
+            if progress.identity_controls.is_none() {
+                progress.identity_controls =
+                    Some(self.file_message_identity_controls_for(&progress.recipient, false)?);
+            }
+            if let Some(identities) = &progress.identity_controls {
+                for bundle in identities {
+                    if let Some(current) = self.current_opaque_identity_control(
+                        &progress.recipient,
+                        bundle.id,
+                        &super::file_message_identity::bundle_references(bundle),
+                    )? {
+                        controls.insert(current.id, current);
+                    }
+                }
+            }
+            // Receive decisions are published by the shared duplex drain, not
+            // once again for every unrelated outgoing file. Keep identity
+            // supplements above so relay-only receivers can authenticate data.
+            if progress.intent == MailboxIntent::Duplex
+                || !matches!(progress.incremental, incremental::Mode::Active(_))
+            {
+                if progress.consent_offers.is_none() {
+                    progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
+                }
+                let offers = self.unsettled_consent_offers(progress);
+                let prepared =
+                    self.prepare_file_consent_controls(&progress.recipient, &offers, false)?;
+                #[cfg(test)]
+                self.trace_account_client(&progress.recipient, || {
+                    "consent_controls_prepared".into()
+                });
+                let mut no_control_due = Vec::new();
+                for outcome in prepared {
+                    match outcome {
+                        super::file_consent::ConsentControlOutcome::Prepared(event) => {
+                            controls.insert(event.id, event);
+                        }
+                        super::file_consent::ConsentControlOutcome::PendingNoPublishedControl(
+                            file,
+                            manifest,
+                        ) => {
+                            no_control_due.push((file, manifest));
+                        }
+                    }
+                }
+                // The per-offer owner has returned and released delivery,
+                // consent and publication guards before any scope recapture.
+                if matches!(progress.incremental, incremental::Mode::Active(_)) {
+                    self.remember_no_control_due(progress, &no_control_due)?;
+                }
+            }
+        }
+        Ok(controls)
+    }
+
+    fn current_opaque_identity_control(
+        &self,
+        recipient: &PublicIdentity,
+        id: EventId,
+        references: &[(ConversationId, EventId)],
+    ) -> Result<Option<Event>, LogError> {
+        let guarded = self.sync_store(recipient);
+        for (file, manifest) in references {
+            if let Some(current) = guarded
+                .lock()
+                .expect("projection lock")
+                .file_message_identity(file, manifest)?
+                .filter(|current| current.id == id)
+            {
+                return Ok(Some(current));
+            }
+        }
+        Ok(None)
+    }
+
+    fn selected_opaque_control<F: Fn() -> bool + Sync>(
+        &self,
+        progress: &OpaqueMailboxProgress,
+        selected: &SelectedOpaqueControl,
+        authorize_upload: &F,
+    ) -> Result<Option<Event>, LogError> {
+        if !self.relay_send_allowed(&progress.relay) || !authorize_upload() {
+            return Ok(None);
+        }
+        match &selected.kind {
+            SelectedOpaqueControlKind::Identity(references) => {
+                self.current_opaque_identity_control(&progress.recipient, selected.id, references)
+            }
+            SelectedOpaqueControlKind::Consent(file, manifest) => Ok(self
+                .file_consent_controls(&progress.recipient, &[(*file, *manifest)], false)?
+                .into_iter()
+                .find(|event| event.id == selected.id)),
+        }
+    }
+
+    fn accept_opaque_wrappers(
+        &self,
+        progress: &mut OpaqueMailboxProgress,
+        wrappers: Vec<Event>,
+    ) -> Result<(), super::session::SessionError> {
+        progress.missing_parents = None;
         let mut inner: Vec<(EventId, Event)> = Vec::new();
         let mut processed = Vec::new();
         let mut retained = Vec::new();
+        let mut semantic = Vec::new();
         for outer in wrappers {
+            self.observe_mailbox_work(
+                super::work_observation::reason::OUTER,
+                Some((progress.mailbox.id(), outer.id)),
+            );
             match progress.mailbox.open(&outer) {
                 Ok(event) => inner.push((outer.id, event)),
-                Err(_) => processed.push(outer.id),
+                Err(_) => {
+                    self.observe_mailbox_work(super::work_observation::reason::OPEN_FAILED, None);
+                    processed.push(outer.id);
+                }
             }
         }
         // A file's manifest is in its DM conversation and its chunks are in
@@ -476,133 +1000,259 @@ impl Node {
                 event.id,
             )
         });
-        let store = self.sync_store(channel.peer_identity());
-        for (outer_id, event) in inner {
-            if !self.relay_receive_allowed(channel.peer_identity()) {
-                break;
-            }
-            if super::file_message_identity::is_bundle(&event) {
-                use super::file_message_identity::FileMessageIdentityImportError;
-                if self
-                    .delivery_suspended
-                    .load(std::sync::atomic::Ordering::Acquire)
-                {
+        let store = self.sync_store(&progress.relay);
+        store
+            .lock()
+            .expect("projection lock not poisoned")
+            .swap_uninvited_channel_staging(&mut progress.uninvited_channels)?;
+        // Every error returns operation-owned ancestry to the progress owner.
+        let result: Result<(), super::session::SessionError> = (|| {
+            for (outer_id, event) in inner {
+                if !self.relay_receive_allowed(&progress.relay) {
                     break;
                 }
-                let source =
-                    super::file_message_identity::bundle_accounts(&event).map(|(source, _)| source);
-                let actor = self
-                    .historical_author(&progress.recipient.ed25519_pub)
-                    .filter(|proof| proof.public() == progress.recipient)
-                    .and_then(|proof| proof.account_id());
-                if source.is_none()
-                    || source != actor
-                    || !self.known_account_allowed(&progress.recipient)
-                {
-                    processed.push(outer_id);
+                if super::file_message_identity::is_bundle(&event) {
+                    use super::file_message_identity::FileMessageIdentityImportError;
+                    if self
+                        .delivery_suspended
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        break;
+                    }
+                    let source = super::file_message_identity::bundle_accounts(&event)
+                        .map(|(source, _)| source);
+                    let actor = self
+                        .historical_author(&progress.recipient.ed25519_pub)
+                        .filter(|proof| proof.public() == progress.recipient)
+                        .and_then(|proof| proof.account_id());
+                    if source.is_none()
+                        || source != actor
+                        || !self.known_account_allowed(&progress.recipient)
+                    {
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::IDENTITY_HANDLED,
+                            None,
+                        );
+                        processed.push(outer_id);
+                        continue;
+                    }
+                    let inner_id = event.id;
+                    match self.import_file_message_identity_checked(event) {
+                        Ok(()) => {
+                            // The append-only binding and all import side effects
+                            // completed; raw log retention is not its authority.
+                            semantic.push((outer_id, inner_id));
+                            self.observe_mailbox_work(
+                                super::work_observation::reason::IDENTITY_HANDLED,
+                                None,
+                            );
+                            processed.push(outer_id)
+                        }
+                        Err(FileMessageIdentityImportError::Invalid(_)) => {
+                            self.observe_mailbox_work(
+                                super::work_observation::reason::IDENTITY_HANDLED,
+                                None,
+                            );
+                            processed.push(outer_id)
+                        }
+                        Err(
+                            FileMessageIdentityImportError::MissingProof
+                            | FileMessageIdentityImportError::Persistence(_),
+                        ) => {
+                            self.observe_mailbox_work(
+                                super::work_observation::reason::IDENTITY_DEFERRED,
+                                None,
+                            );
+                            progress.defer_event(outer_id)?;
+                        }
+                    }
                     continue;
                 }
-                match self.import_file_message_identity_checked(event) {
-                    Ok(()) | Err(FileMessageIdentityImportError::Invalid(_)) => {
-                        processed.push(outer_id)
+                match self.accept_file_consent_event(&event, &progress.recipient) {
+                    Ok(true) => {
+                        self.remember_consent_transport(progress.mailbox.id(), outer_id, &event)?;
+                        // Recognized controls include ineligible/malformed ones.
+                        // Only an exact durable decision or authenticated own echo
+                        // qualifies this cursor for reuse in another runtime.
+                        if self.consent_transport_seen(progress.mailbox.id(), outer_id)? {
+                            semantic.push((outer_id, event.id));
+                        }
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::CONSENT_HANDLED,
+                            None,
+                        );
+                        processed.push(outer_id);
+                        continue;
                     }
-                    Err(
-                        FileMessageIdentityImportError::MissingProof
-                        | FileMessageIdentityImportError::Persistence(_),
-                    ) => {
+                    Err(error) => {
+                        // Retry this control after local storage recovers, while
+                        // allowing unrelated messages in the same mailbox through.
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::CONSENT_DEFERRED,
+                            None,
+                        );
+                        log::debug!("file consent persistence deferred: {error}");
+                        // Do not re-download this failed control in every protocol
+                        // step. This ID is deliberately absent from the node-wide seen cache:
+                        // a fresh mailbox operation must retry its persistence.
                         progress.defer_event(outer_id)?;
+                        continue;
                     }
+                    Ok(false) => {}
                 }
-                continue;
-            }
-            match self.accept_file_consent_event(&event, &progress.recipient) {
-                Ok(true) => {
+                // Fully authenticated own-device profiles need no presentation;
+                // foreign profiles need an exact prior presentation terminal or
+                // authorized source-retirement fact. Neither certifies custody.
+                // Explicit authenticated dependency repair must install the raw
+                // parent through the original guarded admission below.
+                if event.kind == EventKind::Profile
+                    && progress.required_parent != Some(event.id)
+                    && event.is_canonical()
+                    && event.verify_integrity()
+                    && event.verify_signature()
+                    && (event.author
+                        == crate::eventlog::event::Author::from_ed25519(
+                            self.identity.public().ed25519_pub,
+                        )
+                        || self
+                            .profile_receive_work
+                            .lock()
+                            .expect("profile receive work")
+                            .processed(event.id)?)
+                {
+                    self.remember_semantic_profile(
+                        progress.mailbox.id(),
+                        outer_id,
+                        event.id,
+                        event.author
+                            == crate::eventlog::event::Author::from_ed25519(
+                                self.identity.public().ed25519_pub,
+                            ),
+                    )?;
                     processed.push(outer_id);
+                    self.observe_mailbox_work(
+                        super::work_observation::reason::SEMANTIC_PROFILE,
+                        None,
+                    );
+                    semantic.push((outer_id, event.id));
                     continue;
                 }
-                Err(error) => {
-                    // Retry this control after local storage recovers, while
-                    // allowing unrelated messages in the same mailbox through.
-                    log::debug!("file consent persistence deferred: {error}");
-                    // Do not re-download this failed control in every protocol
-                    // step. This ID is deliberately absent from the node-wide seen cache:
-                    // a fresh mailbox operation must retry its persistence.
-                    progress.defer_event(outer_id)?;
-                    continue;
-                }
-                Ok(false) => {}
-            }
-            if self
-                .log
-                .lock()
-                .expect("log mutex not poisoned")
-                .has(&event.id)?
-            {
-                processed.push(outer_id);
-                retained.push((outer_id, event.id));
-                continue;
-            }
-            let inner_id = event.id;
-            let conv = event.conversation_id;
-            let admission = store
-                .lock()
-                .expect("projection lock not poisoned")
-                .ingest(event);
-            if let Err(error) = admission {
-                // Valid wrappers are only transport progress: missing parents,
-                // receive policy or storage failure may reject their contents.
-                // Recreating the round store must not make the same rejected
-                // page appear newly applied forever. Defer only this operation,
-                // so later drains retry after dependencies or policy recover.
-                log::debug!("opaque event admission deferred: {error}");
-                progress.defer_event(outer_id)?;
-            } else {
-                processed.push(outer_id);
                 if self
                     .log
                     .lock()
-                    .expect("log lock not poisoned")
-                    .has(&inner_id)?
+                    .expect("log mutex not poisoned")
+                    .has(&event.id)?
                 {
-                    retained.push((outer_id, inner_id));
+                    processed.push(outer_id);
+                    self.observe_mailbox_work(
+                        super::work_observation::reason::RETAINED_DUPLICATE,
+                        None,
+                    );
+                    retained.push((outer_id, event.id));
+                    continue;
                 }
-                self.emit_new_messages(conv);
-                self.process_channel_reception(conv, "catch_up");
-                self.process_file_events_reception(conv, "catch_up");
-                self.process_profile_events(conv);
-                self.persist_media_if_complete(conv);
+                let inner_id = event.id;
+                let conv = event.conversation_id;
+                let (admission, staged) = {
+                    let mut store = store.lock().expect("projection lock not poisoned");
+                    let admission = store.ingest(event);
+                    let staged = store.uninvited_channel_staged(conv, inner_id);
+                    (admission, staged)
+                };
+                if let Err(error) = admission {
+                    self.observe_mailbox_work(
+                        super::work_observation::reason::ADMISSION_FAILED,
+                        None,
+                    );
+                    // Valid wrappers are only transport progress: missing parents,
+                    // receive policy or storage failure may reject their contents.
+                    // Recreating the round store must not make the same rejected
+                    // page appear newly applied forever. Defer only this operation,
+                    // so later drains retry after dependencies or policy recover.
+                    if let LogError::MissingParents(parents) = &error {
+                        progress.missing_parents = Some((outer_id, parents.clone()));
+                    }
+                    log::debug!("opaque event admission deferred: {error}");
+                    progress.defer_event(outer_id)?;
+                } else if staged {
+                    self.observe_mailbox_work(super::work_observation::reason::STAGED, None);
+                    // Staging is memory-only preparation. Cancellation drops it,
+                    // so this wrapper must remain retryable without session hints.
+                    progress.defer_event(outer_id)?;
+                } else {
+                    processed.push(outer_id);
+                    if self
+                        .log
+                        .lock()
+                        .expect("log lock not poisoned")
+                        .has(&inner_id)?
+                    {
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::ADMITTED_RETAINED,
+                            None,
+                        );
+                        retained.push((outer_id, inner_id));
+                    } else {
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::ADMITTED_NONRETAINED,
+                            None,
+                        );
+                    }
+                    self.emit_new_messages(conv);
+                    self.process_channel_reception(conv, "catch_up");
+                    self.process_file_events_reception(conv, "catch_up");
+                    self.process_profile_events(conv);
+                    self.persist_media_if_complete(conv);
+                }
             }
-        }
-        let retained_by_outer: HashMap<_, _> = retained.iter().copied().collect();
-        for outer in &processed {
-            if progress.processed_events.len() >= super::session::MAX_HAVE_IDS_TOTAL
-                && !progress.processed_events.contains_key(outer)
-            {
-                return Err(super::session::SessionError::NoProgress);
+            for (outer, inner) in retained.iter().chain(&semantic) {
+                self.remember_wrapper_id(progress.mailbox.id(), *inner, *outer);
             }
-            progress
-                .processed_events
-                .insert(*outer, retained_by_outer.get(outer).copied());
-        }
-        if !retained.is_empty() {
-            self.opaque_receive_cache
-                .lock()
-                .expect("opaque cache lock not poisoned")
-                .remember(progress.mailbox.id(), &retained);
-        }
-        // Retained pairs stay dependent on exact main-log membership. Only
-        // wrappers without a retained inner event need session-only progress.
-        processed.retain(|outer| !retained_by_outer.contains_key(outer));
-        if !processed.is_empty() {
-            self.opaque_receive_cache
-                .lock()
-                .expect("opaque cache lock not poisoned")
-                .remember_session(progress.mailbox.id(), &processed);
-        }
-        if !self.relay_send_allowed(channel.peer_identity()) {
-            progress.uploaded.clear();
-        }
-        Ok(complete)
+            let durable_by_outer: HashMap<_, _> = retained
+                .iter()
+                .map(|(outer, inner)| (*outer, ProcessedWrapper::Retained(*inner)))
+                .chain(
+                    semantic
+                        .iter()
+                        .map(|(outer, _)| (*outer, ProcessedWrapper::DurableSemantic)),
+                )
+                .collect();
+            for outer in &processed {
+                if progress.processed_events.len() >= super::session::MAX_HAVE_IDS_TOTAL
+                    && !progress.processed_events.contains_key(outer)
+                {
+                    return Err(super::session::SessionError::NoProgress);
+                }
+                progress.processed_events.insert(
+                    *outer,
+                    durable_by_outer
+                        .get(outer)
+                        .copied()
+                        .unwrap_or(ProcessedWrapper::SessionOnly),
+                );
+            }
+            if !retained.is_empty() {
+                self.opaque_receive_cache
+                    .lock()
+                    .expect("opaque cache lock not poisoned")
+                    .remember(progress.mailbox.id(), &retained);
+            }
+            // Semantic facts authorize durable transport progress only. They
+            // never enter retained pairs, HAVE, or custody inventories.
+            processed.retain(|outer| !durable_by_outer.contains_key(outer));
+            if !processed.is_empty() {
+                self.opaque_receive_cache
+                    .lock()
+                    .expect("opaque cache lock not poisoned")
+                    .remember_session(progress.mailbox.id(), &processed);
+            }
+            Ok(())
+        })();
+        store
+            .lock()
+            .expect("projection lock not poisoned")
+            .swap_uninvited_channel_staging(&mut progress.uninvited_channels)?;
+        result
     }
 }
 
@@ -651,6 +1301,100 @@ mod permission_tests {
     use super::*;
     use crate::identity::{account::Account, device::DeviceIdentity};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn work_observation_enabled_and_disabled_preserve_wrapper_receive_results() {
+        use crate::discovery::Announce;
+        for enabled in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let remote = DeviceIdentity::generate();
+            let account = Account::generate();
+            let proof = Announce::new_with_account(&remote, &account, "Remote", 47475);
+            let (mut node, _, _) = super::super::test_support::node_with_files(
+                root.path(),
+                DeviceIdentity::generate(),
+                Account::generate(),
+                &proof,
+            );
+            Arc::get_mut(&mut node)
+                .expect("fixture has one Node owner")
+                .order_work_observation =
+                enabled.then(super::super::work_observation::OrderWorkObserver::for_test);
+            let relay = DeviceIdentity::generate().public();
+            let mailbox = RelayMailbox::new(&node.identity, &remote.public(), &relay).unwrap();
+            let outer = Event::new(
+                &remote,
+                mailbox.id(),
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                vec![0; 32],
+            );
+            let mut progress = OpaqueMailboxProgress::new(&relay, &remote.public(), None, mailbox);
+            let bodies = node
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts();
+            node.accept_opaque_wrappers(&mut progress, vec![outer.clone()])
+                .unwrap();
+            node.accept_opaque_wrappers(&mut progress, vec![outer.clone()])
+                .unwrap();
+            assert_eq!(
+                progress.processed_events.get(&outer.id),
+                Some(&ProcessedWrapper::SessionOnly)
+            );
+            assert!(progress.deferred_events.is_empty());
+            assert!(!node.log.lock().unwrap().has(&outer.id).unwrap());
+            assert_eq!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .body_read_counts(),
+                bodies
+            );
+            let held = node.log.lock().unwrap();
+            let other = node.clone();
+            let (send, receive) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                other.observe_order_work();
+                let _ = send.send(());
+            });
+            let returned = receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok();
+            drop(held);
+            worker.join().unwrap();
+            assert!(
+                returned,
+                "actual observation must not wait for the log owner"
+            );
+            if let Some(slot) = &node.order_work_observation {
+                let held = slot.lock().unwrap();
+                let other = node.clone();
+                let (send, receive) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    other.observe_mailbox_work(super::super::work_observation::reason::OUTER, None);
+                    let _ = send.send(());
+                });
+                let returned = receive
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_ok();
+                drop(held);
+                worker.join().unwrap();
+                assert!(
+                    returned,
+                    "actual branch recording must not wait for observer"
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn opaque_receive_restart_skips_payload_and_recovers_missing_inner() {
@@ -1176,3 +1920,12 @@ mod permission_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod incremental_tests;
+
+#[cfg(test)]
+mod incremental_receive_tests;
+
+#[cfg(test)]
+mod incremental_admission_tests;

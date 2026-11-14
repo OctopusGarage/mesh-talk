@@ -84,6 +84,11 @@ fn page_limit(rows: usize, bytes: usize, charge: usize) -> Result<i64, LogError>
     Ok(rows.min(bytes / charge) as i64)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(in crate::node) static OFFER_PAGE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone)]
 pub(crate) struct IndexedFileBook {
     pub(super) profile: Arc<ProfileStorage>,
@@ -91,6 +96,8 @@ pub(crate) struct IndexedFileBook {
     // Early WAL/migration setup may precede adoption publication. Only the
     // recaptured final owner may schedule newly received events.
     pub(super) receive_owner: Option<ParticipantEventOwner>,
+    // Bounded volatile retry order; clones share one scheduling owner.
+    pub(super) receive_order: Arc<std::sync::Mutex<Vec<EventId>>>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FileOffer {
@@ -292,6 +299,8 @@ impl IndexedFileBook {
         let limit = page_limit(rows, bytes, 144)?;
         self.profile.database().read(|c| {
             self.check(c)?;
+            #[cfg(test)]
+            OFFER_PAGE_QUERIES.with(|count| count.set(count.get() + 1));
             // Distinct statements preserve key seeks on each compound index.
             let selector = match (file,author) { (Some(_),Some(_)) => " AND file=?4 AND author=?5", (Some(_),None) => " AND file=?4", (None,Some(_)) => " AND author=?5", (None,None) => "" };
             let mut statement = c.prepare_cached(&format!("SELECT ordinal,event,file,parent,author FROM file_book_offers WHERE account=?1 AND ordinal>?2{selector} ORDER BY ordinal LIMIT ?3"))?;
@@ -367,6 +376,7 @@ impl IndexedFileBook {
             let account = active(c)?;
             super::historical::initialize_on(c)?;
             super::retention::initialize_on(c)?;
+            super::custody_dispatch::initialize_on(c)?;
             super::receiving::initialize_on(c, &account)?;
             // Only the initial account may import the old unnamespaced source.
             // A newly adopted account starts with no offers.
@@ -392,6 +402,7 @@ impl IndexedFileBook {
             profile,
             account,
             receive_owner,
+            receive_order: Arc::default(),
         })
     }
     pub(super) fn check(&self, c: &Connection) -> Result<(), LogError> {
@@ -688,6 +699,315 @@ mod tests {
             )?;
             install_on(c, entry, original)
         }
+    }
+
+    #[test]
+    fn group_custody_dispatch_exact_demand_is_durable_and_read_only_when_settled() {
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(71);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &entry, &original))
+            .unwrap();
+        let file = manifest.file_conv();
+        let recipient = DeviceIdentity::generate().public();
+        let demand = Some(EventId::new([81; 32]));
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..16 {
+            assert!(
+                f.book
+                    .group_custody_settled(file, entry.event_id, &recipient, demand)
+                    .unwrap()
+            );
+            assert!(
+                f.book
+                    .settle_group_custody(file, entry.event_id, &recipient, demand)
+                    .unwrap()
+            );
+        }
+        assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(database.successful_write_commits(), commits);
+        let Fixture {
+            root,
+            device,
+            account,
+            book,
+            records,
+        } = f;
+        drop(book);
+        drop(records);
+        let (book, _) = Fixture::open(root.path(), &device, &account);
+        assert!(
+            book.group_custody_settled(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn group_custody_dispatch_full_binding_cascades_and_rejects_missing_offer() {
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(72);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &entry, &original))
+            .unwrap();
+        let file = manifest.file_conv();
+        let recipient = DeviceIdentity::generate().public();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        let mut other = recipient.clone();
+        other.x25519_pub[0] ^= 1;
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &other, None)
+                .unwrap()
+        );
+        other = recipient.clone();
+        other.ed25519_pub[0] ^= 1;
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &other, None)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(
+                    ConversationId::new([90; 32]),
+                    entry.event_id,
+                    &recipient,
+                    None
+                )
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, EventId::new([91; 32]), &recipient, None)
+                .unwrap()
+        );
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute(
+                    "DELETE FROM file_book_offers WHERE account=?1",
+                    [f.book.account.as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert_eq!(
+            f.book
+                .profile
+                .database()
+                .read(|c| Ok(c.query_row(
+                    "SELECT count(*) FROM file_book_custody_dispatch",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn group_custody_dispatch_failed_write_retries_without_publishing_acceptance() {
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(73);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &entry, &original))
+            .unwrap();
+        let file = manifest.file_conv();
+        let recipient = DeviceIdentity::generate().public();
+        f.book.profile.database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER fail_custody_dispatch BEFORE INSERT ON file_book_custody_dispatch BEGIN SELECT RAISE(ABORT,'injected'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .is_err()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_custody_dispatch")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        let demand = Some(EventId::new([99; 32]));
+        f.book.profile.database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER fail_custody_update BEFORE UPDATE ON file_book_custody_dispatch BEGIN SELECT RAISE(ABORT,'injected'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, demand)
+                .is_err()
+        );
+        assert!(
+            f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            !f.book
+                .group_custody_settled(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_custody_update")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, demand)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn group_custody_dispatch_account_epoch_and_read_faults_are_not_success() {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(74);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &entry, &original))
+            .unwrap();
+        let file = manifest.file_conv();
+        let recipient = DeviceIdentity::generate().public();
+        f.book
+            .settle_group_custody(file, entry.event_id, &recipient, None)
+            .unwrap();
+        let next = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
+        assert!(matches!(
+            f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            f.book
+                .settle_group_custody(file, entry.event_id, &recipient, None),
+            Err(LogError::StaleCursor)
+        ));
+        let other = IndexedFileBook::open(f.book.profile.clone()).unwrap();
+        assert!(
+            !other
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        assert!(
+            !other
+                .settle_group_custody(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &next.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(matches!(
+            f.book
+                .group_custody_settled(file, entry.event_id, &recipient, None),
+            Err(LogError::StaleCursor)
+        ));
+        let resumed = IndexedFileBook::open(f.book.profile.clone()).unwrap();
+        assert!(
+            resumed
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TABLE file_book_custody_dispatch")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            resumed.group_custody_settled(file, entry.event_id, &recipient, None),
+            Err(LogError::Database(_))
+        ));
+        assert!(matches!(
+            resumed.settle_group_custody(file, entry.event_id, &recipient, None),
+            Err(LogError::Database(_))
+        ));
+        let upgraded = IndexedFileBook::open(f.book.profile.clone()).unwrap();
+        assert!(
+            !upgraded
+                .group_custody_settled(file, entry.event_id, &recipient, None)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1484,6 +1804,122 @@ mod tests {
     }
 
     #[test]
+    fn download_claim_all_fit_is_read_only() {
+        for count in [1, 8] {
+            let f = Fixture::new();
+            for n in 1..=count {
+                let (row, event, _) = f.fixture(n);
+                f.book
+                    .profile
+                    .database()
+                    .transaction(|c| Fixture::install(c, &row, &event))
+                    .unwrap();
+            }
+            let database = f.book.profile.database();
+            let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+            let commits = database.successful_write_commits();
+            let revision = f.book.revision().unwrap();
+            for _ in 0..8 {
+                let selected = f.book.claim_downloads().unwrap();
+                assert_eq!(selected.len(), usize::from(count));
+                assert_eq!(
+                    selected.iter().map(|work| work.file).collect::<Vec<_>>(),
+                    (1..=count)
+                        .map(|n| ConversationId::new([n; 32]))
+                        .collect::<Vec<_>>()
+                );
+                assert!(selected.iter().all(|work| work.revision == 1));
+            }
+            assert_eq!(
+                database.read(|c| Ok(c.total_changes())).unwrap(),
+                changes,
+                "all-fit queue of {count} must not rewrite tickets or counters"
+            );
+            assert_eq!(database.successful_write_commits(), commits);
+            assert_eq!(f.book.revision().unwrap(), revision);
+            assert_eq!(f.records.body_reads(), 0);
+        }
+    }
+
+    #[test]
+    fn download_claim_new_ninth_gets_a_bounded_fair_turn() {
+        let f = Fixture::new();
+        for n in 1..=8 {
+            let (row, event, _) = f.fixture(n);
+            f.book
+                .profile
+                .database()
+                .transaction(|c| Fixture::install(c, &row, &event))
+                .unwrap();
+        }
+        for _ in 0..8 {
+            assert_eq!(f.book.claim_downloads().unwrap().len(), 8);
+        }
+        let (row, event, _) = f.fixture(9);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &row, &event))
+            .unwrap();
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let first = f.book.claim_downloads().unwrap();
+        assert_eq!(
+            first.iter().map(|work| work.file).collect::<Vec<_>>(),
+            (1..=8)
+                .map(|n| ConversationId::new([n; 32]))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap() - changes,
+            16
+        );
+        assert_eq!(database.successful_write_commits() - commits, 1);
+        let second = f.book.claim_downloads().unwrap();
+        assert_eq!(second.len(), 8);
+        assert_eq!(second[0].file, ConversationId::new([9; 32]));
+        assert_eq!(f.records.body_reads(), 0);
+    }
+
+    #[test]
+    fn download_claim_rotation_failure_preserves_queue_and_counter() {
+        let f = Fixture::new();
+        for n in 1..=9 {
+            let (row, event, _) = f.fixture(n);
+            f.book
+                .profile
+                .database()
+                .transaction(|c| Fixture::install(c, &row, &event))
+                .unwrap();
+        }
+        let database = f.book.profile.database();
+        database.transaction(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER fail_download_rotation BEFORE UPDATE ON file_download_pending WHEN OLD.ticket=2 BEGIN SELECT RAISE(ABORT,'injected rotation failure'); END")?;
+            Ok(())
+        }).unwrap();
+        let commits = database.successful_write_commits();
+        assert!(f.book.claim_downloads().is_err());
+        assert_eq!(database.successful_write_commits(), commits);
+        database.read(|c| {
+            assert_eq!(c.query_row("SELECT next_ticket FROM file_download_scan", [], |r| r.get::<_, i64>(0))?, 10);
+            assert_eq!(c.query_row("SELECT count(*) FROM file_download_pending WHERE ticket BETWEEN 1 AND 9 AND revision=1", [], |r| r.get::<_, i64>(0))?, 9);
+            Ok(())
+        }).unwrap();
+        database
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_download_rotation")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(f.book.claim_downloads().unwrap().len(), 8);
+        assert_eq!(
+            f.book.claim_downloads().unwrap()[0].file,
+            ConversationId::new([9; 32])
+        );
+    }
+
+    #[test]
     fn durable_download_work_is_bounded_fair_and_survives_reopen() {
         let f = Fixture::new();
         for n in 1..=130 {
@@ -1580,6 +2016,491 @@ mod tests {
         assert!(current.revision > work.revision);
         f.book.finish_download(current).unwrap();
         assert!(!f.book.pending_for_test(manifest.file_conv()));
+    }
+
+    #[test]
+    fn completed_download_scan_rejects_stale_owner_and_storage_failure() {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        f.book.discover_downloads(7).unwrap();
+        let next = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
+        assert!(matches!(
+            f.book.claim_downloads(),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            f.book.discover_downloads(7),
+            Err(LogError::StaleCursor)
+        ));
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &next.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(matches!(
+            f.book.claim_downloads(),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(
+            matches!(f.book.discover_downloads(7), Err(LogError::StaleCursor)),
+            "returning to an account must not revive its retired scan owner"
+        );
+        let fresh = Fixture::new();
+        fresh.book.discover_downloads(7).unwrap();
+        fresh
+            .book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TABLE file_download_scan")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            fresh.book.discover_downloads(7).is_err(),
+            "quiet scans must propagate storage read failures"
+        );
+    }
+
+    #[test]
+    fn completed_download_scan_is_quiet_and_changed_policy_resumes() {
+        let f = Fixture::new();
+        f.book.discover_downloads(7).unwrap();
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..8 {
+            f.book.discover_downloads(7).unwrap();
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "completed unchanged policy scans must perform no writes"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        let (row, event, _) = f.fixture(1);
+        database
+            .transaction(|c| Fixture::install(c, &row, &event))
+            .unwrap();
+        assert_eq!(
+            f.book.claim_downloads().unwrap().len(),
+            1,
+            "a new offer must enqueue after the scan has completed"
+        );
+        for work in f.book.claim_downloads().unwrap() {
+            f.book.finish_download(work).unwrap();
+        }
+        f.book.discover_downloads(8).unwrap();
+        assert_eq!(
+            f.book.claim_downloads().unwrap().len(),
+            1,
+            "a changed policy must rediscover retained offers"
+        );
+    }
+
+    #[test]
+    fn file_receive_empty_candidate_turns_do_not_commit_or_rewrite_scan() {
+        let f = Fixture::new();
+        let conversation = ConversationId::new([12; 32]);
+        let database = f.book.profile.database();
+        let before_changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let before_commits = database.successful_write_commits();
+        for _ in 0..8 {
+            assert!(
+                f.book
+                    .receive_candidates(conversation, 8, 8 * 1024 * 1024)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before_changes,
+            "empty receive turns must not rewrite the unchanged scan cursor"
+        );
+        assert_eq!(
+            database.successful_write_commits(),
+            before_commits,
+            "empty receive turns must not create durable write transactions"
+        );
+        assert_eq!(f.records.body_reads(), 0);
+    }
+
+    #[test]
+    fn file_receive_idle_tail_preserves_order_without_durable_rewrites() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversation = ConversationId::new([12; 32]);
+        let other = ConversationId::new([13; 32]);
+        for sequence in 1..=3 {
+            log.append_durable(Event::new(
+                &sender,
+                conversation,
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &rows, own).unwrap();
+        let expected: Vec<_> = rows.iter().map(|row| row.header.id).collect();
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..8 {
+            assert_eq!(
+                f.book.receive_candidates(conversation, 8, 4096).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "retrying an unchanged global tail must not rewrite its tickets"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(f.records.body_reads(), 0);
+
+        // Newly enqueued work must take its fair turn ahead of the old retry.
+        log.append_durable(Event::new(
+            &sender,
+            other,
+            1,
+            vec![],
+            4,
+            0,
+            EventKind::FileManifest,
+            vec![2; 100],
+        ))
+        .unwrap();
+        let after = f.book.receive_after().unwrap();
+        let added = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(after, 128)
+            .unwrap();
+        f.book.discover_receives(after, &added, own).unwrap();
+        assert_eq!(
+            f.book.receive_candidates(conversation, 8, 4096).unwrap(),
+            expected
+        );
+        assert_eq!(
+            f.book.receive_conversations().unwrap().first(),
+            Some(&other)
+        );
+        for id in &expected {
+            f.book.mark_processed(*id).unwrap();
+        }
+        assert!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn file_receive_interleaved_tail_retains_cross_conversation_fairness() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversation = ConversationId::new([12; 32]);
+        let other = ConversationId::new([13; 32]);
+        for sequence in 1..=3 {
+            log.append_durable(Event::new(
+                &sender,
+                if sequence == 2 { other } else { conversation },
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &rows, own).unwrap();
+        assert_eq!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            f.book.receive_conversations().unwrap().first(),
+            Some(&other),
+            "matching the last ticket cannot hide an interleaved conversation"
+        );
+    }
+
+    #[test]
+    fn file_receive_small_blocked_rotation_is_read_only_and_fair() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversations: Vec<_> = (10..22).map(|n| ConversationId::new([n; 32])).collect();
+        for (index, conversation) in conversations.iter().enumerate() {
+            log.append_durable(Event::new(
+                &sender,
+                *conversation,
+                index as u64 + 1,
+                vec![],
+                index as u64 + 1,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &rows, own).unwrap();
+        let database = f.book.profile.database();
+        let before = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..8 {
+            // Clones share the runtime scheduling owner.
+            let clone = f.book.clone();
+            for conversation in clone.receive_conversations().unwrap() {
+                let ids = clone.receive_candidates(conversation, 8, 4096).unwrap();
+                assert_eq!(ids.len(), 1);
+                seen.insert(conversation);
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            conversations.len(),
+            "blocked work must not starve a later conversation"
+        );
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before,
+            "fair retry ordering is runtime state, not durable progress"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(f.records.body_reads(), 0);
+    }
+
+    #[test]
+    fn file_receive_runtime_order_is_not_published_after_failed_cleanup() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let conversation = ConversationId::new([12; 32]);
+        for sequence in 1..=2 {
+            log.append_durable(Event::new(
+                &sender,
+                conversation,
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book
+            .discover_receives(
+                None,
+                &rows,
+                Author::from_ed25519(f.device.public().ed25519_pub),
+            )
+            .unwrap();
+        assert_eq!(
+            f.book.receive_candidates(conversation, 1, 4096).unwrap(),
+            vec![rows[0].header.id]
+        );
+        let before = f.book.receive_order.lock().unwrap().clone();
+        f.book.profile.database().transaction(|c| {
+            // Model a retained legacy completion whose pending cleanup failed.
+            c.execute("INSERT INTO file_book_processed VALUES(?1,?2)", params![f.book.account.as_slice(), rows[1].header.id.as_bytes().as_slice()])?;
+            c.execute_batch("CREATE TRIGGER fail_receive_retirement BEFORE DELETE ON file_receive_pending BEGIN SELECT RAISE(ABORT,'injected'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(f.book.receive_candidates(conversation, 1, 4096).is_err());
+        assert_eq!(*f.book.receive_order.lock().unwrap(), before);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_receive_retirement")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            f.book
+                .receive_candidates(conversation, 1, 4096)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            f.book.receive_candidates(conversation, 1, 4096).unwrap(),
+            vec![rows[0].header.id]
+        );
+        assert!(f.book.receive_order.lock().unwrap().capacity() <= 128);
+    }
+
+    #[test]
+    fn file_receive_runtime_rotation_falls_back_above_its_bound() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversation = ConversationId::new([12; 32]);
+        for sequence in 1..=129 {
+            log.append_durable(Event::new(
+                &sender,
+                conversation,
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let first = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &first, own).unwrap();
+        let after = f.book.receive_after().unwrap();
+        let last = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(after, 128)
+            .unwrap();
+        f.book.discover_receives(after, &last, own).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..18 {
+            seen.extend(
+                f.book
+                    .receive_candidates(conversation, 8, 8 * 1024 * 1024)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(seen.len(), 129, "large queues retain indexed fair rotation");
+        f.book.forget_receive(last[0].header.id).unwrap();
+        let database = f.book.profile.database();
+        let before = database.read(|c| Ok(c.total_changes())).unwrap();
+        seen.clear();
+        for _ in 0..32 {
+            seen.extend(
+                f.book
+                    .receive_candidates(conversation, 8, 8 * 1024 * 1024)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            128,
+            "shrinking through the bound retains every pending row"
+        );
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before,
+            "the bounded runtime path must resume after shrink"
+        );
+    }
+
+    #[test]
+    fn file_receive_empty_candidate_turns_reject_stale_owner_and_read_failure() {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        let conversation = ConversationId::new([12; 32]);
+        assert!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .is_empty()
+        );
+        let next = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
+        assert!(matches!(
+            f.book.receive_candidates(conversation, 8, 4096),
+            Err(LogError::StaleCursor)
+        ));
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &next.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(
+            matches!(
+                f.book.receive_candidates(conversation, 8, 4096),
+                Err(LogError::StaleCursor)
+            ),
+            "returning to the same account must not revive its old receive owner"
+        );
+        let fresh = Fixture::new();
+        fresh
+            .book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TABLE file_receive_pending")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                fresh.book.receive_candidates(conversation, 8, 4096),
+                Err(LogError::Database(_))
+            ),
+            "a failed receive query must not become a successful empty page"
+        );
     }
 
     #[test]

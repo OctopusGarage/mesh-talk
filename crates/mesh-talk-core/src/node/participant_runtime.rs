@@ -16,6 +16,172 @@ use tokio::{
 };
 
 const FILE_PULL_INTERVAL_SECS: u64 = 3;
+const FILE_REPAIR_INTERVAL_SECS: u64 = 300;
+
+// Scheduling evidence only. Actual file admission keeps current consent and
+// transport authority checks; ordinary lease renewals do not represent new work.
+pub(super) struct FilePullPeer {
+    public: crate::identity::device::PublicIdentity,
+    account: Option<String>,
+    post_office: bool,
+    routes: crate::discovery::roster::SchedulingEndpoints,
+    fresh_until: Option<std::time::Instant>,
+}
+impl FilePullPeer {
+    fn changes_work(&self, next: &Self, now: std::time::Instant) -> bool {
+        self.public != next.public
+            || self.account != next.account
+            || self.post_office != next.post_office
+            || self.routes != next.routes
+            || (self.fresh_until.is_none_or(|at| at <= now)
+                && next.fresh_until.is_some_and(|at| at > now))
+    }
+}
+
+impl Node {
+    pub(super) fn file_pull_peers(&self) -> Vec<FilePullPeer> {
+        let now = std::time::Instant::now();
+        let peers = self.roster.lock().expect("roster lock").peers();
+        let mut snapshot: Vec<_> = peers
+            .into_iter()
+            .map(|peer| {
+                let fresh_until = peer.presence_deadline(now);
+                let routes = peer.scheduling_endpoints();
+                FilePullPeer {
+                    public: peer.public,
+                    account: peer.account_id,
+                    post_office: peer.post_office,
+                    routes,
+                    fresh_until,
+                }
+            })
+            .collect();
+        snapshot.sort_unstable_by_key(|peer| peer.public.user_id());
+        snapshot
+    }
+
+    pub(super) async fn wait_for_file_pull(
+        &self,
+        network: &mut tokio::sync::watch::Receiver<u64>,
+        roster: &mut tokio::sync::watch::Receiver<u64>,
+        available: &mut tokio::sync::watch::Receiver<u64>,
+        channels: &mut tokio::sync::broadcast::Receiver<crate::eventlog::ConversationId>,
+        peers: &mut Vec<FilePullPeer>,
+        wait: Duration,
+    ) -> bool {
+        self.wait_for_attachment_work(
+            &self.file_pull_notify,
+            network,
+            roster,
+            available,
+            channels,
+            peers,
+            wait,
+        )
+        .await
+    }
+
+    // Both lanes observe the same meaningful route/policy events but consume
+    // independent retained notifications; neither owns the other's retry clock.
+    #[allow(clippy::too_many_arguments)]
+    async fn wait_for_attachment_work(
+        &self,
+        notify: &Notify,
+        network: &mut tokio::sync::watch::Receiver<u64>,
+        roster: &mut tokio::sync::watch::Receiver<u64>,
+        available: &mut tokio::sync::watch::Receiver<u64>,
+        channels: &mut tokio::sync::broadcast::Receiver<crate::eventlog::ConversationId>,
+        peers: &mut Vec<FilePullPeer>,
+        wait: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut channels_open = true;
+        loop {
+            tokio::select! {
+                _ = notify.notified() => return true,
+                _ = network.changed() => return true,
+                _ = available.changed() => return true,
+                event = channels.recv(), if channels_open => {
+                    match event {
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return true,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => channels_open = false,
+                    }
+                },
+                _ = roster.changed() => {
+                    let next = self.file_pull_peers();
+                    let now = std::time::Instant::now();
+                    let changed = peers.len() != next.len()
+                        || peers.iter().zip(&next).any(|(old, new)| old.changes_work(new, now));
+                    // Refresh the captured lease even when ignoring a heartbeat.
+                    // A later expired-to-fresh transition at the same endpoint
+                    // must wake work without treating every renewal as demand.
+                    *peers = next;
+                    if changed { return true; }
+                },
+                _ = tokio::time::sleep_until(deadline) => return false,
+            }
+        }
+    }
+    pub(super) fn group_file_schedule(&self) -> (Duration, bool) {
+        let pending = self.group_file_work_pending();
+        let wait = Duration::from_secs(if pending {
+            FILE_PULL_INTERVAL_SECS
+        } else {
+            FILE_REPAIR_INTERVAL_SECS
+        });
+        (
+            self.group_file_retry_delay()
+                .map_or(wait, |retry| wait.min(retry)),
+            pending,
+        )
+    }
+
+    /// Observe retained work after a pull before scheduling this producer's wait.
+    pub(super) fn file_pull_schedule(&self, delay: Duration) -> (Duration, bool) {
+        let (downloading, preparing) = {
+            let files = self.files.lock().expect("files lock");
+            let downloading = files.download_work_pending().unwrap_or_else(|error| {
+                log::warn!("download scheduling observation failed: {error}");
+                true
+            });
+            let preparing = files
+                .download_preparation_pending()
+                .unwrap_or_else(|error| {
+                    log::warn!("download preparation observation failed: {error}");
+                    false
+                });
+            (downloading, preparing)
+        };
+        let local = preparing
+            || self.pending_channel_file().is_some()
+            || self.media_maintenance_pending().unwrap_or_else(|error| {
+                log::warn!("media scheduling observation failed: {error}");
+                false
+            });
+        let pending = downloading || local;
+        let wait = if local {
+            delay.min(Duration::from_secs(FILE_PULL_INTERVAL_SECS))
+        } else if pending {
+            delay.clamp(
+                Duration::from_secs(FILE_PULL_INTERVAL_SECS),
+                Duration::from_secs(FILE_REPAIR_INTERVAL_SECS),
+            )
+        } else {
+            delay.max(Duration::from_secs(FILE_REPAIR_INTERVAL_SECS))
+        };
+        (wait, pending)
+    }
+}
+
+// Keep the disclosure observation boundary explicit: its invalidation belongs
+// to the source refresh decision, not to a later publication or probe.
+pub(super) async fn observe_candidate_disclosure(
+    changes: &mut tokio::sync::watch::Receiver<u64>,
+    observe: impl std::future::Future<Output = bool>,
+) -> bool {
+    changes.borrow_and_update();
+    observe.await
+}
 
 /// Network inventory supplied by the host; identity and roster come from Node.
 pub struct ParticipantConfig {
@@ -85,6 +251,7 @@ impl PreparedParticipant {
         let _ = node.update_presence(&current_announce);
         let announce = shared_announce(&current_announce);
         let discovery_trigger = Arc::new(Notify::new());
+        let candidate_refresh = Arc::new(Notify::new());
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
         let discovery = spawn_discovery_with_network_changes(
             Arc::clone(&socket),
@@ -119,24 +286,73 @@ impl PreparedParticipant {
             let socket_v6 = socket_v6.clone();
             let visibility = Arc::clone(&visibility);
             let routed = Arc::clone(&routed);
-            let trigger = Arc::clone(&discovery_trigger);
+            let trigger = Arc::clone(&candidate_refresh);
+            // Subscribe before the first snapshot. Changes during source/probe
+            // work retain one follow-up instead of depending on a Notify waiter.
+            let mut network = node.network_changes.subscribe();
+            let mut disclosure = visibility.subscribe_changes();
+            let mut topology = source.subscribe_changes();
             tasks.push(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(5));
+                use futures_util::FutureExt;
+                let mut probes = tokio::time::interval(Duration::from_secs(5));
+                probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                probes.tick().await; // Startup refresh already sends the first probes.
+                let mut refresh = true;
+                let mut refresh_at = tokio::time::Instant::now();
+                let mut hints = Vec::new();
                 loop {
-                    tokio::select! {
-                        _ = tick.tick() => {},
-                        _ = trigger.notified() => {},
+                    refresh |= trigger.notified().now_or_never().is_some()
+                        || network.has_changed().unwrap_or(false)
+                        || disclosure.has_changed().unwrap_or(false);
+                    if let Some(changes) = topology.as_ref() {
+                        match changes.has_changed() {
+                            Ok(changed) => refresh |= changed,
+                            Err(_) => {
+                                topology = None;
+                                refresh = true;
+                            }
+                        }
                     }
-                    if visibility.routed_allowed().await
-                        && let Ok(candidates) =
-                            tokio::time::timeout(Duration::from_secs(3), source.snapshot()).await
-                    {
-                        let mut unique = std::collections::HashSet::new();
-                        for endpoint in candidates
-                            .into_iter()
-                            .filter(|addr| unique.insert(*addr))
-                            .take(256)
-                        {
+                    if refresh {
+                        // Capture all pending demand before the first visibility
+                        // await. Any later change must retain another turn.
+                        let _ = trigger.notified().now_or_never();
+                        network.borrow_and_update();
+                        if let Some(changes) = topology.as_mut() {
+                            changes.borrow_and_update();
+                        }
+                    }
+                    let allowed = if refresh {
+                        observe_candidate_disclosure(&mut disclosure, visibility.routed_allowed())
+                            .await
+                    } else {
+                        visibility.routed_allowed().await
+                    };
+                    if refresh {
+                        if allowed {
+                            if let Ok(candidates) =
+                                tokio::time::timeout(Duration::from_secs(3), source.snapshot())
+                                    .await
+                            {
+                                let mut unique = std::collections::HashSet::new();
+                                hints = candidates
+                                    .into_iter()
+                                    .filter(|addr| unique.insert(*addr))
+                                    .take(256)
+                                    .collect();
+                            }
+                            // An outer timeout retains only address hints, never
+                            // presence or authority. A successful empty read clears.
+                        } else {
+                            hints.clear();
+                        }
+                        refresh_at = tokio::time::Instant::now() + Duration::from_secs(300);
+                        // This refresh already sends current probes; discard any
+                        // overdue idle tick instead of duplicating that sweep.
+                        probes.reset();
+                    }
+                    if allowed {
+                        for endpoint in &hints {
                             if !visibility.routed_allowed().await {
                                 break;
                             }
@@ -145,15 +361,39 @@ impl PreparedParticipant {
                                 std::net::SocketAddr::V6(_) => socket_v6.as_ref(),
                             } {
                                 let _ = visibility
-                                    .with_routed_send(routed.probe(sender, endpoint))
+                                    .with_routed_send(routed.probe(sender, *endpoint))
                                     .await;
                             }
                             tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                     }
+                    refresh = false;
+                    tokio::select! {
+                        _ = probes.tick(), if allowed && !hints.is_empty() => {},
+                        _ = tokio::time::sleep_until(refresh_at) => refresh = true,
+                        _ = trigger.notified() => refresh = true,
+                        change = network.changed() => {
+                            if change.is_err() { return; }
+                            refresh = true;
+                        },
+                        change = disclosure.changed() => {
+                            if change.is_err() { return; }
+                            refresh = true;
+                        },
+                        change = async {
+                            match topology.as_mut() {
+                                Some(changes) => changes.changed().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            if change.is_err() { topology = None; }
+                            refresh = true;
+                        },
+                    }
                 }
             }));
         }
+
         tasks.push(tokio::spawn(Arc::clone(&node).run_accept_loop(listener)));
         {
             let node = Arc::clone(&node);
@@ -172,6 +412,9 @@ impl PreparedParticipant {
             tasks.push(tokio::spawn(async move {
                 let mut network = node.network_changes.subscribe();
                 let mut roster = node.roster.lock().expect("roster lock not poisoned").subscribe_changes();
+                let mut available = node.subscribe_sibling_availability();
+                let mut channels = node.subscribe_channel_changes();
+                let mut peers = node.file_pull_peers();
                 let mut delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS);
                 loop {
                     let Some(permit) = node.runtime_work.admit() else { break; };
@@ -185,16 +428,45 @@ impl PreparedParticipant {
                     }).await {
                         log::warn!("file receive worker failed: {error}");
                     }
-                    let pending = node.files.lock().expect("files lock").download_work_pending().unwrap_or_else(|error| {log::warn!("download scheduling observation failed: {error}");true}) || node.group_file_work_pending() || node.pending_channel_file().is_some() || node.media_maintenance_pending().unwrap_or_else(|error|{log::warn!("media scheduling observation failed: {error}");true});
                     tokio::select! {
-                        _ = node.pull_pending_files() => {},
+                        _ = node.pull_pending_files_direct() => {},
                         _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },
                     }
+                    let (wait, _pending) = node.file_pull_schedule(delay);
+                    let changed = node.wait_for_file_pull(&mut network, &mut roster, &mut available, &mut channels, &mut peers, wait).await;
+                    delay = if changed {
+                        Duration::from_secs(FILE_PULL_INTERVAL_SECS)
+                    } else {
+                        (delay * 2).min(Duration::from_secs(FILE_REPAIR_INTERVAL_SECS))
+                    };
+                }
+            }));
+        }
+
+        {
+            let node = Arc::clone(&node);
+            tasks.push(tokio::spawn(async move {
+                let mut network = node.network_changes.subscribe();
+                let mut roster = node.subscribe_roster_changes();
+                let mut available = node.subscribe_sibling_availability();
+                let mut channels = node.subscribe_channel_changes();
+                let mut files = node.subscribe_file_changes();
+                let mut peers = node.file_pull_peers();
+                loop {
+                    if node.runtime_work.is_closed() {
+                        break;
+                    }
                     tokio::select! {
-                        _ = node.file_pull_notify.notified() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); },
-                        _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); },
-                        _ = roster.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); },
-                        _ = tokio::time::sleep(delay) => { delay = if pending { Duration::from_secs(FILE_PULL_INTERVAL_SECS) } else { (delay * 2).min(Duration::from_secs(60)) }; },
+                        _ = node.retry_group_file_delivery() => {},
+                        _ = network.changed() => continue,
+                    }
+                    let (wait, _) = node.group_file_schedule();
+                    tokio::select! {
+                        _ = node.wait_for_attachment_work(
+                            &node.group_file_notify, &mut network, &mut roster,
+                            &mut available, &mut channels, &mut peers, wait,
+                        ) => {},
+                        _ = files.changed() => {},
                     }
                 }
             }));
@@ -210,6 +482,7 @@ impl PreparedParticipant {
             routed_discovery: routed,
             visibility,
             discovery_trigger,
+            candidate_refresh,
             discovery_health,
             tasks,
             graceful_host_tasks: Vec::new(),
@@ -233,6 +506,7 @@ pub struct ParticipantRuntime {
     routed_discovery: Arc<RoutedDiscovery>,
     pub(super) visibility: Arc<DiscoveryVisibility>,
     discovery_trigger: Arc<Notify>,
+    candidate_refresh: Arc<Notify>,
     discovery_health: Vec<tokio::task::AbortHandle>,
     pub(super) tasks: Vec<JoinHandle<()>>,
     graceful_host_tasks: Vec<GracefulHostTask>,
@@ -436,6 +710,7 @@ impl ParticipantRuntime {
     }
 
     pub fn trigger_discovery(&self) {
+        self.candidate_refresh.notify_one();
         self.discovery_trigger.notify_waiters();
     }
 
@@ -478,7 +753,7 @@ impl ParticipantRuntime {
     /// Close admission, cancel and join producers, then wait for admitted
     /// blocking work. Externally held Node handles remain the host's responsibility.
     pub async fn stop(mut self) {
-        self.node.runtime_work.close();
+        let prepared_retirement = self.node.retire_prepared_sync_views();
         self.node.clear_delivery_observations();
         for owner in &mut self.graceful_host_tasks {
             if let Some(shutdown) = owner.shutdown.take() {
@@ -494,13 +769,18 @@ impl ParticipantRuntime {
         for owner in std::mem::take(&mut self.graceful_host_tasks) {
             let _ = owner.task.await;
         }
+        if let Some(retirement) = prepared_retirement {
+            let _ = retirement.await;
+        }
         self.node.runtime_work.drain().await;
     }
 }
 
 impl Drop for ParticipantRuntime {
     fn drop(&mut self) {
-        self.node.runtime_work.close();
+        // Drop requests retirement; its admitted blocking owner keeps the actual
+        // profile leases until cleanup ends even without an awaited shutdown.
+        drop(self.node.retire_prepared_sync_views());
         self.node.clear_delivery_observations();
         for owner in &mut self.graceful_host_tasks {
             if let Some(shutdown) = owner.shutdown.take() {

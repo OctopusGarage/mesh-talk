@@ -176,6 +176,29 @@ export async function receiptColdRestartCheckpoint(c, state) {
   return { owner: c.owner, account: c.account, ids: [...state.ids], statuses, offlineBackendDurabilityVerified: true, peerOfflineDuringSourceRestart: true };
 }
 
+// Cache only the fixture's already-emitted startup endpoint, never a live
+// connectivity claim or an extra CLI command.
+export function cliListenerEndpoint(output) {
+  const match = /node ([0-9a-f]{32}) listening on tcp\/(\d+)\b/.exec(output);
+  const tcpPort = Number(match?.[2]);
+  return match && tcpPort > 0 && tcpPort <= 65535 ? { deviceId: match[1], tcpPort } : null;
+}
+
+export async function receiptPeerEndpointContext({ observe, expectedAccount, previousPeer, currentPeer }) {
+  const context = { expectedAccount, previousPeer, currentPeer, observedPeers: null, observationError: null };
+  const deviceId = currentPeer?.deviceId ?? previousPeer?.deviceId;
+  try {
+    // Use the existing driver/HTTP deadline and await this one request; do
+    // not race a detached promise. A request error does not prove backend cancellation.
+    const peers = await observe("list_peers");
+    context.observedPeers = peers.filter(peer => deviceId && peer.user_id === deviceId).slice(0, 4)
+      .map(peer => ({ deviceId: peer.user_id, accountId: peer.account_id, addr: String(peer.addr).slice(0, 256) }));
+  } catch (error) {
+    context.observationError = String(error.message ?? error).slice(0, 512);
+  }
+  return context;
+}
+
 export async function receiptPhase(c, state, name, expected, historical = false, cold = undefined) {
   assert.equal(c.owner, state.owner, "receipt owner unchanged");
   if (historical) {
@@ -188,10 +211,37 @@ export async function receiptPhase(c, state, name, expected, historical = false,
   }
   const history = await c.observe("owner_account_history", { owner: c.owner, account: c.account, limit: 500 });
   for (const id of state.ids) assert.equal(history.filter(item => item.id === id && item.from_me).length, 1, "original accepted history entry retained once");
-  const statuses = await c.until(`original IDs become ${expected}`, async () => {
-    const values = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
-    return values.every(value => value === expected) && values;
-  });
+  let statuses, latestStatuses = null, observationError = null;
+  let deliveryObservations = state.ids.slice(0, 3).map(() => ({ kind: "UNKNOWN", age_ms: null, reason: null }));
+  try {
+    statuses = await c.until(`original IDs become ${expected}`, async () => {
+      try {
+        const records = await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids });
+        const values = orderedReceiptStatuses(state.ids, records);
+        deliveryObservations = state.ids.slice(0, 3).map(id => {
+          const observation = records.find(record => record.id === id)?.observation;
+          return {
+            kind: ["attempting", "retry_scheduled"].includes(observation?.kind) ? observation.kind : "UNKNOWN",
+            age_ms: Number.isSafeInteger(observation?.age_ms) && observation.age_ms >= 0 ? observation.age_ms : null,
+            reason: ["post_office_disabled", "no_known_route", "attempt_timed_out"].includes(observation?.reason) ? observation.reason : null,
+          };
+        });
+        latestStatuses = values;
+        return values.every(value => value === expected) && values;
+      } catch (error) {
+        observationError = String(error.message ?? error).slice(0, 512);
+        throw error;
+      }
+    });
+  } catch (error) {
+    let endpointContext = null, endpointContextError = null;
+    if (c.receiptFailureContext) {
+      try { endpointContext = await c.receiptFailureContext(); JSON.stringify(endpointContext); }
+      catch (secondary) { endpointContext = null; endpointContextError = String(secondary.message ?? secondary).slice(0, 512); }
+    }
+    const diagnostic = JSON.stringify({ statuses: latestStatuses, deliveryObservations, observationError, endpointContext, endpointContextError });
+    throw new Error(`${error.message}; receipt observation=${diagnostic}`, { cause: error });
+  }
   const captures = [];
   for (const [index, label] of [...state.labels].reverse().entries()) {
     if (historical && index > 0) await revealHistoricalNativeMessage(c, label);

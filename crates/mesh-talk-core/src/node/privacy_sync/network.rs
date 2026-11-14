@@ -1,6 +1,7 @@
 //! Production participant network adapter. A finite authorization selection lives
 //! in the encrypted profile DB; unchanged pages only check scalar revisions.
 //! Preparation advances bounded header/edge pages and yields in the session owner.
+use super::prepared_views::Purpose;
 use super::*;
 use crate::eventlog::{
     repository::network::{ExportCursor, HaveCursor, NetworkView},
@@ -12,9 +13,70 @@ use crate::eventlog::{
         },
     },
 };
+use crate::node::work_observation::reason as query_reason;
 use std::sync::{Mutex, atomic::Ordering};
 
-#[derive(Clone, PartialEq, Eq)]
+pub(in crate::node) struct RetainedSelection {
+    purpose: Purpose,
+    denied: bool,
+    inbound: bool,
+    pull_only: bool,
+    view: ParticipantView,
+}
+
+/// Exact local history and authorization observation, not mailbox completion.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(in crate::node) struct HistorySyncStamp {
+    pub(super) fingerprint: [u8; 32],
+}
+
+/// One bounded runtime cache entry. Its existing SQL selection and profile
+/// lease stay owned until this entry is evicted; no guard crosses an await.
+pub(in crate::node) struct HistoryUpload {
+    view: ParticipantView,
+    binding: crate::eventlog::repository::network::HistorySyncBinding,
+    peer: PublicIdentity,
+    denied: bool,
+    cache_eligible: bool,
+    inbound: bool,
+    pull_only: bool,
+    export_initialized: Mutex<bool>,
+    export_ready: Mutex<bool>,
+}
+
+impl HistoryUpload {
+    pub(in crate::node) fn recipient(&self) -> &PublicIdentity {
+        &self.peer
+    }
+
+    /// Runtime scheduling progress only; never authorization or custody evidence.
+    pub(in crate::node) fn preparation_progress(&self) -> (u8, bool, bool) {
+        let phase = self
+            .view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .progress_phase();
+        let initialized = *self.export_initialized.lock().expect("upload export lock");
+        let ready = *self.export_ready.lock().expect("upload export lock");
+        (phase, initialized, ready)
+    }
+}
+
+#[cfg(test)]
+pub(in crate::node) struct HistoryUploadPage {
+    pub(in crate::node) events: Vec<Event>,
+    pub(in crate::node) next_rank: i64,
+    pub(in crate::node) complete: bool,
+}
+
+pub(in crate::node) struct HistoryUploadIdPage {
+    pub(in crate::node) ids: Vec<EventId>,
+    pub(in crate::node) next_rank: i64,
+    pub(in crate::node) complete: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub(super) struct Policy {
     privacy_generation: u64,
     pending: [u8; 32],
@@ -22,7 +84,7 @@ pub(super) struct Policy {
     pub(super) sibling: bool,
     device_policy: u64,
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
 struct Observation {
     source: i64,
     destructive_policy: i64,
@@ -60,6 +122,7 @@ pub(in crate::node) struct ParticipantView {
     pub(super) pending: Vec<EventId>,
     export_have: Mutex<Option<[u8; 32]>>,
     sibling_closure: bool,
+    metadata_stamp: Option<HistorySyncStamp>,
 }
 #[derive(Clone)]
 pub(in crate::node) enum ParticipantHaveCursor {
@@ -72,6 +135,641 @@ pub(in crate::node) struct ParticipantExportCursor {
     have: [u8; 32],
 }
 impl GuardedSyncStore<'_> {
+    fn prepared_scope(
+        &self,
+        conversation: ConversationId,
+        purpose: Purpose,
+    ) -> super::prepared_views::Scope {
+        super::prepared_views::Scope {
+            peer: self.peer.clone(),
+            purpose,
+            conversation,
+            inbound: self.inbound,
+            pull_only: self.pull_only,
+            denied: self.denied,
+        }
+    }
+    fn take_retained_selection(
+        &mut self,
+        conversation: &ConversationId,
+    ) -> Result<Option<RetainedSelection>, LogError> {
+        if !self.use_node_preparation {
+            return Ok(self.custody_view.take());
+        }
+        self.take_node_prepared_selection(conversation, Purpose::Ordinary)
+    }
+    fn take_node_prepared_selection(
+        &self,
+        conversation: &ConversationId,
+        purpose: Purpose,
+    ) -> Result<Option<RetainedSelection>, LogError> {
+        if self.node.runtime_work.is_closed() {
+            return Ok(None);
+        }
+        let Some(stamp) = self.history_sync_stamp(conversation)? else {
+            return Ok(None);
+        };
+        let (value, retired) = {
+            let mut cache = self
+                .node
+                .prepared_sync_views
+                .lock()
+                .expect("prepared sync cache lock");
+            if self.node.runtime_work.is_closed() {
+                return Ok(None);
+            }
+            cache.take(&self.prepared_scope(*conversation, purpose), &stamp)
+        };
+        drop(retired);
+        if let Some(mut value) = value {
+            if self.node.runtime_work.is_closed() {
+                return Ok(None);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .activate_cached_selection(
+                    value
+                        .view
+                        .preparation
+                        .get_mut()
+                        .expect("owned view preparation")
+                        .selection
+                        .as_mut()
+                        .ok_or(LogError::StaleCursor)?,
+                )?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+    fn cache_prepared_view(
+        &self,
+        mut view: ParticipantView,
+        purpose: Purpose,
+    ) -> Result<Option<ParticipantView>, LogError> {
+        // Pending uninvited ancestry remains operation-owned, never node-wide.
+        if !view.pending.is_empty()
+            || !self.pending_channels.is_empty()
+            || !view
+                .preparation
+                .get_mut()
+                .expect("owned view preparation")
+                .compact_for_cache(purpose == Purpose::History)
+        {
+            return Ok(Some(view));
+        }
+        let bytes = match view
+            .preparation
+            .get_mut()
+            .expect("owned view preparation")
+            .cached_bytes
+        {
+            Some(bytes) => bytes,
+            None => {
+                let bytes = self
+                    .node
+                    .log
+                    .lock()
+                    .expect("log lock")
+                    .repository()?
+                    .selection_cache_bytes(
+                        view.preparation
+                            .get_mut()
+                            .expect("owned view preparation")
+                            .selection()?,
+                    )?;
+                view.preparation
+                    .get_mut()
+                    .expect("owned view preparation")
+                    .cached_bytes = Some(bytes);
+                bytes
+            }
+        };
+        if !super::PreparedSyncCache::accepts_bytes(bytes) {
+            return Ok(Some(view));
+        }
+        let scope = self.prepared_scope(view.conversation, purpose);
+        let stamp = view.metadata_stamp.clone().ok_or(LogError::StaleCursor)?;
+        let retired = {
+            let mut cache = self
+                .node
+                .prepared_sync_views
+                .lock()
+                .expect("prepared sync cache lock");
+            // Retirement closes commit authority before draining the cache.
+            if self.node.runtime_work.is_closed() {
+                return Ok(Some(view));
+            }
+            // Owned mutable access takes no preparation mutex or DB lock here.
+            view.preparation
+                .get_mut()
+                .expect("owned view preparation")
+                .selection
+                .as_mut()
+                .ok_or(LogError::StaleCursor)?
+                .park();
+            cache.insert(
+                scope,
+                stamp,
+                bytes,
+                RetainedSelection {
+                    purpose,
+                    denied: self.denied,
+                    inbound: self.inbound,
+                    pull_only: self.pull_only,
+                    view,
+                },
+                std::time::Instant::now(),
+            )
+        };
+        drop(retired);
+        Ok(None)
+    }
+    pub(in crate::node) fn history_upload_id_page(
+        &self,
+        upload: &HistoryUpload,
+        after_rank: i64,
+        budget: IdPageBudget,
+    ) -> Result<HistoryUploadIdPage, LogError> {
+        budget.validate()?;
+        self.validate_history_upload(upload)?;
+        if !*upload.export_ready.lock().expect("upload export lock") {
+            return Err(LogError::StaleCursor);
+        }
+        let (ids, next_rank, complete) = {
+            let preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_upload_id_rank_page(
+                    preparation.selection()?,
+                    &upload.view.repository,
+                    after_rank,
+                    preparation
+                        .history_generation()
+                        .map_or(0, |generation| generation.count),
+                    budget,
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        Ok(HistoryUploadIdPage {
+            ids,
+            next_rank,
+            complete,
+        })
+    }
+
+    pub(in crate::node) fn history_upload_event(
+        &self,
+        upload: &HistoryUpload,
+        id: EventId,
+        max_bytes: usize,
+    ) -> Result<Option<Event>, LogError> {
+        self.validate_history_upload(upload)?;
+        if !*upload.export_ready.lock().expect("upload export lock") {
+            return Err(LogError::StaleCursor);
+        }
+        let event = {
+            let preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_upload_event(
+                    preparation.selection()?,
+                    &upload.view.repository,
+                    id,
+                    preparation
+                        .history_generation()
+                        .map_or(0, |generation| generation.count),
+                    max_bytes,
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        Ok(event)
+    }
+
+    pub(in crate::node) fn history_upload_contains(
+        &self,
+        upload: &HistoryUpload,
+        id: EventId,
+    ) -> Result<bool, LogError> {
+        self.validate_history_upload(upload)?;
+        if !*upload.export_ready.lock().expect("upload export lock") {
+            return Err(LogError::StaleCursor);
+        }
+        let contains = {
+            let preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_upload_contains(
+                    preparation.selection()?,
+                    &upload.view.repository,
+                    id,
+                    preparation
+                        .history_generation()
+                        .map_or(0, |generation| generation.count),
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        Ok(contains)
+    }
+
+    pub(in crate::node) fn open_history_upload(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<HistoryUpload, LogError> {
+        if !self.denied
+            && self.pending_channels.is_empty()
+            && let Some(retained) =
+                self.take_node_prepared_selection(conversation, Purpose::History)?
+        {
+            let RetainedSelection {
+                purpose,
+                denied,
+                inbound,
+                pull_only,
+                view,
+            } = retained;
+            if purpose == Purpose::History
+                && denied == self.denied
+                && inbound == self.inbound
+                && pull_only == self.pull_only
+                && self.history_sync_stamp(conversation)?.as_ref() == view.metadata_stamp.as_ref()
+            {
+                self.validate_view(&view)?;
+                let upload = HistoryUpload {
+                    binding: view.repository.history_binding.clone(),
+                    view,
+                    peer: self.peer.clone(),
+                    denied: self.denied,
+                    cache_eligible: true,
+                    inbound: self.inbound,
+                    pull_only: self.pull_only,
+                    export_initialized: Mutex::new(true),
+                    export_ready: Mutex::new(true),
+                };
+                self.validate_history_upload(&upload)?;
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_VIEW_REUSED, None);
+                return Ok(upload);
+            }
+        }
+        let view = NetworkSyncStore::open_view(self, conversation)?;
+        // Connection-staged invitation ancestry belongs to that connection's
+        // bounded exchange, not a reusable retained-history upload.
+        if !view.pending.is_empty() {
+            return Err(LogError::StaleCursor);
+        }
+        let binding = view.repository.history_binding.clone();
+        view.preparation
+            .lock()
+            .expect("view preparation lock")
+            .enable_history_upload();
+        let upload = HistoryUpload {
+            view,
+            binding,
+            peer: self.peer.clone(),
+            denied: self.denied,
+            cache_eligible: !self.denied && self.pending_channels.is_empty(),
+            inbound: self.inbound,
+            pull_only: self.pull_only,
+            export_initialized: Mutex::new(false),
+            export_ready: Mutex::new(false),
+        };
+        self.validate_history_upload(&upload)?;
+        Ok(upload)
+    }
+
+    /// Return only an exact, ready local plan. Remote upload progress and proof
+    /// remain in their mailbox owner; this cache never certifies delivery/custody.
+    pub(in crate::node) fn retain_history_upload(
+        &self,
+        upload: HistoryUpload,
+    ) -> Result<(), LogError> {
+        let Some(_work) = self.node.runtime_work.admit() else {
+            return Ok(());
+        };
+        // Keep destruction of an unretained SQL owner inside this work permit.
+        let upload = upload;
+        if !upload.cache_eligible
+            || self.denied
+            || !self.pending_channels.is_empty()
+            || !*upload
+                .export_initialized
+                .lock()
+                .expect("upload export lock")
+            || !*upload.export_ready.lock().expect("upload export lock")
+            || !upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock")
+                .ready()
+        {
+            return Ok(());
+        }
+        self.validate_history_upload(&upload)?;
+        let current = self.history_sync_stamp(&upload.view.conversation)?;
+        if current.is_none() || current.as_ref() != upload.view.metadata_stamp.as_ref() {
+            return Ok(());
+        }
+        drop(self.cache_prepared_view(upload.view, Purpose::History)?);
+        Ok(())
+    }
+
+    pub(in crate::node) fn validate_history_upload(
+        &self,
+        upload: &HistoryUpload,
+    ) -> Result<(), LogError> {
+        if upload.peer != self.peer
+            || upload.denied != self.denied
+            || upload.inbound != self.inbound
+            || upload.pull_only != self.pull_only
+        {
+            return Err(LogError::StaleCursor);
+        }
+        self.validate_view(&upload.view)?;
+        let captured = upload
+            .view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .history_generation();
+        if let Some(captured) = captured {
+            let current = self
+                .node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .order_generation(
+                    &upload.view.conversation,
+                    crate::eventlog::repository::order::CausalOrder::Logical,
+                )?;
+            if !current.is_some_and(|current| {
+                current.job == captured.job && current.count >= captured.count
+            }) {
+                return Err(LogError::StaleCursor);
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::node) fn prepare_history_upload_step(
+        &self,
+        upload: &HistoryUpload,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        budget.validate()?;
+        self.validate_history_upload(upload)?;
+        let view = &upload.view;
+        let ready = view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .ready();
+        let export_initialized = *upload
+            .export_initialized
+            .lock()
+            .expect("upload export lock");
+        let mut step = if !ready {
+            let mut step = NetworkSyncStore::prepare_view_step(self, view, budget)?;
+            // The outgoing parent closure is a separate bounded phase. Never
+            // hand off partially computed sibling/share-off flags.
+            step.ready = false;
+            step
+        } else if !export_initialized {
+            let preparation = view.preparation.lock().expect("view preparation lock");
+            let mut step = self
+                .node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .reset_selected_export_step(preparation.selection()?, &view.repository, budget)?;
+            if step.ready {
+                *upload
+                    .export_initialized
+                    .lock()
+                    .expect("upload export lock") = true;
+            }
+            step.ready = false;
+            step
+        } else {
+            let preparation = view.preparation.lock().expect("view preparation lock");
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_export_step(
+                    preparation.selection()?,
+                    &view.repository,
+                    view.sibling_closure,
+                    !self.inbound && !preparation.replica_shared,
+                    budget,
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        if step.ready {
+            *upload.export_ready.lock().expect("upload export lock") = true;
+        }
+        // Reading an already ready entry spends no extra rows.
+        step.ready |= *upload.export_ready.lock().expect("upload export lock");
+        Ok(step)
+    }
+
+    pub(in crate::node) fn resume_history_upload(
+        &self,
+        upload: &mut HistoryUpload,
+    ) -> Result<bool, LogError> {
+        if upload.peer != self.peer
+            || upload.denied != self.denied
+            || upload.inbound != self.inbound
+            || upload.pull_only != self.pull_only
+            || !*upload.export_ready.lock().expect("upload export lock")
+        {
+            return Ok(false);
+        }
+        match self.validate_history_upload(upload) {
+            Ok(()) => {}
+            Err(LogError::StaleCursor | LogError::ConversationRetiring) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        let conversation = upload.view.conversation;
+        let (repository, binding, generation) = {
+            let log = self.node.log.lock().expect("log lock");
+            let source = log.repository()?;
+            (
+                NetworkSyncStore::open_view(source, &conversation)?,
+                source.history_sync_binding(&conversation)?,
+                source.order_generation(
+                    &conversation,
+                    crate::eventlog::repository::order::CausalOrder::Logical,
+                )?,
+            )
+        };
+        if binding == upload.binding {
+            return Ok(true);
+        }
+        {
+            let mut preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.resume_history(generation) {
+                return Ok(false);
+            }
+        }
+        upload.view.repository = repository;
+        upload.binding = binding;
+        *upload.export_ready.lock().expect("upload export lock") = false;
+        self.validate_history_upload(upload)?;
+        upload
+            .view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .save_history_progress(self, &upload.view)?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn history_upload_page(
+        &self,
+        upload: &HistoryUpload,
+        after_rank: i64,
+        budget: ExportPageBudget,
+    ) -> Result<HistoryUploadPage, LogError> {
+        budget.validate()?;
+        self.validate_history_upload(upload)?;
+        if !*upload.export_ready.lock().expect("upload export lock") {
+            return Err(LogError::StaleCursor);
+        }
+        let (events, next_rank, complete) = {
+            let preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_upload_rank_page(
+                    preparation.selection()?,
+                    &upload.view.repository,
+                    after_rank,
+                    preparation
+                        .history_generation()
+                        .map_or(0, |generation| generation.count),
+                    budget,
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        Ok(HistoryUploadPage {
+            events,
+            next_rank,
+            complete,
+        })
+    }
+
+    pub(in crate::node) fn history_sync_stamp(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<Option<HistorySyncStamp>, LogError> {
+        use sha2::{Digest, Sha256};
+        let policy = self.network_policy(conversation)?;
+        let mut observation = self.network_observation(conversation)?;
+        if observation.controls.is_none() {
+            // Backfill belongs to bounded session preparation; a cold index
+            // never supplies evidence that policy history is unchanged.
+            return Ok(None);
+        }
+        let binding = self
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .history_sync_binding(conversation)?;
+        // Ordinary appends in another conversation do not affect this source.
+        // Global raw controls and unclassified destructive dependencies remain
+        // exact fences; this scope's binding retains every physical rewrite.
+        observation.source = 0;
+        let mut after = self.network_observation(conversation)?;
+        after.source = 0;
+        let current_binding = self
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .history_sync_binding(conversation)?;
+        if observation != after
+            || binding != current_binding
+            || !self.policy_unchanged(conversation, &policy)
+        {
+            return Ok(None);
+        }
+        let bytes = bincode::serialize(&(
+            binding,
+            &self.peer,
+            self.node.identity.public(),
+            self.node.account_id(),
+            policy,
+            observation,
+            self.pull_only,
+            self.inbound,
+        ))
+        .map_err(|error| LogError::Serialization(error.to_string()))?;
+        // Counter meaning is part of a persisted completion certificate. An
+        // unversioned old full-counter hash must never alias a later value of
+        // the classified authority counter after a real destructive change.
+        let mut hash = Sha256::new();
+        hash.update(b"MeshTalkHistorySyncAuthorityV2\0");
+        hash.update(bytes);
+        Ok(Some(HistorySyncStamp {
+            fingerprint: hash.finalize().into(),
+        }))
+    }
+
     fn network_policy(&self, conversation: &ConversationId) -> Result<Policy, LogError> {
         Ok(Policy {
             privacy_generation: self.node.privacy.generation.load(Ordering::SeqCst),
@@ -124,7 +822,7 @@ impl GuardedSyncStore<'_> {
             .lock()
             .expect("log lock")
             .repository()?
-            .destructive_policy_revision()?;
+            .authority_destructive_revision()?;
         let roster = self
             .node
             .roster
@@ -191,6 +889,43 @@ impl GuardedSyncStore<'_> {
         })
     }
 
+    fn pull_comparison_scope(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<
+        Option<(
+            super::super::channel_projection_cache::PullComparisonScope,
+            HistorySyncStamp,
+        )>,
+        LogError,
+    > {
+        // Gate before any expensive observation or remote inventory hashing.
+        if !self.pull_only
+            || self.inbound
+            || self.denied
+            || !self.use_node_preparation
+            || self.node.runtime_work.is_closed()
+            || self
+                .pending_channels
+                .get(conversation)
+                .is_some_and(|pending| !pending.events.is_empty())
+        {
+            return Ok(None);
+        }
+        let Some(stamp) = self.history_sync_stamp(conversation)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            super::super::channel_projection_cache::PullComparisonScope {
+                peer: self.peer.clone(),
+                own: self.node.identity.public(),
+                own_account: self.node.account_id(),
+                conversation: *conversation,
+            },
+            stamp,
+        )))
+    }
+
     fn pending_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
         let mut ids: Vec<_> = self
             .pending_channels
@@ -204,10 +939,119 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl NetworkSyncStore for GuardedSyncStore<'_> {
+    fn bind_session_peer(&mut self, peer: &PublicIdentity) {
+        self.use_node_preparation = peer == &self.peer && !self.node.runtime_work.is_closed();
+        if self.use_node_preparation {
+            drop(self.custody_view.take());
+        }
+    }
     type View = ParticipantView;
     type HaveCursor = ParticipantHaveCursor;
     type ExportCursor = ParticipantExportCursor;
+    fn quiet_comparison(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<Option<crate::eventlog::sync::network::QuietComparison>, LogError> {
+        let Some((scope, stamp)) = self.pull_comparison_scope(conversation)? else {
+            return Ok(None);
+        };
+        let hint = self
+            .node
+            .channel_projection_cache
+            .lock()
+            .expect("projection cache")
+            .pull_comparison(&scope, &stamp);
+        // Recheck after the cache owner has been released.
+        if self.pull_comparison_scope(conversation)?.as_ref() != Some(&(scope, stamp)) {
+            return Ok(None);
+        }
+        Ok(hint)
+    }
+    fn validate_quiet_comparison(
+        &self,
+        conversation: &ConversationId,
+        hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<bool, LogError> {
+        Ok(self.quiet_comparison(conversation)? == Some(hint))
+    }
+    fn quiet_comparison_token(&self, view: &Self::View) -> Result<Option<[u8; 32]>, LogError> {
+        if !view.pending.is_empty() {
+            return Ok(None);
+        }
+        let ready_ordinary = {
+            let p = view.preparation.lock().expect("view preparation");
+            p.ready() && p.metadata.fingerprint.is_some()
+        };
+        if !ready_ordinary {
+            return Ok(None);
+        }
+        let Some((_, stamp)) = self.pull_comparison_scope(&view.conversation)? else {
+            return Ok(None);
+        };
+        if view.metadata_stamp.as_ref() != Some(&stamp) {
+            return Ok(None);
+        }
+        self.validate_view(view)?;
+        if self.history_sync_stamp(&view.conversation)?.as_ref() != Some(&stamp) {
+            return Ok(None);
+        }
+        Ok(Some(stamp.fingerprint))
+    }
+    fn retain_quiet_comparison(
+        &self,
+        view: &Self::View,
+        hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<(), LogError> {
+        if self.quiet_comparison_token(view)? != Some(hint.local_token) {
+            return Ok(());
+        }
+        let Some((scope, stamp)) = self.pull_comparison_scope(&view.conversation)? else {
+            return Ok(());
+        };
+        if stamp.fingerprint != hint.local_token {
+            return Ok(());
+        }
+        self.node
+            .channel_projection_cache
+            .lock()
+            .expect("projection cache")
+            .insert_pull_comparison(scope, stamp, hint);
+        Ok(())
+    }
+    fn probe_metadata(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<Option<SyncMetadata>, LogError> {
+        let Some(stamp) = self.history_sync_stamp(conversation)? else {
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_STAMP_UNKNOWN, None);
+            return Ok(None);
+        };
+        let metadata = self
+            .node
+            .channel_projection_cache
+            .lock()
+            .expect("projection cache lock not poisoned")
+            .get_paged(&stamp);
+        self.node.observe_mailbox_work(
+            if metadata.is_some() {
+                query_reason::QUERY_META_HIT
+            } else {
+                query_reason::QUERY_META_MISS
+            },
+            None,
+        );
+        if metadata.is_some() && self.history_sync_stamp(conversation)?.as_ref() != Some(&stamp) {
+            return Ok(None);
+        }
+        Ok(metadata)
+    }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError> {
+        self.node
+            .observe_mailbox_work(query_reason::QUERY_VIEW_NEW, None);
+        // Capture BEFORE the finite repository cutoff. A later append must
+        // never label this older view with its newer exact history stamp.
+        let metadata_stamp = self.history_sync_stamp(conversation)?;
         let policy = self.network_policy(conversation)?;
         let observed = self.network_observation(conversation)?;
         let repository = NetworkSyncStore::open_view(
@@ -230,11 +1074,124 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             pending,
             export_have: Mutex::new(None),
             sibling_closure,
+            metadata_stamp,
         };
         #[cfg(test)]
         self.node
             .trace_account_client(&self.peer, || "network_view_captured".into());
         Ok(view)
+    }
+    fn reusable_view(&self, view: &Self::View) -> Result<bool, LogError> {
+        if !view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .ready()
+        {
+            return Ok(false);
+        }
+        let Some(stamp) = &view.metadata_stamp else {
+            return Ok(false);
+        };
+        if self.history_sync_stamp(&view.conversation)?.as_ref() != Some(stamp) {
+            return Ok(false);
+        }
+        match self.validate_view(view) {
+            Ok(()) => {}
+            Err(LogError::StaleCursor) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        // Validation observes live authority independently. Recheck the exact
+        // source afterward instead of absorbing an append during validation.
+        Ok(self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp))
+    }
+    fn take_custody_view(
+        &mut self,
+        conversation: &ConversationId,
+    ) -> Result<Option<Self::View>, LogError> {
+        let Some(retained) = self.take_retained_selection(conversation)? else {
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_VIEW_ABSENT, None);
+            return Ok(None);
+        };
+        let RetainedSelection {
+            purpose,
+            denied,
+            inbound,
+            pull_only,
+            view,
+        } = retained;
+        if purpose != Purpose::Ordinary
+            || view.conversation != *conversation
+            || denied != self.denied
+            || inbound != self.inbound
+            || pull_only != self.pull_only
+            || self.node.runtime_work.is_closed()
+        {
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_SCOPE_MISS, None);
+            return Ok(None);
+        }
+        let current = self.history_sync_stamp(conversation)?;
+        if current.is_none() || current.as_ref() != view.metadata_stamp.as_ref() {
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_STAMP_MISS, None);
+            return Ok(None);
+        }
+        match self.validate_view(&view) {
+            Ok(()) => {
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_VIEW_REUSED, None);
+                Ok(Some(view))
+            }
+            Err(LogError::StaleCursor) => {
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_VIEW_INVALID, None);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    fn retain_custody_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        // Evict before admitting another selection. The existing SQL owner
+        // bounds both live selections and incremental retirement work.
+        drop(self.custody_view.take());
+        if self.node.runtime_work.is_closed() {
+            return Ok(Some(view));
+        }
+        let ready = view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .ready();
+        if !ready {
+            return Ok(Some(view));
+        }
+        self.validate_view(&view)?;
+        if let Some(stamp) = &view.metadata_stamp
+            && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
+        {
+            if self.use_node_preparation {
+                let result = self.cache_prepared_view(view, Purpose::Ordinary)?;
+                if result.is_none() {
+                    self.node
+                        .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
+                }
+                return Ok(result);
+            }
+            self.custody_view = Some(RetainedSelection {
+                purpose: Purpose::Ordinary,
+                denied: self.denied,
+                inbound: self.inbound,
+                pull_only: self.pull_only,
+                view,
+            });
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
+            Ok(None)
+        } else {
+            Ok(Some(view))
+        }
     }
     fn prepare_view_step(
         &self,
@@ -294,7 +1251,24 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         if !preparation.ready() {
             return Err(LogError::StaleCursor);
         }
-        Ok(preparation.metadata)
+        let metadata = preparation.metadata;
+        drop(preparation);
+        if metadata.fingerprint.is_some()
+            && let Some(stamp) = &view.metadata_stamp
+            && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
+        {
+            let evicted = self
+                .node
+                .channel_projection_cache
+                .lock()
+                .expect("projection cache lock not poisoned")
+                .insert_paged(stamp.clone(), metadata);
+            if evicted {
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_META_EVICTED, None);
+            }
+        }
+        Ok(metadata)
     }
     fn have_page(
         &self,
@@ -352,6 +1326,44 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             next,
         })
     }
+    fn reusable_export(
+        &self,
+        view: &Self::View,
+        have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        self.validate_view(view)?;
+        // Ordinary appends preserve a finite view's validity, but must prevent
+        // reuse of its completed answer on the next independent request.
+        if view.metadata_stamp.is_none()
+            || self.history_sync_stamp(&view.conversation)?.as_ref() != view.metadata_stamp.as_ref()
+            || !view
+                .preparation
+                .lock()
+                .expect("view preparation lock")
+                .ready()
+        {
+            return Ok(false);
+        }
+        let needs_have = self.export_preparation_needs_have(view)?;
+        let fingerprint = crate::eventlog::sync::fingerprint(have.iter().copied().collect());
+        let mut prepared = view.export_have.lock().expect("view export lock");
+        let reusable = prepared.is_some() && (!needs_have || *prepared == Some(fingerprint));
+        if reusable {
+            // The plan is unchanged, but subsequent pages still bind the fresh
+            // query and reject a cursor from any other Have set.
+            *prepared = Some(fingerprint);
+        }
+        Ok(reusable)
+    }
+    fn export_preparation_needs_have(&self, view: &Self::View) -> Result<bool, LogError> {
+        self.validate_view(view)?;
+        let preparation = view.preparation.lock().expect("view preparation lock");
+        if !preparation.ready() {
+            return Err(LogError::StaleCursor);
+        }
+        preparation.selection()?;
+        Ok(view.sibling_closure || (!self.inbound && !preparation.replica_shared))
+    }
     fn reset_export_step(
         &self,
         view: &Self::View,
@@ -359,7 +1371,8 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     ) -> Result<PreparationStep, LogError> {
         self.validate_view(view)?;
         *view.export_have.lock().expect("view export lock") = None;
-        let preparation = view.preparation.lock().expect("view preparation lock");
+        let mut preparation = view.preparation.lock().expect("view preparation lock");
+        preparation.cached_bytes = None;
         if !preparation.ready() {
             return Err(LogError::StaleCursor);
         }
@@ -372,7 +1385,8 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     }
     fn stage_export_have(&self, view: &Self::View, ids: &[EventId]) -> Result<(), LogError> {
         self.validate_view(view)?;
-        let preparation = view.preparation.lock().expect("view preparation lock");
+        let mut preparation = view.preparation.lock().expect("view preparation lock");
+        preparation.cached_bytes = None;
         self.node
             .log
             .lock()
@@ -388,8 +1402,9 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     ) -> Result<PreparationStep, LogError> {
         self.validate_view(view)?;
         let step = {
-            let preparation = view.preparation.lock().expect("view preparation lock");
-            self.node
+            let mut preparation = view.preparation.lock().expect("view preparation lock");
+            let step = self
+                .node
                 .log
                 .lock()
                 .expect("log lock")
@@ -400,7 +1415,11 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
                     view.sibling_closure,
                     !self.inbound && !preparation.replica_shared,
                     budget,
-                )?
+                )?;
+            if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+                preparation.cached_bytes = None;
+            }
+            step
         };
         self.validate_view(view)?;
         if step.ready {
@@ -461,29 +1480,23 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         })
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
-        #[cfg(not(test))]
-        {
-            SyncStore::ingest(self, event)
-        }
         #[cfg(test)]
+        let message =
+            (event.kind == EventKind::Message).then_some((event.conversation_id, event.id));
+        let result = SyncStore::ingest(self, event);
+        #[cfg(test)]
+        if matches!(result, Ok(AppendOutcome::Appended))
+            && let Some((channel, id)) = message
         {
-            let message =
-                (event.kind == EventKind::Message).then_some((event.conversation_id, event.id));
-            let result = SyncStore::ingest(self, event);
-            if matches!(result, Ok(AppendOutcome::Appended))
-                && let Some((channel, id)) = message
-            {
-                // The durable append owner has returned and released its store guards.
-                self.node.trace_account_client(&self.peer, || {
-                    format!(
-                        "gossip_diag_ciphertext_applied channel={} event={}",
-                        hex::encode(channel.as_bytes()),
-                        id.to_hex()
-                    )
-                });
-            }
-            result
+            self.node.trace_account_client(&self.peer, || {
+                format!(
+                    "gossip_diag_ciphertext_applied channel={} event={}",
+                    hex::encode(channel.as_bytes()),
+                    id.to_hex()
+                )
+            });
         }
+        result
     }
 
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
@@ -543,6 +1556,8 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         SyncStore::file_message_identity(self, file, manifest)
     }
     fn accept_file_message_identity(&mut self, bundle: Event) -> Result<bool, LogError> {
+        // The identity owner updates an already accepted file row and publishes
+        // its own history invalidation; this introduces no raw reception work.
         SyncStore::accept_file_message_identity(self, bundle)
     }
     fn sticker_file_consent(
@@ -551,6 +1566,8 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         manifest: &EventId,
         headers: Vec<Event>,
     ) -> Result<Option<Event>, LogError> {
+        // Reconstructed chunks record their actual file conversation at the
+        // ordinary durable-ingest seam, including a partially accepted proof.
         SyncStore::sticker_file_consent(self, file, manifest, headers)
     }
     fn sticker_file_proof(
@@ -580,6 +1597,9 @@ fn open_prepared(store: &GuardedSyncStore<'_>, conversation: &ConversationId) ->
 }
 
 #[cfg(test)]
+mod incremental_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -587,6 +1607,37 @@ mod tests {
         discovery::Announce,
         identity::{account::Account, device::DeviceIdentity},
     };
+
+    pub(super) fn prepare_upload(store: &GuardedSyncStore<'_>, upload: &HistoryUpload) -> usize {
+        let mut rows = 0;
+        for _ in 0..10_000 {
+            let budget = PreparationBudget {
+                rows: 8,
+                edges: 16,
+                bytes: 65536,
+            };
+            let step = store.prepare_history_upload_step(upload, budget).unwrap();
+            assert!(
+                step.rows <= budget.rows
+                    && step.edges <= budget.edges
+                    && step.bytes <= budget.bytes
+            );
+            rows += step.rows;
+            if step.ready {
+                return rows;
+            }
+        }
+        panic!("history upload preparation failed to progress");
+    }
+
+    pub(super) fn upload_page_budget() -> ExportPageBudget {
+        ExportPageBudget {
+            examined: 16,
+            events: 16,
+            encoded_bytes: 65536,
+            allocated_bytes: 262144,
+        }
+    }
 
     fn prepare_export(
         store: &GuardedSyncStore<'_>,
@@ -612,7 +1663,7 @@ mod tests {
         {}
     }
 
-    fn collect(
+    pub(super) fn collect(
         store: &GuardedSyncStore<'_>,
         view: &ParticipantView,
         have: &HashSet<EventId>,
@@ -1248,8 +2299,125 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn participant_network_chained_preparation_amortizes_commits_across_reloaded_turns() {
+        for count in [128, 256] {
+            let directory = tempfile::tempdir().unwrap();
+            let peer = DeviceIdentity::generate();
+            let peer_account = Account::generate();
+            let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+            let (node, _, _) = super::super::super::test_support::node_with_files(
+                directory.path(),
+                DeviceIdentity::generate(),
+                Account::generate(),
+                &proof,
+            );
+            node.configure_privacy(
+                directory.path(),
+                "pw",
+                &node.own_group_proof(),
+                std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+            node.privacy
+                .state
+                .write()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .proofs
+                .record(&proof)
+                .unwrap();
+            node.set_allowed(&peer_account.account_id(), true)
+                .await
+                .unwrap();
+            node.set_invisible(true).await.unwrap();
+            let conversation = super::super::super::conversation::dm_conversation_id(
+                &node.identity.public(),
+                &peer.public(),
+            );
+            let mut expected = Vec::new();
+            for seq in 1..=count {
+                let event = Event::new(
+                    &node.identity,
+                    conversation,
+                    seq,
+                    expected.last().copied().into_iter().collect(),
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![7; 2048],
+                );
+                expected.push(event.id);
+                node.log.lock().unwrap().append_durable(event).unwrap();
+            }
+            let database = node.storage.database();
+            let selected_rows = || {
+                database
+                    .read(|c| {
+                        Ok(c.query_row(
+                            "SELECT count(*) FROM participant_work.participant_sync_rows",
+                            [],
+                            |r| r.get::<_, i64>(0),
+                        )?)
+                    })
+                    .unwrap()
+            };
+            let owner = node.sync_store(&peer.public());
+            let store = owner.lock().unwrap();
+            let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+            let mut checked_row_turns = 0;
+            let mut reloaded_turns = 0;
+            let mut ready = false;
+            for _ in 0..20 * count {
+                let rows_before = selected_rows();
+                let commits_before = database.successful_write_commits();
+                let budget = PreparationBudget::default();
+                let step = NetworkSyncStore::prepare_view_step(&*store, &view, budget).unwrap();
+                let rows_added = selected_rows() - rows_before;
+                let commits = database.successful_write_commits() - commits_before;
+                assert!(
+                    step.rows <= budget.rows
+                        && step.edges <= budget.edges
+                        && step.bytes <= budget.bytes
+                );
+                // A turn already inside Rows isolates row admission from cold index setup.
+                if rows_before > 0 && rows_added > 1 {
+                    checked_row_turns += 1;
+                    assert!(
+                        commits <= 2,
+                        "{count} chained messages: a bounded turn admitted {rows_added} rows with {commits} durable write commits; rows and their resume cursor must commit together"
+                    );
+                }
+                if step.ready {
+                    ready = true;
+                    break;
+                }
+                // Restart every committed row batch. The SHA accumulator is
+                // intentionally transient; repeatedly restarting Hash would
+                // prevent any multi-page fingerprint from reaching EOF.
+                let mut preparation = view.preparation.lock().unwrap();
+                if rows_added > 0 && preparation.selection.is_some() {
+                    preparation.discard_transient_preparation();
+                    reloaded_turns += 1;
+                }
+            }
+            assert!(ready, "reloaded bounded preparation must finish");
+            assert!(checked_row_turns > 0 && reloaded_turns > 1);
+            assert_eq!(
+                NetworkSyncStore::metadata(&*store, &view).unwrap().count,
+                count
+            );
+            assert_eq!(
+                collect(&store, &view, &HashSet::new()),
+                expected,
+                "buffered parent closure must survive every durable resume boundary"
+            );
+        }
+    }
+
     #[test]
-    fn participant_network_preparation_recovers_committed_row_before_cursor_failure() {
+    fn participant_network_preparation_rolls_back_rows_on_cursor_failure() {
         let directory = tempfile::tempdir().unwrap();
         let peer = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
@@ -1293,22 +2461,27 @@ mod tests {
         }
         assert_eq!(view.preparation.lock().unwrap().metadata.count, 1);
         node.storage.database().transaction(|c| {
-            c.execute_batch("CREATE TEMP TRIGGER test_fail_selection_progress BEFORE UPDATE ON participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected selection cursor failure'); END;")?;
+            c.execute_batch("CREATE TEMP TRIGGER test_fail_selection_progress BEFORE UPDATE ON participant_work.participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected selection cursor failure'); END;")?;
             Ok(())
         }).unwrap();
-        assert!(NetworkSyncStore::prepare_view_step(&*store, &view, single_row).is_err());
+        assert!(
+            NetworkSyncStore::prepare_view_step(&*store, &view, PreparationBudget::default())
+                .is_err()
+        );
         assert_eq!(
             node.storage
                 .database()
                 .read(|c| {
-                    c.query_row("SELECT count(*) FROM participant_sync_rows", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
+                    c.query_row(
+                        "SELECT count(*) FROM participant_work.participant_sync_rows",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
                     .map_err(Into::into)
                 })
                 .unwrap(),
-            2,
-            "the selected row commits before the injected cursor-save failure"
+            1,
+            "row admission and the resume cursor must both roll back on a failed save"
         );
         assert!(
             !view.preparation.lock().unwrap().ready(),
@@ -1466,6 +2639,15 @@ mod tests {
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
         let view = open_prepared(&store, &conversation);
+        let mut upload = store.open_history_upload(&conversation).unwrap();
+        prepare_upload(&store, &upload);
+        let initial_upload = store
+            .history_upload_page(&upload, -1, upload_page_budget())
+            .unwrap();
+        assert!(
+            initial_upload.events.is_empty() && initial_upload.complete,
+            "sibling upload must retain the missing history-parent fence"
+        );
         for (have, expected) in [
             (HashSet::new(), vec![]),
             (HashSet::from([a.id]), vec![b.id, c.id]),
@@ -1523,6 +2705,29 @@ mod tests {
             ),
             Err(LogError::StaleCursor)
         ));
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(Event::new(
+                &node.identity,
+                conversation,
+                4,
+                vec![c.id],
+                101,
+                0,
+                EventKind::FileManifest,
+                vec![4],
+            ))
+            .unwrap();
+        assert!(store.resume_history_upload(&mut upload).unwrap());
+        prepare_upload(&store, &upload);
+        let blocked = store
+            .history_upload_page(&upload, initial_upload.next_rank, upload_page_budget())
+            .unwrap();
+        assert!(
+            blocked.events.is_empty() && blocked.complete,
+            "resumed sibling closure must not release a tail with an excluded ancestor"
+        );
         node.set_device_sync_category(crate::node::SyncCategory::Attachments, false)
             .unwrap();
         assert!(matches!(
@@ -1531,8 +2736,14 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn participant_network_parent_retirement_invalidates_prepared_file_authorization() {
+    async fn dependent_file_authorization_fixture() -> (
+        tempfile::TempDir,
+        std::sync::Arc<Node>,
+        DeviceIdentity,
+        Account,
+        ConversationId,
+        ConversationId,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let peer = DeviceIdentity::generate();
         let peer_account = Account::generate();
@@ -1588,6 +2799,508 @@ mod tests {
             .send_file_channel(parent, &path, crate::file::FileKind::File)
             .await
             .unwrap();
+        (directory, node, peer, peer_account, parent, file)
+    }
+
+    fn received_profile_compaction_inputs(
+        node: &std::sync::Arc<Node>,
+        peer: &DeviceIdentity,
+        account: &Account,
+    ) -> (ConversationId, Vec<Event>, Event) {
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let mut profiles = Vec::new();
+        // Eleven leaves minus the latest pair and one genuine referenced
+        // ancestor produce the production minimum of eight droppable sources.
+        for revision in 1..=11 {
+            let payload = crate::node::profile::ProfilePayload::new(account, None, revision);
+            let event = Event::new(
+                peer,
+                conversation,
+                revision,
+                vec![],
+                revision,
+                1,
+                EventKind::Profile,
+                crate::dm::seal(peer, &node.identity.public().x25519_pub, &payload.encode())
+                    .unwrap(),
+            );
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(event.clone())
+                .unwrap();
+            profiles.push(event);
+        }
+        let child = Event::new(
+            peer,
+            conversation,
+            12,
+            vec![profiles[0].id],
+            12,
+            1,
+            EventKind::Message,
+            crate::dm::seal(
+                peer,
+                &node.identity.public().x25519_pub,
+                b"retained ancestor witness",
+            )
+            .unwrap(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(child.clone())
+            .unwrap();
+        // This is the actual receive/discovery owner. No explicit maintenance
+        // request or synthetic classifier counter grants destructive demand.
+        node.process_profile_events(conversation);
+        (conversation, profiles, child)
+    }
+
+    fn finish_natural_profile_compaction(node: &Node, conversation: ConversationId) -> usize {
+        let mut dropped = 0;
+        for _ in 0..64 {
+            node.process_profile_events(conversation);
+            dropped += node.drain_profile_compaction().unwrap().unwrap_or(0);
+        }
+        dropped
+    }
+
+    #[tokio::test]
+    async fn participant_network_unrelated_profile_compaction_preserves_prepared_file_authorization()
+     {
+        let (_directory, node, peer, peer_account, parent, file) =
+            dependent_file_authorization_fixture().await;
+        let (unrelated, profiles, child) =
+            received_profile_compaction_inputs(&node, &peer, &peer_account);
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let own_view = open_prepared(&store, &unrelated);
+        let file_view = open_prepared(&store, &file);
+        let have = HashSet::new();
+        let selected = collect(&store, &file_view, &have);
+        assert!(
+            !selected.is_empty(),
+            "the real parent manifest must grant actual file export"
+        );
+        let file_binding = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .history_sync_binding(&file)
+            .unwrap();
+        let stamp = store.history_sync_stamp(&file).unwrap().unwrap();
+        let proof =
+            bincode::serialize(&node.historical_author(&peer.public().ed25519_pub).unwrap())
+                .unwrap();
+        let manifests = node
+            .log
+            .lock()
+            .unwrap()
+            .events(&parent)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::FileManifest)
+            .map(|event| event.id)
+            .collect::<Vec<_>>();
+        assert!(!manifests.is_empty());
+        assert_eq!(finish_natural_profile_compaction(&node, unrelated), 8);
+        {
+            let log = node.log.lock().unwrap();
+            assert!(log.get(&profiles[0].id).unwrap().as_ref() == Some(&profiles[0]));
+            assert!(log.get(&child.id).unwrap().as_ref() == Some(&child));
+            assert!(
+                profiles[1..9]
+                    .iter()
+                    .all(|event| log.get(&event.id).unwrap().is_none())
+            );
+            assert!(manifests.iter().all(|id| log.get(id).unwrap().is_some()));
+            assert_eq!(
+                log.repository()
+                    .unwrap()
+                    .history_sync_binding(&file)
+                    .unwrap(),
+                file_binding
+            );
+        }
+        assert_eq!(
+            bincode::serialize(&node.historical_author(&peer.public().ed25519_pub).unwrap())
+                .unwrap(),
+            proof
+        );
+        assert!(
+            matches!(
+                NetworkSyncStore::validate_view(&*store, &own_view),
+                Err(LogError::StaleCursor)
+            ),
+            "the compacted conversation's own physical epoch must still reject its view"
+        );
+        // Current 28 invalidates B through the global destructive counter even
+        // though no canonical/authority dependency of B changed: expected RED.
+        assert_eq!(
+            store.history_sync_stamp(&file).unwrap(),
+            Some(stamp),
+            "unrelated classified leaf compaction must preserve exact FILES reuse evidence"
+        );
+        NetworkSyncStore::validate_view(&*store, &file_view).unwrap();
+        assert_eq!(
+            collect(&store, &file_view, &have),
+            selected,
+            "the same retained parent manifest must authorize the exact same file events"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_network_profile_compaction_sql_failure_preserves_bindings_until_retry() {
+        let (_directory, node, peer, peer_account, _parent, file) =
+            dependent_file_authorization_fixture().await;
+        let (unrelated, profiles, _) =
+            received_profile_compaction_inputs(&node, &peer, &peer_account);
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let own_view = open_prepared(&store, &unrelated);
+        let file_view = open_prepared(&store, &file);
+        let stamp = store.history_sync_stamp(&file).unwrap();
+        let revisions = || {
+            let log = node.log.lock().unwrap();
+            let repo = log.repository().unwrap();
+            (
+                repo.destructive_policy_revision().unwrap(),
+                repo.receive_repair_revision().unwrap(),
+                repo.conversation_destructive_epoch(&unrelated).unwrap(),
+            )
+        };
+        let before = revisions();
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER reject_classified_profile_delete BEFORE DELETE ON retained_events WHEN OLD.kind=8 BEGIN SELECT RAISE(ABORT,'injected classified Profile delete failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        let mut failed = false;
+        for _ in 0..64 {
+            if node.drain_profile_compaction().is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(
+            failed,
+            "the real publication must reach the injected post-classification delete"
+        );
+        assert_eq!(
+            revisions(),
+            before,
+            "classification and destructive publication must roll back together"
+        );
+        assert!(
+            profiles
+                .iter()
+                .all(|event| node.log.lock().unwrap().get(&event.id).unwrap().is_some())
+        );
+        assert_eq!(store.history_sync_stamp(&file).unwrap(), stamp);
+        NetworkSyncStore::validate_view(&*store, &file_view).unwrap();
+        NetworkSyncStore::validate_view(&*store, &own_view).unwrap();
+        node.storage
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER reject_classified_profile_delete")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(finish_natural_profile_compaction(&node, unrelated), 8);
+        let after = revisions();
+        assert!(after.0 > before.0 && after.2 > before.2);
+        assert_eq!(
+            after.1, before.1,
+            "only the validated semantic class is subtracted"
+        );
+        assert!(matches!(
+            NetworkSyncStore::validate_view(&*store, &own_view),
+            Err(LogError::StaleCursor)
+        ));
+    }
+
+    #[tokio::test]
+    async fn participant_network_actual_dm_parent_profile_compaction_preserves_file_authorization()
+    {
+        let (directory, node, peer, peer_account, _channel, _channel_file) =
+            dependent_file_authorization_fixture().await;
+        // Unlike the unrelated-DM case, these legitimate received Profiles live
+        // in the actual manifest parent. Their exact payloads authenticate to the
+        // peer account through the ordinary Profile receive owner.
+        let (parent, profiles, child) =
+            received_profile_compaction_inputs(&node, &peer, &peer_account);
+        for profile in &profiles {
+            assert!(
+                node.profile_receive_work
+                    .lock()
+                    .unwrap()
+                    .processed(profile.id)
+                    .unwrap()
+            );
+        }
+        let path = directory.path().join("dm-parent.txt");
+        std::fs::write(&path, b"real DM file with a retained Profile ancestor").unwrap();
+        let (manifest_id, file) = node
+            .enqueue_file_dm(&peer.user_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let manifest = node.log.lock().unwrap().get(&manifest_id).unwrap().unwrap();
+        assert_eq!(manifest.conversation_id, parent);
+        assert_eq!(manifest.kind, EventKind::FileManifest);
+        assert!(
+            manifest.parents.contains(&child.id),
+            "the genuine manifest must retain the message whose parent is the old Profile"
+        );
+        assert_eq!(child.parents, vec![profiles[0].id]);
+        node.process_profile_events(parent);
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let parent_view = open_prepared(&store, &parent);
+        let view = open_prepared(&store, &file);
+        let have = HashSet::new();
+        let selected = collect(&store, &view, &have);
+        assert!(!selected.is_empty());
+        let stamp = store.history_sync_stamp(&file).unwrap().unwrap();
+        let binding = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .history_sync_binding(&file)
+            .unwrap();
+        let proof =
+            bincode::serialize(&node.historical_author(&peer.public().ed25519_pub).unwrap())
+                .unwrap();
+        assert!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .order_generation(
+                    &parent,
+                    crate::eventlog::repository::order::CausalOrder::Logical
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(finish_natural_profile_compaction(&node, parent), 8);
+        {
+            let log = node.log.lock().unwrap();
+            assert_eq!(log.get(&manifest_id).unwrap(), Some(manifest));
+            assert_eq!(log.get(&child.id).unwrap(), Some(child));
+            assert_eq!(log.get(&profiles[0].id).unwrap(), Some(profiles[0].clone()));
+            assert!(
+                profiles[1..9]
+                    .iter()
+                    .all(|event| log.get(&event.id).unwrap().is_none())
+            );
+            assert!(
+                log.repository()
+                    .unwrap()
+                    .order_generation(
+                        &parent,
+                        crate::eventlog::repository::order::CausalOrder::Logical
+                    )
+                    .unwrap()
+                    .is_none(),
+                "compaction must actually retire the parent's old canonical order"
+            );
+            assert_eq!(
+                log.repository()
+                    .unwrap()
+                    .history_sync_binding(&file)
+                    .unwrap(),
+                binding
+            );
+        }
+        assert_eq!(
+            bincode::serialize(&node.historical_author(&peer.public().ed25519_pub).unwrap())
+                .unwrap(),
+            proof
+        );
+        assert!(matches!(
+            NetworkSyncStore::validate_view(&*store, &parent_view),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(
+            store.history_sync_stamp(&file).unwrap(),
+            Some(stamp),
+            "classified parent leaf removal preserves the exact retained file authority"
+        );
+        NetworkSyncStore::validate_view(&*store, &view).unwrap();
+        assert_eq!(
+            collect(&store, &view, &have),
+            selected,
+            "retiring only the parent's derived order cannot fabricate or revoke the retained manifest proof"
+        );
+        let before_retirement = store.history_sync_stamp(&file).unwrap();
+        assert!(matches!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .begin_retirement(&parent)
+                .unwrap(),
+            crate::eventlog::repository::retirement::RetirementBegin::Started(_)
+        ));
+        assert_ne!(store.history_sync_stamp(&file).unwrap(), before_retirement);
+        assert!(
+            matches!(
+                NetworkSyncStore::validate_view(&*store, &view),
+                Err(LogError::StaleCursor)
+            ),
+            "real retirement of that same parent must revoke the cached file authority"
+        );
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .history_sync_binding(&file)
+                .unwrap(),
+            binding,
+            "the revocation must come from the actual parent, not a changed file binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_history_sync_stamp_never_aliases_legacy_full_counter_after_parent_retirement()
+     {
+        use sha2::{Digest, Sha256};
+        let (_directory, node, peer, peer_account, parent, file) =
+            dependent_file_authorization_fixture().await;
+        let (unrelated, _, _) = received_profile_compaction_inputs(&node, &peer, &peer_account);
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = open_prepared(&store, &file);
+        assert!(!collect(&store, &view, &HashSet::new()).is_empty());
+        assert_eq!(finish_natural_profile_compaction(&node, unrelated), 8);
+        let binding = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .history_sync_binding(&file)
+            .unwrap();
+        let policy = store.network_policy(&file).unwrap();
+        let mut legacy_observation = store.network_observation(&file).unwrap();
+        legacy_observation.source = 0;
+        let legacy_full = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .destructive_policy_revision()
+            .unwrap();
+        legacy_observation.destructive_policy = legacy_full;
+        // Exact pre-migration 28 tuple and SHA-256 domain (no prefix), not a
+        // call to the new serializer or a substituted counterfeit fingerprint.
+        let legacy_bytes = bincode::serialize(&(
+            binding.clone(),
+            &store.peer,
+            node.identity.public(),
+            node.account_id(),
+            policy.clone(),
+            legacy_observation.clone(),
+            store.pull_only,
+            store.inbound,
+        ))
+        .unwrap();
+        let legacy = HistorySyncStamp {
+            fingerprint: Sha256::digest(legacy_bytes).into(),
+        };
+        let persisted = bincode::serialize(&legacy).unwrap();
+        let persisted_legacy: HistorySyncStamp = bincode::deserialize(&persisted).unwrap();
+        assert!(matches!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .begin_retirement(&parent)
+                .unwrap(),
+            crate::eventlog::repository::retirement::RetirementBegin::Started(_)
+        ));
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .history_sync_binding(&file)
+                .unwrap(),
+            binding,
+            "real parent retirement must not change the file's own binding"
+        );
+        assert!(store.policy_unchanged(&file, &policy));
+        let mut current = store.network_observation(&file).unwrap();
+        current.source = 0;
+        assert_eq!(
+            current.destructive_policy, legacy_full,
+            "the real D=2,C=1 authority counter must collide with the old full D=1 value"
+        );
+        assert!(
+            current == legacy_observation,
+            "all other exact fingerprint inputs remain equal across this real parent retirement"
+        );
+        let current_stamp = store.history_sync_stamp(&file).unwrap().unwrap();
+        assert_ne!(
+            current_stamp, persisted_legacy,
+            "an old persisted completion fingerprint must not regain validity when new counter semantics reuse its numeric value"
+        );
+        assert!(
+            matches!(
+                NetworkSyncStore::validate_view(&*store, &view),
+                Err(LogError::StaleCursor)
+            ),
+            "the actual parent retirement independently invalidates the old active view"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_network_missing_or_corrupt_compaction_classification_fails_closed() {
+        for missing in [false, true] {
+            let (_directory, node, peer, _peer_account, _parent, file) =
+                dependent_file_authorization_fixture().await;
+            let owner = node.sync_store(&peer.public());
+            let store = owner.lock().unwrap();
+            let view = open_prepared(&store, &file);
+            assert!(store.history_sync_stamp(&file).unwrap().is_some());
+            node.storage.database().transaction(|c| {
+                if missing {
+                    c.execute_batch("DROP TABLE participant_semantic_compaction_revisions")?;
+                } else {
+                    c.execute_batch("INSERT INTO participant_semantic_compaction_revisions(domain,counter) SELECT domain,1000000 FROM participant_event_publication WHERE singleton=1 ON CONFLICT(domain) DO UPDATE SET counter=excluded.counter")?;
+                }
+                Ok(())
+            }).unwrap();
+            let stamp = store.history_sync_stamp(&file);
+            assert!(
+                !matches!(stamp, Ok(Some(_))),
+                "missing={missing}: unavailable classification cannot certify outgoing reuse"
+            );
+            assert!(
+                NetworkSyncStore::validate_view(&*store, &view).is_err(),
+                "missing={missing}: a prepared file view must fail closed on unavailable classification"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn participant_network_parent_retirement_invalidates_prepared_file_authorization() {
+        let (_directory, node, peer, _peer_account, parent, file) =
+            dependent_file_authorization_fixture().await;
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
         let view = open_prepared(&store, &file);
@@ -1773,6 +3486,20 @@ mod tests {
         assert_eq!(
             collect(&store, &view, &HashSet::new()),
             vec![genesis.id, share_off.id]
+        );
+        let upload = store.open_history_upload(&conversation).unwrap();
+        prepare_upload(&store, &upload);
+        let upload_page = store
+            .history_upload_page(&upload, -1, upload_page_budget())
+            .unwrap();
+        assert_eq!(
+            upload_page
+                .events
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            vec![genesis.id, share_off.id],
+            "upload retains the existing share-off parent closure"
         );
         assert_eq!(
             collect(
@@ -2266,6 +3993,659 @@ mod control_publication_tests {
         ));
     }
     #[tokio::test]
+    async fn participant_probe_metadata_rejects_cold_and_appended_finite_views() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let append = |seq| {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(Event::new(
+                    &node.identity,
+                    conversation,
+                    seq,
+                    vec![],
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![1],
+                ))
+                .unwrap();
+        };
+        append(1);
+        // Model a legitimate pre-existing backfill backlog even when the fresh
+        // fixture's insert trigger already advanced its initially empty index.
+        node.storage
+            .database()
+            .transaction(|connection| {
+                connection.execute("UPDATE participant_kind_scan SET ordinal=-1", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let cold = open_prepared(&store, &conversation);
+        assert!(
+            cold.metadata_stamp.is_none(),
+            "fixture must start without raw-kind evidence"
+        );
+        assert!(!NetworkSyncStore::reusable_view(&*store, &cold).unwrap());
+        assert_eq!(NetworkSyncStore::metadata(&*store, &cold).unwrap().count, 1);
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_none(),
+            "finishing preparation must never upgrade an initially cold stamp"
+        );
+        drop(cold);
+
+        // Finish A without publishing metadata. An append before the first
+        // preparation turn may fail closed when its newer order exceeds A's
+        // cutoff; that existing contract is separate from cache publication.
+        let finite = open_prepared(&store, &conversation);
+        assert!(finite.metadata_stamp.is_some());
+        assert!(NetworkSyncStore::reusable_view(&*store, &finite).unwrap());
+        append(2);
+        assert!(!NetworkSyncStore::reusable_view(&*store, &finite).unwrap());
+        assert_eq!(
+            NetworkSyncStore::metadata(&*store, &finite).unwrap().count,
+            1
+        );
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_none(),
+            "an old finite cutoff cannot acquire the current appended history stamp"
+        );
+        let current = open_prepared(&store, &conversation);
+        assert_eq!(
+            NetworkSyncStore::metadata(&*store, &current).unwrap().count,
+            2
+        );
+        assert_eq!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .unwrap()
+                .count,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_probe_metadata_scopes_full_peer_direction_controls_and_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(Event::new(
+                &node.identity,
+                conversation,
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                vec![1],
+            ))
+            .unwrap();
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        drop(open_prepared(&store, &conversation)); // settle the initially cold index
+        let ready = open_prepared(&store, &conversation);
+        NetworkSyncStore::metadata(&*store, &ready).unwrap();
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_some()
+        );
+        let mut other_transport = peer.public();
+        other_transport.x25519_pub = DeviceIdentity::generate().public().x25519_pub;
+        for other in [other_transport, DeviceIdentity::generate().public()] {
+            assert!(
+                NetworkSyncStore::probe_metadata(
+                    &*node.sync_store(&other).lock().unwrap(),
+                    &conversation
+                )
+                .unwrap()
+                .is_none(),
+                "both peer keys must qualify the scalar cache"
+            );
+        }
+        for inbound in [
+            node.serve_sync_store(&peer.public()),
+            node.pull_sync_store(&peer.public()),
+        ] {
+            assert!(
+                NetworkSyncStore::probe_metadata(&*inbound.lock().unwrap(), &conversation)
+                    .unwrap()
+                    .is_none(),
+                "inbound and pull-only stores have separate authority"
+            );
+        }
+        let control = Event::new(
+            &node.identity,
+            ConversationId::new([217; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::ChannelReplica,
+            vec![0],
+        );
+        node.log.lock().unwrap().append_durable(control).unwrap();
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_none(),
+            "even a rejected raw control invalidates qualified metadata"
+        );
+        let refreshed = open_prepared(&store, &conversation);
+        NetworkSyncStore::metadata(&*store, &refreshed).unwrap();
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_some()
+        );
+        // The fixture has retained ciphertext but no plaintext sidecars. A
+        // no-op presentation clear must not impersonate an authority change.
+        assert_eq!(node.clear_conversation(conversation).unwrap(), 0);
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_some(),
+            "unchanged history must preserve qualified inventory"
+        );
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .drop_conversation(&conversation)
+                .unwrap(),
+            1
+        );
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_none(),
+            "actual retained-history deletion must invalidate previously qualified inventory"
+        );
+    }
+
+    #[test]
+    fn participant_probe_metadata_shares_legacy_fifo_bound_without_touching_hits() {
+        use super::super::super::channel_projection_cache::{
+            ChannelProjectionCache, ProjectionKey, ProjectionMetadata,
+        };
+        let mut cache = ChannelProjectionCache::default();
+        let own = DeviceIdentity::generate().public();
+        let peer = DeviceIdentity::generate().public();
+        let key = |index| ProjectionKey {
+            conversation: ConversationId::new([index; 32]),
+            raw: ([0; 32], 0),
+            peer: peer.clone(),
+            own: own.clone(),
+            own_account: "owner".into(),
+            established: None,
+            privacy_generation: 0,
+            privacy_configured: false,
+            inbound: false,
+            sharing: false,
+        };
+        let legacy = ProjectionMetadata {
+            fingerprint: [0; 32],
+            len: 0,
+            requires_v2: false,
+            requires_v3: false,
+            requires_v4: false,
+            requires_v5: false,
+        };
+        for index in 0..64 {
+            cache.insert(key(index), legacy);
+        }
+        let metadata = SyncMetadata {
+            fingerprint: Some([1; 32]),
+            count: 1,
+            ..Default::default()
+        };
+        for index in 0..64 {
+            cache.insert_paged(
+                HistorySyncStamp {
+                    fingerprint: [index; 32],
+                },
+                metadata,
+            );
+        }
+        assert_eq!(cache.len(), 128);
+        let oldest = HistorySyncStamp {
+            fingerprint: [0; 32],
+        };
+        for _ in 0..3 {
+            assert!(cache.get(&key(0)).is_some());
+            assert!(cache.get_paged(&oldest).is_some());
+        }
+        cache.insert_paged(
+            HistorySyncStamp {
+                fingerprint: [64; 32],
+            },
+            metadata,
+        );
+        assert_eq!(cache.len(), 128);
+        assert!(
+            cache.get(&key(0)).is_none(),
+            "reads must not change FIFO eviction"
+        );
+        assert!(cache.get_paged(&oldest).is_some());
+        for index in 65..128 {
+            cache.insert_paged(
+                HistorySyncStamp {
+                    fingerprint: [index; 32],
+                },
+                metadata,
+            );
+        }
+        cache.insert_paged(
+            HistorySyncStamp {
+                fingerprint: [128; 32],
+            },
+            metadata,
+        );
+        assert_eq!(cache.len(), 128);
+        assert!(cache.get_paged(&oldest).is_none());
+        cache.insert_paged(
+            HistorySyncStamp {
+                fingerprint: [129; 32],
+            },
+            SyncMetadata::default(),
+        );
+        assert_eq!(cache.len(), 128);
+        assert!(
+            cache
+                .get_paged(&HistorySyncStamp {
+                    fingerprint: [129; 32]
+                })
+                .is_none(),
+            "history-only metadata without a fingerprint cannot enter the cache"
+        );
+    }
+
+    /// Exercise fresh store wrappers on both sides of an authenticated equal-FP
+    /// exchange. Only scalar metadata can survive between these independent views.
+    #[tokio::test]
+    async fn participant_probe_metadata_loopback_reuses_without_selection_commits() {
+        use crate::{
+            node::session::{Served, request_round_paged, serve_one_paged},
+            transport::SecureChannel,
+        };
+        for history in [32, 128] {
+            let left_dir = tempfile::tempdir().unwrap();
+            let right_dir = tempfile::tempdir().unwrap();
+            let left_identity = DeviceIdentity::generate();
+            let right_identity = DeviceIdentity::generate();
+            let left_account = Account::generate();
+            let right_account = Account::generate();
+            let left_proof = Announce::new_with_account(&left_identity, &left_account, "Left", 9);
+            let right_proof =
+                Announce::new_with_account(&right_identity, &right_account, "Right", 9);
+            let (left, _, _) = super::super::super::test_support::node_with_files(
+                left_dir.path(),
+                left_identity,
+                left_account,
+                &right_proof,
+            );
+            let (right, _, _) = super::super::super::test_support::node_with_files(
+                right_dir.path(),
+                right_identity,
+                right_account,
+                &left_proof,
+            );
+            left.cached_peer_snapshot_async().await.unwrap();
+            right.cached_peer_snapshot_async().await.unwrap();
+            let conversation = super::super::super::conversation::dm_conversation_id(
+                &left.identity.public(),
+                &right.identity.public(),
+            );
+            let append_shared = |seq| {
+                let event = Event::new(
+                    &left.identity,
+                    conversation,
+                    seq,
+                    vec![],
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![7; 128],
+                );
+                for node in [&left, &right] {
+                    node.log
+                        .lock()
+                        .unwrap()
+                        .append_durable(event.clone())
+                        .unwrap();
+                }
+            };
+            for seq in 1..=history {
+                append_shared(seq);
+            }
+            // A cold raw-kind index deliberately cannot qualify a reusable stamp.
+            let settle = || {
+                for node in [&left, &right] {
+                    while !node
+                        .log
+                        .lock()
+                        .unwrap()
+                        .repository()
+                        .unwrap()
+                        .prepare_kind_metadata_step(PreparationBudget::default())
+                        .unwrap()
+                        .ready
+                    {}
+                }
+            };
+            settle();
+            let commits = || {
+                (
+                    left.storage.database().successful_write_commits(),
+                    right.storage.database().successful_write_commits(),
+                )
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server_node = right.clone();
+            let remote = left.identity.public();
+            let (served, mut completed) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::spawn(async move {
+                let (server, _) = listener.accept().await.unwrap();
+                let mut channel = SecureChannel::accept(server, &server_node.identity)
+                    .await
+                    .unwrap();
+                loop {
+                    // No selection or per-GuardedSyncStore cache crosses a round.
+                    let store = server_node.serve_sync_store(&remote);
+                    if matches!(
+                        serve_one_paged(&mut channel, &store).await.unwrap(),
+                        Served::Closed
+                    ) {
+                        break;
+                    }
+                    // The probe view's destructor has completed before baseline reads.
+                    served.send(()).unwrap();
+                }
+            });
+            let client = tokio::net::TcpStream::connect(address).await.unwrap();
+            let mut channel =
+                SecureChannel::connect(client, &left.identity, Some(&right.identity.public()))
+                    .await
+                    .unwrap();
+            for phase in 0..3 {
+                if phase == 1 {
+                    append_shared(history + 1);
+                    settle();
+                } else if phase == 2 {
+                    // Revocation generation changes invalidate even equal inventory.
+                    for node in [&left, &right] {
+                        node.privacy.generation.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let before = commits();
+                request_round_paged(
+                    &mut channel,
+                    &left.sync_store(&right.identity.public()),
+                    conversation,
+                )
+                .await
+                .unwrap();
+                completed.recv().await.unwrap();
+                let warmed = commits();
+                assert!(
+                    warmed.0 > before.0 && warmed.1 > before.1,
+                    "new exact scope must prepare on both participants, history={history}, phase={phase}"
+                );
+                for _ in 0..2 {
+                    request_round_paged(
+                        &mut channel,
+                        &left.sync_store(&right.identity.public()),
+                        conversation,
+                    )
+                    .await
+                    .unwrap();
+                    completed.recv().await.unwrap();
+                    assert_eq!(
+                        commits(),
+                        warmed,
+                        "quiet equal-fingerprint probes must not rebuild selections, history={history}, phase={phase}"
+                    );
+                }
+            }
+            drop(channel);
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn participant_durable_have_connection_reuses_selection_and_rechecks_authority() {
+        use crate::{
+            node::session::{Served, request_durable_have, serve_one_paged},
+            transport::SecureChannel,
+        };
+        async fn query(
+            channel: &mut SecureChannel<tokio::net::TcpStream>,
+            completed: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+            conversation: ConversationId,
+            event: EventId,
+        ) -> bool {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                request_durable_have(channel, conversation, event),
+            )
+            .await
+            .expect("custody request stalled")
+            .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), completed.recv())
+                .await
+                .expect("serving completion stalled")
+                .expect("server exited");
+            result
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let peer_account = Account::generate();
+        let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.configure_privacy(
+            directory.path(),
+            "pw",
+            &node.own_group_proof(),
+            std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .proofs
+            .record(&proof)
+            .unwrap();
+        node.set_allowed(&peer_account.account_id(), true)
+            .await
+            .unwrap();
+        node.set_invisible(true).await.unwrap();
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let append = |conversation, seq| {
+            let event = Event::new(
+                &node.identity,
+                conversation,
+                seq,
+                vec![],
+                seq,
+                0,
+                EventKind::Message,
+                vec![7; 2048],
+            );
+            let id = event.id;
+            node.log.lock().unwrap().append_durable(event).unwrap();
+            id
+        };
+        let mut selected = None;
+        for seq in 1..=128 {
+            selected = Some(append(conversation, seq));
+        }
+        let selected = selected.unwrap();
+        let missing = EventId::new([93; 32]);
+        let counters = || {
+            (
+                node.storage
+                    .database()
+                    .read(|c| Ok(c.total_changes()))
+                    .unwrap(),
+                node.storage.database().successful_write_commits(),
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .body_read_counts(),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_node = node.clone();
+        let remote = peer.public();
+        let (served, mut completed) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            let (server, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(server, &server_node.identity)
+                .await
+                .unwrap();
+            // Production owns one store for the lifetime of this connection.
+            let store = server_node.serve_sync_store(&remote);
+            loop {
+                if matches!(
+                    serve_one_paged(&mut channel, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+                served.send(()).unwrap();
+            }
+        });
+        let client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut channel = SecureChannel::connect(client, &peer, Some(&node.identity.public()))
+            .await
+            .unwrap();
+        // First preparation may have an unqualified cold metadata stamp.
+        for _ in 0..3 {
+            assert!(query(&mut channel, &mut completed, conversation, selected).await);
+        }
+        let warm = counters();
+        for _ in 0..3 {
+            assert!(query(&mut channel, &mut completed, conversation, selected).await);
+            assert!(!query(&mut channel, &mut completed, conversation, missing).await);
+        }
+        assert_eq!(
+            counters(),
+            warm,
+            "warm present/missing custody requests must not rewrite selections or read historical bodies"
+        );
+
+        append(ConversationId::new([203; 32]), 1);
+        let unrelated = counters();
+        assert!(query(&mut channel, &mut completed, conversation, selected).await);
+        assert_eq!(
+            counters(),
+            unrelated,
+            "unrelated ordinary append must retain custody preparation"
+        );
+
+        let tail = append(conversation, 129);
+        let changed = counters();
+        assert!(
+            query(&mut channel, &mut completed, conversation, tail).await,
+            "newly appended retained events must not be hidden by the old finite selection"
+        );
+        let prepared = counters();
+        assert!(
+            prepared.0 > changed.0 && prepared.1 > changed.1,
+            "changed conversation must prepare a current authorization selection"
+        );
+        for _ in 0..3 {
+            assert!(query(&mut channel, &mut completed, conversation, tail).await);
+        }
+        assert_eq!(
+            counters(),
+            prepared,
+            "refreshed custody preparation must become quiet again"
+        );
+
+        node.set_allowed(&peer_account.account_id(), false)
+            .await
+            .unwrap();
+        assert!(
+            !query(&mut channel, &mut completed, conversation, selected).await,
+            "warm positive custody must not outlive current peer authority"
+        );
+        drop(channel);
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .expect("connection owner failed to retire")
+            .unwrap();
+        let retirement = node
+            .retire_prepared_sync_views()
+            .expect("cached selection retirement");
+        retirement.await.unwrap();
+        node.runtime_work.drain().await;
+        let active: i64 = node
+            .storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM participant_work.participant_sync_views WHERE retired=0",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            active, 0,
+            "retired node cache must release its selection leases"
+        );
+    }
+
+    #[tokio::test]
     async fn participant_durable_have_request_uses_no_historical_bodies() {
         use crate::{
             node::session::{request_durable_have, serve_one_paged},
@@ -2342,5 +4722,222 @@ mod control_publication_tests {
             before,
             "a selected custody probe must not decode retained history"
         );
+    }
+
+    #[tokio::test]
+    async fn guarded_pull_only_remote_subset_scope_pending_owner_guards() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let event = Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![1],
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(event.clone())
+            .unwrap();
+        let owner = node.pull_sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        let view = open_prepared(&store, &conversation);
+        assert!(
+            store.quiet_comparison_token(&view).unwrap().is_none(),
+            "unbound transport cannot enroll a runtime hint"
+        );
+        store.bind_session_peer(&peer.public());
+        let token = store.quiet_comparison_token(&view).unwrap().unwrap();
+        let hint = crate::eventlog::sync::network::QuietComparison {
+            local_token: token,
+            remote_fingerprint: crate::eventlog::sync::fingerprint(vec![]),
+            remote_count: 0,
+        };
+        store.retain_quiet_comparison(&view, hint).unwrap();
+        assert_eq!(store.quiet_comparison(&conversation).unwrap(), Some(hint));
+        assert!(
+            !NetworkSyncStore::durable_have(&*store, &conversation, &EventId::new([240; 32]))
+                .unwrap(),
+            "quiet scheduling cannot fabricate durable custody"
+        );
+        for owner in [
+            node.sync_store(&peer.public()),
+            node.serve_sync_store(&peer.public()),
+            node.pull_sync_store(&DeviceIdentity::generate().public()),
+        ] {
+            let mut other = owner.lock().unwrap();
+            other.bind_session_peer(&peer.public());
+            assert!(
+                other.quiet_comparison(&conversation).unwrap().is_none(),
+                "direction/full peer/duplex scopes cannot borrow a pull hint"
+            );
+        }
+        let mut wrong = hint;
+        wrong.local_token = [239; 32];
+        store.retain_quiet_comparison(&view, wrong).unwrap();
+        assert_eq!(store.quiet_comparison(&conversation).unwrap(), Some(hint));
+        // This creates actual duplicate retained+pending contributors. Current
+        // pending later clears, but the captured view must remain ineligible.
+        store.pending_channels.insert(
+            conversation,
+            super::super::PendingChannel {
+                events: vec![event],
+                ..Default::default()
+            },
+        );
+        let pending = open_prepared(&store, &conversation);
+        assert!(store.quiet_comparison_token(&pending).unwrap().is_none());
+        store.pending_channels.clear();
+        assert!(
+            store.quiet_comparison_token(&pending).unwrap().is_none(),
+            "actual captured pending contributor must exclude a hint even after live pending clears"
+        );
+        drop(pending);
+        let upload = store.open_history_upload(&conversation).unwrap();
+        super::tests::prepare_upload(&store, &upload);
+        assert!(
+            store
+                .quiet_comparison_token(&upload.view)
+                .unwrap()
+                .is_none(),
+            "history-only preparation cannot enroll ordinary comparison metadata"
+        );
+        drop(upload);
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(Event::new(
+                &node.identity,
+                conversation,
+                2,
+                vec![],
+                2,
+                0,
+                EventKind::Message,
+                vec![2],
+            ))
+            .unwrap();
+        assert!(
+            !store
+                .validate_quiet_comparison(&conversation, hint)
+                .unwrap()
+        );
+        assert!(
+            store.quiet_comparison_token(&view).unwrap().is_none(),
+            "finite view validity alone cannot certify an unchanged answer"
+        );
+        let current = open_prepared(&store, &conversation);
+        let current_hint = crate::eventlog::sync::network::QuietComparison {
+            local_token: store.quiet_comparison_token(&current).unwrap().unwrap(),
+            ..hint
+        };
+        store
+            .retain_quiet_comparison(&current, current_hint)
+            .unwrap();
+        assert_eq!(
+            store.quiet_comparison(&conversation).unwrap(),
+            Some(current_hint),
+            "runtime closure control must start with currently qualified evidence"
+        );
+        node.runtime_work.close();
+        assert!(store.quiet_comparison(&conversation).unwrap().is_none());
+        assert!(store.quiet_comparison_token(&view).unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guarded_pull_only_remote_subset_cache_deadline_and_shared_capacity() {
+        use super::super::super::channel_projection_cache::{
+            ChannelProjectionCache, ProjectionKey, ProjectionMetadata, PullComparisonScope,
+        };
+        let mut cache = ChannelProjectionCache::default();
+        let own = DeviceIdentity::generate().public();
+        let peer = DeviceIdentity::generate().public();
+        let key = |tag| ProjectionKey {
+            conversation: ConversationId::new([tag; 32]),
+            raw: ([0; 32], 0),
+            peer: peer.clone(),
+            own: own.clone(),
+            own_account: "owner".into(),
+            established: None,
+            privacy_generation: 0,
+            privacy_configured: false,
+            inbound: false,
+            sharing: false,
+        };
+        let scope = |tag| PullComparisonScope {
+            conversation: ConversationId::new([tag; 32]),
+            peer: peer.clone(),
+            own: own.clone(),
+            own_account: "owner".into(),
+        };
+        let stamp = |tag| HistorySyncStamp {
+            fingerprint: [tag; 32],
+        };
+        let hint = |tag| crate::eventlog::sync::network::QuietComparison {
+            local_token: [tag; 32],
+            remote_fingerprint: [222; 32],
+            remote_count: 0,
+        };
+        let legacy = ProjectionMetadata {
+            fingerprint: [11; 32],
+            len: 0,
+            requires_v2: false,
+            requires_v3: false,
+            requires_v4: false,
+            requires_v5: false,
+        };
+        for tag in 0..64 {
+            cache.insert(key(tag), legacy);
+        }
+        let metadata = SyncMetadata {
+            fingerprint: Some([77; 32]),
+            ..Default::default()
+        };
+        for tag in 64..96 {
+            cache.insert_paged(stamp(tag), metadata);
+        }
+        for tag in 96..128 {
+            cache.insert_pull_comparison(scope(tag), stamp(tag), hint(tag));
+        }
+        assert_eq!(cache.len(), 128);
+        tokio::time::advance(std::time::Duration::from_secs(250)).await;
+        assert_eq!(
+            cache.pull_comparison(&scope(96), &stamp(96)),
+            Some(hint(96))
+        );
+        cache.insert_pull_comparison(scope(96), stamp(96), hint(96));
+        tokio::time::advance(std::time::Duration::from_secs(51)).await;
+        assert!(
+            cache.pull_comparison(&scope(96), &stamp(96)).is_none(),
+            "hits/identical observations must not renew the original deadline"
+        );
+        assert_eq!(
+            cache.get_paged(&stamp(64)).unwrap().fingerprint,
+            Some([77; 32]),
+            "remote comparison must never overwrite ordinary local fingerprint metadata"
+        );
+        cache.insert_pull_comparison(scope(128), stamp(128), hint(128));
+        assert_eq!(cache.len(), 128);
+        assert!(
+            cache.get(&key(0)).is_none(),
+            "new hint shares the existing FIFO quota"
+        );
+        assert!(cache.get(&key(1)).is_some());
     }
 }

@@ -4,6 +4,72 @@ use super::*;
 use crate::identity::{account::Account, device::DeviceIdentity};
 
 #[test]
+fn avatar_revision_reuses_sql_compilation_but_reads_current_values_and_errors() {
+    thread_local! {
+        static SELECT_COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    unsafe extern "C" fn count_selects(
+        _context: *mut std::ffi::c_void,
+        action: std::ffi::c_int,
+        _table: *const std::ffi::c_char,
+        _column: *const std::ffi::c_char,
+        _database: *const std::ffi::c_char,
+        _view: *const std::ffi::c_char,
+    ) -> std::ffi::c_int {
+        if action == rusqlite::ffi::SQLITE_SELECT {
+            SELECT_COMPILES.with(|count| count.set(count.get() + 1));
+        }
+        rusqlite::ffi::SQLITE_OK
+    }
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE current_avatar_state(singleton INTEGER PRIMARY KEY,revision INTEGER);\n\
+             INSERT INTO current_avatar_state VALUES(1,0);",
+        )
+        .unwrap();
+    // SAFETY: this connection is exclusively owned by this synchronous test.
+    // The callback uses only thread-local state and retains no borrowed pointer.
+    assert_eq!(
+        unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(
+                connection.handle(),
+                Some(count_selects),
+                std::ptr::null_mut(),
+            )
+        },
+        rusqlite::ffi::SQLITE_OK
+    );
+    SELECT_COMPILES.with(|count| count.set(0));
+    assert_eq!(revision_on(&connection).unwrap(), 0);
+    assert_eq!(revision_on(&connection).unwrap(), 0);
+    assert_eq!(
+        SELECT_COMPILES.with(std::cell::Cell::get),
+        1,
+        "unchanged maintenance must not compile the same scalar query again"
+    );
+    connection
+        .execute("UPDATE current_avatar_state SET revision=7", [])
+        .unwrap();
+    assert_eq!(revision_on(&connection).unwrap(), 7);
+    connection
+        .execute("UPDATE current_avatar_state SET revision=-1", [])
+        .unwrap();
+    assert!(revision_on(&connection).is_err());
+    connection
+        .execute_batch("DROP TABLE current_avatar_state")
+        .unwrap();
+    assert!(revision_on(&connection).is_err());
+    connection
+        .execute_batch(
+            "CREATE TABLE current_avatar_state(singleton INTEGER PRIMARY KEY,revision INTEGER);\n\
+             INSERT INTO current_avatar_state VALUES(1,9);",
+        )
+        .unwrap();
+    assert_eq!(revision_on(&connection).unwrap(), 9);
+}
+
+#[test]
 fn indexed_current_avatars_page_before_bodies_and_keep_clear_order() {
     let dir = tempfile::tempdir().unwrap();
     let owner = profile(

@@ -46,7 +46,7 @@ import { useTranslation } from "react-i18next";
 import { messageSummary } from "@/lib/messagePresentation";
 import { usePacks } from "@/store/packs";
 import { needsCustomWindowControls } from "@/lib/platform";
-import { ReceptionStatus } from "./ReceptionStatus";
+import { ConversationReceptionStatus } from "./ReceptionStatus";
 import { CameraCaptureDialog } from "./CameraCaptureDialog";
 import { Composer } from "./Composer";
 import { useDrafts } from "@/store/drafts";
@@ -256,7 +256,6 @@ export function ConversationView() {
   );
   const unread = useChat((s) => s.unreadIds[key] ?? NO_IDS);
   const earlier = useChat((s) => s.lateUnreadIds[key] ?? NO_IDS);
-  const recovery = useChat((s) => s.reception[key]);
   const overflowUnread = useChat((s) => s.overflowUnread[key] ?? 0);
   const markMessagesViewed = useChat((s) => s.markMessagesViewed);
   const loading = useChat((s) => s.loading);
@@ -677,13 +676,12 @@ export function ConversationView() {
           onClose={collection.cancel}
         />
       )}
-      <ReceptionStatus
+      <ConversationReceptionStatus
         key={`${receptionScope}:${key}`}
         conversation={key}
         overflow={overflowUnread}
         unread={unread}
         earlier={earlier}
-        recovery={recovery}
         onJump={(id) => void navigateUnread(id)}
         unavailable={!!unavailableUnread && unread.includes(unavailableUnread)}
         onMarkRead={() => {

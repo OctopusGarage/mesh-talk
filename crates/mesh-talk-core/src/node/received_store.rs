@@ -164,6 +164,11 @@ impl ReceivedStore {
     pub(crate) fn check_publication(&self) -> Result<(), LogError> {
         self.repository.check_publication()
     }
+    /// Quiet receiver discovery validates the barrier; an actual install must
+    /// independently pass check_write before its transaction.
+    pub(crate) fn check_read_publication(&self) -> Result<(), LogError> {
+        self.repository.check_read_publication()
+    }
     pub(crate) fn check_write(&self) -> Result<(), LogError> {
         #[cfg(test)]
         self.check_failure_for_test()?;
@@ -478,6 +483,13 @@ impl ReceivedStore {
             .map(decode)
             .transpose()
     }
+    pub(crate) fn header_in(
+        &self,
+        conversation: &ConversationId,
+        id: EventId,
+    ) -> Result<Option<TranscriptHeader>, LogError> {
+        self.repository.lookup_header(conversation, id.as_bytes())
+    }
     pub(crate) fn file_headers(
         &self,
         file: &ConversationId,
@@ -614,7 +626,10 @@ impl ReceivedStore {
         after: Option<TranscriptDeadlineCursor>,
         limit: usize,
     ) -> Result<Vec<TranscriptDeadline>, LogError> {
-        self.repository.deadline_page(before, after, limit)
+        let rows = self.repository.deadline_page(before, after, limit)?;
+        #[cfg(test)]
+        deadline_observations::ROWS.with(|count| count.set(count.get() + rows.len()));
+        Ok(rows)
     }
     pub(crate) fn revision(&self) -> u64 {
         self.repository.revision()
@@ -672,4 +687,9 @@ impl ReceivedStore {
             result.extend(page);
         }
     }
+}
+
+#[cfg(test)]
+pub(in crate::node) mod deadline_observations {
+    std::thread_local! { pub static ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 }

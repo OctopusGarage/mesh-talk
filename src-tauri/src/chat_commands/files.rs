@@ -673,9 +673,115 @@ pub async fn read_media<R: tauri::Runtime>(
         .await
 }
 
+async fn preview_decode_admission(
+    decode: std::sync::Arc<tokio::sync::Semaphore>,
+    wait: std::time::Duration,
+) -> Result<tokio::sync::OwnedSemaphorePermit, CommandError> {
+    tokio::time::timeout(wait, decode.acquire_owned())
+        .await
+        .map_err(|_| CommandError::Validation("preview worker busy".into()))?
+        .map_err(|_| CommandError::Internal("preview worker closed".into()))
+}
+
+/// The observer deadline includes semaphore, runtime and blocking-pool admission.
+/// Once spawned, the detached parent owns the runtime guard until its real child
+/// settles, even when the observer times out. Only short authority checks hold
+/// session/app-lock guards; file reads and decoding never hold those guards.
+async fn media_preview_query<T: Send + 'static>(
+    admission: RuntimeAdmission,
+    lock_revision: u64,
+    deadline: std::time::Instant,
+    queue: std::sync::Arc<tokio::sync::Semaphore>,
+    decode: std::sync::Arc<tokio::sync::Semaphore>,
+    query: impl FnOnce(std::sync::Arc<mesh_talk_core::node::Node>) -> Result<T, CommandError>
+    + Send
+    + 'static,
+) -> Result<T, CommandError> {
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async move {
+        let queued = queue
+            .try_acquire_owned()
+            .map_err(|_| CommandError::Validation("preview queue full".into()))?;
+        let decoding = preview_decode_admission(
+            decode,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+        )
+        .await?;
+        admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    admission.checked_at_lock_revision(runtime, lock_revision, || Ok(()))?;
+                    let node = runtime.handle();
+                    let bytes = tokio::task::spawn_blocking(move || {
+                        let _queued = queued;
+                        let _decoding = decoding;
+                        // A timed-out pool waiter must not begin expensive obsolete work.
+                        if std::time::Instant::now() >= deadline {
+                            return Err(CommandError::Validation(
+                                "preview deadline elapsed".into(),
+                            ));
+                        }
+                        query(node)
+                    })
+                    .await
+                    .map_err(|_| CommandError::Internal("preview worker terminated".into()))??;
+                    admission.checked_at_lock_revision(runtime, lock_revision, || Ok(bytes))
+                })
+            })
+            .await
+    })
+    .await
+    .map_err(|_| CommandError::Validation("preview deadline elapsed".into()))?
+}
+
+/// Ephemeral PNG thumbnails transported as raw binary IPC; no plaintext disk cache.
+#[tauri::command]
+pub async fn read_media_preview<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, NodeState>,
+    file_conv: String,
+) -> Result<tauri::ipc::Response, CommandError> {
+    static QUEUE: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
+    static DECODE: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let session = app.state::<AppState>();
+    let admission = RuntimeAdmission::capture_current(session.inner(), &state)?;
+    let lock_revision = session.app_lock().authorization_revision()?;
+    let id = parse_channel_id(&file_conv)?;
+    let bytes = media_preview_query(
+        admission,
+        lock_revision,
+        deadline,
+        QUEUE.clone(),
+        DECODE.clone(),
+        move |node| node.read_media_preview(id).map_err(CommandError::from),
+    )
+    .await?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn preview_decode_wait_times_out_without_releasing_actual_work_capacity() {
+        let decode = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let active = decode.acquire().await.unwrap();
+        assert!(matches!(
+            preview_decode_admission(decode.clone(), std::time::Duration::ZERO).await,
+            Err(CommandError::InvalidInput(_))
+        ));
+        assert_eq!(decode.available_permits(), 0);
+        drop(active);
+        let recovered = preview_decode_admission(decode.clone(), std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(decode.available_permits(), 0);
+        drop(recovered);
+        assert_eq!(decode.available_permits(), 1);
+    }
 
     #[tokio::test]
     async fn automatic_save_rejects_another_account_before_waiting_for_its_runtime() {
@@ -739,6 +845,116 @@ mod tests {
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
         (root, app)
+    }
+
+    #[tokio::test]
+    async fn preview_deadline_bounds_runtime_writer_wait_without_starting_work() {
+        let (_root, app) = sticker_app();
+        let state = app.state::<NodeState>();
+        let admission =
+            RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state).unwrap();
+        let revision = app
+            .state::<AppState>()
+            .app_lock()
+            .authorization_revision()
+            .unwrap();
+        let queue = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let decode = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let held = state.0.write().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            media_preview_query(
+                admission,
+                revision,
+                std::time::Instant::now() + std::time::Duration::from_millis(20),
+                queue.clone(),
+                decode.clone(),
+                |_| -> Result<(), CommandError> { panic!("blocked runtime cannot start query") },
+            ),
+        )
+        .await
+        .expect("observer deadline must cover runtime lock admission");
+        assert!(matches!(result, Err(CommandError::InvalidInput(_))));
+        assert_eq!(queue.available_permits(), 1);
+        assert_eq!(decode.available_permits(), 1);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn preview_timeout_keeps_actual_worker_owned_without_holding_session_lock() {
+        let (root, app) = sticker_app();
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "alice",
+            "Alice",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let state = app.state::<NodeState>();
+        *state.0.write().await = Some(runtime);
+        let admission =
+            RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state).unwrap();
+        let revision = app
+            .state::<AppState>()
+            .app_lock()
+            .authorization_revision()
+            .unwrap();
+        let queue = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let decode = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let task = tokio::spawn(media_preview_query(
+            admission,
+            revision,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            queue.clone(),
+            decode.clone(),
+            move |_node| {
+                let _ = entered.send(());
+                blocked.recv().unwrap();
+                Ok(())
+            },
+        ));
+        started.await.unwrap();
+        let app_state = app.state::<AppState>().inner().clone();
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::task::spawn_blocking(move || app_state.session().capture()),
+        )
+        .await;
+        let result = task.await.unwrap();
+        let queue_held = queue.available_permits() == 0;
+        let decode_held = decode.available_permits() == 0;
+        let runtime_held = state.0.try_write().is_err();
+        release.send(()).unwrap();
+        let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), decode.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(recovered);
+        let retired = tokio::time::timeout(std::time::Duration::from_secs(2), state.0.write())
+            .await
+            .unwrap()
+            .take()
+            .unwrap();
+        retired.stop().await;
+        assert!(
+            observed.is_ok(),
+            "decoding cannot hold the unrelated session capture lock"
+        );
+        assert!(matches!(result, Err(CommandError::InvalidInput(_))));
+        assert!(
+            queue_held && decode_held && runtime_held,
+            "timed-out actual work retains all lifecycle and resource owners"
+        );
+        assert_eq!(queue.available_permits(), 1);
     }
 
     #[tokio::test]

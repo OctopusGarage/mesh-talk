@@ -232,6 +232,11 @@ pub(super) fn maintenance(profile: &ProfileStorage) -> Result<(), LogError> {
     }
     cleanup(profile, &source)
 }
+pub(super) fn maintenance_pending(profile: &ProfileStorage) -> Result<(bool, bool), LogError> {
+    profile.database().read(|c| {
+        c.query_row("SELECT staging_pending,cleanup_pending FROM participant_event_publication WHERE singleton=1", [], |row| Ok((row.get(0)?,row.get(1)?))).map_err(Into::into)
+    })
+}
 pub(super) fn open(
     profile: &Arc<ProfileStorage>,
     path: &Path,

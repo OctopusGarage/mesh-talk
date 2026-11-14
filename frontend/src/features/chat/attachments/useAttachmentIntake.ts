@@ -58,6 +58,7 @@ export function useAttachmentIntake(
   const [screenshotAvailable, setScreenshotAvailable] = useState(false);
   const [screenshot, setScreenshot] = useState<{
     bytes: Uint8Array;
+    capturedAt: number;
     current: Current;
     policy: AttachmentSendOptions;
   } | null>(null);
@@ -249,6 +250,7 @@ export function useAttachmentIntake(
     const current = capture();
     if (!current() || capturing.current || screenshot) return;
     const policy = snapshot();
+    const capturedAt = Date.now();
     const request = ++captureGeneration.current;
     capturing.current = true;
     try {
@@ -258,7 +260,7 @@ export function useAttachmentIntake(
         request === captureGeneration.current &&
         bytes.length > 0
       )
-        setScreenshot({ bytes, current, policy });
+        setScreenshot({ bytes, capturedAt, current, policy });
     } catch (error) {
       if (!current() || request !== captureGeneration.current) return;
       const message = errorMessage(error);
@@ -283,9 +285,13 @@ export function useAttachmentIntake(
     const origin = screenshot;
     if (!origin?.current()) return;
     captureGeneration.current++;
-    const file = new File([new Uint8Array(bytes)], "screenshot.png", {
-      type: "image/png",
-    });
+    const file = new File(
+      [new Uint8Array(bytes)],
+      `screenshot-${origin.capturedAt}.png`,
+      {
+        type: "image/png",
+      },
+    );
     screenshotPolicies.current.set(file, origin.policy);
     setStagedScreenshot({ file, current: origin.current });
     setScreenshot((value) => (value === origin ? null : value));

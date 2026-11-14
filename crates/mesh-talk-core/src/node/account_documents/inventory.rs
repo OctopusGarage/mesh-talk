@@ -16,8 +16,12 @@ const PUBLICATION_SLICE: usize = 16;
 pub(in crate::node) enum InventoryPublication {
     Complete,
     Pending,
+    Failed,
 }
 impl InventoryPublication {
+    pub(in crate::node) fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed)
+    }
     pub(in crate::node) fn is_pending(&self) -> bool {
         matches!(self, Self::Pending)
     }
@@ -299,7 +303,7 @@ impl GroupInventoryReference {
 
 pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool {
     let AccountDocumentKey::GroupInventory {
-        channel,
+        channel: _,
         source_device,
     } = &meta.key
     else {
@@ -314,6 +318,20 @@ pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool 
     let Ok(value) = serde_json::from_slice::<GroupInventoryReference>(payload) else {
         return false;
     };
+    valid_reference(meta, &value)
+}
+
+pub(super) fn valid_reference(meta: &AccountDocumentMeta, value: &GroupInventoryReference) -> bool {
+    let AccountDocumentKey::GroupInventory {
+        channel,
+        source_device,
+    } = &meta.key
+    else {
+        return false;
+    };
+    if meta.tombstone || source_device != &meta.writer_device {
+        return false;
+    }
     let mut members = BTreeSet::new();
     let principals = value
         .members
@@ -370,22 +388,28 @@ pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool 
 
 fn references_from_rows(
     node: &Node,
-    store: &store::AccountDocumentStore,
+    store: &mut store::AccountDocumentStore,
     rows: Vec<AccountDocumentMeta>,
 ) -> BTreeMap<String, GroupInventoryReference> {
     let mut grouped: BTreeMap<String, Vec<(AccountDocumentMeta, GroupInventoryReference)>> =
         BTreeMap::new();
     for meta in rows.into_iter().filter(|meta| !meta.tombstone) {
-        let Ok(Some(document)) = store.get(&meta.key) else {
+        #[cfg(test)]
+        let before = store.inventory_body_validations;
+        let reference = store.inventory_reference(&meta);
+        #[cfg(test)]
+        node.inventory_body_validations.fetch_add(
+            store.inventory_body_validations - before,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let Some(reference) = reference else {
             continue;
         };
-        if !valid_payload(&meta, document.payload()) {
-            continue;
+        #[cfg(test)]
+        if reference.directory.is_some() {
+            node.inventory_live_binding_checks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let Ok(reference) = serde_json::from_slice::<GroupInventoryReference>(document.payload())
-        else {
-            continue;
-        };
         if reference
             .directory
             .as_ref()
@@ -481,6 +505,66 @@ fn references_from_rows(
 }
 
 impl Node {
+    /// Test-artifact observer for inventory payload reads on the caller thread.
+    #[doc(hidden)]
+    #[cfg(feature = "fast-test-kdf")]
+    pub fn test_group_inventory_body_read_count(&self) -> usize {
+        self.account_documents
+            .lock()
+            .expect("documents mutex")
+            .inventory_body_read_count()
+    }
+
+    /// Bodyless scheduling hint only; direct document integrity checks remain mandatory.
+    pub fn group_projection_revision(&self) -> Result<[u8; 32], LogError> {
+        use std::sync::atomic::Ordering;
+        let source = {
+            let log = self.log.lock().expect("log mutex");
+            let repository = log.repository()?;
+            (
+                repository.source_revision()?,
+                repository.destructive_policy_revision()?,
+            )
+        };
+        let profiles = self.profiles.lock().expect("profiles mutex").revision()?;
+        let avatars = self.account_profiles.revision()?;
+        let proofs = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy state mutex")
+            .as_ref()
+            .map(|state| state.proofs.revision());
+        let privacy = (
+            self.privacy.generation.load(Ordering::SeqCst),
+            self.privacy.projection_revision.load(Ordering::SeqCst),
+            proofs,
+        );
+        let policy = self.device_sync_policy_snapshot().1;
+        let documents = *self.account_document_updates.borrow();
+        let mut devices = self.linked_devices();
+        devices.sort_by_key(|device| device.public.user_id());
+        // Announce excludes last-seen timestamps and IP routes: an identical
+        // signed heartbeat is unchanged. Include live bindings too, as private
+        // owner-proof eligibility may consult them. Both roster sets are bounded.
+        let (mut historical, mut live) = {
+            let roster = self.roster.lock().expect("roster mutex");
+            (roster.historical_announcements(), roster.announcements())
+        };
+        historical.sort_by_key(|proof| proof.user_id.clone());
+        live.sort_by_key(|proof| proof.user_id.clone());
+        let roster = (historical, live);
+        let mut groups = self.channels.lock().expect("channels mutex").channel_ids();
+        groups.sort_by_key(|group| *group.as_bytes());
+        let identity = (self.account_id(), self.user_id());
+        let bytes = bincode::serialize(&(
+            identity, source, profiles, avatars, privacy, policy, documents, devices, roster,
+            groups,
+        ))
+        .map_err(|error| crate::eventlog::LogError::Serialization(error.to_string()))?;
+        Ok(Sha256::digest(bytes).into())
+    }
+
     fn project_inventory_bindings(&self, reference: &mut GroupInventoryReference) {
         if !reference.legacy_membership {
             return;
@@ -678,8 +762,9 @@ impl Node {
             return None;
         }
         let channel = hex::encode(channel.as_bytes());
-        let store = self.account_documents.lock().expect("documents mutex");
-        references_from_rows(self, &store, store.inventory_channel_rows(&channel)).remove(&channel)
+        let mut store = self.account_documents.lock().expect("documents mutex");
+        let rows = store.inventory_channel_rows(&channel);
+        references_from_rows(self, &mut store, rows).remove(&channel)
     }
     pub fn channel_legacy_membership(&self, channel: ConversationId) -> bool {
         let book = self.channels.lock().expect("channels mutex");
@@ -693,8 +778,29 @@ impl Node {
     pub(in crate::node) fn group_inventory_references(
         &self,
     ) -> BTreeMap<String, GroupInventoryReference> {
-        let store = self.account_documents.lock().expect("documents mutex");
-        references_from_rows(self, &store, store.inventory_rows())
+        let mut store = self.account_documents.lock().expect("documents mutex");
+        let rows = store.inventory_rows();
+        references_from_rows(self, &mut store, rows)
+    }
+
+    /// Listing already owns physical groups from its channel-book snapshot.
+    /// Discard only those unused rows before reading their durable bodies.
+    pub(in crate::node) fn group_inventory_references_excluding_local(
+        &self,
+        local_ids: &std::collections::HashSet<ConversationId>,
+    ) -> BTreeMap<String, GroupInventoryReference> {
+        if local_ids.is_empty() {
+            return self.group_inventory_references();
+        }
+        let excluded: BTreeSet<_> = local_ids
+            .iter()
+            .map(|id| hex::encode(id.as_bytes()))
+            .collect();
+        let mut store = self.account_documents.lock().expect("documents mutex");
+        let rows = store.inventory_rows().into_iter().filter(|meta| {
+            !matches!(&meta.key, AccountDocumentKey::GroupInventory { channel, .. } if excluded.contains(channel))
+        }).collect();
+        references_from_rows(self, &mut store, rows)
     }
 
     /// Publish only physical local groups, with canonical facts and their witness
@@ -735,16 +841,23 @@ impl Node {
             if let Err(error) = self.try_publish_group_inventory_groups(&[*id]) {
                 let outcome = match &error {
                     NodeError::Log(LogError::StaleCursor) => {
-                        publication = InventoryPublication::Pending;
+                        if !publication.is_failed() {
+                            publication = InventoryPublication::Pending;
+                        }
                         "source_pending"
                     }
                     NodeError::Log(LogError::Io(error))
                         if error.kind() == std::io::ErrorKind::WouldBlock =>
                     {
-                        publication = InventoryPublication::Pending;
+                        if !publication.is_failed() {
+                            publication = InventoryPublication::Pending;
+                        }
                         "directory_pending"
                     }
-                    _ => "error",
+                    _ => {
+                        publication = InventoryPublication::Failed;
+                        "error"
+                    }
                 };
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
@@ -842,6 +955,23 @@ impl Node {
                 .filter(|member| state.is_accepted_member(&member.user_id()))
                 .cloned()
                 .collect();
+            // Modern ownership belongs to an account. The legacy owner device
+            // remains historical; inventory needs a current accepted device of
+            // the exact owner account to describe that role coherently.
+            let inventory_owner = if let Some(account) = state.owner_account_id() {
+                accepted
+                    .iter()
+                    .filter(|member| state.member_account_id(&member.user_id()) == Some(account))
+                    .map(PublicIdentity::user_id)
+                    .min()
+                    .ok_or_else(|| {
+                        NodeError::InvalidInput(
+                            "group inventory owner account has no accepted device".into(),
+                        )
+                    })?
+            } else {
+                state.owner().to_owned()
+            };
             let member_count = if state.owner_account_id().is_some() {
                 accepted
                     .iter()
@@ -855,7 +985,7 @@ impl Node {
             let mut members = state.members().to_vec();
             members.sort_by_key(|member| {
                 (
-                    member.user_id() != state.owner() && member.user_id() != own,
+                    member.user_id() != inventory_owner && member.user_id() != own,
                     member.user_id(),
                 )
             });
@@ -864,7 +994,7 @@ impl Node {
                 source_device: own.clone(),
                 name: inventory_display_name(state.name(), *id),
                 member_count,
-                owner: state.owner().into(),
+                owner: inventory_owner,
                 owner_account_id: state.owner_account_id().map(str::to_owned),
                 dissolved: state.is_dissolved(),
                 left: !self.channel_identity_matches_account(&state),
@@ -955,17 +1085,18 @@ impl Node {
                 .as_ref()
                 .is_some_and(|meta| old.is_none() && meta.content_hash != content_hash(&payload))
             {
-                continue;
+                return Err(LogError::CorruptFile(
+                    "unreadable group inventory source floor".into(),
+                )
+                .into());
             }
             let log = self.log.lock().expect("log mutex");
             view.check(log.repository()?)?;
-            if log.sync().is_err() {
-                continue;
-            }
+            log.sync()?;
             let changed = {
                 let mut store = self.account_documents.lock().expect("documents mutex");
                 if store.meta(&key) != previous {
-                    continue;
+                    return Err(LogError::StaleCursor.into());
                 }
                 let meta = if let Some(old) = previous
                     .as_ref()
@@ -992,9 +1123,9 @@ impl Node {
             match changed {
                 Ok(true) => self.documents_changed(),
                 Ok(false) => {}
-                Err(error) => log::debug!("group inventory publication deferred: {error}"),
+                Err(error) => return Err(error.into()),
             }
-            self.publish_group_activity_for(*id);
+            self.try_publish_group_activity_for(*id)?;
         }
         Ok(())
     }

@@ -224,6 +224,73 @@ fn inspection_uses_exact_sets_and_excludes_expired_removed_members() {
     );
 }
 #[test]
+fn unchanged_expiry_maintenance_does_not_rescan_favorite_media() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let mut favorite = node
+        .save_message_favorite_guarded(source(&node), Default::default(), |c| c())
+        .unwrap();
+    let file = ConversationId::new([96; 32]);
+    favorite.messages[0].file = Some(FavoriteFile {
+        file_conv: hex::encode(file.as_bytes()),
+        name: "retained.txt".into(),
+        size: 5,
+        mime: "text/plain".into(),
+        media: false,
+    });
+    favorite.revision += 1;
+    node.favorites
+        .lock()
+        .unwrap()
+        .merge(FavoriteRecord {
+            generation: 1,
+            favorite: favorite.clone(),
+            removed: false,
+        })
+        .unwrap();
+    node.favorite_media
+        .store_bytes(file, "retained.txt", b"bytes")
+        .unwrap();
+    node.prune_expired_received().unwrap();
+    crate::node::media_store::prune_observations::ROWS.with(|count| count.set(0));
+    node.prune_expired_received().unwrap();
+    assert_eq!(
+        crate::node::media_store::prune_observations::ROWS.with(|count| count.get()),
+        0,
+        "an unchanged favorite and media namespace must not cause another full prune"
+    );
+    assert!(node.favorite_media.contains(file));
+
+    // An arriving orphan invalidates the media inventory; a failed cleanup must
+    // not certify it as complete and suppress recovery after storage returns.
+    let orphan = ConversationId::new([97; 32]);
+    let path = node
+        .favorite_media
+        .store_bytes(orphan, "orphan.txt", b"bytes")
+        .unwrap();
+    let root = path.parent().unwrap();
+    let parked = root.with_extension("parked");
+    std::fs::rename(root, &parked).unwrap();
+    std::fs::write(root, b"unavailable media root").unwrap();
+    assert!(node.prune_expired_received().is_err());
+    std::fs::remove_file(root).unwrap();
+    std::fs::rename(&parked, root).unwrap();
+    node.prune_expired_received().unwrap();
+    assert!(!node.favorite_media.contains(orphan));
+    assert!(node.favorite_media.contains(file));
+
+    // Changed references still retire the previously retained bytes.
+    node.remove_message_favorite_guarded(
+        &favorite.id,
+        favorite.revision,
+        &favorite.device_id,
+        |c| c(),
+    )
+    .unwrap();
+    assert!(!node.favorite_media.contains(file));
+}
+
+#[test]
 fn retained_attachment_export_requires_live_favorite_and_safe_destination() {
     let dir = tempfile::tempdir().unwrap();
     let node = open(dir.path(), &Account::generate());
@@ -389,6 +456,142 @@ fn missing_attachment_queue_filters_existing_files_before_bounding() {
     assert_eq!(
         node.missing_favorite_files(),
         vec![ConversationId::new([101; 32])]
+    );
+}
+
+// Invalidate the already-captured favorite's canonical history using a real
+// transcript append, without running the projector again before the query.
+fn append_after_favorite_capture(node: &Node, favorite: &MessageFavorite) {
+    let peer = favorite.source.target.clone();
+    let conv = super::super::conversation::account_conversation_id(&node.account_id(), &peer);
+    let envelope = super::super::DmEnvelope::new(
+        node.account_id(),
+        peer,
+        [3; 32],
+        super::super::MessageBody::new(b"later ordinary message".to_vec(), None).encode(),
+    );
+    node.sentlog
+        .lock()
+        .unwrap()
+        .record(conv, 3, 3, &envelope.encode())
+        .unwrap();
+}
+
+#[test]
+fn empty_favorite_file_candidates_do_not_project_canonical_history() {
+    for case in ["text", "cached", "expired", "oversize"] {
+        let dir = tempfile::tempdir().unwrap();
+        let node = open(dir.path(), &Account::generate());
+        let selected = source(&node);
+        let mut favorite = node
+            .save_message_favorite_guarded(selected, Default::default(), |c| c())
+            .unwrap();
+        let file = ConversationId::new([71; 32]);
+        if case != "text" {
+            for message in &mut favorite.messages {
+                message.file = Some(FavoriteFile {
+                    file_conv: hex::encode(file.as_bytes()),
+                    name: "irrelevant.txt".into(),
+                    size: if case == "oversize" {
+                        MAX_FAVORITE_FILE_BYTES + 1
+                    } else {
+                        1
+                    },
+                    mime: "text/plain".into(),
+                    media: false,
+                });
+                if case == "expired" {
+                    message.expires_at_ms = Some(1);
+                }
+            }
+            favorite.revision += 1;
+            node.favorites
+                .lock()
+                .unwrap()
+                .merge(FavoriteRecord {
+                    generation: 1,
+                    favorite: favorite.clone(),
+                    removed: false,
+                })
+                .unwrap();
+        }
+        if case == "cached" {
+            node.favorite_media
+                .store_bytes(file, "irrelevant.txt", b"x")
+                .unwrap();
+        }
+        append_after_favorite_capture(&node, &favorite);
+        let database = node.storage.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        assert!(node.missing_favorite_files().is_empty(), "case={case}");
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "no file candidate can be selected, so canonical history must not be projected; case={case}"
+        );
+        assert_eq!(database.successful_write_commits(), commits, "case={case}");
+    }
+}
+
+#[test]
+fn unrelated_favorite_file_metadata_does_not_project_canonical_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let selected = source(&node);
+    let mut favorite = node
+        .save_message_favorite_guarded(selected, Default::default(), |c| c())
+        .unwrap();
+    favorite.messages[0].file = Some(FavoriteFile {
+        file_conv: hex::encode([72; 32]),
+        name: "different.txt".into(),
+        size: 1,
+        mime: "text/plain".into(),
+        media: false,
+    });
+    favorite.revision += 1;
+    node.favorites
+        .lock()
+        .unwrap()
+        .merge(FavoriteRecord {
+            generation: 1,
+            favorite: favorite.clone(),
+            removed: false,
+        })
+        .unwrap();
+    append_after_favorite_capture(&node, &favorite);
+    let database = node.storage.database();
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = database.successful_write_commits();
+    // This public-to-Node wrapper performs the actual favorite_file_metadata
+    // lookup; the requested file is absent from every persisted snapshot.
+    assert_eq!(node.favorite_file_size(ConversationId::new([73; 32])), None);
+    assert_eq!(
+        database.read(|c| Ok(c.total_changes())).unwrap(),
+        changes,
+        "unrelated file lookup must not rebuild another favorite's canonical history"
+    );
+    assert_eq!(database.successful_write_commits(), commits);
+    // A real selected candidate still requires current canonical validation.
+    // Corrupt only this fixture's canonical source bytes, retaining its declared
+    // charge/digest so ordinary transcript integrity checks must reject it.
+    let conv = super::super::conversation::account_conversation_id(
+        &node.account_id(),
+        &favorite.source.target,
+    );
+    database.transaction(|c| {
+        let changed = c.execute(
+            "UPDATE transcript_bodies SET plaintext=X'00' WHERE ordinal IN (SELECT ordinal FROM transcript_rows WHERE conversation=?1)",
+            [conv.as_bytes().as_slice()],
+        )?;
+        assert!(changed > 0);
+        Ok(())
+    }).unwrap();
+    assert!(node.favorite_protection(&favorite).is_err());
+    assert_eq!(node.favorite_file_size(ConversationId::new([72; 32])), None);
+    assert!(
+        node.missing_favorite_files().is_empty(),
+        "eligible missing attachments must fail closed when canonical protection cannot be read"
     );
 }
 
@@ -867,6 +1070,15 @@ async fn existing_favorite_cannot_expose_a_canonical_protected_image() {
             removed: false,
         })
         .unwrap();
+    assert!(
+        node.missing_favorite_files().is_empty(),
+        "an otherwise eligible missing file must still be denied by current canonical protection"
+    );
+    assert_eq!(
+        node.favorite_file_size(file),
+        None,
+        "selected protected metadata must remain unavailable"
+    );
     // Model a retained copy written before the current protection-aware client.
     node.favorite_media
         .store_bytes(file, "private.png", bytes)

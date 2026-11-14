@@ -209,8 +209,52 @@ impl DeliveryControlIndex {
         &mut self,
         bindings: std::collections::HashMap<EventId, ControlBinding>,
     ) {
-        self.bindings = bindings;
-        self.revision = self.revision.wrapping_add(1);
+        if self.bindings != bindings {
+            self.bindings = bindings;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_index_tests {
+    use super::*;
+
+    #[test]
+    fn equal_replacement_is_quiet_while_retirement_and_aba_invalidate() {
+        let id = EventId::new([7; 32]);
+        let binding = ControlBinding {
+            device: crate::identity::device::DeviceIdentity::generate().public(),
+            account: Some("account".into()),
+        };
+        let rows = std::collections::HashMap::from([(id, binding.clone())]);
+        let mut index = DeliveryControlIndex::new(rows.clone());
+        let initial = index.revision();
+        index.replace(rows);
+        assert_eq!(
+            index.revision(),
+            initial,
+            "unchanged authority is not a new generation"
+        );
+        index.replace(Default::default());
+        assert_ne!(
+            index.revision(),
+            initial,
+            "retirement must revoke old selections"
+        );
+        let retired = index.revision();
+        index.insert(id, binding);
+        assert_ne!(
+            index.revision(),
+            retired,
+            "restoration must invalidate the empty selection"
+        );
+        let restored = index.revision();
+        index.replace(Default::default());
+        assert_ne!(index.revision(), restored);
+        let empty = index.revision();
+        index.replace(Default::default());
+        assert_eq!(index.revision(), empty);
     }
 }
 
@@ -594,6 +638,8 @@ pub(crate) struct DeliveryStore {
     outbox_records: usize,
     needs_sync: bool,
     deferred_profile_binding: bool,
+    #[cfg(test)]
+    record_validations: std::cell::Cell<usize>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,6 +664,11 @@ impl DeliveryStore {
             }
         }
         omitted
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_outbox_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.outbox.fail_appends_for_test(enabled)
     }
 
     #[cfg(test)]
@@ -989,6 +1040,8 @@ impl DeliveryStore {
             outbox_records: records.len(),
             needs_sync: false,
             deferred_profile_binding: false,
+            #[cfg(test)]
+            record_validations: std::cell::Cell::new(0),
         };
         for record in records {
             store.validate_record(&record)?;
@@ -1805,6 +1858,15 @@ impl DeliveryStore {
         self.install_record(OutboxRecord::RetireDestination(id, original))
     }
 
+    /// Read only after recovered durable outbox publication. Completed targets
+    /// can shrink through retirement but cannot acquire new originals.
+    pub(crate) fn completed_delivery(&self, id: EventId) -> Option<&CompletedDelivery> {
+        if self.needs_sync || !self.pending.is_empty() {
+            return None;
+        }
+        self.completed.get(&id)
+    }
+
     pub(crate) fn completed_work(&self, id: EventId) -> Option<&CompletedDelivery> {
         self.completed.get(&id).filter(|m| !m.remaining.is_empty())
     }
@@ -1888,6 +1950,12 @@ impl DeliveryStore {
             return Err(invalid("invalid incoming group file reservation"));
         }
         self.check_file_slot(&file)?;
+        // Installed cards were authenticated before durable acceptance (or on
+        // reopen). Exact equality reuses only immutable evidence; the live
+        // erasure/capacity checks above and pending durability retry stay active.
+        if self.files.get(&file.id) == Some(&file) {
+            return self.outbox.sync();
+        }
         self.install_record(OutboxRecord::FileCard(file))
     }
 
@@ -3211,6 +3279,9 @@ impl DeliveryStore {
     }
 
     fn validate_record(&self, record: &OutboxRecord) -> Result<(), LogError> {
+        #[cfg(test)]
+        self.record_validations
+            .set(self.record_validations.get() + 1);
         match record {
             OutboxRecord::FileCard(file) => {
                 let mut ids = HashSet::new();

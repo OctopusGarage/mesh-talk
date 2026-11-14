@@ -15,6 +15,8 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
+mod mailbox_watch;
+
 /// Per-connection round ceiling for an inbound serve loop (matches the requester-side
 /// `MAX_SYNC_ROUNDS`); a real reconciliation converges far below this.
 const MAX_SERVE_ROUNDS: usize = 10_000;
@@ -23,6 +25,47 @@ const SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Leave one shared TCP slot available to outbound progress. Excess inbound
 /// streams wait in the OS queue; the Node's shared pool also counts handshakes.
 pub(super) const MAX_CONCURRENT_CONNS: usize = super::session_pool::MAX_DIRECTION_CONNECTIONS;
+
+/// Accepted payloads outlive a failed or cancelled connection future. The
+/// connection owns one admission through actual blocking cleanup; Drop never
+/// performs reception callbacks or SQL while unwinding.
+pub(in crate::node) struct SyncReceptionScope<'a, 'node> {
+    node: Arc<Node>,
+    store: &'a std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'node>>,
+    permit: Option<super::runtime_work::WorkPermit>,
+    capacity: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    transport_capacity: Vec<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Drop for SyncReceptionScope<'_, '_> {
+    fn drop(&mut self) {
+        let conversations = match self.store.lock() {
+            Ok(mut store) => store.take_received_conversations(),
+            Err(_) => return,
+        };
+        if conversations.is_empty() {
+            return;
+        }
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let node = self.node.clone();
+        let capacity = self.capacity.take();
+        let transport_capacity = std::mem::take(&mut self.transport_capacity);
+        // WorkPermit keeps the captured Node and SQL work inside retirement's
+        // drain even though cancellation has destroyed the awaiting connection.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _runtime = self.runtime.enter();
+            drop(permit.spawn_blocking(move || {
+                // Releasing the socket does not release SQL cleanup capacity.
+                let _capacity = capacity;
+                let _transport_capacity = transport_capacity;
+                node.dispatch_received_conversations(conversations);
+            }));
+        }));
+    }
+}
 
 /// Retry scheduling retains a conversation and deadline, never plaintext or
 /// receiver keys. The durable pending row is the complete retry authority.
@@ -33,6 +76,11 @@ pub(in crate::node) struct PendingChannelPlaintext {
     pub(in crate::node) retry_at: Option<std::time::Instant>,
     lanes: std::collections::HashMap<ConversationId, ChannelPlaintextRetry>,
     cursor: Option<ConversationId>,
+    owner_cursor: Option<ConversationId>,
+    owner_upper: Option<ConversationId>,
+    owner_active: bool,
+    owner_complete: bool,
+    pub(super) owner_resweep: bool,
 }
 #[derive(Default)]
 struct ChannelPlaintextRetry {
@@ -68,7 +116,30 @@ impl ChannelPlaintextRetry {
 
 const POST_OFFICE_DRAIN_INTERVAL: Duration = Duration::from_secs(3);
 const MAX_DRAIN_DUE_ENTRIES: usize = 256;
-type DrainKey = super::session_pool::PeerEndpointKey;
+// Work identity only. Physical sessions remain keyed by their exact dial endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DrainKey {
+    identity: crate::identity::device::PublicIdentity,
+    endpoints: crate::discovery::roster::SchedulingEndpoints,
+    account: Option<String>,
+    post_office: bool,
+    generation: u64,
+}
+
+impl Node {
+    fn drain_key(&self, peer: &PeerRecord) -> DrainKey {
+        DrainKey {
+            identity: peer.public.clone(),
+            endpoints: peer.scheduling_endpoints(),
+            account: peer.account_id.clone(),
+            post_office: peer.post_office,
+            generation: self
+                .privacy
+                .generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+}
 
 #[derive(Default)]
 struct PostOfficeDrainSchedule {
@@ -229,9 +300,11 @@ impl Node {
         Err(SessionError::UnexpectedMessage)
     }
 
-    /// Replicate `conv` to the elected post office, if one is known. Returns
-    /// `Ok(true)` if a post office accepted a round, `Ok(false)` if no post office
-    /// is known.
+    /// Replicate `conv` to eligible post offices. `Ok(true)` means a required
+    /// round returned nonempty selected inner/wrapper pairs; those pairs may be
+    /// retained or reused and do not imply newly uploaded bytes. `Ok(false)`
+    /// includes qualified unchanged history and missing or unfinished rounds.
+    /// Neither result proves durable custody.
     pub(in crate::node) async fn replicate_to_post_office(
         &self,
         conv: ConversationId,
@@ -250,6 +323,31 @@ impl Node {
         self.replicate_to_post_office_targets(conv, targets).await
     }
 
+    pub(in crate::node) async fn observe_profile_relay(
+        &self,
+        conv: ConversationId,
+    ) -> Result<
+        (
+            super::opaque_relay::PublicationObservation,
+            Vec<super::opaque_relay::PublicationProof>,
+        ),
+        SessionError,
+    > {
+        let me = self.identity.public();
+        let targets = self
+            .historical_dm_peers()
+            .into_iter()
+            .map(|proof| proof.public())
+            .filter(|recipient| {
+                conv == crate::node::conversation::dm_conversation_id(&me, recipient)
+            })
+            .collect();
+        let (_, observation, proofs) = self
+            .replicate_profile_observing(conv, targets, None, None, true)
+            .await?;
+        Ok((observation, proofs))
+    }
+
     pub(in crate::node) async fn replicate_to_post_office_targets(
         &self,
         conv: ConversationId,
@@ -265,24 +363,70 @@ impl Node {
         targets: Vec<crate::identity::device::PublicIdentity>,
         confirm: Option<EventId>,
     ) -> Result<bool, SessionError> {
+        self.replicate_to_post_office_targets_observing(conv, targets, confirm, None)
+            .await
+    }
+
+    pub(in crate::node) async fn replicate_to_post_office_targets_observing(
+        &self,
+        conv: ConversationId,
+        targets: Vec<crate::identity::device::PublicIdentity>,
+        confirm: Option<EventId>,
+        failure: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<bool, SessionError> {
+        Ok(self
+            .replicate_profile_observing(conv, targets, confirm, failure, false)
+            .await?
+            .0)
+    }
+
+    pub(in crate::node) async fn replicate_profile_observing(
+        &self,
+        conv: ConversationId,
+        targets: Vec<crate::identity::device::PublicIdentity>,
+        confirm: Option<EventId>,
+        failure: Option<&std::sync::atomic::AtomicBool>,
+        observe: bool,
+    ) -> Result<
+        (
+            bool,
+            super::opaque_relay::PublicationObservation,
+            Vec<super::opaque_relay::PublicationProof>,
+        ),
+        SessionError,
+    > {
         if targets.is_empty() {
-            return Ok(false);
+            return Ok((
+                false,
+                super::opaque_relay::PublicationObservation::Deferred,
+                Vec::new(),
+            ));
         }
         let mut uploaded = false;
+        let mut quiet = true;
+        let mut proofs = Vec::new();
         for recipient in &targets {
             let candidates = {
                 let roster = self.roster.lock().expect("roster mutex not poisoned");
                 self.post_office_candidates_for(&roster, recipient)
             };
             let mut complete = false;
+            let mut attempted = false;
             let mut capacity_error = None;
             for po in candidates {
                 if !self.relay_send_allowed(&po.public) {
+                    quiet = false;
                     continue;
                 }
                 let mut channel = match self.privacy_sync_dial(po.addr, &po.public).await {
-                    Ok(channel) => channel,
+                    Ok(channel) => {
+                        attempted = true;
+                        channel
+                    }
                     Err(error) => {
+                        quiet = false;
+                        attempted |=
+                            !matches!(error, crate::transport::TransportError::AdmissionDenied);
                         if super::session_pool::local_capacity_busy(&error) {
                             capacity_error = Some(error);
                         }
@@ -290,14 +434,35 @@ impl Node {
                     }
                 };
                 if !self.relay_send_allowed(&po.public) {
+                    quiet = false;
                     continue;
                 }
-                let Ok(events) = self
-                    .opaque_relay_round(&mut channel, recipient, Some(conv))
+                let result = if observe {
+                    self.observe_history_publication(&mut channel, recipient, conv)
+                        .await
+                } else {
+                    self.opaque_history_publication_round_for(
+                        &mut channel,
+                        recipient,
+                        conv,
+                        confirm,
+                    )
                     .await
-                else {
+                    .map(|events| {
+                        (
+                            events,
+                            super::opaque_relay::PublicationObservation::Deferred,
+                            Vec::new(),
+                        )
+                    })
+                };
+                let Ok((events, observation, round_proofs)) = result else {
+                    quiet = false;
                     continue;
                 };
+                proofs.extend(round_proofs);
+                quiet &=
+                    observation == super::opaque_relay::PublicationObservation::QualifiedUnchanged;
                 // Sync completion is not durable custody. Probe the exact
                 // recipient-encrypted wrapper before publishing a relay copy.
                 if let Some(id) = confirm {
@@ -339,12 +504,18 @@ impl Node {
                     if held {
                         self.publish_channel_custody(conv, id, &po.public, true, false, true)
                             .map_err(|error| SessionError::Serialization(error.to_string()))?;
-                        self.channel_custody
-                            .lock()
-                            .expect("channel custody lock")
-                            .confirm(id, &format!("relay:{}", po.public.user_id()))
-                            .map_err(|error| SessionError::Serialization(error.to_string()))?;
-                        self.delivery_status_notify.notify_waiters();
+                        let changed = {
+                            let mut store =
+                                self.channel_custody.lock().expect("channel custody lock");
+                            let before = store.revision();
+                            store
+                                .confirm(id, &format!("relay:{}", po.public.user_id()))
+                                .map_err(|error| SessionError::Serialization(error.to_string()))?;
+                            store.revision() != before
+                        };
+                        if changed {
+                            self.delivery_status_notify.notify_waiters();
+                        }
                     }
                 }
                 self.recycle_sync_channel(channel);
@@ -353,13 +524,30 @@ impl Node {
                 break;
             }
             if !complete {
+                if attempted && let Some(failure) = failure {
+                    failure.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 if let Some(error) = capacity_error {
                     return Err(SessionError::Transport(error));
                 }
-                return Ok(false);
+                return Ok((
+                    false,
+                    super::opaque_relay::PublicationObservation::Deferred,
+                    Vec::new(),
+                ));
             }
         }
-        Ok(uploaded)
+        Ok((
+            uploaded,
+            if uploaded {
+                super::opaque_relay::PublicationObservation::SelectedResults
+            } else if quiet && self.publication_proofs_current(&proofs)? {
+                super::opaque_relay::PublicationObservation::QualifiedUnchanged
+            } else {
+                super::opaque_relay::PublicationObservation::Deferred
+            },
+            proofs,
+        ))
     }
 
     /// Accept inbound connections and maintain deferred profile compactions.
@@ -431,7 +619,6 @@ impl Node {
         tokio::select! {
             _ = Arc::clone(&self).run_profile_compaction_loop() => {}
             _ = Arc::clone(&self).run_delivery_loop() => {}
-            _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
             _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
             _ = account_history => {}
             _ = Arc::clone(&self).run_account_wake_loop() => {}
@@ -472,13 +659,6 @@ impl Node {
                 Ok(Err(error)) => log::warn!("message expiry cleanup failed: {error}"),
                 Err(error) => log::warn!("message expiry task failed: {error}"),
             }
-        }
-    }
-
-    async fn run_channel_control_retry_loop(self: Arc<Self>) {
-        loop {
-            self.retry_channel_controls().await;
-            tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
 
@@ -559,7 +739,7 @@ impl Node {
                 return;
             };
             connections.spawn(work.track(async move {
-                let _permit = permit; // held for the connection's lifetime, freed on drop
+                let capacity = Arc::new(permit);
                 #[cfg(test)]
                 if let Some(hook) = node.accepted_hook.lock().unwrap().take() {
                     let _ = hook.send(());
@@ -581,7 +761,8 @@ impl Node {
                     )
                 });
                 if let Ok(channel) = accepted {
-                    node.serve_connection(channel).await;
+                    node.serve_connection_with_capacity(channel, Some(capacity))
+                        .await;
                 }
                 #[cfg(test)]
                 node.trace_account_client(&node.identity.public(), || {
@@ -595,7 +776,17 @@ impl Node {
     /// any newly-received DMs, until the peer disconnects. The first frame is peeked:
     /// a device-pairing request gets the linking handler; anything else is a sync wire
     /// and is served normally (then the loop continues).
-    pub async fn serve_connection(self: &Arc<Self>, mut channel: SecureChannel<TcpStream>) {
+    /// Direct protocol hosts own their own concurrent connection admission.
+    /// The production listener supplies its retained semaphore capacity below.
+    pub async fn serve_connection(self: &Arc<Self>, channel: SecureChannel<TcpStream>) {
+        self.serve_connection_with_capacity(channel, None).await;
+    }
+
+    async fn serve_connection_with_capacity(
+        self: &Arc<Self>,
+        mut channel: SecureChannel<TcpStream>,
+        capacity: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    ) {
         if channel.pairing_only() {
             // A retired account proof can recover an interrupted authorized link,
             // but can never enter sync, account history, attachments or call IPC.
@@ -630,7 +821,18 @@ impl Node {
         if is_relay {
             return;
         }
+        let Some(permit) = self.runtime_work.admit() else {
+            return;
+        };
         let store = self.serve_sync_store(channel.peer_identity());
+        let _reception = SyncReceptionScope {
+            node: self.clone(),
+            store: &store,
+            permit: Some(permit),
+            capacity,
+            transport_capacity: Vec::new(),
+            runtime: tokio::runtime::Handle::current(),
+        };
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
         // timeout on every recv + a per-connection round ceiling (mirrors the relay).
         let first = match tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await {
@@ -818,33 +1020,67 @@ impl Node {
         // The first frame may be a Request, which makes serve_wire_bytes await the peer's
         // streamed have-chunks — so it needs the same idle timeout as the loop, or a peer that
         // sends one Request then stalls would pin this task (and its connection permit) forever.
-        match tokio::time::timeout(
+        let result = tokio::time::timeout(
             SERVE_IDLE_TIMEOUT,
             serve_wire_bytes(&mut channel, &store, &first),
         )
-        .await
-        {
-            Ok(Ok(Served::Handled(conv))) => {
-                self.emit_new_messages(conv);
-                self.process_channel(conv);
-                self.process_file_events(conv);
-                self.process_profile_events(conv);
-            }
-            _ => return,
+        .await;
+        self.dispatch_received_sync_work(&store);
+        if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
+            return;
         }
         for _ in 0..MAX_SERVE_ROUNDS {
             if is_relay && !self.relay_allowed(channel.peer_identity()) {
                 break;
             }
-            match tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
-                Ok(Ok(Served::Handled(conv))) => {
-                    self.emit_new_messages(conv);
-                    self.process_channel(conv);
-                    self.process_file_events(conv);
-                    self.process_profile_events(conv);
-                }
-                _ => break, // peer closed, error, or idle past the timeout
+            let result =
+                tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await;
+            self.dispatch_received_sync_work(&store);
+            if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
+                break; // peer closed, error, or idle past the timeout
             }
+        }
+    }
+
+    pub(in crate::node) fn request_reception_scope<'a, 'node>(
+        self: &Arc<Self>,
+        store: &'a std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'node>>,
+        channel: &SecureChannel<TcpStream>,
+    ) -> Option<SyncReceptionScope<'a, 'node>> {
+        let node = self.clone();
+        let permit = self.runtime_work.admit()?;
+        store.lock().expect("sync store lock").track_reception();
+        Some(SyncReceptionScope {
+            node,
+            store,
+            permit: Some(permit),
+            capacity: None,
+            transport_capacity: channel.reception_capacity(),
+            runtime: tokio::runtime::Handle::current(),
+        })
+    }
+
+    pub(in crate::node) fn dispatch_received_sync_work(
+        &self,
+        store: &std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'_>>,
+    ) {
+        let conversations = store
+            .lock()
+            .expect("sync store lock")
+            .take_received_conversations();
+        // Release the adapter guard before reception acquires log/book owners.
+        self.dispatch_received_conversations(conversations);
+    }
+
+    fn dispatch_received_conversations(
+        &self,
+        conversations: std::collections::HashSet<ConversationId>,
+    ) {
+        for conversation in conversations {
+            self.emit_new_messages(conversation);
+            self.process_channel(conversation);
+            self.process_file_events(conversation);
+            self.process_profile_events(conversation);
         }
     }
 
@@ -899,7 +1135,17 @@ impl Node {
         conv: ConversationId,
         context: &'static str,
     ) {
-        let result = (|| -> Result<(), NodeError> {
+        if let Err(error) = self.process_file_events_reception_turn(conv, context) {
+            log::warn!("process_file_events_reception deferred after storage failure: {error}");
+        }
+    }
+
+    fn process_file_events_reception_turn(
+        &self,
+        conv: ConversationId,
+        context: &'static str,
+    ) -> Result<(), NodeError> {
+        (|| -> Result<(), NodeError> {
             self.discover_file_receives()?;
             let is_channel = self
                 .channels
@@ -923,8 +1169,9 @@ impl Node {
                 8 * 1024 * 1024,
             )?;
             if candidates.is_empty() {
-                if self.files.lock().expect("files lock").contains_file(conv)? {
-                    self.persist_media_if_complete(conv);
+                // Release the file-book guard before completion re-enters it.
+                let known_file = self.files.lock().expect("files lock").contains_file(conv)?;
+                if known_file && self.persist_media_if_complete(conv) {
                     self.note_file_change();
                 }
                 return Ok(());
@@ -1005,10 +1252,7 @@ impl Node {
                 }
             }
             Ok(())
-        })();
-        if let Err(error) = result {
-            log::warn!("process_file_events_reception deferred after storage failure: {error}");
-        }
+        })()
     }
 
     /// Fetch chunks for any file we've surfaced a manifest for but don't fully hold yet,
@@ -1025,7 +1269,7 @@ impl Node {
             self.retry_group_file_delivery()
         );
     }
-    async fn pull_pending_files_direct(&self) {
+    pub(super) async fn pull_pending_files_direct(&self) {
         let result: Result<(), NodeError> = async {
             use futures_util::stream::{self, StreamExt};
             let Ok(_pull) = self.file_pull_gate.try_lock() else {
@@ -1076,6 +1320,7 @@ impl Node {
                                     return Ok(());
                                 }
                             };
+                            let mut received = self.file_progress(fc)?.map(|progress| progress.done);
                             let mut pulls = stream::iter(candidates)
                                 .map(|peer| async move {
                                     let _ = tokio::time::timeout(
@@ -1160,8 +1405,16 @@ impl Node {
                                 })
                                 .buffer_unordered(2);
                             while pulls.next().await.is_some() {
-                                self.note_file_change();
-                                if self.file_progress(fc)?.is_some_and(|p| p.done >= p.total) {
+                                let progress = self.file_progress(fc)?;
+                                let next = progress.as_ref().map(|progress| progress.done);
+                                if next > received {
+                                    self.note_file_change();
+                                    // New chunks justify a prompt continuation; an
+                                    // unchanged/failed peer attempt must not reset backoff.
+                                    self.file_pull_notify.notify_one();
+                                }
+                                received = next;
+                                if progress.is_some_and(|p| p.done >= p.total) {
                                     break;
                                 }
                             }
@@ -1177,12 +1430,10 @@ impl Node {
                             if !managed || self.local_media_recovery_complete(fc)?
                             {
                                 self.files.lock().expect("files lock").finish_download(work)?;
-                            } else {
-                                // The byte store may succeed before completion metadata.
-                                // Its helper clears the transient queue; restore recovery
-                                // ownership until both durable writes have succeeded.
-                                self.file_pull_notify.notify_one();
                             }
+                            // Incomplete durable completion retains this download
+                            // for a real change or the bounded repair deadline;
+                            // an unchanged failure must not wake its own retry.
                             self.note_file_change();
                         }
                         Ok(())
@@ -1208,22 +1459,31 @@ impl Node {
         cursor: usize,
     ) -> Result<Vec<PeerRecord>, NodeError> {
         let files = self.files.lock().expect("files lock").clone();
-        let mut peers = Vec::new();
-        for peer in self.routing_peers() {
-            if peer.post_office || peer.public == self.identity.public() {
-                continue;
-            }
-            let mut channel_bound = false;
-            let mut channel_allowed = false;
-            for scope in self.manifest_scopes(file) {
-                let parent = scope?.parent;
-                let book = self.channels.lock().expect("channels lock");
-                if let Some(state) = book.state(&parent) {
-                    channel_bound = true;
-                    channel_allowed |= state.is_accepted_member(&peer.public.user_id())
+        // Only routing-peer metadata is retained. Scope pages remain bounded
+        // and are traversed once for this call, rather than once per peer.
+        let mut candidates: Vec<_> = self
+            .routing_peers()
+            .into_iter()
+            .filter(|peer| !peer.post_office && peer.public != self.identity.public())
+            .map(|peer| (peer, false))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut channel_bound = false;
+        for scope in self.manifest_scopes(file) {
+            let parent = scope?.parent;
+            let book = self.channels.lock().expect("channels lock");
+            if let Some(state) = book.state(&parent) {
+                channel_bound = true;
+                for (peer, allowed) in &mut candidates {
+                    *allowed |= state.is_accepted_member(&peer.public.user_id())
                         && book.replica_enabled(parent, &peer.public.user_id());
                 }
             }
+        }
+        let mut peers = Vec::new();
+        for (peer, channel_allowed) in candidates {
             if channel_allowed
                 || (!channel_bound
                     && files.has_author(file, Author::from_ed25519(peer.public.ed25519_pub))?)
@@ -1262,9 +1522,9 @@ impl Node {
     /// until its independently budgeted selectors finish.
     fn prepare_channel_metadata_turn(&self, conv: ConversationId) -> Result<bool, LogError> {
         use crate::eventlog::sync::network::PreparationBudget;
-        self.channel_checkpoints.queue_runtime(conv)?;
         let step = {
             let log = self.log.lock().expect("log lock");
+            self.channel_checkpoints.queue_metadata_runtime(conv)?;
             self.channel_checkpoints.project_step_with_budget(
                 log.repository()?,
                 &self.identity,
@@ -1287,7 +1547,17 @@ impl Node {
                 hook();
             }
         }
-        if !self.install_current_channel_metadata(conv)? {
+        // Custody observes both canonical history and installed membership.
+        // Publish only after installation released its book/log/SQL guards.
+        // Preserve the paid canonical wake on installation errors too: source
+        // replacement needs another paid turn, while sender-key restore may
+        // fail after current membership has already been installed. Every
+        // awakened attempt independently checks the current authority fences.
+        let installed = self.install_current_channel_metadata(conv);
+        if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+            self.wake_group_file_checkpoint(conv);
+        }
+        if !installed? {
             if self.channel_checkpoints.finish_runtime(conv, None)? {
                 self.channel_recovery_notify.notify_one();
             }
@@ -1302,6 +1572,7 @@ impl Node {
         }
         let step = {
             let log = self.log.lock().expect("log lock");
+            self.channel_checkpoints.queue_metadata_runtime(conv)?;
             self.channel_checkpoints.prepare_presentation_step(
                 log.repository()?,
                 &self.identity,
@@ -1345,6 +1616,7 @@ impl Node {
         // book -> log order; a concurrently appended control cannot install
         // an old display as fresh membership for subsequent authoring.
         let log = self.log.lock().expect("log lock");
+        self.channel_checkpoints.queue_metadata_runtime(conv)?;
         let state = self.channel_checkpoints.current_state(conv)?;
         let Some(state) = state else {
             return Ok(false);
@@ -1377,11 +1649,17 @@ impl Node {
         channel: ConversationId,
         budget: &mut crate::eventlog::sync::network::PreparationBudget,
     ) -> Result<(), LogError> {
-        self.channel_checkpoints.queue_runtime(channel)?;
+        // A caller without a preparation allowance must still retain durable
+        // retry demand. Otherwise qualify completed work under the same log
+        // guard as preparation, before any preparation mutation can run.
+        if budget.rows < 2 || budget.edges == 0 || budget.bytes < 512 {
+            self.channel_checkpoints.queue_runtime(channel)?;
+        }
         let mut advanced = false;
         while budget.rows >= 2 && budget.edges > 0 && budget.bytes >= 512 {
             let step = {
                 let log = self.log.lock().expect("log lock");
+                self.channel_checkpoints.queue_metadata_runtime(channel)?;
                 match self.channel_checkpoints.project_step_with_budget(
                     log.repository()?,
                     &self.identity,
@@ -1519,6 +1797,27 @@ impl Node {
             .pending_channel_plaintext
             .lock()
             .expect("channel retry lock");
+        {
+            // Ordinary DMs share this receive callback. Only signed group
+            // controls or a prior local group checkpoint justify channel work.
+            // Keep the source guard through negative demand cleanup so a newly
+            // appended membership cannot lose its queued continuation.
+            let log = self.log.lock().expect("log lock");
+            if !log
+                .repository()?
+                .has_kind(&conv, crate::eventlog::EventKind::MembershipChange)?
+                && !self
+                    .channel_checkpoints
+                    .has_local_channel_checkpoint(conv)?
+            {
+                let more = self.channel_checkpoints.finish_runtime(conv, None)?;
+                pending.lanes.remove(&conv);
+                if more {
+                    self.channel_recovery_notify.notify_one();
+                }
+                return Ok(());
+            }
+        }
         if pending
             .retry_at
             .is_some_and(|deadline| std::time::Instant::now() < deadline)
@@ -1749,11 +2048,136 @@ impl Node {
     }
 
     /// Retry the exact durable ciphertext work with no reachable peer or new event.
+    #[cfg(test)]
     pub(in crate::node) fn retry_channel_plaintext(&self) {
-        let turn = || -> Result<(), NodeError> {
+        if let Err(error) = self.retry_channel_plaintext_inner(false) {
+            log::warn!("channel work discovery deferred: {error}");
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn defer_channel_plaintext_for_test(
+        &self,
+        channel: ConversationId,
+        deadline: std::time::Instant,
+    ) {
+        self.pending_channel_plaintext
+            .lock()
+            .expect("channel retry lock")
+            .lanes
+            .entry(channel)
+            .or_default()
+            .retry_at = Some(deadline);
+    }
+
+    /// One local recovery admission keeps file failures attached to the same
+    /// durable runtime demand after plaintext independently finishes.
+    pub(super) fn process_channel_recovery_local(
+        &self,
+        channel: ConversationId,
+    ) -> Result<(), NodeError> {
+        let previous_delay = {
+            let pending = self
+                .pending_channel_plaintext
+                .lock()
+                .expect("channel retry lock");
+            let lane = pending.lanes.get(&channel);
+            if lane
+                .and_then(|lane| lane.retry_at)
+                .is_some_and(|at| std::time::Instant::now() < at)
+            {
+                return Ok(());
+            }
+            lane.map_or(0, |lane| lane.delay_ms)
+        };
+        let plaintext = self.process_channel_reception_inner(channel, "catch_up");
+        let files = self.process_file_events_reception_turn(channel, "catch_up");
+        #[cfg(test)]
+        let file_failed = files.is_err();
+        let result = match plaintext {
+            Err(error) => Err(error),
+            Ok(()) => files,
+        };
+        if let Err(error) = &result {
+            self.channel_checkpoints.queue_runtime(channel)?;
+            {
+                let mut pending = self
+                    .pending_channel_plaintext
+                    .lock()
+                    .expect("channel retry lock");
+                let lane = pending.lanes.entry(channel).or_default();
+                lane.delay_ms = lane.delay_ms.max(previous_delay);
+                if !lane.record_failure(error, std::time::Instant::now()) {
+                    self.channel_recovery_notify.notify_one();
+                }
+            }
+        }
+        #[cfg(test)]
+        if file_failed {
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_file_failure".into()
+            });
+        }
+        result
+    }
+
+    pub(super) fn note_channel_plaintext_recovery_input(&self) {
+        let mut pending = self
+            .pending_channel_plaintext
+            .lock()
+            .expect("channel retry lock");
+        if pending.owner_active {
+            pending.owner_resweep = true;
+        } else {
+            pending.owner_complete = false;
+        }
+    }
+
+    pub(super) fn retry_channel_plaintext_turn(
+        &self,
+    ) -> Result<super::channels::LocalRecoveryWork, NodeError> {
+        self.retry_channel_plaintext_inner(true)
+    }
+
+    fn retry_channel_plaintext_inner(
+        &self,
+        owned_turn: bool,
+    ) -> Result<super::channels::LocalRecoveryWork, NodeError> {
+        use super::channels::LocalRecoveryWork;
+        let turn = || -> Result<LocalRecoveryWork, NodeError> {
+            if owned_turn {
+                let pending = self
+                    .pending_channel_plaintext
+                    .lock()
+                    .expect("channel retry lock");
+                if pending.owner_complete {
+                    let now = std::time::Instant::now();
+                    let retry_after = pending
+                        .lanes
+                        .values()
+                        .filter_map(|lane| lane.retry_at)
+                        .chain(pending.retry_at)
+                        .filter(|at| *at > now)
+                        .map(|at| at.duration_since(now))
+                        .min();
+                    return Ok(LocalRecoveryWork {
+                        more: false,
+                        retry_after,
+                    });
+                }
+            }
+            #[cfg(test)]
+            if owned_turn {
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_plaintext_entered".into()
+                });
+            }
             if self.channel_checkpoints.retire_orphan_step(128)? != 0 {
                 self.channel_recovery_notify.notify_one();
-                return Ok(());
+                return Ok(LocalRecoveryWork {
+                    more: true,
+                    retry_after: None,
+                });
             }
             let more = {
                 let log = self.log.lock().expect("log lock");
@@ -1769,29 +2193,49 @@ impl Node {
                     .retry_at
                     .is_some_and(|deadline| std::time::Instant::now() < deadline)
                 {
-                    return Ok(());
+                    return Ok(LocalRecoveryWork {
+                        more: more || bootstrap,
+                        retry_after: pending
+                            .retry_at
+                            .map(|at| at.saturating_duration_since(std::time::Instant::now())),
+                    });
                 }
-                let channel = self.channel_checkpoints.next_runtime(pending.cursor)?;
-                pending.cursor = channel.map(|(channel, _)| channel);
-                channel
+                if owned_turn {
+                    if !pending.owner_active {
+                        pending.owner_upper = self.channel_checkpoints.runtime_upper()?;
+                        pending.owner_cursor = None;
+                        pending.owner_active = true;
+                    }
+                    if more || bootstrap {
+                        pending.owner_resweep = true;
+                    }
+                    let channel = match pending.owner_upper {
+                        Some(upper) => self
+                            .channel_checkpoints
+                            .next_runtime_through(pending.owner_cursor, upper)?,
+                        None => None,
+                    };
+                    pending.owner_cursor = channel.map(|(channel, _)| channel);
+                    channel
+                } else {
+                    let channel = self.channel_checkpoints.next_runtime(pending.cursor)?;
+                    pending.cursor = channel.map(|(channel, _)| channel);
+                    channel
+                }
             };
             if more || bootstrap {
                 self.channel_recovery_notify.notify_one();
             }
+            let mut local_failed = false;
             if let Some((channel, _)) = channel {
-                if let Err(error) = self.process_channel_reception_inner(channel, "catch_up") {
-                    let mut pending = self
-                        .pending_channel_plaintext
-                        .lock()
-                        .expect("channel retry lock");
-                    let lane = pending.lanes.entry(channel).or_default();
-                    if lane.record_failure(&error, std::time::Instant::now()) {
-                        log::warn!("channel recovery deferred after storage failure: {error}");
-                    } else {
-                        self.channel_recovery_notify.notify_one();
-                    }
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    format!("channel_recovery_plaintext_selected {channel:?}")
+                });
+                if let Err(error) = self.process_channel_recovery_local(channel) {
+                    local_failed = true;
+                    log::warn!("channel local recovery deferred: {error}");
                 }
-                self.process_file_events_reception(channel, "catch_up");
             }
             #[cfg(test)]
             self.trace_account_client(&self.identity.public(), || {
@@ -1813,122 +2257,50 @@ impl Node {
                     global_delayed, next_delayed, next.is_err(), pending.lanes.len(), more, bootstrap
                 )
             });
-            Ok(())
+            let mut pending = self
+                .pending_channel_plaintext
+                .lock()
+                .expect("channel retry lock");
+            let runtime_more = if owned_turn {
+                let next = match pending.owner_upper {
+                    Some(upper) => self
+                        .channel_checkpoints
+                        .next_runtime_through(pending.owner_cursor, upper)?,
+                    None => None,
+                };
+                if next.is_some() {
+                    true
+                } else {
+                    pending.owner_active = false;
+                    let again = std::mem::take(&mut pending.owner_resweep);
+                    pending.owner_complete = !again && !local_failed && !more && !bootstrap;
+                    again
+                }
+            } else {
+                false
+            };
+            let now = std::time::Instant::now();
+            let retry_after = pending
+                .lanes
+                .values()
+                .filter_map(|lane| lane.retry_at)
+                .chain(pending.retry_at)
+                .filter(|at| *at > now)
+                .map(|at| at.duration_since(now))
+                .chain(local_failed.then_some(Duration::from_secs(3)))
+                .min();
+            Ok(LocalRecoveryWork {
+                more: more || bootstrap || runtime_more,
+                retry_after,
+            })
         };
-        if let Err(error) = turn() {
-            log::warn!("channel work discovery deferred: {error}");
-        }
+        turn()
     }
 
     /// Receive producer owned by the participant runtime task set. A healthy
     /// relay keeps its own cadence while one alternative makes bounded progress.
     pub(in crate::node) async fn run_post_office_drains(self: Arc<Self>) {
-        use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
-        let mut network = self.network_changes.subscribe();
-        let mut roster = self
-            .roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .subscribe_changes();
-        loop {
-            let mut candidates = self.post_office_drain_candidates();
-            let generation = self
-                .privacy
-                .generation
-                .load(std::sync::atomic::Ordering::SeqCst);
-            let mut schedule = PostOfficeDrainSchedule::default();
-            let mut active = Vec::new();
-            let mut cancellation = Vec::new();
-            let mut attempts = FuturesUnordered::new();
-            loop {
-                let eligible = candidates
-                    .iter()
-                    .filter(|po| {
-                        self.relay_receive_allowed(&po.public) && self.relay_retry_due(&po.public)
-                    })
-                    .map(|po| (self.peer_endpoint_key(po.addr, &po.public), po.clone()))
-                    .collect::<Vec<_>>();
-                while let Some(index) =
-                    schedule.select(&eligible, &active, tokio::time::Instant::now())
-                {
-                    let (key, po) = eligible[index].clone();
-                    active.push(key.clone());
-                    let (abort, registration) = futures_util::future::AbortHandle::new_pair();
-                    cancellation.push((key.clone(), abort));
-                    let node = &self;
-                    attempts.push(
-                        async move {
-                            let result = futures_util::future::Abortable::new(
-                                async {
-                                    if node.cached_peer_snapshot_async().await.is_err() {
-                                        log::warn!("verified discovery cache update failed");
-                                    }
-                                    let peers = node.post_office_drain_peers();
-                                    if peers.is_empty() {
-                                        None
-                                    } else {
-                                        Some(node.drain_one_post_office(&po, &peers).await)
-                                    }
-                                },
-                                registration,
-                            )
-                            .await;
-                            (key, result)
-                        }
-                        .boxed(),
-                    );
-                }
-                let wake = schedule.next_wake(&eligible, &active, tokio::time::Instant::now());
-                tokio::select! {
-                    result = attempts.next(), if !attempts.is_empty() => {
-                        if let Some((key, result)) = result {
-                            active.retain(|candidate| candidate != &key);
-                            cancellation.retain(|(candidate, _)| candidate != &key);
-                            if let Ok(result) = result {
-                                schedule.completed(key, result, tokio::time::Instant::now());
-                            }
-                        }
-                    }
-                    _ = tokio::time::sleep_until(wake) => {},
-                    // Mailbox switches own a retained wake rather than competing
-                    // with delivery's Notify or waiting for the idle cadence.
-                    _ = self.post_office_receive_notify.notified() => break,
-                    _ = network.changed() => break,
-                    _ = roster.changed() => {},
-                }
-                // Roster churn must not repeatedly cancel a valid slow relay.
-                // Retire only the exact identities/endpoints that lost authority;
-                // network and policy generations retire the whole owned work set.
-                if generation
-                    != self
-                        .privacy
-                        .generation
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    break;
-                }
-                candidates = self.post_office_drain_candidates();
-                let current = candidates
-                    .iter()
-                    .map(|po| self.peer_endpoint_key(po.addr, &po.public))
-                    .collect::<Vec<_>>();
-                for (key, abort) in &cancellation {
-                    if !current.contains(key) {
-                        abort.abort();
-                    }
-                }
-                schedule.due.retain(|(key, _)| current.contains(key));
-                if schedule
-                    .primary
-                    .as_ref()
-                    .is_some_and(|key| !current.contains(key))
-                {
-                    schedule.primary = None;
-                }
-            }
-            // Futures are owned here: cancellation/reset drops every socket and
-            // in-flight exchange before the next generation starts.
-        }
+        self.run_watched_post_office_drains().await;
     }
 
     fn post_office_drain_candidates(&self) -> Vec<PeerRecord> {
@@ -1986,7 +2358,18 @@ impl Node {
         po: &PeerRecord,
         peers: &[crate::discovery::Announce],
     ) -> bool {
+        self.drain_one_post_office_with_channel(po, peers, None)
+            .await
+    }
+
+    async fn drain_one_post_office_with_channel(
+        &self,
+        po: &PeerRecord,
+        peers: &[crate::discovery::Announce],
+        mut channel: Option<SecureChannel<TcpStream>>,
+    ) -> bool {
         if !self.relay_receive_allowed(&po.public) || !self.relay_retry_due(&po.public) {
+            self.observe_mailbox_work(super::work_observation::reason::DRAIN_RECEIVE_GATE, None);
             return false;
         }
         let relay_id = po.public.user_id();
@@ -1997,7 +2380,6 @@ impl Node {
             .get(&relay_id)
             .copied()
             .unwrap_or(0);
-        let mut channel = None;
         let mut success = true;
         for offset in 0..peers.len().min(8) {
             let index = start.wrapping_add(offset) % peers.len();
@@ -2022,6 +2404,10 @@ impl Node {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(error) => {
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::DRAIN_GROUP_LOOKUP_FAILED,
+                            None,
+                        );
                         log::warn!("relay group membership lookup deferred: {error}");
                         success = false;
                         continue;
@@ -2043,11 +2429,31 @@ impl Node {
                     .await
                     .map(|_| ())
             };
-            if !matches!(
+            let result =
                 tokio::time::timeout(super::delivery_runtime::RELAY_EXCHANGE_TIMEOUT, attempt)
-                    .await,
-                Ok(Ok(()))
-            ) {
+                    .await;
+            let reason = match &result {
+                Ok(Ok(())) => None,
+                Ok(Err(super::session::SessionError::NoProgress)) => {
+                    Some(super::work_observation::reason::DRAIN_NO_PROGRESS)
+                }
+                Ok(Err(super::session::SessionError::Transport(_))) => {
+                    Some(super::work_observation::reason::DRAIN_TRANSPORT_FAILED)
+                }
+                Ok(Err(super::session::SessionError::Store(_))) => {
+                    Some(super::work_observation::reason::DRAIN_STORE_FAILED)
+                }
+                Ok(Err(
+                    super::session::SessionError::Serialization(_)
+                    | super::session::SessionError::UnexpectedMessage
+                    | super::session::SessionError::ResourceUnavailable,
+                )) => Some(super::work_observation::reason::DRAIN_PROTOCOL_FAILED),
+                Err(_) => Some(super::work_observation::reason::DRAIN_TIMEOUT),
+            };
+            if let Some(reason) = reason {
+                self.observe_mailbox_work(reason, None);
+            }
+            if !matches!(result, Ok(Ok(()))) {
                 success = false;
                 channel = None;
                 break;
@@ -2622,7 +3028,7 @@ mod post_office_drain_schedule_tests {
                 let mut roster = crate::discovery::Roster::default();
                 roster.update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
                 let peer = roster.peers().into_iter().next().unwrap();
-                (node.peer_endpoint_key(peer.addr, &peer.public), peer)
+                (node.drain_key(&peer), peer)
             })
             .collect()
     }
@@ -2641,6 +3047,46 @@ mod post_office_drain_schedule_tests {
             &peer,
         )
         .0
+    }
+
+    #[test]
+    fn drain_work_identity_ignores_preference_but_preserves_endpoint_and_authority_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = node(dir.path());
+        let mut peer = candidates(&node, 1).remove(0).1;
+        let mut second = peer.routes[0].clone();
+        second.addr.set_ip("127.0.0.2".parse().unwrap());
+        peer.routes.push(second);
+        let original = node.drain_key(&peer);
+        peer.routes.reverse();
+        peer.addr = peer.routes[0].addr;
+        assert_eq!(node.drain_key(&peer), original);
+        let mut changed = peer.clone();
+        changed.routes.pop();
+        changed.addr = changed.routes[0].addr;
+        assert_ne!(node.drain_key(&changed), original);
+        changed = peer.clone();
+        changed.routes[0].source = crate::discovery::roster::RouteSource::Gateway;
+        assert_ne!(node.drain_key(&changed), original);
+        changed = peer.clone();
+        changed.account_id = Some("replacement".into());
+        assert_ne!(node.drain_key(&changed), original);
+        changed = peer.clone();
+        changed.post_office = false;
+        assert_ne!(node.drain_key(&changed), original);
+        changed = peer.clone();
+        changed.routes.clear();
+        let legacy = node.drain_key(&changed);
+        changed.addr.set_port(2);
+        assert_ne!(
+            node.drain_key(&changed),
+            legacy,
+            "legacy preferred-only records retain their endpoint"
+        );
+        node.privacy
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(node.drain_key(&peer), original);
     }
 
     #[test]
@@ -2715,6 +3161,204 @@ mod file_recovery_tests {
     use crate::identity::{account::Account, device::DeviceIdentity};
 
     #[tokio::test]
+    async fn attachment_recovery_scans_file_scopes_once_for_multiple_peers() {
+        use crate::node::filebook::{indexed::OFFER_PAGE_QUERIES, scopes::SCOPE_PAGE_QUERIES};
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob_account = Account::generate();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
+        let (a, _, _) = super::super::test_support::node_with_files(source.path(), alice, aa, &bp);
+        let (b, _, _) =
+            super::super::test_support::node_with_files(target.path(), bob, bob_account, &ap);
+        for _ in 0..4 {
+            let unrelated = Announce::new_with_account(
+                &DeviceIdentity::generate(),
+                &Account::generate(),
+                "Unrelated",
+                9,
+            );
+            b.roster
+                .lock()
+                .unwrap()
+                .update(&unrelated, "127.0.0.1".parse().unwrap(), &b.user_id());
+        }
+        let path = source.path().join("source.bin");
+        std::fs::write(&path, b"source-aware recovery query count").unwrap();
+        let (id, file) = a
+            .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let event = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+            .event
+            .clone();
+        b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+        b.process_file_events(event.conversation_id);
+        assert!(
+            b.routing_peers()
+                .iter()
+                .filter(|peer| !peer.post_office && peer.public != b.identity.public())
+                .count()
+                >= 5
+        );
+        OFFER_PAGE_QUERIES.with(|count| count.set(0));
+        SCOPE_PAGE_QUERIES.with(|count| count.set(0));
+        let writes = b.storage.database().successful_write_commits();
+        let sources = b.file_recovery_sources(file, 0).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].public, ap.public());
+        assert_eq!(
+            OFFER_PAGE_QUERIES.with(|count| count.get()),
+            1,
+            "one call must traverse the real offer page once, independent of routing peers"
+        );
+        assert_eq!(
+            SCOPE_PAGE_QUERIES.with(|count| count.get()),
+            1,
+            "one call must traverse the real sent-scope page once, independent of routing peers"
+        );
+        assert_eq!(b.storage.database().successful_write_commits(), writes);
+        // Exercise actual fallible page reads, then restore the same owner.
+        // A missing scope table is not evidence that direct fallback is safe.
+        for table in ["file_book_offers", "sent_file_scopes"] {
+            b.storage
+                .database()
+                .transaction(|c| {
+                    c.execute_batch(&format!(
+                        "ALTER TABLE {table} RENAME TO recovery_unavailable"
+                    ))?;
+                    Ok(())
+                })
+                .unwrap();
+            let failed = b.file_recovery_sources(file, 0);
+            b.storage
+                .database()
+                .transaction(|c| {
+                    c.execute_batch(&format!(
+                        "ALTER TABLE recovery_unavailable RENAME TO {table}"
+                    ))?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(failed.is_err(), "{table} read failure must propagate");
+            let restored = b.file_recovery_sources(file, 0).unwrap();
+            assert_eq!(restored.len(), 1);
+            assert_eq!(restored[0].public, ap.public());
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_recovery_keeps_current_members_replica_policy_and_rotation() {
+        use crate::eventlog::{Author, Event, EventKind};
+        let target = tempfile::tempdir().unwrap();
+        let identities: Vec<_> = (0..5).map(|_| DeviceIdentity::generate()).collect();
+        let accounts: Vec<_> = (0..5).map(|_| Account::generate()).collect();
+        let announcements: Vec<_> = identities
+            .iter()
+            .zip(&accounts)
+            .map(|(id, account)| Announce::new_with_account(id, account, "Member", 9))
+            .collect();
+        let (node, _, _) = super::super::test_support::node_with_files(
+            target.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &announcements[0],
+        );
+        for announce in &announcements[1..] {
+            node.roster.lock().unwrap().update(
+                announce,
+                "127.0.0.1".parse().unwrap(),
+                &node.user_id(),
+            );
+        }
+        let group = node
+            .create_channel(
+                "Recovery sources",
+                identities.iter().map(DeviceIdentity::public).collect(),
+            )
+            .await
+            .unwrap();
+        let path = target.path().join("group-source.bin");
+        std::fs::write(&path, b"group recovery selection").unwrap();
+        let file = node
+            .send_file_channel(group, &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let mut expected: Vec<_> = identities.iter().map(DeviceIdentity::public).collect();
+        expected.sort_unstable_by_key(|peer| peer.user_id());
+        let expected_three = |all: &[crate::identity::device::PublicIdentity], cursor: usize| {
+            let mut order = all.to_vec();
+            if !order.is_empty() {
+                let offset = cursor % order.len();
+                order.rotate_left(offset);
+            }
+            order.truncate(3);
+            order
+        };
+        for cursor in [0, 2, 7] {
+            let actual: Vec<_> = node
+                .file_recovery_sources(file, cursor)
+                .unwrap()
+                .into_iter()
+                .map(|peer| peer.public)
+                .collect();
+            assert_eq!(actual, expected_three(&expected, cursor));
+        }
+        // Publish an actual member-signed replica opt-out and install it through
+        // the canonical metadata owner before asking for recovery sources again.
+        let history = node.log.lock().unwrap().events(&group).unwrap();
+        let parent = history.last().unwrap();
+        let peer = &identities[0];
+        let sequence = node
+            .log
+            .lock()
+            .unwrap()
+            .next_sequence(&group, &Author::from_ed25519(peer.public().ed25519_pub))
+            .unwrap();
+        let disabled = Event::new(
+            peer,
+            group,
+            sequence,
+            vec![parent.id],
+            parent.lamport + 1,
+            0,
+            EventKind::ChannelReplica,
+            vec![0],
+        );
+        node.log.lock().unwrap().append_durable(disabled).unwrap();
+        node.await_channel_metadata(group).await.unwrap();
+        assert!(
+            !node
+                .channels
+                .lock()
+                .unwrap()
+                .replica_enabled(group, &peer.user_id())
+        );
+        expected.retain(|public| public != &peer.public());
+        let actual: Vec<_> = node
+            .file_recovery_sources(file, 0)
+            .unwrap()
+            .into_iter()
+            .map(|peer| peer.public)
+            .collect();
+        assert_eq!(actual, expected_three(&expected, 0));
+        node.remove_channel_member(group, &identities[1].user_id())
+            .await
+            .unwrap();
+        expected.retain(|public| public != &identities[1].public());
+        let actual: Vec<_> = node
+            .file_recovery_sources(file, 0)
+            .unwrap()
+            .into_iter()
+            .map(|peer| peer.public)
+            .collect();
+        assert_eq!(actual, expected_three(&expected, 0));
+    }
+
+    #[tokio::test]
     async fn attachment_recovery_excludes_unrelated_roster_peers() {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
@@ -2762,6 +3406,258 @@ mod inbound_idle_capacity_tests {
         identity::{account::Account, device::DeviceIdentity},
         node::{AccountDocumentKey, account_devices::AccountDevice},
     };
+
+    #[tokio::test]
+    async fn cancelled_timed_out_and_external_drop_owners_retain_capacity_until_reception_drains() {
+        use crate::eventlog::sync::network::NetworkSyncStore;
+        use futures_util::FutureExt;
+        struct HeldDelivery {
+            release: Option<std::sync::mpsc::Sender<()>>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl HeldDelivery {
+            fn release(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+                if let Some(thread) = self.thread.take() {
+                    assert!(thread.join().is_ok());
+                }
+            }
+        }
+        impl Drop for HeldDelivery {
+            fn drop(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+        for (requester, mode) in [false, true]
+            .into_iter()
+            .flat_map(|requester| [0, 1, 2].map(|mode| (requester, mode)))
+        {
+            let source_dir = tempfile::tempdir().unwrap();
+            let target_dir = tempfile::tempdir().unwrap();
+            let source_identity = DeviceIdentity::generate();
+            let target_identity = DeviceIdentity::generate();
+            let source_account = Account::generate();
+            let target_account = Account::generate();
+            let source_proof =
+                Announce::new_with_account(&source_identity, &source_account, "Source", 9);
+            let target_proof =
+                Announce::new_with_account(&target_identity, &target_account, "Target", 9);
+            let (source, _, _) = super::super::test_support::node_with_files(
+                source_dir.path(),
+                source_identity,
+                source_account,
+                &target_proof,
+            );
+            let (target, mut incoming, _) = super::super::test_support::node_with_files(
+                target_dir.path(),
+                target_identity,
+                target_account,
+                &source_proof,
+            );
+            target.cached_peer_snapshot_async().await.unwrap();
+            let id = source
+                .enqueue_to_account(&target.account_id(), b"accepted before cancellation", None)
+                .await
+                .unwrap();
+            let event = source
+                .delivery
+                .lock()
+                .unwrap()
+                .message(id)
+                .unwrap()
+                .destinations[0]
+                .event
+                .clone();
+            let wire = event.id;
+            let peer = source.identity.public();
+            let capacity_slots = Arc::new(Semaphore::new(1));
+            let capacity = capacity_slots.clone().acquire_owned().await.unwrap();
+            let transport_before = target.sessions.test_capacity_snapshot();
+            let (channel, _remote_channel, capacity) = if requester {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (outgoing, incoming_channel) =
+                    tokio::time::timeout(Duration::from_secs(3), async {
+                        tokio::join!(
+                            async {
+                                let stream = TcpStream::connect(address).await.unwrap();
+                                SecureChannel::connect(stream, &target.identity, Some(&peer))
+                                    .await
+                                    .unwrap()
+                            },
+                            async {
+                                let (stream, _) = listener.accept().await.unwrap();
+                                SecureChannel::accept(stream, &source.identity)
+                                    .await
+                                    .unwrap()
+                            }
+                        )
+                    })
+                    .await
+                    .expect("the requester must own a real authenticated TCP channel");
+                let mut outgoing = outgoing;
+                // Retain both real Node pool permits and the one-slot pressure
+                // witness on the channel, exactly as a production requester does.
+                let mut permits = target.sessions.try_outbound().unwrap();
+                permits.push(capacity);
+                outgoing.retain_connection_permits(permits);
+                (Some(outgoing), Some(incoming_channel), None)
+            } else {
+                (None, None, Some(Arc::new(capacity)))
+            };
+            let (release, released) = std::sync::mpsc::channel();
+            let (locked, holding) = tokio::sync::oneshot::channel();
+            let held_target = target.clone();
+            let mut gate = HeldDelivery {
+                release: Some(release),
+                thread: Some(std::thread::spawn(move || {
+                    let _delivery = held_target.delivery.lock().unwrap();
+                    locked.send(()).unwrap();
+                    let _ = released.recv();
+                })),
+            };
+            tokio::time::timeout(Duration::from_secs(3), holding)
+                .await
+                .unwrap()
+                .unwrap();
+            let receiving = target.clone();
+            let (accepted, ready) = tokio::sync::oneshot::channel();
+            let mut task = tokio::spawn(async move {
+                let operation = async {
+                    let channel = channel;
+                    let store = if requester {
+                        receiving.sync_store(&peer)
+                    } else {
+                        receiving.serve_sync_store(&peer)
+                    };
+                    let _owner = if let Some(channel) = channel.as_ref() {
+                        receiving
+                            .request_reception_scope(&store, channel)
+                            .expect("a live requester must admit reception ownership")
+                    } else {
+                        SyncReceptionScope {
+                            node: receiving.clone(),
+                            store: &store,
+                            permit: Some(receiving.runtime_work.admit().unwrap()),
+                            capacity,
+                            transport_capacity: Vec::new(),
+                            runtime: tokio::runtime::Handle::current(),
+                        }
+                    };
+                    NetworkSyncStore::ingest(&mut *store.lock().unwrap(), event).unwrap();
+                    accepted.send(()).unwrap();
+                    // Exercise the actual adapter/admission owner at a suspended
+                    // protocol boundary; no fake ciphertext or reception callback.
+                    std::future::pending::<()>().await;
+                };
+                if mode == 0 {
+                    operation.await;
+                } else if mode == 2 {
+                    let mut operation = Box::pin(operation);
+                    std::future::poll_fn(|context| {
+                        assert!(
+                            std::future::Future::poll(operation.as_mut(), context).is_pending()
+                        );
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
+                    std::thread::scope(|scope| {
+                        scope.spawn(move || {
+                            assert!(tokio::runtime::Handle::try_current().is_err(), "the cancellation drop must actually occur outside Tokio context");
+                            drop(operation);
+                        }).join().unwrap();
+                    });
+                } else {
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(10), operation)
+                            .await
+                            .is_err()
+                    );
+                }
+            });
+            let outcome = std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(Duration::from_secs(3), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(target.log.lock().unwrap().get(&wire).unwrap().is_some());
+            if mode == 0 {
+                task.abort();
+                assert!((&mut task).await.unwrap_err().is_cancelled());
+            } else {
+                tokio::time::timeout(Duration::from_secs(3), &mut task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            assert!(
+                capacity_slots.clone().try_acquire_owned().is_err(),
+                "a cancelled connection must not admit another cleanup while its real reception SQL is blocked"
+            );
+            if requester {
+                let held = target.sessions.test_capacity_snapshot();
+                assert_eq!(held.0 + 1, transport_before.0, "accepted requester cleanup must retain real shared TCP capacity");
+                assert_eq!(held.2 + 1, transport_before.2, "accepted requester cleanup must retain real outbound TCP capacity");
+            }
+            let drained = target.runtime_work.drain();
+            tokio::pin!(drained);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut drained)
+                    .await
+                    .is_err(),
+                "retirement must remain blocked by actual accepted reception work"
+            );
+            gate.release();
+            tokio::time::timeout(Duration::from_secs(3), &mut drained)
+                .await
+                .expect("releasing actual SQL work must finish retirement's drain");
+            assert_eq!(
+                capacity_slots.available_permits(),
+                1,
+                "connection capacity retires only after actual reception completes"
+            );
+            if requester {
+                let retired = target.sessions.test_capacity_snapshot();
+                assert_eq!(retired.0, transport_before.0, "shared TCP capacity retires after reception completes");
+                assert_eq!(retired.2, transport_before.2, "outbound TCP capacity retires after reception completes");
+            }
+            let received = incoming.try_recv().expect("accepted reception must survive its suspended owner disappearing without another query");
+            assert_eq!(received.message_id, Some(id));
+            assert_eq!(received.text, b"accepted before cancellation");
+            assert!(target.received.lock().unwrap().processed(wire).unwrap());
+            let receipts = target.delivery.lock().unwrap().retry_receipts(8);
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].original_event_id, wire);
+            assert!(incoming.try_recv().is_err());
+            }).catch_unwind().await;
+            let cleanup = std::panic::AssertUnwindSafe(async {
+                gate.release();
+                if !task.is_finished() {
+                    task.abort();
+                    let _ = (&mut task).await;
+                }
+                if let Some(retirement) = target.retire_prepared_sync_views() {
+                    retirement.await.unwrap();
+                }
+                target.runtime_work.drain().await;
+            })
+            .catch_unwind()
+            .await;
+            if let Err(error) = outcome {
+                std::panic::resume_unwind(error);
+            }
+            if let Err(error) = cleanup {
+                std::panic::resume_unwind(error);
+            }
+        }
+    }
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -3026,5 +3922,205 @@ mod inbound_idle_capacity_tests {
             clients[7].account_document_meta(&control_key),
             Some(expected)
         );
+    }
+}
+
+#[cfg(test)]
+mod custody_notification_tests {
+    use super::*;
+    use crate::{
+        discovery::Announce,
+        identity::{account::Account, device::DeviceIdentity},
+        node::test_support::node_with_files,
+    };
+    use futures_util::FutureExt;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn channel_custody_noop_relay_confirmation_does_not_notify_delivery_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let recipient = DeviceIdentity::generate();
+        let proof =
+            Announce::new_with_account(&recipient, &Account::generate(), "offline member", 1);
+        let (source, _, _) = node_with_files(
+            &dir.path().join("source"),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let relay_identity = DeviceIdentity::generate();
+        let secret = relay_identity.secret_bytes();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let relay_proof = Announce::new_post_office(&relay_identity, "relay", address.port());
+        source
+            .roster
+            .lock()
+            .unwrap()
+            .update(&relay_proof, address.ip(), &source.user_id());
+        let relay = Arc::new(Mutex::new(
+            crate::postoffice::PostOffice::open(&dir.path().join("relay"), "pw", relay_identity)
+                .unwrap(),
+        ));
+        let worker = tokio::spawn(super::super::postbox::run_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            listener,
+            relay.clone(),
+        ));
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let channel = source
+                .create_channel("relay status notification", vec![recipient.public()])
+                .await
+                .unwrap();
+            let event = source
+                .enqueue_channel_message_reply_expiring_if(
+                    channel,
+                    b"retained relay custody",
+                    None,
+                    None,
+                    |commit| commit(),
+                )
+                .unwrap();
+            let first = source.delivery_status_notify.notified();
+            tokio::pin!(first);
+            first.as_mut().enable();
+            assert!(
+                source
+                    .replicate_to_post_office_targets_confirming(
+                        channel,
+                        vec![recipient.public()],
+                        Some(event)
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                first.as_mut().now_or_never().is_some(),
+                "first durable relay custody must notify"
+            );
+            let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+                &source.identity,
+                &recipient.public(),
+                &relay_proof.public(),
+            )
+            .unwrap();
+            let original = source.log.lock().unwrap().get(&event).unwrap().unwrap();
+            assert!(
+                relay
+                    .lock()
+                    .unwrap()
+                    .has(&mailbox.wrap(&original).unwrap().id),
+                "real recipient-encrypted wrapper must be held by the relay"
+            );
+            let journal_peer = format!("relay:{}", relay_proof.user_id);
+            assert!(
+                source
+                    .channel_custody
+                    .lock()
+                    .unwrap()
+                    .peers(event)
+                    .unwrap()
+                    .contains(&journal_peer)
+            );
+            let before = source.channel_custody_observations(channel, event);
+            let repeated = source.delivery_status_notify.notified();
+            tokio::pin!(repeated);
+            repeated.as_mut().enable();
+            assert!(
+                source
+                    .replicate_to_post_office_targets_confirming(
+                        channel,
+                        vec![recipient.public()],
+                        Some(event)
+                    )
+                    .await
+                    .unwrap()
+            );
+            let unchanged_woke = repeated.as_mut().now_or_never().is_some();
+            let after = source.channel_custody_observations(channel, event);
+            assert_eq!(
+                before
+                    .iter()
+                    .map(|m| (&m.key, m.revision, m.content_hash))
+                    .collect::<Vec<_>>(),
+                after
+                    .iter()
+                    .map(|m| (&m.key, m.revision, m.content_hash))
+                    .collect::<Vec<_>>(),
+                "the repeated exchange must retain the same published witness"
+            );
+            // An unchanged document must not suppress repair of a real local
+            // custody change after a successfully authenticated held answer.
+            source
+                .channel_custody
+                .lock()
+                .unwrap()
+                .revoke(event, &journal_peer)
+                .unwrap();
+            let repair = source.delivery_status_notify.notified();
+            tokio::pin!(repair);
+            repair.as_mut().enable();
+            source
+                .replicate_to_post_office_targets_confirming(
+                    channel,
+                    vec![recipient.public()],
+                    Some(event),
+                )
+                .await
+                .unwrap();
+            assert!(
+                repair.as_mut().now_or_never().is_some(),
+                "local custody repair must notify independently of the unchanged document"
+            );
+            assert!(
+                source
+                    .channel_custody
+                    .lock()
+                    .unwrap()
+                    .peers(event)
+                    .unwrap()
+                    .contains(&journal_peer)
+            );
+            // Real policy rejection still produces no custody publication.
+            source.set_post_office_permissions(false, true);
+            let denied = source.delivery_status_notify.notified();
+            tokio::pin!(denied);
+            denied.as_mut().enable();
+            assert!(
+                !source
+                    .replicate_to_post_office_targets_confirming(
+                        channel,
+                        vec![recipient.public()],
+                        Some(event)
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert!(denied.as_mut().now_or_never().is_none());
+            assert!(
+                !unchanged_woke,
+                "unchanged relay-held confirmation must not wake delivery status"
+            );
+        })
+        .catch_unwind()
+        .await;
+        source.sessions.clear();
+        worker.abort();
+        let _ = worker.await;
+        // The existing relay accept helper spawns bounded connection workers.
+        // Closing pooled sockets must retire their store owners before cleanup,
+        // including when an assertion failed before the policy-rejection cut.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&relay) != 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("relay connection workers must release their profile");
+        source.runtime_work.close();
+        source.runtime_work.drain().await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 }

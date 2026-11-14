@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -17,15 +17,7 @@ import {
 } from "./settings/model";
 import { useSettingsController } from "./settings/useSettingsController";
 import { SettingsError } from "./settings/primitives";
-import { LocalAgentSettings } from "./settings/LocalAgentSettings";
-import { ScreenshotShortcutSettings } from "./settings/ScreenshotShortcutSettings";
-import { GeneralSettings } from "./settings/GeneralSettings";
-import { AppearanceSettings } from "./settings/AppearanceSettings";
-import { NotificationSettings } from "./settings/NotificationSettings";
-import { NetworkSettings } from "./settings/NetworkSettings";
-import { SecuritySettings } from "./settings/SecuritySettings";
-import { FileSettings } from "./settings/FileSettings";
-import { HistorySettings } from "./settings/HistorySettings";
+import { SettingsPage } from "./settings/SettingsPage";
 
 /** Composition only: category navigation never derives selection from scroll position. */
 export function SettingsDialog({
@@ -63,17 +55,26 @@ export function SettingsDialog({
     if (category !== "privacy") setPresetDraft(false);
     if (panel.current) panel.current.scrollTop = 0;
   }, [category]);
-  useLayoutEffect(() => {
-    if (!open || !focusTarget.current) return;
+  const focusRequestedControl = useCallback(() => {
+    if (!focusTarget.current) return;
     const editor = panel.current?.querySelector<HTMLElement>(
       focusTarget.current,
     );
-    if (!editor) return; // A category's settings may still be loading.
+    if (!editor) return;
     editor.scrollIntoView({ block: "nearest" });
     if (editor.matches(":disabled")) panel.current?.focus();
     else editor.focus();
     focusTarget.current = null;
-  }, [open, category, controller.settings, controller.identity]);
+  }, []);
+  useLayoutEffect(() => {
+    if (open) focusRequestedControl();
+  }, [
+    open,
+    category,
+    controller.settings,
+    controller.identity,
+    focusRequestedControl,
+  ]);
   useLayoutEffect(() => {
     if (!open) return;
     const nav = navigation.current;
@@ -112,36 +113,6 @@ export function SettingsDialog({
     focusTarget.current = `#${controlId}`;
     setCategory(destination);
   };
-  const page = {
-    general: <GeneralSettings controller={controller} />,
-    appearance: <AppearanceSettings />,
-    shortcuts: (
-      <ScreenshotShortcutSettings
-        key={controller.identity ?? "loading"}
-        controller={controller}
-      />
-    ),
-    notifications: <NotificationSettings controller={controller} />,
-    connection: <NetworkSettings controller={controller} />,
-    privacy: (
-      <SecuritySettings
-        controller={controller}
-        onDraftChange={setPresetDraft}
-        onAgentSettings={() => {
-          focusTarget.current = "#setting-local-agent-access";
-          setCategory(
-            settingsCategoryForControl("setting-local-agent-access")!,
-          );
-        }}
-        onNotifications={() => showControl("setting-notification-preview")}
-      />
-    ),
-    integrations: controller.settings ? (
-      <LocalAgentSettings controller={controller} />
-    ) : null,
-    files: <FileSettings controller={controller} />,
-    history: <HistorySettings controller={controller} />,
-  }[category];
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       {controlledOpen === undefined && (
@@ -253,7 +224,19 @@ export function SettingsDialog({
                   onDismiss={() => controller.clearError(category)}
                 />
               )}
-              {page}
+              <SettingsPage
+                category={category}
+                enabled={open}
+                controller={controller}
+                onReady={focusRequestedControl}
+                onDraftChange={setPresetDraft}
+                onAgentSettings={() =>
+                  showControl("setting-local-agent-access")
+                }
+                onNotifications={() =>
+                  showControl("setting-notification-preview")
+                }
+              />
             </div>
           </div>
         </div>

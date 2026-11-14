@@ -1,3 +1,4 @@
+import { startRecoveryRefresh } from "./recoveryRefresh";
 import {
   accountDocuments,
   type AccountDocumentKey,
@@ -11,7 +12,7 @@ import {
   type ReceptionLedger,
 } from "@/store/reception";
 import { captureRuntimeOwner } from "@/store/ownership";
-import { subscribeSyncInvalidation } from "./syncInvalidation";
+import { subscribeDocumentInvalidation } from "./syncInvalidation";
 import { readWithDeadline } from "./readDeadline";
 
 interface ReceiptPorts {
@@ -37,14 +38,27 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
   let active = true;
   let enabled = false;
   let polling = false;
+  let pollDirty = false;
   let writing = false;
+  let writeContinuation: ReturnType<typeof setTimeout> | undefined;
+  let writeDirty = false;
   let after: AccountDocumentKey | null = null;
+  let continuation: ReturnType<typeof setTimeout> | undefined;
   const known = new Set<string>();
   const current = () => active && ports.current();
   const identity = (key: string, id: string) => JSON.stringify([key, id]);
   const flush = async () => {
-    if (!current() || !enabled || writing) return;
+    if (!current() || !enabled) return;
+    if (writing) {
+      writeDirty = true;
+      return;
+    }
     writing = true;
+    writeDirty = false;
+    if (writeContinuation !== undefined) clearTimeout(writeContinuation);
+    writeContinuation = undefined;
+    let exhausted = false;
+    let failed = false;
     try {
       let budget = 64;
       for (const [key, entries] of Object.entries(ports.ledger())) {
@@ -64,28 +78,45 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
           if (!current()) return;
           known.add(token);
           ports.apply(key, [id]);
-          budget--;
+          if (--budget === 0) {
+            exhausted = true;
+            return;
+          }
         }
       }
     } catch {
+      failed = true;
       /* Retain local seen evidence for the next policy-enabled retry. */
     } finally {
       writing = false;
+      if (!failed && (exhausted || writeDirty) && current() && enabled)
+        writeContinuation = setTimeout(() => void flush(), 0);
     }
   };
   const unsubscribe = ports.subscribe(() => {
     void flush();
   });
-  return {
-    poll: async () => {
-      if (!current() || polling) return;
-      polling = true;
-      try {
-        const policy = await readWithDeadline(ports.policy);
-        if (!current()) return;
-        enabled = policy.history;
-        if (!enabled) return;
-        const page = await readWithDeadline(() => ports.list(after));
+  const poll = async () => {
+    if (!current()) return;
+    if (polling) {
+      pollDirty = true;
+      return;
+    }
+    polling = true;
+    pollDirty = false;
+    if (continuation !== undefined) clearTimeout(continuation);
+    continuation = undefined;
+    let more = false;
+    try {
+      const policy = await readWithDeadline(ports.policy);
+      if (!current()) return;
+      enabled = policy.history;
+      if (!enabled) return;
+      // A low-frequency repair must not make each already-available page wait
+      // another five minutes. Drain bounded batches and yield between them.
+      for (let budget = 0; budget < 8; budget++) {
+        const cursor = after;
+        const page = await readWithDeadline(() => ports.list(cursor));
         if (!current() || !enabled) return;
         for (const meta of page.items) {
           if (meta.key.kind !== "read_receipt" || meta.tombstone) continue;
@@ -96,19 +127,32 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
           known.add(token);
           ports.apply(key, [message_id]);
         }
+        if (
+          page.next !== null &&
+          JSON.stringify(page.next) === JSON.stringify(cursor)
+        )
+          throw new Error("Receipt cursor did not advance");
         after = page.next;
-        // A local mutation retains its serial write lane until native completion,
-        // but cannot prevent observing another device's receipts or policy.
-        void flush();
-      } catch {
-        /* A later invalidation or bounded poll retries the same page. */
-      } finally {
-        polling = false;
+        if (after === null) break;
       }
-    },
+      more = after !== null;
+      // Local mutations keep their own write lane, independently of observation.
+      void flush();
+    } catch {
+      /* A later invalidation or bounded recovery retries the retained cursor. */
+    } finally {
+      polling = false;
+      if ((more || pollDirty) && current())
+        continuation = setTimeout(() => void poll(), 0);
+    }
+  };
+  return {
+    poll,
     stop: () => {
       active = false;
       enabled = false;
+      if (continuation !== undefined) clearTimeout(continuation);
+      if (writeContinuation !== undefined) clearTimeout(writeContinuation);
       unsubscribe();
     },
   };
@@ -126,7 +170,10 @@ export function startLinkedReadReceipts(owner: string): () => void {
   const sync = createLinkedReadReceiptSync({
     current,
     ledger: () => useChat.getState().ledger,
-    subscribe: (changed) => useChat.subscribe(changed),
+    subscribe: (changed) =>
+      useChat.subscribe((state, previous) => {
+        if (state.ledger !== previous.ledger) changed();
+      }),
     apply: (key, ids) => {
       if (current())
         useChat.getState().applyAccountReadReceipts(owner, accountId, key, ids);
@@ -137,15 +184,13 @@ export function startLinkedReadReceipts(owner: string): () => void {
     mark: (conversation, id) =>
       accountDocuments.markSeen(owner, accountId, conversation, id),
   });
-  const timer = setInterval(() => {
+  const stopRecovery = startRecoveryRefresh(() => void sync.poll());
+  const unsubscribe = subscribeDocumentInvalidation(owner, () => {
     void sync.poll();
-  }, 15000);
-  const unsubscribe = subscribeSyncInvalidation((change) => {
-    if (change.owner === owner) void sync.poll();
   });
   void sync.poll();
   return () => {
-    clearInterval(timer);
+    stopRecovery();
     unsubscribe();
     sync.stop();
   };

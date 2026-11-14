@@ -1,3 +1,4 @@
+import { RECOVERY_REFRESH_MS } from "./recoveryRefresh";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CustomizationPack } from "./pack";
 const mocks = vi.hoisted(() => ({
@@ -7,6 +8,10 @@ const mocks = vi.hoisted(() => ({
     loaded: true,
     scope: { owner: "owner", account: "account" },
     packs: [] as CustomizationPack[],
+    contentToken: (_id: string) => JSON.stringify(mocks.state.packs),
+    readPack: vi.fn(async (id: string) =>
+      mocks.state.packs.find((pack) => pack.id === id),
+    ),
   },
   listeners: new Set<() => void>(),
 }));
@@ -115,10 +120,10 @@ it("retries failed local registration without re-registering successful artwork"
   mocks.register.mockRejectedValueOnce(new Error("runtime starting"));
   stop = startInstalledStickerSources("owner");
   await settle();
-  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   await settle();
   expect(mocks.register).toHaveBeenCalledTimes(2);
-  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   await settle();
   expect(mocks.register).toHaveBeenCalledTimes(2);
 });

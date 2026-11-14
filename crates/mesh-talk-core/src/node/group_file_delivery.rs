@@ -1,5 +1,7 @@
 //! Consent-gated group attachments over the existing recipient-encrypted mailboxes.
-use super::{Node, ReceiveDecision, delivery_store::FileCard, file_consent::Decision};
+#[cfg(test)]
+use super::file_consent::Decision;
+use super::{Node, ReceiveDecision, delivery_store::FileCard};
 use crate::{
     discovery::Announce,
     eventlog::{ConversationId, Event, EventId, EventKind, LogError},
@@ -8,26 +10,100 @@ use crate::{
 };
 use std::{
     collections::BTreeMap,
-    sync::{Mutex, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::Ordering},
 };
 
 type UploadKey = (EventId, [u8; 32]);
 const MAX_GROUP_FILE_JOBS: usize = 10_000;
+const MAX_AUTHORIZATION_VIEWS: usize = 4;
+type AuthorizationKey = ([u8; 32], [u8; 32], [u8; 32]);
+
+struct AuthorizationView {
+    upload: super::privacy_sync::HistoryUpload,
+    stamp: Option<super::privacy_sync::HistorySyncStamp>,
+    ready: bool,
+    used: std::time::Instant,
+}
+
+enum GroupFileQueueProgress {
+    Complete,
+    Preparing,
+}
+
+#[derive(Clone, Copy)]
+enum AuthorizationProbe {
+    Allowed,
+    Denied,
+    Preparing,
+}
+impl AuthorizationProbe {
+    fn ready(self) -> Result<bool, LogError> {
+        match self {
+            Self::Allowed => Ok(true),
+            Self::Denied => Ok(false),
+            Self::Preparing => Err(LogError::StaleCursor),
+        }
+    }
+}
+#[derive(Default)]
+struct AuthorizationAdvance {
+    progressed: bool,
+    completed: Option<AuthorizationKey>,
+}
 
 #[derive(Clone)]
 struct GroupFileUpload {
+    channel: ConversationId,
+    waiting_dependency: bool,
     file: ConversationId,
     manifest: EventId,
     recipient: PublicIdentity,
     retry_after: Option<std::time::Instant>,
+    retry_delay: std::time::Duration,
+    // Exact receiver action captured by this dispatch, not current custody.
+    demand: Option<EventId>,
+    // Bounded by the existing job count. Cloned retry selections share only
+    // exact local outgoing-membership evidence, never remote custody proof.
+    authorization_stamp: Arc<Mutex<Option<super::privacy_sync::HistorySyncStamp>>>,
+}
+
+// Owned only by one active retry future, never by queued/cooling jobs.
+#[derive(Clone)]
+struct IntrinsicOffer {
+    event: Event,
+    row: super::received_log::ReceivedEntry,
+    rewrite_revision: u64,
+    file: ConversationId,
+}
+type AttemptOffer = Mutex<Option<Arc<IntrinsicOffer>>>;
+
+type GroupFileDiscoveryInput = ([u8; 32], bool, u64, u64);
+#[derive(Clone, Copy)]
+struct DeferredGroupFileDiscovery {
+    input: GroupFileDiscoveryInput,
+    source: (u64, u64),
+    at: std::time::Instant,
+}
+
+#[derive(Clone, Copy, Default)]
+struct GroupFileScan {
+    cursor: Option<i64>,
+    source: Option<(u64, u64)>,
+    input: Option<GroupFileDiscoveryInput>,
+    deferred: Option<DeferredGroupFileDiscovery>,
+    readiness: u64,
+    repair_after: Option<std::time::Instant>,
+    // Retained overflow recovery; only the serialized producer consumes it.
+    rescan_requested: bool,
 }
 
 #[derive(Default)]
 pub(super) struct GroupFileDelivery {
     gate: tokio::sync::Mutex<()>,
-    scan_cursor: Mutex<Option<i64>>,
+    scan: Mutex<GroupFileScan>,
     cursor: Mutex<Option<UploadKey>>,
     jobs: Mutex<BTreeMap<UploadKey, GroupFileUpload>>,
+    authorization: Mutex<BTreeMap<AuthorizationKey, AuthorizationView>>,
 }
 
 impl Node {
@@ -38,35 +114,99 @@ impl Node {
         manifest: EventId,
         peer: &PublicIdentity,
     ) -> Result<Option<(Event, super::received_log::ReceivedEntry)>, LogError> {
+        Ok(self
+            .group_file_offer_with_attempt(file, manifest, peer, None)?
+            .map(|offer| {
+                let offer = Arc::unwrap_or_clone(offer);
+                (offer.event, offer.row)
+            }))
+    }
+
+    fn group_file_offer_with_attempt(
+        &self,
+        file: ConversationId,
+        manifest: EventId,
+        peer: &PublicIdentity,
+        attempt: Option<&AttemptOffer>,
+    ) -> Result<Option<Arc<IntrinsicOffer>>, LogError> {
         if self.delivery_suspended.load(Ordering::Acquire) {
             return Ok(None);
         }
-        let Some(row) = self
-            .received_files
-            .lock()
-            .expect("file rows lock")
-            .entry(manifest)?
-        else {
-            return Ok(None);
+        let cached = attempt.and_then(|slot| slot.lock().expect("attempt offer lock").clone());
+        let offer = if let Some(cached) = cached.filter(|cached| {
+            cached.event.id == manifest
+                && self
+                    .received_files
+                    .lock()
+                    .expect("file rows lock")
+                    .rewrite_revision()
+                    == cached.rewrite_revision
+        }) {
+            // Retained existence remains live authority even when immutable
+            // ciphertext, integrity and signature work were already validated.
+            let present = self
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .header(&manifest)?;
+            if !present.is_some_and(|header| {
+                header.kind == EventKind::FileManifest
+                    && header.conversation == cached.event.conversation_id
+                    && header.author == cached.event.author
+            }) {
+                return Ok(None);
+            }
+            cached
+        } else {
+            let (row, rewrite_revision) = {
+                let rows = self.received_files.lock().expect("file rows lock");
+                (rows.entry(manifest)?, rows.rewrite_revision())
+            };
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            if super::files::validated_manifest(&row.plaintext)
+                .is_none_or(|decoded| decoded.file_conv() != file)
+                || self.recipient_expired(&row.plaintext, manifest, row.wall_clock)
+            {
+                return Ok(None);
+            }
+            let (event, authenticated_read) = {
+                let log = self.log.lock().expect("log lock");
+                (log.get(&manifest)?, log.repository().is_ok())
+            };
+            let Some(event) = event else {
+                return Ok(None);
+            };
+            if event.kind != EventKind::FileManifest
+                || event.conversation_id != row.conversation
+                || event.author.user_id() != row.from
+                // Indexed reads authenticate the exact body against its header.
+                // Legacy replay trusts encrypted records, so preserve its explicit checks.
+                || (!authenticated_read
+                    && (!event.verify_integrity() || !event.verify_signature()))
+            {
+                return Ok(None);
+            }
+            let offer = Arc::new(IntrinsicOffer {
+                event,
+                row,
+                rewrite_revision,
+                file,
+            });
+            if let Some(slot) = attempt {
+                *slot.lock().expect("attempt offer lock") = Some(offer.clone());
+            }
+            offer
         };
-        let Some(decoded) = super::files::validated_manifest(&row.plaintext) else {
-            return Ok(None);
-        };
-        if decoded.file_conv() != file
-            || self.recipient_expired(&row.plaintext, manifest, row.wall_clock)
-        {
+        let event = &offer.event;
+        let row = &offer.row;
+        if offer.file != file || self.recipient_expired(&row.plaintext, manifest, row.wall_clock) {
             return Ok(None);
         }
-        let Some(event) = self.log.lock().expect("log lock").get(&manifest)? else {
-            return Ok(None);
-        };
-        if event.kind != EventKind::FileManifest
-            || event.conversation_id != row.conversation
-            || event.author.user_id() != row.from
-            || (event.author.ed25519_pub() != &self.identity.public().ed25519_pub
-                && event.author.ed25519_pub() != &peer.ed25519_pub)
-            || !event.verify_integrity()
-            || !event.verify_signature()
+        if event.author.ed25519_pub() != &self.identity.public().ed25519_pub
+            && event.author.ed25519_pub() != &peer.ed25519_pub
         {
             return Ok(None);
         }
@@ -99,11 +239,14 @@ impl Node {
             return Ok(None);
         }
         {
-            let book = self.channels.lock().expect("channels lock");
-            let Some(state) = book.state(&row.conversation) else {
+            // The checkpoint validates the exact signed canonical generation;
+            // display membership may still precede an unapplied leave/transfer.
+            let log = self.log.lock().expect("log lock");
+            let Some(state) = self.channel_checkpoints.current_state(row.conversation)? else {
                 return Ok(None);
             };
-            if !self.channel_identity_is_current(state)?
+            let projection = self.account_group_projection_with_log(&log, row.conversation)?;
+            if !self.channel_identity_is_current_in(&state, &projection)
                 || !state.is_accepted_member(&peer.user_id())
                 || !state.members().contains(peer)
                 || (state.owner_account_id().is_some()
@@ -112,18 +255,7 @@ impl Node {
                 return Ok(None);
             }
         }
-        // Check signed controls too: a removal can precede the live-book refresh.
-        let log = self.log.lock().expect("log lock");
-        let Some(members) = super::channel::ChannelBook::projected_members(
-            row.conversation,
-            &log.events(&row.conversation)?,
-        ) else {
-            return Ok(None);
-        };
-        Ok(
-            (members.contains(peer) && members.contains(&self.identity.public()))
-                .then_some((event, row)),
-        )
+        Ok(Some(offer))
     }
 
     pub(super) fn group_mailbox_peers(&self) -> Vec<Announce> {
@@ -191,34 +323,175 @@ impl Node {
             .retain_incoming_group_file(file)
     }
 
+    // Scheduling evidence only; admission and every transfer still authorize now.
+    // Capture owners separately, without retaining guards across another owner.
+    fn group_file_discovery_input(&self) -> Result<GroupFileDiscoveryInput, LogError> {
+        let projection = self.group_projection_revision()?;
+        let paused = self.group_file_sharing_status().paused;
+        let files = *self.file_changes.borrow();
+        let policy = self
+            .attachment_consent
+            .lock()
+            .expect("consent lock")
+            .generation()?;
+        Ok((projection, paused, files, policy))
+    }
+
     /// Rebuild bounded work from the durable group rows, including older sends.
     fn refill_group_file_delivery(&self) -> Result<(), LogError> {
-        let after = *self
-            .group_file_delivery
-            .scan_cursor
-            .lock()
-            .expect("group file scan lock");
-        let page = self
-            .received_files
-            .lock()
-            .expect("file rows lock")
-            .scan_page(
+        {
+            let mut scan = self
+                .group_file_delivery
+                .scan
+                .lock()
+                .expect("group file scan lock");
+            // Consume due scheduling evidence before even reading the source:
+            // a failed metadata read must not leave a zero-delay producer loop.
+            if scan
+                .deferred
+                .is_some_and(|wait| std::time::Instant::now() >= wait.at)
+            {
+                scan.deferred = None;
+            }
+        }
+        let input = self.group_file_discovery_input()?;
+        let mut scan = {
+            let mut scan = self
+                .group_file_delivery
+                .scan
+                .lock()
+                .expect("group file scan lock");
+            if scan.rescan_requested {
+                scan.cursor = None;
+                scan.source = None;
+                scan.repair_after = None;
+                scan.rescan_requested = false;
+                scan.deferred = None;
+            }
+            *scan
+        };
+        let page = {
+            let rows = self.received_files.lock().expect("file rows lock");
+            let source = (rows.revision(), rows.rewrite_revision());
+            if scan.deferred.is_some_and(|wait| {
+                wait.input == input && wait.source == source && std::time::Instant::now() < wait.at
+            }) {
+                return Ok(());
+            }
+            scan.deferred = None;
+            if scan.input != Some(input)
+                || scan.source.is_none_or(|old| old.1 != source.1)
+                || (scan.repair_after.is_some() && scan.source != Some(source))
+            {
+                scan.cursor = None;
+                scan.repair_after = None;
+            }
+            scan.source = Some(source);
+            scan.input = Some(input);
+            if scan
+                .repair_after
+                .is_some_and(|deadline| std::time::Instant::now() < deadline)
+            {
+                return Ok(());
+            }
+            // A full queue retains its discovery page; it must not certify EOF
+            // or skip a recipient which could not yet be admitted.
+            if self
+                .group_file_delivery
+                .jobs
+                .lock()
+                .expect("group file jobs lock")
+                .len()
+                >= MAX_GROUP_FILE_JOBS
+            {
+                return Ok(());
+            }
+            rows.scan_page(
                 None,
-                after,
+                scan.cursor,
                 super::transcript_repository::TranscriptPageLimit::default(),
-            )?;
+            )?
+        };
         for row in page.rows {
             if row.from == self.user_id()
                 && let Some(manifest) = super::files::validated_manifest(&row.plaintext)
             {
-                self.queue_group_file_delivery(manifest.file_conv(), row.event_id)?;
+                let outcome =
+                    self.queue_group_file_delivery_progress(manifest.file_conv(), row.event_id);
+                if matches!(outcome, Ok(GroupFileQueueProgress::Preparing)) {
+                    return Err(LogError::StaleCursor);
+                }
+                if let Err(error) = outcome {
+                    if matches!(error, LogError::StaleCursor) {
+                        #[cfg(test)]
+                        self.trace_account_client(&self.identity.public(), || {
+                            "group_file_discovery_deferred_before_publish".into()
+                        });
+                        let mut current = self
+                            .group_file_delivery
+                            .scan
+                            .lock()
+                            .expect("group file scan lock");
+                        // Readiness may publish during the failed probe. Never
+                        // reinstall a hold after that publisher consumed it.
+                        if !current.rescan_requested && current.readiness == scan.readiness {
+                            current.deferred = Some(DeferredGroupFileDiscovery {
+                                input,
+                                source: scan.source.expect("captured source"),
+                                at: std::time::Instant::now() + std::time::Duration::from_secs(3),
+                            });
+                        }
+                    }
+                    return Err(error);
+                }
+                if self
+                    .group_file_delivery
+                    .jobs
+                    .lock()
+                    .expect("group file jobs lock")
+                    .len()
+                    >= MAX_GROUP_FILE_JOBS
+                {
+                    return Ok(());
+                }
             }
         }
-        *self
+        scan.cursor = page.next;
+        scan.repair_after = page
+            .next
+            .is_none()
+            .then(|| std::time::Instant::now() + super::delivery_runtime::QUIET_REPAIR_INTERVAL);
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "group_file_refill_before_publish".into()
+        });
+        // A completed page cannot acknowledge a concurrent semantic change.
+        // Errors leave the old scan retryable rather than certifying quietness.
+        let after = self.group_file_discovery_input()?;
+        let source_after = {
+            let rows = self.received_files.lock().expect("file rows lock");
+            (rows.revision(), rows.rewrite_revision())
+        };
+        if after != input || scan.source != Some(source_after) {
+            scan.cursor = None;
+            scan.repair_after = None;
+        }
+        let mut current = self
             .group_file_delivery
-            .scan_cursor
+            .scan
             .lock()
-            .expect("group file scan lock") = page.next;
+            .expect("group file scan lock");
+        // A request rejected by a full active queue may arrive during the SQL
+        // scan. Never overwrite its retained rescan with an older EOF.
+        if !current.rescan_requested {
+            if current.readiness != scan.readiness {
+                scan.readiness = current.readiness;
+                scan.cursor = None;
+                scan.repair_after = None;
+                scan.deferred = None;
+            }
+            *current = scan;
+        }
         Ok(())
     }
 
@@ -227,116 +500,631 @@ impl Node {
         file: ConversationId,
         manifest: EventId,
     ) -> Result<(), LogError> {
+        match self.queue_group_file_delivery_progress(file, manifest)? {
+            GroupFileQueueProgress::Complete => Ok(()),
+            GroupFileQueueProgress::Preparing => Err(LogError::StaleCursor),
+        }
+    }
+
+    fn queue_group_file_delivery_progress(
+        &self,
+        file: ConversationId,
+        manifest: EventId,
+    ) -> Result<GroupFileQueueProgress, LogError> {
         let original = self.log.lock().expect("log lock").get(&manifest)?;
         let Some(original) = original.filter(|event| {
             event.kind == EventKind::FileManifest
                 && event.author.ed25519_pub() == &self.identity.public().ed25519_pub
         }) else {
-            return Ok(());
+            return Ok(GroupFileQueueProgress::Complete);
         };
         let members = {
             let book = self.channels.lock().expect("channels lock");
             let Some(state) = book.state(&original.conversation_id) else {
-                return Ok(());
+                return Ok(GroupFileQueueProgress::Complete);
             };
             if !self.channel_identity_is_current(state)? {
-                return Ok(());
+                return Ok(GroupFileQueueProgress::Complete);
             }
             state.recipient_members()
         };
-        let mut added = false;
         for recipient in members
             .into_iter()
             .filter(|peer| *peer != self.identity.public())
         {
+            let key = (manifest, recipient.ed25519_pub);
+            {
+                let jobs = self
+                    .group_file_delivery
+                    .jobs
+                    .lock()
+                    .expect("group file jobs lock");
+                // Existing work revalidates current entitlement in the rotating
+                // retry owner. Refill must not restart its prepared prefix.
+                if jobs.contains_key(&key) {
+                    continue;
+                }
+                if jobs.len() >= MAX_GROUP_FILE_JOBS {
+                    break;
+                }
+            }
+            let demand = self.group_file_dispatch_demand(file, manifest, &recipient)?;
+            if self
+                .files
+                .lock()
+                .expect("files lock")
+                .group_custody_settled(file, manifest, &recipient, demand)?
+            {
+                continue;
+            }
             let job = GroupFileUpload {
+                channel: original.conversation_id,
+                waiting_dependency: false,
                 file,
                 manifest,
                 recipient,
                 retry_after: None,
+                retry_delay: std::time::Duration::from_secs(3),
+                demand,
+                authorization_stamp: Arc::new(Mutex::new(None)),
             };
-            if !self.group_file_custody_allowed(&job)? {
-                continue;
+            match self.group_file_custody_probe(&job, None)? {
+                AuthorizationProbe::Allowed => {}
+                AuthorizationProbe::Denied => continue,
+                AuthorizationProbe::Preparing => return Ok(GroupFileQueueProgress::Preparing),
             }
             let mut jobs = self
                 .group_file_delivery
                 .jobs
                 .lock()
                 .expect("group file jobs lock");
-            let key = (manifest, job.recipient.ed25519_pub);
             if jobs.len() < MAX_GROUP_FILE_JOBS && !jobs.contains_key(&key) {
                 jobs.insert(key, job);
-                added = true;
+                // A later recipient may still be pending. Publish this wake
+                // at insertion instead of losing it on that early return.
+                self.group_file_notify.notify_one();
             }
         }
-        if added {
-            self.file_pull_notify.notify_one();
-        }
-        Ok(())
+        Ok(GroupFileQueueProgress::Complete)
     }
 
-    pub(super) fn group_file_work_pending(&self) -> bool {
-        !self
-            .group_file_delivery
-            .jobs
-            .lock()
-            .expect("group file jobs lock")
-            .is_empty()
-    }
-
-    fn group_file_custody_allowed(&self, job: &GroupFileUpload) -> Result<bool, LogError> {
-        let Some((original, _)) = self.group_file_offer(job.file, job.manifest, &job.recipient)?
-        else {
-            return Ok(false);
-        };
-        if original.author.ed25519_pub() != &self.identity.public().ed25519_pub
-            || self
-                .file_progress(job.file)
-                .map_err(|error| match error {
-                    super::NodeError::Log(error) => error,
-                    other => LogError::Serialization(other.to_string()),
-                })?
-                .is_none_or(|p| p.done != p.total)
-        {
-            return Ok(false);
-        }
-        // A new member's grant cannot release a pre-invitation file. Reuse the
-        // existing recipient projection for its exact signed manifest.
-        if !self
-            .sync_store(&job.recipient)
-            .lock()
-            .expect("projection lock")
-            .authorized_event_ids(&original.conversation_id)?
-            .contains(&job.manifest)
-        {
-            return Ok(false);
-        }
-        // Custody of ciphertext may precede approval. An explicit refusal or
-        // verified recipient completion stops further deposits for this device.
+    fn group_file_dispatch_demand(
+        &self,
+        file: ConversationId,
+        manifest: EventId,
+        recipient: &PublicIdentity,
+    ) -> Result<Option<EventId>, LogError> {
         Ok(self
             .file_consent
             .lock()
             .expect("file consent lock")
-            .received_control_for(job.manifest, &job.recipient)?
-            .as_ref()
-            .and_then(Decision::open)
+            .received_decision_snapshot_for(manifest, recipient)?
+            .filter(|(_, decision)| {
+                decision.file == file
+                    && decision.sender == self.identity.public()
+                    && decision.decision == ReceiveDecision::Accepted
+                    && decision.completion.is_none()
+            })
+            .map(|(id, _)| id))
+    }
+
+    /// A committed, authenticated receiver request is retained without entering
+    /// file/history preparation or the network from the receiving callback.
+    pub(super) fn request_group_file_custody(
+        &self,
+        channel: ConversationId,
+        file: ConversationId,
+        manifest: EventId,
+        recipient: &PublicIdentity,
+        demand: EventId,
+    ) {
+        let key = (manifest, recipient.ed25519_pub);
+        let mut jobs = self
+            .group_file_delivery
+            .jobs
+            .lock()
+            .expect("group file jobs lock");
+        if jobs.contains_key(&key) || jobs.len() < MAX_GROUP_FILE_JOBS {
+            jobs.insert(
+                key,
+                GroupFileUpload {
+                    channel,
+                    waiting_dependency: false,
+                    file,
+                    manifest,
+                    recipient: recipient.clone(),
+                    retry_after: None,
+                    retry_delay: std::time::Duration::from_secs(3),
+                    demand: Some(demand),
+                    authorization_stamp: Arc::new(Mutex::new(None)),
+                },
+            );
+            drop(jobs);
+            self.wake_group_file_discovery();
+        } else {
+            // The signed request is already durable. A retained scan wake is
+            // sufficient recovery when bounded active admission is exhausted.
+            drop(jobs);
+            self.group_file_delivery
+                .scan
+                .lock()
+                .expect("group file scan lock")
+                .rescan_requested = true;
+            self.wake_group_file_discovery();
+        }
+        self.group_file_notify.notify_one();
+    }
+
+    fn retire_group_file_dispatch(&self, key: &UploadKey, job: &GroupFileUpload) -> bool {
+        let mut jobs = self
+            .group_file_delivery
+            .jobs
+            .lock()
+            .expect("group file jobs lock");
+        if jobs.get(key).is_some_and(|current| {
+            current.file == job.file
+                && current.recipient == job.recipient
+                && current.demand == job.demand
+        }) {
+            jobs.remove(key);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn group_file_work_pending(&self) -> bool {
+        let (due, count) = {
+            let jobs = self
+                .group_file_delivery
+                .jobs
+                .lock()
+                .expect("group file jobs lock");
+            (
+                jobs.values().any(|job| {
+                    job.retry_after
+                        .is_none_or(|deadline| std::time::Instant::now() >= deadline)
+                }),
+                jobs.len(),
+            )
+        };
+        let scanning = {
+            let scan = self
+                .group_file_delivery
+                .scan
+                .lock()
+                .expect("group file scan lock");
+            count < MAX_GROUP_FILE_JOBS
+                && scan.cursor.is_some()
+                && scan
+                    .deferred
+                    .is_none_or(|wait| std::time::Instant::now() >= wait.at)
+        };
+        due || scanning
+            || self
+                .group_file_delivery
+                .authorization
+                .lock()
+                .expect("group file authorization lock")
+                .values()
+                .any(|view| !view.ready)
+    }
+
+    /// The existing producer owns the timer; cooled work retains its wake deadline.
+    pub(super) fn group_file_retry_delay(&self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let jobs = self
+            .group_file_delivery
+            .jobs
+            .lock()
+            .expect("group file jobs lock")
+            .values()
+            .filter_map(|job| job.retry_after)
+            .filter(|deadline| *deadline > now)
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .min();
+        let discovery = self
+            .group_file_delivery
+            .scan
+            .lock()
+            .expect("group file scan lock")
+            .deferred
+            .map(|wait| wait.at.saturating_duration_since(now));
+        jobs.into_iter().chain(discovery).min()
+    }
+
+    #[cfg(test)]
+    pub(super) fn group_file_custody_ready_for_test(
+        &self,
+        channel: ConversationId,
+        file: ConversationId,
+        manifest: EventId,
+        recipient: &PublicIdentity,
+    ) -> Result<bool, LogError> {
+        self.group_file_custody_allowed(&GroupFileUpload {
+            channel,
+            waiting_dependency: false,
+            file,
+            manifest,
+            recipient: recipient.clone(),
+            retry_after: None,
+            retry_delay: std::time::Duration::from_secs(3),
+            demand: None,
+            authorization_stamp: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    #[cfg(test)]
+    fn group_file_custody_allowed(&self, job: &GroupFileUpload) -> Result<bool, LogError> {
+        self.group_file_custody_with_attempt(job, None)
+    }
+
+    fn group_file_custody_with_attempt(
+        &self,
+        job: &GroupFileUpload,
+        attempt: Option<&AttemptOffer>,
+    ) -> Result<bool, LogError> {
+        self.group_file_custody_probe(job, attempt)?.ready()
+    }
+
+    fn group_file_custody_probe(
+        &self,
+        job: &GroupFileUpload,
+        attempt: Option<&AttemptOffer>,
+    ) -> Result<AuthorizationProbe, LogError> {
+        let Some(offer) =
+            self.group_file_offer_with_attempt(job.file, job.manifest, &job.recipient, attempt)?
+        else {
+            return Ok(AuthorizationProbe::Denied);
+        };
+        let original = &offer.event;
+        if original.author.ed25519_pub() != &self.identity.public().ed25519_pub
+            || self.expired_received_file(job.file)?
+        {
+            return Ok(AuthorizationProbe::Denied);
+        }
+        let Some(retention) = self
+            .files
+            .lock()
+            .expect("files lock")
+            .retention_for(job.file)?
+        else {
+            return Ok(AuthorizationProbe::Denied);
+        };
+        {
+            // UI completeness can use a managed plaintext copy after signed
+            // chunks are reclaimed. Custody exports only retained ciphertext;
+            // its final confirmation also requires our original final header.
+            let log = self.log.lock().expect("log lock");
+            if log.count_kind(&job.file, EventKind::Message)? < u64::from(retention.chunks)
+                || !log
+                    .repository()?
+                    .authored_header(
+                        &job.file,
+                        crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub),
+                        u64::from(retention.chunks),
+                    )?
+                    .is_some_and(|header| header.kind == EventKind::Message)
+            {
+                return Ok(AuthorizationProbe::Denied);
+            }
+        }
+        // Custody of ciphertext may precede approval. An explicit refusal or
+        // verified recipient completion stops further deposits for this device.
+        if !self
+            .file_consent
+            .lock()
+            .expect("file consent lock")
+            .received_decision_for(job.manifest, &job.recipient)?
             .is_none_or(|decision| {
                 decision.file == job.file
                     && decision.sender == self.identity.public()
                     && decision.recipient == job.recipient
                     && decision.decision != ReceiveDecision::Declined
                     && decision.completion.is_none()
-            }))
+            })
+        {
+            return Ok(AuthorizationProbe::Denied);
+        }
+        // A new member's grant cannot release a pre-invitation file. Reuse the
+        // existing recipient projection for its exact signed manifest.
+        let before = self
+            .sync_store(&job.recipient)
+            .lock()
+            .expect("projection lock")
+            .history_sync_stamp(&original.conversation_id)?;
+        let qualified = before.as_ref().is_some_and(|stamp| {
+            job.authorization_stamp
+                .lock()
+                .expect("group file qualification lock")
+                .as_ref()
+                == Some(stamp)
+        });
+        if !qualified {
+            // Immutable job fields bind this slot to one exact manifest/file
+            // and full recipient. A missing or changed version is never a hit.
+            *job.authorization_stamp
+                .lock()
+                .expect("group file qualification lock") = None;
+            match self.group_file_outgoing_probe(
+                original.conversation_id,
+                job.manifest,
+                &job.recipient,
+            )? {
+                AuthorizationProbe::Allowed => {}
+                other => return Ok(other),
+            }
+            let after = self
+                .sync_store(&job.recipient)
+                .lock()
+                .expect("projection lock")
+                .history_sync_stamp(&original.conversation_id)?;
+            if before.is_some() && before == after {
+                *job.authorization_stamp
+                    .lock()
+                    .expect("group file qualification lock") = before;
+            }
+        }
+        Ok(AuthorizationProbe::Allowed)
     }
 
-    fn group_file_custody_current(&self, job: &GroupFileUpload) -> bool {
-        match self.group_file_custody_allowed(job) {
+    #[cfg(test)]
+    fn group_file_outgoing_contains(
+        &self,
+        channel: ConversationId,
+        event: EventId,
+        peer: &PublicIdentity,
+    ) -> Result<bool, LogError> {
+        self.group_file_outgoing_probe(channel, event, peer)?
+            .ready()
+    }
+
+    fn group_file_outgoing_probe(
+        &self,
+        channel: ConversationId,
+        event: EventId,
+        peer: &PublicIdentity,
+    ) -> Result<AuthorizationProbe, LogError> {
+        let key = (*channel.as_bytes(), peer.ed25519_pub, peer.x25519_pub);
+        // This owner holds only four leased SQL selections, never historical
+        // event IDs or a cached positive grant. No guard crosses network work.
+        let mut views = self
+            .group_file_delivery
+            .authorization
+            .lock()
+            .expect("group file authorization lock");
+        // Every path takes the cache before constructing any scope's store.
+        // A missing fifth scope must not discard another scope's unfinished
+        // finite preparation. Spend one turn on that owner, then yield.
+        if !views.contains_key(&key) && views.len() >= MAX_AUTHORIZATION_VIEWS {
+            let oldest_ready = views
+                .iter()
+                .filter(|(_, view)| view.ready)
+                .min_by_key(|(_, view)| view.used)
+                .map(|(key, _)| *key);
+            if let Some(oldest) = oldest_ready {
+                views.remove(&oldest);
+            } else {
+                let advanced = self.advance_group_file_authorization_on(&mut views)?;
+                drop(views);
+                if let Some(key) = advanced.completed {
+                    self.publish_group_file_readiness(
+                        ConversationId::new(key.0),
+                        Some((key.1, key.2)),
+                    );
+                }
+                return if advanced.progressed {
+                    Ok(AuthorizationProbe::Preparing)
+                } else {
+                    Err(LogError::StaleCursor)
+                };
+            }
+        }
+        let owner = self.sync_store(peer);
+        let store = owner.lock().expect("projection lock");
+        let stamp = store.history_sync_stamp(&channel)?;
+        if let Some(view) = views.get(&key) {
+            match store.validate_history_upload(&view.upload) {
+                Ok(()) => {}
+                Err(LogError::StaleCursor | LogError::ConversationRetiring) => {
+                    views.remove(&key);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(view) = views.get_mut(&key)
+            && view.ready
+            && (stamp.is_none() || view.stamp != stamp)
+        {
+            // Ordinary appends extend the existing finite prepared prefix;
+            // changed authority must reopen through the same selection owner.
+            if store.resume_history_upload(&mut view.upload)? {
+                view.stamp = stamp.clone();
+                view.ready = false;
+            } else {
+                views.remove(&key);
+            }
+        }
+        if let std::collections::btree_map::Entry::Vacant(entry) = views.entry(key) {
+            entry.insert(AuthorizationView {
+                upload: store.open_history_upload(&channel)?,
+                stamp,
+                ready: false,
+                used: std::time::Instant::now(),
+            });
+            // Once per admitted cold view, not once per Pending turn: this
+            // wakes an idle worker without creating a self-notification loop.
+            self.group_file_notify.notify_one();
+        }
+        let view = views.get_mut(&key).expect("installed authorization view");
+        view.used = std::time::Instant::now();
+        let before = view.upload.preparation_progress();
+        let was_ready = view.ready;
+        let step = store.prepare_history_upload_step(
+            &view.upload,
+            crate::eventlog::sync::network::PreparationBudget::default(),
+        );
+        let step = match step {
+            Ok(step) => step,
+            Err(error @ (LogError::StaleCursor | LogError::ConversationRetiring)) => {
+                views.remove(&key);
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        view.ready = step.ready;
+        if !step.ready {
+            let progressed = step.rows != 0
+                || step.edges != 0
+                || step.bytes != 0
+                || before != view.upload.preparation_progress();
+            return if progressed {
+                Ok(AuthorizationProbe::Preparing)
+            } else {
+                Err(LogError::StaleCursor)
+            };
+        }
+        let allowed = store.history_upload_contains(&view.upload, event)?;
+        // A concurrent append may lie beyond this finite prefix. Positive
+        // answers retain the owner's current control fences; an absent event
+        // cannot become a final denial until the source observation catches up.
+        if !allowed {
+            let current = store.history_sync_stamp(&channel)?;
+            if current.is_none() || view.stamp != current {
+                return Err(LogError::StaleCursor);
+            }
+        }
+        drop(store);
+        drop(owner);
+        drop(views);
+        if !was_ready {
+            self.publish_group_file_readiness(channel, Some((peer.ed25519_pub, peer.x25519_pub)));
+        }
+        Ok(if allowed {
+            AuthorizationProbe::Allowed
+        } else {
+            AuthorizationProbe::Denied
+        })
+    }
+
+    /// Advance even orphaned preparation through its existing exact authority
+    /// owner. The caller holds the cache first; no store or guard spans awaits.
+    fn advance_group_file_authorization_on(
+        &self,
+        views: &mut BTreeMap<AuthorizationKey, AuthorizationView>,
+    ) -> Result<AuthorizationAdvance, LogError> {
+        let Some(key) = views
+            .iter()
+            .filter(|(_, view)| !view.ready)
+            .min_by_key(|(_, view)| view.used)
+            .map(|(key, _)| *key)
+        else {
+            return Ok(AuthorizationAdvance::default());
+        };
+        let peer = PublicIdentity {
+            ed25519_pub: key.1,
+            x25519_pub: key.2,
+        };
+        let owner = self.sync_store(&peer);
+        let store = owner.lock().expect("projection lock");
+        let view = views
+            .get_mut(&key)
+            .expect("selected pending authorization view");
+        let before = view.upload.preparation_progress();
+        let result = store.validate_history_upload(&view.upload).and_then(|()| {
+            store.prepare_history_upload_step(
+                &view.upload,
+                crate::eventlog::sync::network::PreparationBudget::default(),
+            )
+        });
+        match result {
+            Ok(step) => {
+                let progressed = step.rows != 0
+                    || step.edges != 0
+                    || step.bytes != 0
+                    || before != view.upload.preparation_progress();
+                view.ready = step.ready;
+                view.used = std::time::Instant::now();
+                Ok(AuthorizationAdvance {
+                    progressed: progressed || step.ready,
+                    completed: step.ready.then_some(key),
+                })
+            }
+            Err(LogError::StaleCursor | LogError::ConversationRetiring) => {
+                views.remove(&key);
+                Ok(AuthorizationAdvance {
+                    progressed: true,
+                    completed: None,
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Scheduling hint only. Publication owners call after releasing their
+    /// source guards; the next attempt independently checks current authority.
+    fn wake_group_file_discovery(&self) {
+        let mut scan = self
+            .group_file_delivery
+            .scan
+            .lock()
+            .expect("group file scan lock");
+        scan.readiness = scan.readiness.wrapping_add(1);
+        scan.deferred = None;
+    }
+
+    fn publish_group_file_readiness(
+        &self,
+        channel: ConversationId,
+        peer: Option<([u8; 32], [u8; 32])>,
+    ) {
+        self.wake_group_file_discovery();
+        self.wake_group_file_dependency(channel, peer);
+        // Retain publication even if an in-flight probe has not installed its
+        // deferred marker and no job has yet been admitted.
+        self.group_file_notify.notify_one();
+    }
+
+    pub(in crate::node) fn wake_group_file_checkpoint(&self, channel: ConversationId) {
+        self.publish_group_file_readiness(channel, None);
+    }
+    fn wake_group_file_dependency(
+        &self,
+        channel: ConversationId,
+        peer: Option<([u8; 32], [u8; 32])>,
+    ) {
+        let mut jobs = self
+            .group_file_delivery
+            .jobs
+            .lock()
+            .expect("group file jobs lock");
+        for job in jobs.values_mut() {
+            if job.channel == channel
+                && job.waiting_dependency
+                && peer.is_none_or(|(ed, x)| {
+                    job.recipient.ed25519_pub == ed && job.recipient.x25519_pub == x
+                })
+            {
+                job.waiting_dependency = false;
+                job.retry_after = None;
+            }
+        }
+    }
+
+    fn group_file_custody_current(&self, job: &GroupFileUpload, offer: &AttemptOffer) -> bool {
+        let current = match self.group_file_custody_with_attempt(job, Some(offer)) {
             Ok(current) => current,
+            Err(LogError::StaleCursor) => false,
             Err(error) => {
                 log::warn!("Group file custody deferred after storage failure: {error}");
                 false
             }
-        }
+        };
+        #[cfg(test)]
+        self.trace_account_client(&job.recipient, || {
+            format!("group_file_custody_checked {current}")
+        });
+        current
     }
 
     /// One bounded pass; mailbox reconciliation resumes only missing signed chunks.
@@ -346,9 +1134,33 @@ impl Node {
         let Ok(_work) = self.group_file_delivery.gate.try_lock() else {
             return;
         };
-        if let Err(error) = self.refill_group_file_delivery() {
+        let preparation = {
+            let mut views = self
+                .group_file_delivery
+                .authorization
+                .lock()
+                .expect("group file authorization lock");
+            self.advance_group_file_authorization_on(&mut views)
+        };
+        match preparation {
+            Ok(advanced) => {
+                if let Some(key) = advanced.completed {
+                    self.publish_group_file_readiness(
+                        ConversationId::new(key.0),
+                        Some((key.1, key.2)),
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!("Group file authorization deferred after storage failure: {error}")
+            }
+        }
+        // Pending refill must not prevent queued jobs from advancing the
+        // same finite authorization owners and releasing admission slots.
+        if let Err(error) = self.refill_group_file_delivery()
+            && !matches!(error, LogError::StaleCursor)
+        {
             log::warn!("Group file scan deferred after storage failure: {error}");
-            return;
         }
         let after = *self
             .group_file_delivery
@@ -383,13 +1195,76 @@ impl Node {
                     .cursor
                     .lock()
                     .expect("group file cursor lock") = Some(key);
-                let allowed = match self.group_file_custody_allowed(&job) { Ok(allowed) => allowed, Err(error) => { log::warn!("Group file retry deferred after storage failure: {error}"); continue; } };
+                // Publish before any authorization/network await: cancellation,
+                // unavailable relays and failures must retain bounded backoff.
+                let retry_delay = {
+                    let mut jobs = self.group_file_delivery.jobs.lock().expect("group file jobs lock");
+                    let Some(pending) = jobs.get_mut(&key) else { continue; };
+                    if pending.recipient != job.recipient || pending.file != job.file
+                        || pending.demand != job.demand { continue; }
+                    let delay = pending.retry_delay;
+                    // Register before probing: a concurrent dependency publication
+                    // can clear this deadline without losing its wake afterwards.
+                    pending.waiting_dependency = true;
+                    pending.retry_after = Some(std::time::Instant::now() + delay);
+                    pending.retry_delay = (delay * 2).min(std::time::Duration::from_secs(60));
+                    delay
+                };
+                let demand = match self.group_file_dispatch_demand(job.file, job.manifest, &job.recipient) {
+                    Ok(demand) => demand,
+                    Err(error) => { log::warn!("Group file demand observation deferred: {error}"); continue; }
+                };
+                {
+                    let mut jobs = self.group_file_delivery.jobs.lock().expect("group file jobs lock");
+                    let Some(pending) = jobs.get_mut(&key) else { continue; };
+                    if pending.recipient != job.recipient || pending.file != job.file
+                        || pending.demand != job.demand { continue; }
+                    pending.demand = demand;
+                }
+                let job = GroupFileUpload { demand, ..job };
+                let settled = self.files.lock().expect("files lock")
+                    .group_custody_settled(job.file, job.manifest, &job.recipient, demand);
+                match settled {
+                    Ok(true) => { self.retire_group_file_dispatch(&key, &job); continue; }
+                    Ok(false) => {}
+                    Err(error) => { log::warn!("Group file dispatch observation deferred: {error}"); continue; }
+                }
+                #[cfg(test)]
+                self.trace_account_client(&job.recipient, || "group_file_dependency_registered".into());
+                let offer = AttemptOffer::new(None);
+                let allowed = match self.group_file_custody_probe(&job, Some(&offer)) {
+                    Ok(AuthorizationProbe::Allowed) => {
+                        self.observe_mailbox_work(super::work_observation::reason::FILE_ALLOWED, None);
+                        true
+                    },
+                    Ok(AuthorizationProbe::Denied) => false,
+                    Ok(AuthorizationProbe::Preparing) => {
+                        self.observe_mailbox_work(super::work_observation::reason::FILE_PREPARING, None);
+                        if let Some(pending) = self.group_file_delivery.jobs.lock().expect("group file jobs lock").get_mut(&key)
+                            .filter(|pending| pending.recipient == job.recipient && pending.file == job.file && pending.demand == job.demand) {
+                            pending.waiting_dependency = false;
+                            pending.retry_after = None;
+                            pending.retry_delay = std::time::Duration::from_secs(3);
+                        }
+                        continue;
+                    }
+                    Err(LogError::StaleCursor) => {
+                        self.observe_mailbox_work(super::work_observation::reason::FILE_WAITING, None);
+                        continue;
+                    }
+                    Err(error) => { log::warn!("Group file retry deferred after storage failure: {error}"); continue; }
+                };
+                if let Some(pending) = self.group_file_delivery.jobs.lock().expect("group file jobs lock").get_mut(&key)
+                    .filter(|pending| pending.recipient == job.recipient && pending.file == job.file && pending.demand == job.demand) {
+                    pending.waiting_dependency = false;
+                    // Readiness may have consumed the waiting deadline during
+                    // the probe. Network work owns a fresh cancellation deadline.
+                    if allowed {
+                        pending.retry_after = Some(std::time::Instant::now() + retry_delay);
+                    }
+                }
                 if !allowed {
-                    self.group_file_delivery
-                        .jobs
-                        .lock()
-                        .expect("group file jobs lock")
-                        .remove(&key);
+                    self.retire_group_file_dispatch(&key, &job);
                     continue;
                 }
                 let candidates = {
@@ -402,15 +1277,18 @@ impl Node {
                     .for_each_concurrent(2, |relay| {
                         let job = &job;
                         let held = &held;
+                        let offer = &offer;
                         async move {
                             let _ = tokio::time::timeout(
                                 super::delivery_runtime::RELAY_EXCHANGE_TIMEOUT,
                                 async {
                                     if !self.relay_send_allowed(&relay.public)
-                                        || !self.group_file_custody_current(job)
+                                        || !self.group_file_custody_current(job, offer)
                                     {
                                         return;
                                     }
+                                    #[cfg(test)]
+                                    self.trace_account_client(&job.recipient, || "group_file_relay_attempt".into());
                                     let Ok(mut channel) =
                                         self.privacy_sync_dial(relay.addr, &relay.public).await
                                     else {
@@ -429,16 +1307,21 @@ impl Node {
                                     }
                                     for mailbox in mailboxes.into_iter().flatten() {
                                         let mailbox_id = mailbox.id();
+                                        let federated = RelayMailbox::is_federated_id(&mailbox_id);
+                                        let bridge = self.bridge_generation.load(Ordering::SeqCst);
                                         let mut progress =
-                                            super::opaque_relay::OpaqueMailboxProgress::new(
+                                            super::opaque_relay::OpaqueMailboxProgress::new_file_dispatch(
                                                 &relay.public,
                                                 &job.recipient,
-                                                Some(job.file),
+                                                job.file,
                                                 mailbox,
                                             );
                                         let current = || {
-                                            self.group_file_custody_current(job)
+                                            self.group_file_custody_current(job, offer)
                                                 && self.relay_send_allowed(&relay.public)
+                                                && (!federated
+                                                    || (self.bridge_directory_allowed()
+                                                        && self.bridge_generation.load(Ordering::SeqCst) == bridge))
                                                 && self
                                                     .roster
                                                     .lock()
@@ -466,21 +1349,45 @@ impl Node {
                                                 return;
                                             }
                                         }
-                                        let chunks = match self
-                                            .log
-                                            .lock()
-                                            .expect("log lock")
-                                            .events(&job.file) { Ok(chunks) => chunks, Err(error) => { log::warn!("Group file completion deferred after storage failure: {error}"); return; } };
-                                        let final_chunk = chunks.last().map(|event| event.id);
-                                        if let Some((_, outer)) = progress
-                                            .uploaded()
-                                            .iter()
-                                            .find(|(inner, _)| Some(*inner) == final_chunk)
+                                        // Chunk sequences are one-based and this job is
+                                        // restricted to our original signed file. Resolve
+                                        // its final header without hydrating every chunk.
+                                        let final_chunk = (|| -> Result<Option<EventId>, LogError> {
+                                            let Some(retention) = self.files.lock().expect("files lock")
+                                                .retention_for(job.file)? else { return Ok(None); };
+                                            Ok(self.log.lock().expect("log lock").repository()?
+                                                .authored_header(
+                                                    &job.file,
+                                                    crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub),
+                                                    u64::from(retention.chunks),
+                                                )?
+                                                .filter(|header| header.kind == EventKind::Message)
+                                                .map(|header| header.id))
+                                        })();
+                                        let final_chunk = match final_chunk {
+                                            Ok(chunk) => chunk,
+                                            Err(error) => { log::warn!("Group file completion deferred after storage failure: {error}"); return; }
+                                        };
+                                        let outer = if let Some(inner) = final_chunk {
+                                            let resolved = self.resolve_opaque_confirmation(&mut progress, inner, &|| {
+                                                current() && channel.io_admitted()
+                                            }).await;
+                                            if !current() || !channel.io_admitted() {
+                                                return;
+                                            }
+                                            match resolved {
+                                                Ok(outer) => outer,
+                                                Err(_) => return,
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(outer) = outer
                                             && matches!(
                                                 super::session::request_durable_have(
                                                     &mut channel,
                                                     mailbox_id,
-                                                    *outer
+                                                    outer
                                                 )
                                                 .await,
                                                 Ok(true)
@@ -497,19 +1404,30 @@ impl Node {
                         }
                     })
                     .await;
-                if held.load(Ordering::Relaxed)
-                    && let Some(pending) = self
-                        .group_file_delivery
-                        .jobs
-                        .lock()
-                        .expect("group file jobs lock")
-                        .get_mut(&key)
+                if held.load(Ordering::Relaxed) {
+                    #[cfg(test)]
+                    self.trace_account_client(&job.recipient, || "group_file_dispatch_before_settle".into());
+                    let settled = self.files.lock().expect("files lock")
+                        .settle_group_custody(job.file, job.manifest, &job.recipient, demand);
+                    match settled {
+                        Ok(true) => { self.retire_group_file_dispatch(&key, &job); continue; }
+                        Ok(false) => {}
+                        Err(error) => log::warn!("Group file dispatch settlement deferred: {error}"),
+                    }
+                }
+                if let Some(pending) = self.group_file_delivery.jobs.lock()
+                    .expect("group file jobs lock").get_mut(&key)
+                    .filter(|pending| pending.file == job.file && pending.recipient == job.recipient
+                        && pending.demand == job.demand)
                 {
-                    pending.retry_after =
-                        Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+                    pending.retry_after = Some(std::time::Instant::now() + retry_delay);
                 }
             }
         })
         .await;
     }
 }
+
+#[cfg(test)]
+#[path = "group_file_authorization_tests.rs"]
+mod authorization_tests;

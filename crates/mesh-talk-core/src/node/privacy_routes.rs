@@ -176,6 +176,14 @@ impl RouteCache {
             .flat_map(|r| r.ips.iter().map(|ip| (r.public.clone(), *ip)))
             .collect()
     }
+    pub(crate) fn contains(&self, public: &PublicIdentity, ip: IpAddr) -> bool {
+        self.routes
+            .binary_search_by(|route| route.public.user_id().cmp(&public.user_id()))
+            .ok()
+            .is_some_and(|index| {
+                self.routes[index].public == *public && self.routes[index].ips.contains(&ip)
+            })
+    }
     fn save(&self, routes: &[Route]) -> io::Result<()> {
         let plaintext = codec().serialize(&(2u32, routes)).map_err(bad)?;
         let (ciphertext, nonce) = encrypt_data(&plaintext, &self.key).map_err(bad)?;

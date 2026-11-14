@@ -5,6 +5,13 @@ const packs = vi.hoisted(() => ({
   selected: undefined as import("./pack").ThemePack | undefined,
 }));
 vi.mock("@/store/packs", () => ({
+  usePacks: {
+    getState: () => ({
+      prepareTheme: async () => {
+        packs.selected = undefined;
+      },
+    }),
+  },
   installedTheme: (id: string) =>
     packs.selected?.id === id ? packs.selected : undefined,
 }));

@@ -48,6 +48,8 @@ serde_json = "1" # persist app settings as JSON in the app config dir
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy", "query", "form"] }
 semver = "1"
 sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+rand_core = { workspace = true }
 minisign-verify = "0.3" # release helper uses the SDK-compatible signed-version trust root
 fs4 = { version = "1.1", default-features = false } # quota-aware private staging budget
 zstd = { version = "0.14.3", default-features = false }
@@ -88,6 +90,7 @@ xcap = "0.9.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 rcgen = "0.14"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tauri-plugin-wdio-webdriver = "=1.5.1"

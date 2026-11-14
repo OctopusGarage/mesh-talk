@@ -1247,7 +1247,7 @@ impl Drop for PaidPairBoundary {
     }
 }
 
-async fn send_boundary_wake(source: &Arc<Node>, target: &Arc<Node>) -> ([u8; 16], u64) {
+pub(super) async fn send_boundary_wake(source: &Arc<Node>, target: &Arc<Node>) -> ([u8; 16], u64) {
     use crate::node::account_sync_wire::AccountSyncVersion;
     let peer = source.routing_peer(&target.user_id()).unwrap();
     let (epoch, revision) = source.account_wake_token_for_test();
@@ -1278,20 +1278,32 @@ async fn hold_original_pair_resume(
     executor: &Arc<Node>,
     requester: &Arc<Node>,
     partial_keys: &Arc<Mutex<Vec<crate::node::AccountDocumentKey>>>,
+    source_control: (ConversationId, &Mutex<ColdControlScope>),
     trace: &BTrace,
     clock: std::time::Instant,
 ) -> PaidPairBoundary {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    super::cold_account_setup(async {
-        while !executor.device_sync_status().iter().any(|status| {
-            status.device_id == source.user_id()
-                && status.document_phase == crate::node::SyncPhase::UpToDate
-        }) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+    let (group, source_scope) = source_control;
+    super::cold_account_setup(super::observe_account_fixture_condition(|| {
+        // This fault owns Control inputs and pair retirement. Optional document
+        // lanes can remain busy without changing the paid-page precondition.
+        let keys = partial_keys.lock().unwrap().clone();
+        let prefix_current = keys.iter().all(|key| {
+            source.account_document_meta(key).is_some_and(|meta| {
+                executor.account_document_meta(key).as_ref() == Some(&meta)
+                    && executor.operation_input_consumed_for_test(&meta)
+            })
+        });
+        prefix_current
+            && executor_has_processed_current_inputs(
+                executor,
+                [source, requester],
+                group,
+                source_scope,
+            )
+    }))
     .await
-    .expect("the executor's unrelated scope must settle before the deterministic fault");
+    .expect("the executor must consume current Control inputs and retire its prior source pair before the deterministic fault");
     let pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let gates = PaidPairBoundary {
         original: Arc::new(Semaphore::new(0)),
@@ -1623,7 +1635,10 @@ async fn hold_original_pair_resume(
             })
         }
     }));
-    executor.account_sync_notify.notify_one();
+    // Seed the natural unpaired page through actual scoped receiver demand.
+    // No publisher Wake is created: the later authenticated Wake must still
+    // replace this exact original page and pay its protected prefix/resume.
+    executor.request_sibling_pull_for_test(&source.identity.public());
     super::cold_account_setup(arrived.acquire())
         .await
         .unwrap_or_else(|error| {
@@ -1837,7 +1852,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         }
     }
     // Import the immutable prefix through the real background workers before
-    // arming a held request. Only row 66 is introduced at the natural snapshot;
+    // arming a held request. Row 66 then creates genuine source demand;
     // the operation budgets must not include cold replication of rows 1..65.
     let partial_keys = Arc::new(Mutex::new(Vec::new()));
     for value in 1..=65u8 {
@@ -2062,7 +2077,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         siblings
             .iter()
             .all(|node| node.account_document_meta(&last).is_none()),
-        "the controlled tail must remain absent until the natural snapshot"
+        "the controlled tail must remain absent until the hold hooks are armed"
     );
 
     let b_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -2117,6 +2132,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     let executor_natural_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let executor_paired_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let executor_paired_task = Arc::new(Mutex::new(None));
+    let executor_rejected_requests = Arc::new(Mutex::new([0_u64; 3]));
     if held_executor_preparation {
         let exact = other.as_ref().unwrap().identity.public();
         *reference.account_session_test_hook.lock().unwrap() = Some(Arc::new({
@@ -2127,6 +2143,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             let natural_seen = executor_natural_seen.clone();
             let paired_seen = executor_paired_seen.clone();
             let paired_task = executor_paired_task.clone();
+            let rejected = executor_rejected_requests.clone();
             move |peer, frame| {
                 let pages = pages.clone();
                 let armed = armed.clone();
@@ -2135,6 +2152,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 let natural_seen = natural_seen.clone();
                 let paired_seen = paired_seen.clone();
                 let paired_task = paired_task.clone();
+                let rejected = rejected.clone();
                 let exact = exact.clone();
                 Box::pin(async move {
                     if peer != exact || !armed.load(std::sync::atomic::Ordering::Acquire) {
@@ -2153,11 +2171,19 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     }
                     let page = pages.lock().unwrap().live_request(&request);
                     let Some(page) = page else {
+                        let mut counts = rejected.lock().unwrap();
+                        counts[0] = counts[0].saturating_add(1);
                         return;
                     };
                     let Some(dispatch) = page.dispatch() else {
+                        let mut counts = rejected.lock().unwrap();
+                        counts[1] = counts[1].saturating_add(1);
                         return;
                     };
+                    if !dispatch.unpaired_background() && !dispatch.paired {
+                        let mut counts = rejected.lock().unwrap();
+                        counts[2] = counts[2].saturating_add(1);
+                    }
                     if dispatch.unpaired_background()
                         && !natural_seen.swap(true, std::sync::atomic::Ordering::AcqRel)
                     {
@@ -2554,17 +2580,13 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                             crate::eventlog::ConversationId::new([66; 32]),
                             revision,
                         );
-                        if revision == 1 {
-                            partial_keys.lock().unwrap().push(key);
-                        } else {
-                            assert!(
-                                partial_keys.lock().unwrap().last() == Some(&key),
-                                "preparation may revise only the same controlled tail key"
-                            );
-                        }
+                        assert!(
+                            partial_keys.lock().unwrap().last() == Some(&key),
+                            "preparation may revise only the same controlled tail key"
+                        );
                         revision
                     };
-                    if preparation_wake && revision == 1 {
+                    if preparation_wake && revision == 2 {
                         let lifetime = control_pages
                             .lock()
                             .unwrap()
@@ -2711,8 +2733,21 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         }));
     }
     let mut executor_preparation_failure = None;
-    reference.account_sync_notify.notify_one();
     super::cold_account_setup(async {
+        // Paid unchanged comparisons are idle. Publish the one controlled tail
+        // only after every hold hook is armed, then use the authenticated Wake
+        // to create the genuine background comparison this scenario requires.
+        let tail_key =
+            crate::node::account_documents::sync::seed_legacy_control_page_revision_for_test(
+                &owner,
+                crate::eventlog::ConversationId::new([66; 32]),
+                1,
+            );
+        partial_keys.lock().unwrap().push(tail_key);
+        tail_revision.store(1, std::sync::atomic::Ordering::Release);
+        owner.note_account_local_change();
+        send_boundary_wake(&owner, &reference).await;
+        reference.account_sync_notify.notify_one();
         held.await?;
         if preparation_wake {
             super::observe_account_fixture_condition(|| {
@@ -3000,19 +3035,29 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                         executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope)
                     })).await.expect("the real A inputs and previous B pair must finish before the debt control is armed");
                     executor_fault_armed.store(true, std::sync::atomic::Ordering::Release);
-                    reference.set_device_hostname(Some("Executor natural read control")).unwrap();
+                    crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+                        &reference, ConversationId::new([69; 32]),
+                    );
+                    // Receiver-owned demand opens the original natural page.
+                    // A publisher Wake here could instead preempt a prior read
+                    // into the paired origin this first hold must not accept.
+                    other.request_sibling_pull_for_test(&reference.identity.public());
                     super::cold_account_setup(super::observe_account_fixture_condition(|| {
                         executor_natural_seen.load(std::sync::atomic::Ordering::Acquire)
-                    })).await.expect("a real publication must start the executor's natural read");
+                    })).await.unwrap_or_else(|error| panic!("real Control input and receiver demand must start the executor's natural read: {error:?}; rejected_no_live_missing_dispatch_ineligible_origin={:?}; pages={:?}", *executor_rejected_requests.lock().unwrap(), b_requester_pages.lock().unwrap().summary()));
                     // No unrelated preparation is performed under this hold:
                     // the next real revision creates the same-source pair.
-                    reference.set_device_hostname(Some("Executor paired read control")).unwrap();
+                    crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+                        &reference, ConversationId::new([70; 32]),
+                    );
+                    reference.note_account_local_change();
+                    send_boundary_wake(&reference, other).await;
                     super::cold_account_setup(super::observe_account_fixture_condition(|| {
                         executor_paired_seen.load(std::sync::atomic::Ordering::Acquire)
                             && executor_paired_task.lock().unwrap().is_some()
                     }))
                     .await
-                    .expect("the newer real publication must create the held executor pair");
+                    .unwrap_or_else(|error| panic!("the newer real Control publication must create the held executor pair: {error:?}; rejected_no_live_missing_dispatch_ineligible_origin={:?}; pages={:?}", *executor_rejected_requests.lock().unwrap(), b_requester_pages.lock().unwrap().summary()));
                     let task = executor_paired_task
                         .lock()
                         .unwrap()
@@ -3154,6 +3199,17 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                             other,
                             &reference,
                             &partial_keys,
+                            (
+                                group,
+                                &cold_scopes
+                                    .iter()
+                                    .find(|(_, _, node, peer, _)| {
+                                        node.user_id() == other.user_id()
+                                            && peer.user_id() == owner.user_id()
+                                    })
+                                    .expect("the executor has an exact source Control scope")
+                                    .4,
+                            ),
                             &b_trace,
                             b_clock,
                         )

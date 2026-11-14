@@ -70,7 +70,9 @@
     "copyFailed": "Não foi possível copiar. Verifique o acesso à área de transferência e tente novamente.",
     "clear": "Limpar",
     "close": "Fechar",
-    "dismiss": "Dispensar"
+    "dismiss": "Dispensar",
+    "retry": "Tentar novamente",
+    "loadFailed": "Não foi possível carregar esta página."
   },
   "windowControls": {
     "minimize": "Minimizar",
@@ -507,7 +509,10 @@
     "notifications": "Notificações",
     "notificationsDesc": "Notificar sobre novas mensagens quando a janela não estiver em foco.",
     "staySignedIn": "Manter conectado",
-    "staySignedInDesc": "Guardar a senha no cofre de credenciais do sistema para desbloquear automaticamente na próxima abertura.",
+    "staySignedInDesc": "Salve as credenciais neste computador para entrar automaticamente na próxima vez.",
+    "startupVerification": "Verificar ao iniciar",
+    "startupVerificationDesc": "Use o Touch ID ou a senha de início de sessão do Mac antes de entrar automaticamente.",
+    "startupVerificationLocal": "Quando desativado, as credenciais criptografadas são salvas localmente e protegidas pelas permissões de arquivo do usuário do sistema. Outros processos do mesmo usuário podem acessá-las.",
     "theme": "Tema",
     "themeDesc": "Escolha o tema de cores.",
     "theme_light": "Claro",

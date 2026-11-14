@@ -18,6 +18,9 @@ introduce another workflow, command catalog or acceptance policy.
 Keep tool versions, matrix sizes, deadlines, cache keys and required-check names
 in their existing executable owners. Keep run histories and investigation output
 in ignored `tmp/` or PR/CI artifacts; durable decisions belong in the owning guide.
+For producer/consumer artifact handoffs, pass the successful upload's immutable
+artifact ID instead of rediscovering it by name. Keep source, run, attempt and
+content-digest validation at the consumer; an artifact ID alone is not acceptance.
 
 ## Make the cost of a change explicit
 

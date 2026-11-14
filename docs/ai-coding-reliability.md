@@ -40,6 +40,10 @@ not require a new concurrency test. A changed async callback does require a
 lifetime review even when the diff is one line. Put task-specific reasoning and
 results in the PR or ignored local evidence, not a new permanent report.
 
+Cross-cutting idle budgets, demand-driven work and accumulation rules belong to
+[performance requirements](performance-requirements.md). Apply them alongside the
+correctness rules below; a smaller resource chart does not prove preserved recovery.
+
 ## Select rules by the changed boundary
 
 | Change or symptom                                                        | Read at least                                                                                                                                         |
@@ -110,6 +114,14 @@ run inside an authority guard, keep that contract narrow and inspect its complet
 call chain. Queue presentation without retaining a guard needed by the UI;
 validate captured authority when the queued callback executes.
 
+Rust [temporary scopes](https://doc.rust-lang.org/reference/destructors.html#temporary-scopes)
+can keep guards alive through the complete statement, including struct literals
+and tuples. Read repeated owner scalars under one explicit short guard,
+then release it before constructing a value that could acquire the owner again.
+Check the actual temporary scope before declaring a cycle: each operand of a lazy
+Boolean expression has its own temporary scope. An explicit short block can make
+an observation boundary clearer without changing an already-released guard.
+
 **Evidence:** exercise both competing paths and the real authorization variant.
 An ordinary admission fixture does not cover a sensitive proof that itself locks
 app state. Assert that the other operation progresses, not just that the first
@@ -128,16 +140,38 @@ Identify the executing thread and scheduling owner, not just the function's
 signature. Move blocking work through the existing admitted worker boundary.
 Inspect React render/effect/subscriber feedback loops and large synchronous data
 transforms too; moving I/O off the UI thread does not bound those CPU costs.
+Subscribe to status-only observations at the smallest presentation owner. A
+parent chat subscription can rerender its virtualized message viewport for every
+peer-check timestamp even when the rows are unchanged. The mounted
+[conversation idle regression](../frontend/src/features/chat/ConversationViewIdle.test.ts)
+requires live status updates without viewport renders, while new messages and
+conversation replacement remain live.
 Prepare bulk data outside shared commit guards, then reacquire the required
 guards and revalidate before atomic publication. Keep critical sections small
 without splitting a transaction or permitting stale side effects. Replacing a
 mutex with an async mutex alone does not repair ownership or lock order.
+
+Evaluate authoritative cheap decisions before expensive fallback work. An exact
+accepted identity binding or direct current policy grant must not first scan
+unrelated history to establish an alternative grant. If policy can change,
+recheck at the write owner; release its guard before obtaining missing fallback
+evidence. The [privacy admission tests](../crates/mesh-talk-core/src/node/privacy_runtime_tests.rs)
+require real certified-sibling SessionReady while unrelated histories are held,
+and exercise policy tightening with and without genuine shared-group authority.
 
 Check that the UI event loop, accept loop and control scheduler can still make
 progress while the worker is paused. Offloading a scan does not help other
 branches of a scheduler if that scheduler still waits for the entire scan inside
 one completion branch. Synchronous final persistence can still block; document
 that boundary instead of claiming a timer can preempt it.
+
+Trace guards inside a helper named `blocking`, not only the caller. A read-only
+image decode must not hold the global session/app-lock guard throughout its CPU
+work. The [preview owner](../src-tauri/src/chat_commands/files.rs) retains the
+runtime in a detached parent until its actual worker joins, checks one admission
+deadline before queued work starts, and revalidates lock revision before
+publication. Its held-worker regression checks unrelated session progress and
+that observer timeout does not release worker capacity or runtime ownership.
 
 Branches of one `select!` share a task; adding runtime workers does not let a
 blocked branch poll another branch of that same future. Independently scheduled
@@ -183,6 +217,14 @@ of the unrelated guard or operation. Release the pause and verify the final data
 See the attachment preparation and document-scheduler regressions in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs).
 
+Reuse an immutable certificate binding through the owner that validated it on
+admission and reopen. A hot membership query must not clone/sort the full roster
+and reverify signatures per row/page. Keep exact account and exchange-key checks,
+and retain current policy/revocation fences. The
+[roster regressions](../crates/mesh-talk-core/src/node/account_devices.rs) count
+actual verifier calls through `Node::certified_sibling` while rejecting forged
+admission/reopen records and substituted exchange keys.
+
 Async discovery observers must use the existing owned asynchronous peer-cache
 snapshot and preserve persistence errors. The synchronous desktop convenience
 snapshot writes storage and converts errors to an empty roster; polling it can
@@ -193,6 +235,25 @@ failure must preserve the cache API's error chain rather than time out. This
 control proves error visibility, not the cause of an earlier hosted timeout.
 
 ## R03: Actual work owns its lifetime
+
+Keep concurrency capacity with the same actual owner as retirement admission.
+Cancelling a scheduler must not release a serial maintenance slot while its
+blocking worker or captures remain alive. Acquire only at top-level local-work
+entries, outside business guards; keep network waits and leaf calls independent.
+The `shared_local_repair_actual_owners` regressions hold real Profile work,
+require account-local queuing, verify foreground Noise progress and retain dirty
+follow-up or cancel the queued owner during retirement. The RuntimeWork
+`local_repair_capacity_outlives_blocking_captures_and_panic` control checks capture,
+output and panic cleanup before releasing capacity.
+
+A UI read watchdog retires observation, not the native operation. Coalesce a
+same-owner/query refresh against the original promise until settlement, retaining
+one valid follow-up; reset or query replacement must not let stale work publish
+or block a new intent. The [Favorites store tests](../frontend/src/store/messageFavorites.test.ts)
+hold the actual list promise beyond its UI deadline before requesting refresh.
+The [serial view reader tests](../frontend/src/features/chat/useSerialPoll.test.ts)
+apply the same lifetime rule to recovery timers and event coalescing, including
+hidden views and a follow-up admitted after all 64 read slots were occupied.
 
 Consume the canonical process owner's result contract rather than deriving a new
 verdict from a diagnostic flag. Windows atomically terminates its owned job even
@@ -272,6 +333,9 @@ Uncancellable native work needs an explicit ownership boundary: retain the
 operation's serialization ownership, but not unrelated runtime/session guards across
 the provider call. Revalidate publication and compensate stale effects through
 the owner. A timeout is not permission to abandon durable work or reuse its slot.
+Revoking authorization must not erase the active worker's ownership token before
+its matching completion releases runtime bookkeeping. Discard inactive scheduling
+hints separately from retiring actual work and its permits.
 
 **Evidence:** cancel the caller while work is paused; confirm retirement progress
 where promised, retained serialization, eventual cleanup and absence of stale
@@ -311,14 +375,312 @@ and [group invitation tests](../crates/mesh-talk-core/src/node/account_group/tes
 
 ## R05: Bounded work must also make progress
 
+An expired retry deadline is not runnable work while all actual slots are occupied
+or its required source is unavailable. Wait for capacity release, a relevant
+change or a future deadline; repeatedly selecting a past timer can otherwise spin
+without admitting work. Anchor failure cooldown to actual read/attempt completion,
+including after a held operation. The [profile publisher owner](../crates/mesh-talk-core/src/node/runtime.rs)
+and [runtime controls](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs)
+retain real held connections, pending retries, storage recovery and a fixed repair
+that continuous irrelevant observations cannot postpone.
+
+Do not encode failed, unchanged and completed work as one empty-result boolean
+when their retry policies differ. A qualified unchanged result needs fresh exact
+source and authority evidence after all awaited stages; a denied or incomplete
+round cannot earn it. Preserve existing callers' result meaning through an
+additive internal observation, and keep delivery/custody proof independent. The
+same profile publisher controls exercise warm relay publication with unavailable
+direct delivery; mailbox controls retain source-change and relay-reset recovery.
+
+For change-driven receive, subscribe before observing the predicate and retain
+that observation until all captured work is handled. A notification invalidates
+quietness; it must not cancel valid unrelated work or acknowledge delivery. Keep
+one coalesced follow-up for changes during a drain. Observation tokens may outlive
+a connection: do not hold an idle socket across many individually bounded steps
+whose aggregate exceeds its between-request deadline. The
+[receive owner](../crates/mesh-talk-core/src/node/serving/mailbox_watch.rs) and
+[loopback receive regressions](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+cover quiet preparation, prompt arrival and local policy invalidation; the
+[watch protocol tests](../crates/mesh-talk-core/src/node/session/mailbox_watch.rs)
+cover timeout, reconnection predicates, EOF and bounded capacity. Keep their
+acceptance limits distinct from measured native CPU and power.
+
+When a state publication reschedules an actual-deadline timer, already-due work
+must not depend on another timer tick after the original callback is cancelled.
+Dispatch the due work after the current state notification, coalesce repeated
+publications, and recheck the owning lifetime before mutation. The
+[chat expiry regressions](../frontend/src/store/chat.test.ts) cover a due deadline
+interrupted by state publication and cancellation before its queued dispatch.
+
+Distinguish a fully checked no-work outcome from missing evidence, deferred
+preparation and failure before parking repeated work. Learn scheduling-only
+absence after source guards release and exact before/after inputs match; keep
+fresh direct reads and bounded repair. Negative hints must not displace useful
+confirmed work. The [consent owner](../crates/mesh-talk-core/src/node/file_consent.rs)
+returns only its explicit pending/no-published-control outcome; the
+[mailbox regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental_tests.rs)
+and [bounded hint pressure tests](../crates/mesh-talk-core/src/node/opaque_relay/incremental/controls.rs)
+retain decision changes, direct Pending reads, failures, scope changes and the
+positive cache's existing capacity.
+An incomplete retry flag is not evidence that another immediate scan can
+progress. Retain per-target deadlines for unchanged unsuccessful exchanges;
+continue ready targets and local pages, and invalidate waits on meaningful
+changes without claiming completion. The custody owner in
+[channel recovery](../crates/mesh-talk-core/src/node/channels.rs) exercises failed
+peer backoff, independent group pagination and prompt new-generation recovery.
+A failed or incomplete cycle must not erase its scheduling observation merely
+because it cannot acknowledge success. Ordinary unchanged notifications still
+respect its retained retry deadline, before routing or eligibility preparation;
+fresh semantic inputs and failed observations remain live. Explicit drivers and
+event-only owners cannot park behind a timer that does not exist. The deferred
+channel regression in [account maintenance](../crates/mesh-talk-core/src/node/channel_account_maintenance.rs)
+counts entry into actual eligibility work, with due, changed-input and timer-disabled controls.
+A domain-wide paging upper is not a mailbox revision. Unrelated mailbox appends
+must not invalidate settled work when its exact mailbox binding/revision and
+local source remain unchanged; retain rollback rejection and the original
+expiry deadline. The real send-only eight-offer regression in the same mailbox
+owner advances another mailbox through a genuine encrypted relay append, while
+same-mailbox growth restores preparation. Trace classification must use the
+same predicate as ordinary scheduling because it can govern actual work.
+
+Do not interpret an unavailable dependency or a generic stale-cursor error as
+proof of finite preparation progress. Preserve an explicit finite-preparation
+outcome at the local decision boundary instead of erasing it into a generic
+stale error and then treating it as blocked. Preserve the launch deadline when no rows,
+edges or preparation phase advanced. Register dependency waiting before probing,
+so a concurrent readiness notification cannot be overwritten by the attempt.
+After consuming readiness, reserve the active network attempt's cancellation
+deadline before awaiting; an earlier wake must not erase its backoff.
+Publish scoped readiness hints after installing the state consumers observe and
+releasing source and cache guards; the next attempt still validates authority.
+Readiness has discovery consumers before job admission. Retain their notification
+even before a waiter is registered; waking only existing jobs can strand completed
+preparation. Fence racing probes so an older failure cannot reinstall the wait.
+Warm observations are not readiness transitions.
+An unchanged reception completion is not dependency publication and must not
+clear a blocked deadline. Keep queue-continuation booleans distinct from state
+change evidence: completing the last queued lane can still publish readiness.
+The
+[group-file authorization regression](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+holds a real stale checkpoint, checks quiet backoff, then drives the actual
+checkpoint owner and verifies continuation before the deadline expires.
+
+Bound work across owners as well as inside a page. One physical mailbox must not
+be rescanned by every outgoing attachment merely because its export conversation
+differs. The [publication regression](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+drives actual indexed file and immediate group-control custody and requires zero
+unrelated receive steps, unchanged
+old duplex receipt bytes, renewed custody after relay replacement, and refusal
+processing through the independent drain. Its history-publication intent retains
+identity supplements and fresh authority/remote checks under existing quotas;
+legacy duplex behavior remains separate. Prefer a purpose-specific local hint
+namespace over letting an outgoing worker rewrite incoming runtime or repair
+bindings in a shared envelope.
+
 **Failure pattern:** taking the first N entries every turn permanently excludes
 older pending work; failed items pin a cursor; unbounded retries flood a queue;
 or a completion signal arrives between checking a condition and registering a
 waiter, leaving work asleep indefinitely.
 
+A producer revision gate must precede expensive routing filters and projection
+hydration. A completed last item cannot acknowledge earlier failed or deferred
+items: require matching settled evidence for the whole selected cycle. The
+[channel maintenance regressions](../crates/mesh-talk-core/src/node/channel_account_maintenance.rs)
+exercise multi-channel deferral, failed capability cooldown and a new peer behind
+a quiet cursor. Sparse integrity repair rotates one bounded page; only new demand
+may drain the available backlog, as checked by
+[local maintenance](../crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs).
+
+Keep retry scope equal to the observed success scope: one destination's custody
+cannot quiet a peer's other queued destinations. The
+[delivery runtime](../crates/mesh-talk-core/src/node/delivery_runtime.rs) owns
+peer failure pacing separately from bounded exact-destination quiet hints;
+its real relay-replacement regression keeps both prequeued events eligible.
+
+Local admission pressure is a deferral, not remote failure or successful
+progress. Preserve learned failures while releasing only the exact reservation;
+only actual success or changed routes/authority may clear that evidence. The
+[private probe owner](../crates/mesh-talk-core/src/node/privacy_routing.rs) and
+[retry schedule tests](../crates/mesh-talk-core/src/node/delivery_retry.rs) cover
+contention after repeated failures, bounded deadlines, immediate route recovery
+and rejection of stale completion tokens.
+
+Per-producer limits cannot protect a shared socket pool when several owners dial
+the same historical inventory. Classify speculative work at shared admission,
+retain exact identity/endpoint/generation and finite freshness for positive hints,
+and leave capacity for current routes. A busy speculative lane must not hide later
+fresh peers or permanently rewind the same failed prefix. The real TCP regression
+in [privacy runtime tests](../crates/mesh-talk-core/src/node/privacy_runtime_tests.rs)
+starts independent producers against stalled listeners and requires bounded
+historical sockets plus a healthy Noise/sync round within its original deadline.
+The [session pool tests](../crates/mesh-talk-core/src/node/session_pool.rs) cover
+actual owner cancellation and bounded, expiring, scoped hints.
+
+An unchanged remote delta does not by itself suppress repeated local control
+construction. Qualify individual already-confirmed items before historical body
+and file checks, using a conservative local mutation token plus exact fresh
+remote evidence and a finite external-state fallback. Keep the rotating selector
+running; a memo for one batch cannot certify its unexamined suffix. Such hints
+are runtime work suppression, never reusable authorization or custody. The
+[incremental control tests](../crates/mesh-talk-core/src/node/opaque_relay/incremental_tests.rs)
+require zero repeated offer checks/HAVE requests under unchanged inputs, immediate
+policy-change publication and reconstruction after replacement behind the same
+relay identity; [hint tests](../crates/mesh-talk-core/src/node/opaque_relay/incremental/controls.rs)
+cover expiry without renewal, exact scope and bounded eviction.
+
+Match a mutation token to the data that actually owns the result. A connection's
+total SQL change count includes in-memory TEMP work; a MAIN file version can
+advance even for a zero-row UPDATE. Neither alone proves changed
+producer data. Within one open, exclusively leased writer connection and a finite
+hint lifetime, pair the MAIN version with the non-reset pager dirty-write count;
+recompute when both change. Unsupported observations or a faulted owner cannot
+supply unchanged evidence. This is not a multi-writer or durable revision scheme.
+The [database observation test](../crates/mesh-talk-core/src/storage/database.rs)
+requires unchanged evidence after reads, TEMP work, zero-row MAIN updates, invalidation after real dirty-page writes
+(including indexed same-value updates), and rejection under the fault
+fence. The real control exchange above injects TEMP work and a no-op MAIN update
+between unchanged rounds.
+
+Concurrency limits do not suppress duplicate retries across independent producers.
+Keep actual failed-endpoint pacing at the shared authentication owner, scoped to
+the full device binding and recovery generations; never cool untried routes or
+interpret local capacity as remote failure. A caller's cancellation must release
+its own reservation without modifying a replacement. The real TCP cross-caller
+regression in [privacy runtime tests](../crates/mesh-talk-core/src/node/privacy_runtime_tests.rs)
+requires one failed connection under repeated ordinary callers and immediate
+recovery on network or fresh signed discovery changes. Session-pool tests cover
+bounded hints, mapped endpoints, cancellation and late reservation retirement.
+Repeated expected background failures should use bounded diagnostic aggregation;
+reporting must neither change retry state nor require an idle reporting timer.
+
+Idempotent retirement requires an unchanged-value predicate at the SQL owner.
+Setting an indexed status to its current value can dirty pages, even if a later
+cache compares page-write counts correctly. Restrict retirement to active rows;
+reopening or releasing the last lease must not rewrite already-retired facts.
+The [channel checkpoint tests](../crates/mesh-talk-core/src/node/channel/checkpoint/tests.rs)
+require abandoned-query recovery, zero warm-open changes with 1,024 retired rows,
+and no indexed page writes when a completed query's final lease is dropped.
+Opt-in diagnostic emission must also work in production log configurations;
+verify the target filter and real release output rather than relying on INFO
+macros that can be compiled out.
+
+A deferred cursor with no remote continuation still owns local work. Retain it
+in the scheduler queue beneath its exact retry deadline; retaining a timestamp
+in an unreachable checkpoint loses recovery. The account document contention
+regression in [document tests](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
+requires one attempt under repeated blocked wakes and automatic recovery after
+admission is released, with unchanged recovery deadlines and joined fixture work.
+
+Bounded caches must preserve useful unfinished work between turns. Protecting
+only actively borrowed entries lets rotating demand evict every partial owner,
+retire its SQL selection and restart it on the next attempt. Defer new admission
+while admitted owners make progress; reclaim completed, revoked or genuinely
+stalled work through a finite progress deadline. Access, validation and repeated
+unchanged responses do not renew that deadline. Drop evicted owners outside
+cache guards when destruction can retire database work. Treat a contended entry
+as unavailable during admission rather than waiting for its SQL worker while
+holding the global cache guard. Classify lightweight receive/control demand
+separately from heavy historical preparation so productive bulk work cannot
+reserve every admission slot needed for incoming messages. The fifth-scope pressure
+and stale-progress controls in the
+[mailbox owner](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
+qualify the actual selection identities, write commits and eventual completion.
+
+Pending work in one lane is not successful progress in another. A failed exchange
+must retain demand and a future retry deadline rather than inherit a continuation
+from unrelated favorites or documents. Ordinary notifications cannot bypass that
+deadline. The real, tick-disabled [account history failure regressions](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
+combine favorites failure with authenticated EOF or negotiation timeout, then
+assert quiet backoff and eventual retained-work recovery.
+
+Retaining a failed completion does not justify notifying its own retry waiter.
+The media completion regression in
+[delivery runtime tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+fails the actual persistence owner, preserves the exact pending revision and
+requires backoff until a real consent event wakes recovery. Keep received-byte
+progress notifications separate from unsuccessful completion attempts.
+
 Review fairness across successive turns, not only the batch size. Use the existing
 cursor, coalescing and admission owners; distinguish independent lanes where
 needed. Failed publication must not indefinitely prevent later eligible work.
+Distinguish volatile discovery progress from durable acceptance. Rotating an
+unchanged historical page must not require a durable write on every poll. Where
+a cursor is only a replay hint, bound checkpoint frequency while preserving
+fairness across restarts, exact owner fences and retry after checkpoint failure.
+An in-memory cursor must not acknowledge a failed required checkpoint or override
+a newer durable cursor written by another owner.
+Observing a completed projection must not manufacture and immediately retire
+durable work on every poll. Qualify quiet reads against the owning source and
+generation, while preserving durable demand before any preparation can mutate
+or yield. Cover source changes between preparation and installation, not only
+an unchanged single-threaded read. Historical membership cuts must retain their
+completed indexed fact lease rather than rebuilding per-event checkpoints for
+unchanged roots. The [causal checkpoint owner](../crates/mesh-talk-core/src/node/channel/checkpoint/causal.rs)
+qualifies bounded completed cuts by repository binding, exact canonical source,
+root set and inclusion mode; every hit rechecks the account lifetime and source.
+The `channel_completed_causal_cut_` regressions assert quiet SQL mutations,
+source and account invalidation, failed-construction retry and borrowed eviction
+leases. Current caller authorization and discovery proofs remain fresh.
+Compaction and replication must not form a feedback loop: freeze the eligible
+commit cut for each destructive epoch so later rehydration cannot repeatedly
+reopen the same deletion work. Fresh semantic demand must advance and fence the
+cut even when the request already exists. Keep parent-reference checks current;
+processed presentation is not retained raw custody. The automatic-maintenance
+round-trip regression in the [participant network owner](../crates/mesh-talk-core/src/node/privacy_sync/network/incremental_tests.rs)
+qualifies legacy replay, eventual quiet and a new Profile epoch. Completed
+[media GC](../crates/mesh-talk-core/src/node/media_store.rs) also remains quiet
+until a new schedule, including after completion failure and retry.
+A clean network exchange is not evidence of new data. The
+[delivery runtime](../crates/mesh-talk-core/src/node/delivery_runtime.rs) keeps
+advanced, quiet and deferred reconciliation distinct: empty success must not
+reset a fast progress deadline, and a failed route still cooling must not become
+quiet success. Retain successful framing/session reuse separately. Qualify
+quiet deadlines with the admitted route and policy generation; refreshing an
+unchanged subscription must not invalidate them. The real Noise
+`clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances` regression
+covers empty success, later data, unchanged replay and deferred relay recovery;
+`quiet_pull_deadline_and_changed_admission_do_not_requeue_as_progress` covers
+actual scheduling policy. A repeated positive custody proof is also not fresh
+progress while the durable delivery destination still awaits its receipt. The
+`unchanged_direct_custody_does_not_keep_destination_retry_hot` regression drives
+the real delivery loop, retains awaiting state, bounds repeated positive
+confirmations and admits another new message before the first receipt arrives.
+A successful idempotent commit is not a presentation change. Publish status
+notifications only when the owning durable fact changes; compare its runtime
+revision under the same guard as the commit, then notify after releasing it.
+Preserve independently changed document notifications and failed-write recovery.
+The `channel_custody_noop_` loopback regressions in the
+[channel](../crates/mesh-talk-core/src/node/channels.rs) and
+[relay](../crates/mesh-talk-core/src/node/serving.rs) owners cover repeated positive
+and negative probes, journal-only repair, changed shared witnesses and rejected
+relay policy without inventing recipient-delivery evidence.
+New retry demand belongs to durable intent acceptance, not successful polling
+or idempotent reacceptance of an existing pending intent. Settled reception
+retirement suppresses same-value
+writes inside its existing transaction while preserving cleanup after a committed
+ACK and failed retirement, as covered by the
+[reception-effect tests](../crates/mesh-talk-core/src/node/reception_effects/tests.rs).
+Separate due retries, cooled jobs and unfinished discovery or preparation.
+Reserve a retry deadline before cancellable work and retain its wake through the
+existing scheduler. Scope each reservation to the exact attempt and eligible route;
+a late completion must not cool or release its replacement, including after a
+route changes away and back. Bound retained reservations without evicting active
+or unexpired entries to admit new work. Start failure backoff from completion,
+and distinguish a successful clean protocol step from an unchanged phase name.
+Settled maintenance needs an explicit outcome, distinct from unfinished pages,
+blocked dependencies and failed cleanup. Subscribe before the first pass and
+retire only observations captured before admitted work; changes during that work
+must remain pending. A finite retry sweep must admit a new bounded suffix when
+later discovery creates work beyond its cut. Final lease release, private proof
+or route commits and actual policy changes need retained wakes, including after
+partial persistence failure. Keep lease expiration and contended cleanup on their
+own deadlines. The `profile_owner_` regressions in the
+[Profile maintenance owner](../crates/mesh-talk-core/src/node/profile_io.rs)
+cover quietness, late discovery, blocked-prefix fairness, dependency recovery and
+expiry; its existing worker admission continues to own cancellation.
+A future deadline must not force fast polling; expired
+deadlines must not create zero-delay spins. Finite discovery still needs short
+turns while admission capacity remains, even when every queued job is cooling.
 Recheck conditions with the synchronization primitive's correct waiter protocol;
 a notification alone is not the durable condition. Admission must observe both
 permit release and transitions that make retained resources reclaimable. A one-time
@@ -338,7 +700,43 @@ Keep independent reasons for continuing work separate. A worker can finish a
 history page and then fail an optional favorites exchange; reporting that error
 must not discard unfinished history or a refresh received during the exchange.
 Consume a coalesced wake only when its follow-up remains scheduled after every
-error branch. A failure without pending work must still avoid a busy retry loop.
+error branch. A failure without pending work must still avoid a busy retry loop. Acknowledge
+watch generations before reading an asynchronous eligibility predicate, never
+afterward: a concurrent enable must retain a follow-up rather than certify an
+older disabled observation. The participant regression
+`routed_inventory_disclosure_change_during_read_remains_pending` holds that read
+and advances activation before releasing it.
+
+Separate remembered routes, fresh availability and synchronization demand. A
+certificate or cached endpoint permits neither an assumption of online presence
+nor endless bulk retries. Scope private authenticated availability to the exact
+identity, current authority and a finite deadline; public invisibility must not
+disable authorized private recovery. A repeated live heartbeat is not new data,
+while expired-to-fresh evidence at the same endpoint is a reconnect. Preserve
+the previous lease deadline and refresh it on unchanged observations too; a
+sampled online boolean alone can miss the intervening expiry. Every semantic
+hash dependency needs a subscribed producer, including policy-only changes.
+The real accept-owner controls in [channel recovery](../crates/mesh-talk-core/src/node/channels.rs)
+cover these edges and metadata progress while actual control I/O remains held.
+Preserve
+receiver-owned partial comparisons while offline, and renew productive work only
+from admitted current-scope evidence. Local publication should hint receivers,
+not restart pulls from every sibling. The availability and local-notification
+regressions in [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
+exercise this separation alongside the sparse-repair owner.
+
+A nonempty pending queue does not certify that its dependency is available.
+Keep local paginated preparation prompt, but let blocked file work back off;
+meaningful route, availability, group metadata and consent changes wake the
+existing producer. Subscribe before work so changes during an exchange survive
+until its wait, and treat a lagged group subscription as missed invalidation.
+The blocked-receive, group-wake and lag regressions in
+[participant runtime tests](../crates/mesh-talk-core/src/node/participant_runtime_tests.rs)
+cover these boundaries alongside heartbeat filtering and the original deadline.
+Discovery cursors are not consent or delivery evidence: cyclic old-input rotation
+must not checkpoint a lower watermark. The monotone rotation and failed-write
+regressions in [file consent storage](../crates/mesh-talk-core/src/node/file_consent_store/indexed.rs)
+preserve quiet rotation, restart progress and exact owner fencing.
 
 Retain demand throughout backoff. A future retry deadline makes queued work
 temporarily ineligible; it does not consume that work. Wake the existing scheduler
@@ -351,6 +749,155 @@ checks real admission contention, retained work and the unchanged backoff.
 Keep count, byte, task and concurrency budgets intact. Fair scheduling does not
 guarantee a successful write into a full store, justify eviction of durable intent
 or permit increasing capacity without reviewing consumers.
+
+A completed negative decision can be reusable work too. Prove that the mutation
+preserves its inputs and can only move its threshold farther from eligibility;
+rebind it atomically with that mutation. Include indirect dependencies: referencing
+a protected leaf can change which older leaf is protected. Partial, stale or
+positive decisions retain their original invalidation and publication rules.
+
+Create durable demand from changes to its actual inputs, not from a callback that
+can also report an unchanged round. Commit required demand before acknowledging
+discovery, and preserve idempotent retry across either commit failing. When older
+cursors did not certify the new obligation, supply a bounded, one-time backfill
+without discarding completed facts. The unchanged-conversation callback and
+request-before-cursor regressions in
+[node tests](../crates/mesh-talk-core/src/node/node_tests.rs) and atomic bootstrap
+regression in the [receive owner](../crates/mesh-talk-core/src/storage/profile/profile_receive.rs)
+exercise this boundary.
+An empty receive queue must not update an unchanged fair-turn ticket either.
+When a bounded lookahead proves that the entire scoped queue was selected,
+rotating all unfinished rows preserves the same order and needs no durable
+mutation. Retain partial-page rotation, including oversized attempts, and
+terminal deletion. The complete-page and partial-page regression in the
+[receive repository tests](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
+checks fairness and SQL/commit/body-read costs together. The settled ordinary and
+control callback regression in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs)
+checks SQL mutations, committed writes and body reads together.
+Within one operation, traverse a shared bounded source once rather than
+reconstructing its SQL iterator for every candidate peer. Retain only the
+already-bounded candidate metadata; do not collect historical scopes or turn
+advisory selection into a grant. Keep fallible pages, current membership and
+replica checks, and final exchange authority. The [file recovery regressions](../crates/mesh-talk-core/src/node/serving.rs)
+count real offer/scope queries across multiple peers and retain direct fallback,
+read failure recovery, replica opt-out, membership removal and source rotation.
+
+Compare repeated exact queries with their first preparation too. A metadata-only
+probe cache does not eliminate selection reconstruction in a different request
+path. Reuse an exclusively owned, bounded prepared view only under its complete
+current qualification; recompute mutable answers and preserve durability and
+authority checks. The exact-custody regression in the
+[participant network adapter](../crates/mesh-talk-core/src/node/privacy_sync/network.rs)
+checks unchanged present/missing queries, unrelated and same-conversation appends,
+authority revocation and selection release on disconnect. The ordinary Request
+regressions in the [paged session tests](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+require unchanged warm requests to perform no SQL mutations or commits, while
+source appends, changed remote Have and revoked authority remain fresh. Model
+production lifetimes: keeping a fixture's adapter or socket alive can hide
+request-local or connection-local preparation churn. The requester regressions
+create fresh adapters and fresh authenticated sockets while the source stays
+unchanged. Node-owned indexes are checked out exclusively under complete version
+and authority qualification; parked indexes have a separate bounded budget and
+cannot consume or bypass active query admission. The selection-owner regression
+checks quiet park/reactivation, preserved capacity and rejection by another
+repository owner. Runtime retirement closes publication before extracting cached
+plans and owns their real SQL cleanup through the final work-permit release. Protocol success also does not
+imply received data. The production-serving metadata regression preserves a
+pending, not-yet-decryptable file queue and verifies that a fingerprint query
+cannot rotate its tickets; accepted/duplicate events publish a consumable reception
+signal and invalid events do not. Consume the signal outside its store guard
+before invoking message/file/profile owners. A failed batch can still contain an
+accepted prefix: dispatch its actual conversation scopes on error as well as
+success. Cancellation cleanup must retain both runtime retirement ownership and
+the original connection capacity until reception finishes; a retirement counter
+alone does not bound concurrent workers. The partial-Followup regression in the
+[paged session tests](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+injects a real second-record storage failure, while the
+[serving controls](../crates/mesh-talk-core/src/node/serving.rs) hold reception work
+through cancellation, timeout and dropping outside the runtime context. Apply this
+to both transport roles: a file-manifest requester can durably import a chat reply
+before checking download consent. The [delivery regression](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+requires automatic plaintext and the exact recipient receipt after that real
+bidirectional exchange, without a history read or another payload healing it. Reuse
+completed export preparation under its current source stamp. Require exact Have
+when ancestor closure depends on it; an independent plan may instead rebind its
+cursor digest and apply the fresh Have as a read filter, without persisting query
+IDs or rebuilding flags. The real TCP regression alternates Have sets and requires
+correct fresh responses with zero SQL mutations. Unprepared or closure-dependent
+views retain their existing staged preparation. In every case,
+authority-only view validation deliberately permits a finite old source cutoff.
+The same selected page may be saved repeatedly without advancing its resume
+context. Keep source and view checks inside the owning transaction, but update
+the stored context only when its value changes. The selection preparation
+regression checks zero additional mutations/commits and rejects a retired view
+even for a matching context.
+Do not leave a completed lookup reconstruction classified as protected unfinished
+bulk work. Retire a selection created only for that finished lookup without
+marking bulk coverage complete or discarding a preexisting partial upload. The
+[six-scope mailbox regression](../crates/mesh-talk-core/src/node/opaque_relay/incremental_tests.rs)
+resolves a target outside the bounded recent-target memo across more scopes than
+heavy view slots; actual unfinished-upload pressure retains its separate oracle.
+Retain an ordinary responder view only after all response frames succeed, and
+test terminal-send failure and cancellation while its store remains alive.
+A reconnect or lost runtime memo must not manufacture another immutable event
+for unchanged content. Randomized sealed ciphertext cannot establish plaintext
+equality, and the sender may no longer possess the ephemeral decryption secret.
+Keep any bounded sender fingerprint and canonical event in the same transaction;
+recheck the retained original, full identities and required dependency on reuse.
+The [profile publication regression](../crates/mesh-talk-core/src/node/account_profile_io_tests.rs)
+compares actual retained IDs and source revisions across retries and reopen.
+Measure repeated cryptographic work separately from writes: stable event IDs and
+zero SQL mutations do not prove quiet CPU. A positive intrinsic verification memo
+must bind the complete verification input, including every signature, and be bounded
+independently of retained history. Read current ownership and selected data before
+lookup; recheck requested identities and mutable authorization on every use.
+The [indexed consent tests](../crates/mesh-talk-core/src/node/file_consent_store/indexed.rs)
+count real signature invocations and cover same-ID tampering, requested identity
+changes, fixed-capacity eviction and re-verification, alongside policy and owner
+recovery tests.
+The [announcement owner](../crates/mesh-talk-core/src/discovery/announce.rs) applies
+this rule to complete public proofs, including the account certificate signature.
+A cached intrinsic fact never renews presence, authorizes an account or validates
+a fresh transport challenge. Bound actual retained allocations; oversized inputs,
+cache contention and poison preserve the original verification path. Test real
+cryptographic call counts, every changed field and fixed-capacity recovery.
+Apply the same rule to empty selected federation slices: validate session,
+completion and resource authority, but do not rewrite unchanged session/global
+charges. The raw-selection regression in the
+[federation staging owner](../crates/mesh-talk-core/src/postoffice/storage/federation/tests.rs)
+checks mutation and commit counts while preserving framing and revoked-session
+rejection.
+A durable version must not be invalidated solely by a new process identifier.
+Qualify reuse through the current durable policy version and exact payload;
+legacy versions without that qualification need a deliberate migration boundary.
+Preserve policy ABA and direct-override invalidation rather than treating equal
+payloads alone as unchanged permission. The eight-offer reopen, legacy-marker
+and publication-rollback controls in the
+[consent owner](../crates/mesh-talk-core/src/node/file_consent_store/indexed.rs)
+exercise this boundary.
+Match cache persistence to its actual lifetime. Runtime-only hints should not
+pay durable WAL commits when restart deliberately invalidates their evidence.
+Keep volatile metadata bounded, preserve current-owner checks and prevent cache
+hits from becoming custody. The runtime-hint regressions in the
+[opaque receive owner](../crates/mesh-talk-core/src/node/opaque_receive_cache.rs)
+deny persistent hint writes and exercise TEMP rollback, retry and configuration
+failure while retained evidence remains independently durable.
+Nonempty retry queues can also be unchanged: rewriting the numeric tickets of
+an already selected global suffix does not advance fairness. Prove the exact
+account-wide order with a bounded metadata read before skipping rotation;
+matching only the maximum ticket misses interleaved conversations. Keep byte
+admission, completed-row deletion and fresh ownership checks. The idle-tail and
+interleaved-conversation regressions in the
+[file receive owner](../crates/mesh-talk-core/src/node/filebook/indexed.rs)
+measure actual SQL changes and committed writes while preserving new-work turns.
+Apply this rule at shared lower owners too: terminal export polling must retain
+current selection/authority checks without republishing the same cursor for each
+ID page. The direct and mailbox consumers share that rule in
+[selected export](../crates/mesh-talk-core/src/eventlog/repository/selection/export.rs).
+When measuring completed work, first assert its durable queue lane is absent;
+an existing lane can make insertion idempotent while hiding recreate/retire
+churn. The settled account-maintenance regression exercises actual reception
+drain before repeating maintenance and checking changed-source recovery.
 
 Finite preparation must survive unrelated ordinary appends without relaxing its
 authority fences. Compare the owner's complete control and destructive revisions;
@@ -367,8 +914,45 @@ The `account_history_after_favorites_*` regressions in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
 cover successful and failed optional exchanges, retained refreshes, unfinished
 history pages and failure without pending work.
+The `quiet_file_consent_rotating_iteration_has_bounded_checkpoint_writes` and
+`rotating_offer_checkpoint_*` regressions in the
+[file-consent store](../crates/mesh-talk-core/src/node/file_consent_store/indexed.rs)
+check real multi-page rotation, restart progress, checkpoint failure, competing
+writers and bounded cursor eviction.
+The [group-file retry regressions](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+cover missing routes, cancellation, failed refill, full capacity and unfinished
+discovery alongside cooled jobs. The private-file scheduler regressions in
+[delivery runtime](../crates/mesh-talk-core/src/node/delivery_runtime.rs) and the
+shared [retry owner](../crates/mesh-talk-core/src/node/delivery_retry.rs) cover
+unrelated wakes, cancelled reservations, replacement attempts, completed-step
+progress and capacity churn without retaining file payloads in cooldown hints.
+
+A scheduling readiness predicate must represent completed negative results as
+well as materialized positive output. A completely projected, current-source
+channel can prove that the local device never joined and therefore intentionally
+has no presentation row. Requiring that row recreates demand on every unchanged
+observation. Reuse the existing account/source/full-count evidence at the
+[metadata demand owner](../crates/mesh-talk-core/src/node/channel/checkpoint/presentation.rs);
+keep current membership and plaintext admission at their original consumers.
+The nonlocal-demand regressions in the
+[checkpoint tests](../crates/mesh-talk-core/src/node/channel/checkpoint/tests.rs)
+cover unchanged read-only demand, a later signed membership, stale sources and
+retired participant generations. Absence of a current row or a partially prepared
+reducer is not equivalent negative evidence. A never-created source can be
+quiet only after checking that no pending, projected or retirement owner needs
+work. Keep this absence check off the ordinary prepared-source path; recheck it
+on each demand and retain the normal committed-source discovery recovery.
 
 ## R06: Exact authority and stale completions
+
+When projecting account roles into device-shaped display fields, derive the
+representative from the current validated account membership. A historical
+legacy device owner cannot describe a transferred account role. Keep exact
+account/device validation and bounded-snapshot inclusion together at the
+[inventory publisher](../crates/mesh-talk-core/src/node/account_documents/inventory.rs);
+the real modern and legacy transfer regressions in
+[owner target tests](../crates/mesh-talk-core/src/node/account_group/tests/owner_targets.rs)
+check readable inventory while preserving grants and the legacy owner field.
 
 **Failure pattern:** work authorized before an await or queue delay commits after
 logout, same-user relogin, account replacement or a policy off/on transition.
@@ -378,6 +962,17 @@ Capture the owner's exact session/runtime installation and relevant revision at
 entry. Revalidate through the existing atomic commit seam before side effects
 and before publishing private results. Treat frontend generation guards as UI
 ownership, not host authorization. Read commands can expose stale private data too.
+When consolidating repeated database reads, keep reuse inside the current
+synchronous connection owner. Preserve identity/generation error precedence and
+retirement-job integrity before reading capability metadata, and repeat live
+session/deadline validation at its final owner. The repository network validator's
+[regressions](../crates/mesh-talk-core/src/eventlog/repository/network/tests.rs)
+count executed scope reads and retain stale-view, corruption and capability-change
+controls; a prepared-statement compilation count does not measure executed reads.
+Bind session effects to exact owner/generation rather than a replaceable display
+object. Cosmetic profile refreshes must not restart inactivity timers, republish
+call state or count as user input. The mounted [App regressions](../frontend/src/App.test.ts)
+exercise metadata updates, actual input and same-owner session replacement.
 
 A closing popup's delayed cleanup can outlive a newer popup's focus ownership.
 Default restoration may act only while focus is neutral or still belongs to the
@@ -393,6 +988,16 @@ still needs full identity and current authority checks at the real commit seam.
 The [forwarding owner](message-forwarding.md#source-admission-and-lifecycle) tests a
 signed rename that needs preparation, plus dissolution and same-user/different-key
 controls that must never produce a message or send receipt.
+
+An asynchronous prepare/commit API must revisit mutable prerequisites after
+expensive staging yields. A later synchronous commit allowance cannot finish an
+arbitrary intervening control tail. Recheck cheap expiry and caller admission
+before resuming the existing bounded preparation owner; check expiry again after
+that await and preserve final atomic authorization. The
+[channel file staging regression](../crates/mesh-talk-core/src/node/files.rs)
+commits a real signed rename tail during chunk progress and requires exactly one
+manifest; the sidecar recovery regression retains ordinary/protected acceptance
+and rejects any authorization after its durable WAL commit.
 
 Account for reentrant store subscribers and callbacks that can retire an owner
 synchronously during publication. Lock once when combining sensitive proof and
@@ -475,10 +1080,200 @@ and existing compatibility rules. Multi-store changes are not automatically one
 transaction; define recovery or compensation for every partial commit boundary.
 Use established error types and distinguish absent, unavailable and corrupt data.
 
+Retire successfully handled controls from derived receive work, including controls
+encoded as ordinary Message events. Define recovery across effect and scheduling
+commits before discarding the effect's authentication inputs. A terminal no-op
+classification may retire only work that a matching durable, monotone state can
+never require again; it must not grant authority or manufacture success. The
+[receipt owner](../crates/mesh-talk-core/src/node/delivery_runtime.rs) and
+`authenticated_receipt_retirement` regressions cover quiet replay, failed marker
+persistence after delivery, restart without the original body, current ownership
+and ordinary-message isolation. See the [state contract](network-design-reference.md#state-and-concurrency-contract).
+
+Separate authoritative durability from disposable SQL query progress. The
+[selection owner](../crates/mesh-talk-core/src/eventlog/repository/selection.rs)
+uses the existing connection's encrypted temporary pager for derived ranks and
+cursors; reopening rebuilds them from current MAIN records. Failed preparation
+cannot become a receipt, custody or permission. Preserve MAIN transaction
+and replay guarantees while measuring its actual writes independently of scratch
+mutations. The `disposable_selection_prepare_export_and_drop_leave_main_storage_unchanged`
+regression checks selected/exported results and MAIN write evidence together.
+
+Distinguish filesystem publication durability from later database mutations.
+The [history source publisher](../crates/mesh-talk-core/src/node/transcript_repository/publication.rs)
+synchronizes the barrier file and, where supported, its renamed parent directory
+before SQL marks a source published. Retrying a failed initial sync must finish that ordering without
+replaying a committed import. Once published, every write still validates the exact
+barrier, while SQL FULL transactions own row durability; unchanged directory entries
+must not be synchronized for each row mutation. The publisher's
+`initial_history_barrier_sync_failure_requires_retry_before_publication` regression
+and the opaque checkpoint owner's
+`changed_cache_sql_writes_do_not_republish_barrier` and
+`failed_checkpoint_sql_write_preserves_previous_value_and_retries_after_reopen`
+regressions retain initial-sync retry, barrier rejection and SQL rollback/reopen
+evidence independently of the directory-sync budget.
+
+Scope destructive invalidation to actual dependencies while retaining a global
+fence for cross-conversation authority. The
+[repository classification owner](../crates/mesh-talk-core/src/eventlog/repository/selection/metadata.rs)
+subtracts only atomically classified, unreferenced Profile leaf compaction from
+that global fence; each affected conversation still invalidates its own physical
+epoch and exact history binding. Do not exempt raw appends, real parent retirement,
+erasure or unknown/corrupt classification. The
+[participant network regressions](../crates/mesh-talk-core/src/node/privacy_sync/network.rs)
+check unchanged dependent file exports and retained manifest/proof/ancestor facts,
+own-view rejection, classifier rollback/retry, corrupt or missing metadata, and
+logical parent retirement before physical deletion.
+
+Version the private hash domain when a persisted derived fingerprint changes
+meaning, even if its serialized fields and wire layout remain identical. Changing
+from a full destructive counter to a classified counter can otherwise let an old
+completion proof regain validity after a real retirement reuses its numeric value.
+The participant network
+`participant_history_sync_stamp_never_aliases_legacy_full_counter_after_parent_retirement`
+regression reconstructs the exact legacy serializer and exercises that collision
+through actual compaction and parent retirement. Invalidate only the obsolete
+completion qualification; preserve compatible receive cursors and pending work.
+
+Keep presentation availability separate from transport availability. A local
+managed copy can satisfy UI progress/export after signed ciphertext is reclaimed,
+while network custody still requires retained signed chunks and the original final
+header. The group-file regression
+`managed_plaintext_without_retained_ciphertext_cannot_authorize_group_custody`
+checks valid local export, zero relay attempts and no false custody after raw
+retirement, then restores the original signed chunks through the owning queue.
+
+Give finite buffer dispatch an explicit settled state. A remote buffer's
+capacity eviction or replacement must not silently become perpetual receiver
+demand for all retained source history. The
+[group-file owner](../crates/mesh-talk-core/src/node/group_file_delivery.rs)
+records actual accepted dispatch against the retained offer, full recipient and
+exact receiver action; the file-book foreign key removes scheduling metadata with
+that offer. A committed new request survives an older upload's completion, and a
+failed settlement commit retains retry. The real mailbox publisher regression
+covers actual HAVE, failed persistence, relay replacement, a new signed request,
+duplicate requests, the completion race and independent incoming traversal.
+Qualify receiver actions per file: an unrelated account policy generation must
+not manufacture new demand, while current policy still fences publication.
+The same distinction applies to send-only historical publication: remote buffer
+retirement cannot rewind an unchanged source dispatch. The
+[mailbox owner](../crates/mesh-talk-core/src/node/opaque_relay/incremental.rs)
+preserves duplex receive reset and repair, while explicit targets require fresh
+durable HAVE and current selected export before a missing target is republished.
+The real replacement-store regression covers a cold dispatch owner, selective
+target recovery, transport failure and retry, and changed local source input.
+Keep genuine file requests distinct from archival publication: the file owner
+must redispatch every signed chunk, under a separately qualified send-only key.
+Temporary ready confirmation views retain their admission lease through
+cancellation cleanup; partial preparation keeps its existing protection. The
+four-scope cancellation regression requires real unrelated admission before the
+ordinary unfinished-work timeout, without increasing the view budget.
+
+Keep UI observations distinct from durable progress: phase/check timestamps
+must not rewrite a reception ledger. An unchanged committed cursor can reuse its
+successful commit only while the exact owner has no dirty durable state; failed
+saves must retain that dirtiness and block ACK. The
+[reception owner](../frontend/src/store/chat.ts) and its chat regressions cover
+observation-only wakes, epoch changes, batch progress and quota-failure retry.
+
+An unchanged deferred revision must retain its failure history across worker
+admission, with capped retry spacing and a real dependency wake. Identical
+observations must not reset cooldowns; a newer committed revision or dependency
+change during active work must survive its older completion. Bound retry metadata
+to pending/active work and exclude active deadlines from timer selection. The
+[account fanout owner](../crates/mesh-talk-core/src/node/account_sync/fanout.rs)
+checks capped spacing, revision replacement, wake races, overflow cleanup and
+success deduplication; the real source-invalidation fanout regressions retain
+original event/sequence authority through repeated failure and recovery.
+
+A validated durable fallback must warm the existing bounded runtime owner even
+when no subsequent mutation occurs; otherwise fresh adapters can repeatedly
+verify unchanged evidence. Normalize runtime binding only after rejecting retired
+session-only evidence, and preserve cold repair reset and actual lease ownership.
+A busy adapter does not exclude maintenance: compare its captured receipt under
+the same owner guard used to publish warming, so a concurrent repair rewind
+cannot be restored by stale initialization. Equality of two empty values does not
+prove no invalidation occurred: capture and recheck the owner's reset epoch too.
+Optional work evidence must record under the same invalidation order and decline
+when its actual lease or captured generation was retired.
+The [mailbox checkpoint regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental/checkpoints.rs)
+cover fresh adapters without signature reopens, SQL commits or directory syncs,
+retired-runtime rejection and repair progress under its live owner.
+
+Classify retained custody, durable semantic processing and session-only handling
+separately. A successful immutable identity import or qualified monotonic control
+fact can preserve receive progress without retaining its raw event. Keep account
+and repair fences, conservative mixed/failed classifications and legacy exchange
+progress; semantic evidence must never enter HAVE or custody. The
+[incremental receive regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
+retain the actual checkpoint through reopen instead of deleting it before testing.
+
+Keep retry scheduling distinct from durable progress. A bounded volatile order
+may replace repeated ticket writes, but must reconcile current pending rows,
+retain oversized attempts and publish only after the database operation succeeds.
+The [file receive queue](../crates/mesh-talk-core/src/node/filebook/receiving.rs)
+uses a shared bounded runtime owner with indexed durable fallback. Its inline
+file-book regressions cover blocked cross-conversation fairness without commits,
+capacity shrink, failed cleanup, stale owners and oversized/reopen recovery.
+
+Profile receive uses immutable durable admission tickets with independent bounded
+runtime cursors for scoped callbacks and global recovery. A blocked nonempty
+queue must rotate fairly with zero SQL changes, write commits or dirty MAIN pages;
+reopening can repeat checks but cannot lose pending/processed facts. The owning
+`blocked_profile_retry_rotation_is_read_only_and_reopen_preserves_pending`
+regression checks those costs rather than only the empty-queue case.
+
+A cleanup cursor is not a deletion receipt. Checkpoint one bounded page rather
+than every protected-file read; retain fresh references, exact revisions and
+durability for each real deletion. On failure/reopen, recheck the bounded page
+without skipping unresolved entries. The
+[media owner](../crates/mesh-talk-core/src/node/media_store.rs) tests a full
+protected page's commit count and safe replay through a fresh profile owner.
+
+A profile-wide physical write stamp is a conservative invalidator, not a semantic
+revision: disposable query preparation can otherwise invalidate its own work
+hints. Exclude derived writes only inside the connection owner's guarded table
+boundary. Observe prior ordinary writes before the same-lock derived interval;
+permit TEMP scratch but reject business-table writes through direct SQL, cached
+statements or triggers, and restore default authority on success, failure and unwinding. Schema and
+source/authority indexes keep conservative invalidation. The database work-clock
+regressions and the real incremental-mailbox consent exchange cover independent
+selection preparation/retirement, transport checkpoint advancement, actual
+authority invalidation and rollback. Optional transport hints have their own
+closed table set; they cannot acquire selection or business-write authority.
+
+A directed lookup must select its target before hydrating every cached peer or
+consulting unrelated group authority. Preserve live-roster precedence and the
+existing cached-route order; recheck the selected target's policy and keep dial
+admission independent. Drop the roster guard before entering the cached-policy
+fallback. The [routing owner](../crates/mesh-talk-core/src/node/privacy_routing.rs)
+regressions hold unrelated owners to check lookup isolation, then verify target
+revocation, cached ordering and missing results.
+Progress in one mailbox must not invalidate every settled consent offer merely
+because both happen to share the same encrypted database.
+
+Treat derived-index cache retirement as a storage mutation when its destructor
+marks/deletes SQL rows. Fully version-qualified plans must not expire only because
+no request used them recently; enforce capacity and owner/authority invalidation
+instead. The encrypted paged-request idle-gap regression measures actual changes
+and commits, including across new connections. Cache an absence only after a
+complete current selection proves it; errors, unavailable payloads and unknown
+versions must remain retryable. Six-mailbox confirmation rotation checks zero warm
+SQL work and recovery when the previously absent event arrives.
+
 Preserve accepted intent when presentation fails. Report what actually committed;
 do not relabel a committed change as rejected because later best-effort work
 failed. Avoid empty catches, blanket defaults or unconditional retries that hide
 the distinction. Follow the owning feature guide for rollback and durability.
+
+When bounded discovery and compaction share a source, discovery may not have
+visited an item before its raw bytes are removed. Record the exact authorized
+retirement fact with deletion in the same transaction; a volatile cache or a
+later scan cannot supply that evidence. Keep source-account attribution separate
+from the current account and from presentation or custody. The rollback, adoption
+and undiscovered-profile regressions in the
+[profile receive owner](../crates/mesh-talk-core/src/storage/profile/profile_receive.rs)
+exercise this boundary.
 
 **Evidence:** fail before and after the commit point, interleave a second writer,
 retry with the same identity, and restart using retained data. Verify acknowledged
@@ -497,7 +1292,316 @@ Validate at the owning trust boundary before allocation and side effects, using
 existing frame, file, count, depth and byte limits. Preserve exact account/device
 bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
-do not remove backpressure to make a benchmark look faster. Callback-to-stream
+do not remove backpressure to make a benchmark look faster.
+
+Apply cheap exact-ID rejection before per-row export queries without skipping
+current view, owner, budget or cursor checks. Reuse compiled fixed SQL through the
+existing bounded statement cache; always execute it against current parameters
+and rows. The [repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
+`peer_known_export_ids_skip_sql_membership_and_preserve_unknown_authority` and
+`hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh` count
+actual SQLite preparation work while preserving unknown-item authorization,
+fresh revisions and corruption failures.
+
+Filter impossible candidates before canonical history or protection projection;
+an empty attachment query must not build an unrelated history index. Keep current
+protection and final eligibility checks for selected candidates. The
+[Favorites capture regressions](../crates/mesh-talk-core/src/node/favorites/capture_tests.rs)
+count changed rows and commits for empty queues and unrelated file lookups, with
+protected and corrupt canonical sources still denied.
+
+Share existing bounded intrinsic-proof verification within one repair turn,
+not just within its public batch API. Retain fresh witness and permission reads
+per item. The [custody recovery regression](../crates/mesh-talk-core/src/node/channels.rs)
+counts verification across real witnessed rows through the actual retry turn;
+complete-certificate keys and bounded retention keep their existing controls.
+
+Check read granularity as well as file size: streaming JSON parsers can turn
+each byte into an OS read. Use bounded buffering for files, as required by the
+[serde_json reader contract](https://docs.rs/serde_json/latest/serde_json/fn.from_reader.html),
+while preserving fresh reads and authority checks. The
+[contact policy tests](../src-tauri/src/contact_policy.rs) own size, corrupt-file,
+failed-read and persistence semantics; native I/O traces qualify the read-call cost.
+
+Remote rejection does not itself invalidate qualified local preparation. An
+existing bounded cache may retain it after a completed protocol outcome, with
+current source and authority checks on reuse; this never certifies remote
+acceptance. Best-effort hint maintenance must not replace the original failure.
+The [paged-session regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+own rejection, source/privacy invalidation and transport/cancellation cleanup.
+A quiet remote comparison must distinguish equal inventories from a proved
+remote subset. A zero-applied result alone cannot qualify reuse: policy rejection
+or duplicate wire events may still represent unfinished work. Restrict subset
+reuse to receiver-only export semantics, a unique advertised set already covered
+locally, complete zero-wire exchange and an exact current source/authority stamp.
+Revalidate after the awaited probe, preserve the remote intersection count and
+expire without renewing hits. Retain the shared cache and inventory allocation
+bounds; SDK defaults and duplex requests must follow their ordinary paths. The
+`guarded_pull_only_remote_subset_` regressions exercise the real Noise exchange;
+a skipped Have stream is neither durable possession nor recipient delivery.
+Local selection membership and remote custody have different lifetimes: relay
+replacement must not discard valid local target preparation, and local reuse
+must never substitute for a fresh remote custody probe. The
+[incremental mailbox tests](../crates/mesh-talk-core/src/node/opaque_relay/incremental_tests.rs)
+repeat selected and absent targets after eviction, replacement and invalidation.
+
+A bounded page is still expensive if an unchanged timer keeps rescanning it.
+Gate repair scans with pre-work semantic input, retain short continuation until
+a complete fair sweep, then park until a relevant event or sparse fallback.
+Independent expiry/recheck clocks must not admit the full scan. Actual-owner
+quiet, continuation and recovery controls live in the
+[channel custody tests](../crates/mesh-talk-core/src/node/channels.rs).
+
+Separate known-peer lease renewal from unknown-host discovery. Sparse subnet
+recovery must not expire established peers, miss visibility restoration or truncate
+a large known-target tail. Gate hidden producers before OS inventory work and
+retain per-send disclosure checks. Real UDP and target-budget controls belong to
+the [discovery owner](../crates/mesh-talk-core/src/discovery/service.rs).
+Independent signed discovery can suppress an optional transport probe only for
+the same full binding and endpoint, with enough lease remaining for recovery.
+Reserve the handshake budget in an actual deadline; a coarse timer can otherwise
+wake after the safe start time. The real periodic-worker and slow authenticated-only
+controls in [privacy runtime tests](../crates/mesh-talk-core/src/node/privacy_runtime_tests.rs)
+own both avoided handshakes and timely recovery.
+
+A sparse deadline below a fast loop does not make that loop quiet. Observe entry
+into the real business owner, including queries before inner revision gates.
+Before removing its timer, expose finite continuations and failed-work deadlines;
+test arrivals behind a captured cursor, after its upper cut and while remote work
+is held. Immediate continuation must not manufacture a new dirty input. The
+[local recovery owner](../crates/mesh-talk-core/src/node/channels.rs) and its actual
+periodic-worker controls own this boundary; helper-only empty selection tests do
+not establish that the producer stopped running. A bounded cache miss is not a
+new durable fact: publish readiness from the source-checked materialization
+transition, not from read-only hydration. Exercise more valid groups than the
+cache can retain, and preserve a distinct UI wake after actual failed-read recovery.
+
+Trace every consumer of a scheduling projection: relay-control retries, file
+continuations, profile publication, account access and receive maintenance must
+share canonical endpoint semantics. Equal projections preserve owners, completion
+and backoff; new attempts still read current transport choices. Raw observations
+continue to refresh liveness. The
+[delivery retry tests](../crates/mesh-talk-core/src/node/delivery_runtime.rs),
+[publication tests](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs) and
+[account-access tests](../crates/mesh-talk-core/src/node/account_access.rs) own
+these consumer boundaries.
+
+Coalescing must preserve semantic scope as well as queue size. Reusing a value
+must not claim a new read observation or suppress a pending result for another
+resource; retain independent publication order for peers and account metadata.
+Retain bounded invalidation domains through pending-page ACKs; do not turn a roster pulse,
+progress update or empty read into a global refresh. The native reception gate
+and registered IPC tests, together with the [chat consumer](../frontend/src/store/chat.test.ts),
+exercise quiet pages and changes arriving during acknowledgement.
+Keep scope through the whole producer-to-consumer path: renaming a narrow event
+to a generic auxiliary notification can restore the same broad query fan-out.
+Use cumulative domain revisions rather than the last event kind, capture the
+subscription baseline before installation waits, and retain conservative repair
+for unknown inputs. Actual document/status producer controls, the native reception
+gate and chat/document consumers must prove both quiet unrelated reads and prompt
+mixed changes; preserving legacy observers is a separate compatibility obligation.
+
+Filter lightweight metadata before cloning large payloads. An empty final result
+does not prove that a query avoided full-record reads. Persistent indexes of
+authoritative records must migrate and update in the same transaction as those
+records; failed commits cannot acknowledge work. Disposable query indexes retain
+bounded row turns and admission while spilling through the encrypted temporary
+pager, rather than collecting history in Rust. Its 8192 KiB page-cache setting is
+a target, not a process-memory cap. The
+[query pager controls](../crates/mesh-talk-core/src/storage/database/query_scratch.rs)
+exercise spill encryption, rollback and restoration of TEMP storage before hint
+initialization; connection close discards plans without discarding source facts. The customization storage regression in
+[packs tests](../frontend/src/store/packs.test.ts) and real
+[IndexedDB browser scenario](../frontend/e2e/customization-pending-storage.spec.ts)
+checks empty pending reads, old-data migration and failed writes.
+
+Read-only retry selection must not renumber a queue that already fits one turn.
+Retain authority checks and exact-revision completion; rotate durably only when
+contention changes fair order. The [filebook regressions](../crates/mesh-talk-core/src/node/filebook/indexed.rs)
+assert zero changed rows and write commits for all-fit claims, plus ninth-item
+progress and atomic rollback under contention.
+
+Closed UI is not demand loading if its static imports still initialize documents
+or inactive feature trees. Separate lightweight navigation from payload producers.
+Keep the dialog/controller owner stable while scoped imports settle or fail; test
+close, owner replacement, retry and eventual control focus. The [help reader](../frontend/src/features/help/HelpDialog.test.ts)
+and [settings page](../frontend/src/features/chat/settings/SettingsPage.test.ts)
+regressions exercise these lifetimes without weakening mutation ownership.
+A metadata catalog must exclude image/archive payloads, including snapshots held
+by long-lived subscriptions and registration receipts. Shared hydration qualifies
+each reader before queued disk admission, and a canceled observer cannot release
+an admitted worker slot. The [pack demand regressions](../frontend/src/lib/packDemand.test.ts)
+cover queued retirement, surviving shared demand and finite admission.
+
+A bounded work item can still be unnecessary work. Classify demand from the
+owning source before constructing a derived index; stale queue entries alone
+must not classify its domain. Preserve later valid demand while retiring stale
+work. The ordinary-DM and delayed-membership regressions in
+[group metadata tests](../crates/mesh-talk-core/src/node/group_metadata_tests.rs)
+check that channel recovery does not prepare ordinary private conversations.
+
+Do not regenerate an immutable signed self-binding on every group query or in an
+eager fallback expression. The Node lifetime owns one proof derived only from
+its fixed device/account keys; account adoption creates a new owner. Initializing
+that proof must not acquire group, privacy or log owners. Current authority checks
+still run on every use. The [account-group access regression](../crates/mesh-talk-core/src/node/account_group/access.rs)
+counts actual proof construction and checks isolation across different accounts
+using the same device.
+
+Separate background work classes when one class's continuation can restart
+another class's failed work. A shared notification or retry clock can defeat
+otherwise correct backoff. Keep each producer's retained wake, meaningful
+invalidation subscriptions and cancellation owner explicit. The
+`isolated_file_lane_` regressions check that outgoing queue admission neither
+wakes receive repair nor shortens its sparse deadline.
+
+Batch limits do not bound repeated expensive validation within each row. Trace
+the complete consumer path, including helpers that repeat another public query.
+Request-local reuse may retain intrinsic certificate verification under a bounded
+complete cryptographic key; it must not retain mutable membership, holder bindings,
+document availability or final counts. Verify actual crypto invocation counts and
+mutate authority or stored observations between rows. The custody batch regressions
+in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs) cover this boundary.
+Trace the actual read owner's guarantee before sharing a verified object:
+encrypted legacy replay need not verify signatures as indexed reads do. Exact
+equality with an owner-validated durable record can reuse intrinsic verification,
+but must preserve current erasure checks and failed durability retries. The
+[group-file controls](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+count real body reads and signatures, retain nonempty signed decisions and test
+read failure/recovery. Return the already-authenticated decoded value to callers
+instead of discarding it and reopening its signed event; the warm terminal
+recipient regression counts real consent signature calls across repeated queue
+reconstruction. [Delivery-store controls](../crates/mesh-talk-core/src/node/delivery_store_tests.rs)
+cover identical, conflicting, forged, reopened and erased reservations.
+Hot point reads should reuse bounded compiled statements without retaining
+results or weakening source checks. The [event repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
+count actual VM executions for repeated hit/miss reads and keep domain binding,
+new appends and schema failure/recovery observable. Body authentication and
+retirement checks still run after compilation reuse. The current-avatar
+`avatar_revision_reuses_sql_compilation_but_reads_current_values_and_errors`
+regression counts real SQL compilation and retains changed values, invalid rows
+and schema failure/recovery after warming the scalar statement.
+
+A single file-identity selection should retain its verified immutable event and
+decoded identity through the existing decision instead of independently decoding
+for account, alias and row predicates. The selected opaque-control regression
+`incremental_selected_identity_control_rechecks_current_binding` counts one
+verification and preserves fresh policy, erasure, malformed-proof and source-read
+failure checks. This transient value grants no permission beyond that call.
+
+Intrinsic signature memos must key every verification input and retain no body
+or permission. Current reads, canonical/content checks and source errors still
+precede reuse. The [repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
+cover unchanged reads, forged signatures, repeated negative results, content
+tampering, retirement, reopen and bounded eviction.
+A selected peer-directory record may reuse the exact proof verified at admission
+or authenticated replay; recheck current linked-account bindings before returning
+an unchanged result. The peer-directory regression
+`identical_selected_proofs_reuse_verification_but_keep_linked_binding_checks`
+counts certificate verification and covers changed bytes, linking and reopen.
+A live roster may reuse its already-verified announcement only on full value
+identity, including both public keys, every advertised field, certificate and
+signature. Keep current account bindings, route scope and presence updates
+outside that reuse; forgotten/evicted announcements lose live-roster evidence
+and must re-enter the current verification boundary. An independent bounded
+intrinsic memo may still reuse the deterministic signature fact. The
+[roster regressions](../crates/mesh-talk-core/src/discovery/roster.rs) distinguish
+verification requests from certificate math and exercise tampering, renamed
+proofs, binding transitions and live-proof retirement.
+
+Separate cache admission priorities when recomputable work can displace receive
+progress and repeatedly restart unchanged synchronization. Preserve shared hard
+budgets and plan eviction before mutation when a class may refuse admission. The
+[checkpoint pressure regressions](../crates/mesh-talk-core/src/node/opaque_receive_cache/checkpoints.rs)
+check receiver retention and atomic refusal under count/byte pressure; the signed
+cold-receipt loopback regression checks recovery without new writes. Reject
+impossible optional cache admission before entering a guarded write transaction:
+changing a SQLite authorizer expires prepared queries even when no rows change.
+Derived TEMP receive hints must also use the existing closed transport-hint
+transaction owner: ordinary `total_changes` notifications would wake the source
+consumer for its own cache updates. Read exact unchanged, bounded pages before
+installing that authorizer. The
+[receive-cache regressions](../crates/mesh-talk-core/src/node/opaque_receive_cache.rs)
+check source-watch silence, real append/retirement wakes, session recovery and
+unchanged cached-statement plans.
+Keep the actual mutation guard and capacity recheck; a racing capacity release
+may miss an optional hint until retry, never authorize eviction. The byte-pressure
+regression checks zero `RePrepare` after both refused insertion and refused growth,
+unchanged rows/accounting, and successful admission after capacity is released.
+Eviction of a large work owner is not a source change. When losing its small
+completed-work facts restarts an unchanged scan, retain bounded scheduling
+fingerprints independently of the heavy data. Bind reuse to the exact authenticated
+state, runtime and policy; keep authority checks at use, cap retained metadata and
+preserve a nonrenewable repair deadline. Restart, corruption and missing evidence
+must recover normally. The [mailbox receipt regression](../crates/mesh-talk-core/src/node/opaque_relay/incremental/checkpoints.rs)
+`completed_repair_keeps_quiet_work_across_bounded_owner_eviction` exercises actual
+fixed-capacity admission after a completed repair; the adjacent fingerprint tests
+cover changed inputs, capacity and the original deadline. This evidence never
+restores a compaction lease, cached parent body or permission.
+
+Apply the same rule to terminal preparation: check the live selection, source
+and actual export cursor before entering a write guard. The
+`ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress` regression
+checks zero `RePrepare` for both upload and direct-network consumers, alongside
+zero commits/body reads and rejection after authority changes. A no-op SQL UPDATE
+is insufficient when installing its guard invalidates unrelated read plans.
+
+Reuse compiled static SQL through the existing bounded connection cache rather
+than caching authorization results. Every execution must still bind the current
+parameters and perform the original source, account and lifetime checks. Warming
+a statement must not freeze a read snapshot, retain old bindings or suppress an
+absence or storage error. Exercise changed parameters and retired owners after
+warming the actual production queries. The transcript
+`warm_metadata_reads_reuse_statements_and_observe_current_rows` regression checks
+actual VM reuse, read-only metadata, changed bindings, append/deletion and schema
+recovery without loading bodies. Intrinsic document memos similarly exclude
+receipt-derived publication authority even when the signed payload is unchanged.
+
+A bounded result page must not repeat a history-wide setup scan for each item.
+The [attachment selection owner](../crates/mesh-talk-core/src/node/account_sync/attachment_selection.rs)
+prepares its account lookup context once per decision, lazily on a media miss.
+Keep per-file eligibility, row/author and recall reads fresh and propagate their
+failures. Do not reuse that scheduling context for final publication: the
+attachment commit owner must build fresh context under its existing fences.
+
+Within one connection transaction, reuse a fresh observation through its owning
+role helpers instead of querying the same row again. Retain validation order,
+owner/lifecycle/cutoff checks and storage failures; do not extend the observation
+past the guard or across an await. The post-office
+`network_validation_reads_arrival_once_without_weakening_current_checks`
+regression counts actual SQL executions for absent and populated mailboxes and
+checks current source failure/recovery and changed-arrival invalidation.
+
+Suppress unchanged producers before entering those verified reads. A publication
+gate must cover every effective input owner, retain the selected pre-work stamp
+through bounded pages and leave newer changes dirty. Sparse integrity repair and
+owned failure deadlines remain necessary; a failed pass is not completion.
+The [local publication regressions](../crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs)
+count actual body reads and cover profile/proof/control changes, in-flight
+invalidation, failed writes and timer-driven recovery without periodic peer polls.
+Comparing unchanged publication after loading its encrypted old payload is still
+repeated work. Delivery retries must evaluate the durable reference and current
+retry deadlines before hydrating the event body. The real direct-custody
+regression in [delivery runtime tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+observes actual retry completion, then requires unchanged repository body-read
+counters while custody is parked; new demand and real recipient receipts remain
+prompt. Ordinary/legacy operation publishers qualify at most 128 runtime
+metadata/projection pairs under the exact verified own-head hash, with a
+nonrenewable five-minute repair deadline. Settled ordinary Text/Sticker/File
+results can qualify before body materialization only with complete current journal,
+source/destructive and File row/suppression/recall metadata, observed unchanged
+before and after materialization. Pending/query/forwarding decisions and unsupported
+Recall or expiring File inputs retain live projection. Both absolute and first-seen
+expiry require live evaluation. Changed heads, missing verification and sparse
+repair still re-read. The [operation publication regressions](../crates/mesh-talk-core/src/node/account_documents/group_operations.rs)
+count actual EventRepository body fetches/decodes for real committed Text and File
+results as well as document reads and signatures; a Rename-only fixture or a
+document-store counter cannot detect repeated event preparation. They also cover
+changed inputs, File retirement, expiry, repair and replacement.
+Explicit document reads continue to authenticate durable bytes; this scheduling
+qualification never serves a payload or grants permission.
+
+Callback-to-stream
 adapters must reserve queue capacity before copying input. Closing admission must
 also revoke buffered input and pending output; closing only the producer still
 allows stale queued work to escape. The [BLE stream owner](../crates/mesh-talk-core/src/transport/ble.rs)
@@ -514,8 +1618,40 @@ measures real capacity and reclaims only fixed disposable image SDK payloads;
 [its filesystem controls](../scripts/diagnostics/runner-storage.test.mjs) protect
 workspace/toolchain data, redirected paths and non-hosted environments.
 Keep secrets and private payloads out of diagnostic logs and fixtures.
+Project private API results into explicitly allowed fixed labels or bounded
+scalar counts before logging, including failure-only test output. Do not
+use `Debug` to log whole tuples or containers containing identifiers. The
+[runtime restart control](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
+retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
+
+When replacing a background owner, inspect every producer started by the actual
+runtime. A lower-level loop can become quiet while a legacy sibling keeps
+scanning the same durable facts. Exercise the production parent with unchanged
+sources across the old retry interval and verify actual business scans, then
+retain event, failure, finite-tail and explicit-retry controls. The
+[accept-owner regressions](../crates/mesh-talk-core/src/node/channels.rs) cover the
+[serving runtime](../crates/mesh-talk-core/src/node/serving.rs), including the
+absence of a duplicate producer and preservation of signed-control recovery.
+
+Emit independently captured diagnostics before acquiring optional supplemental
+owners. A busy lock is not corruption, and failure to read a repository page
+must not discard already captured counters. Keep diagnostic hooks opt-in, bounded
+and free of authority changes. For async work, distinguish future construction
+from actual first poll; a dropped unpolled future did no business work. The
+[work-observation controls](../crates/mesh-talk-core/src/node/work_observation.rs)
+exercise held-owner reporting, disabled hooks, cancellation and bounded static
+call-site counts without adding a background task or reporting timer.
+
+For browser compatibility changes, inspect the actual embedded engine's feature
+support and resolved production CSS. A JavaScript target or installed browser
+version does not prove CSS compatibility. A fallback that loses alpha can make
+a same-color SVG disappear even though its paths render correctly. The
+[production frontend owner](testing-feedback-loop.md#production-frontend-startup)
+and [theme alpha regression](../frontend/scripts/theme-alpha.test.mjs) preserve
+HSL transparency through the real CSS pipeline; native light/dark computed-style
+and visual checks remain separate acceptance evidence.
 
 A successful package-index command can still report failed repositories and use
 cached indexes. Release preparation must reuse the
@@ -707,13 +1843,29 @@ protected task can still reach its genuine idle deadline. Test barriers belong
 before I/O, inside the owned child, with cancellation releasing their futures;
 post-send hooks must not hide that deadline. Do not repeat long preparation waits
 inside the measured held-read window.
+Historical scope completion does not prove an existing child or pair has retired.
+When a fixture requires a natural unpaired read, establish it through receiver-owned
+demand before publishing the Wake that deliberately creates its replacement; observe
+the exact setup task, page completion and pair retirement before arming the next hold.
 
 Concurrent actual-tool fixtures must own output directories, not only source
 and temporary data. A second Playwright invocation can otherwise clean a running
 suite's traces. The browser command owner retains live logs and case progress,
 joins descendants before reporting and fails on timeout or uncertain retirement.
 
-Keep a test's observation scope equal to its named requirement. The
+Keep a test's observation scope equal to its named requirement. A live
+transport-authorization fixture must first qualify actual authentication and
+clean channel reuse outside the measured attempt, then change authority only
+after the measured mailbox callback is admitted. A pre-dial check does not
+prove a live exchange or a missing post-revocation check. The
+[group file authorization fixture](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+retains its production and measured watchdogs, requires multiple post-authentication
+checks and labels the failing mutation and phase. If reuse is a setup requirement,
+a fixture must authenticate the same signed role it advertises in the roster;
+identity-only Noise cannot stand in for an authenticated post-office role.
+Keep the matching presence, actual pool checkout and owned server retirement
+rather than weakening the production role-binding check.
+The
 growing-history fixture measures exact durable originals during continuation,
 then checks the full public
 projection after retiring its continuously appending peers. Its projection read
@@ -825,7 +1977,24 @@ post-arm admission. Starting both deadlines when its thread is created lets slow
 setup release the controlled gate before the asserted blockers enter. Keep each
 phase bounded, begin its deadline at the corresponding handshake, and exercise
 that transition with a controlled clock. The profile-rewrite retirement fixture
-in `runtime_retirement_tests.rs` owns this observer regression.
+in `runtime_retirement_tests.rs` owns this observer regression. Install bounded
+readiness and task-origin observers before starting producers: unchanged input
+may never repeat an already completed transition. Arm blocking test gates after
+bootstrap so observation cannot create a setup dependency cycle. The selected-source
+and queued-source controls in `node/account_group/tests/` retain the real page,
+live-child and settlement predicates rather than substituting aggregate status.
+An inbound-only source cannot converge a bidirectional union digest through
+one-way reads. Keep the required receiver owners live during preparation, or
+finish symmetric repair after all initial publications before measuring. Bind
+partial-page proof to the measured publication, exact live request and validated
+completion; startup pages cannot satisfy a later phase's continuation condition.
+
+Negative idle assertions must consume startup JoinSet results and retained wakes,
+then invalidate the old idle marker when the target event is observed. Await the
+owner's new idle boundary before counting admitted work; a retired worker or one
+cooperative poll cannot certify that its parent handled the event. The
+[account maintenance owner tests](../crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs)
+exercise the actual roster observation and post-event scheduling boundary.
 
 A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck
@@ -847,6 +2016,15 @@ recovery gesture. One failed call does not hold an error state while automatic
 timer or focus retries remain live. The [unread badge scenario](../frontend/e2e/unread-badge.spec.ts)
 keeps those retries enabled, rejects synthetic recovery and requires the trusted
 retry to write the current cleared count before retiring its controlled fault.
+
+The metadata-hold and repair-body-hold controls in the
+[opaque mailbox regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
+qualify separate setup and admitted repair cancellation: setup cannot consume the
+progress budget, and that budget must still cancel actual owned work.
+
+A storage fault fixture must fail the currently selected persistence owner and
+observe that failure before asserting recovery. A hook on a neighboring journal
+cannot certify the actual commit failed merely because both use the same logger.
 
 A bounded positive observer may keep waiting on the owning API's explicit pending
 state. Match only that state; storage, authorization and unexpected failures stay
@@ -951,6 +2129,11 @@ state loss, actual CSS target sizes and a real tap through that same owner.
 A negative control must observe the capability it removes; disabling touch does
 not require every host to become hover-capable or shrink its CSS targets.
 
+Before holding unrelated work in a full-host regression, observe the listener's
+actual accept admission. Spawning a child is not proof it has been polled; work
+in a scheduler-local slot may remain unavailable to other workers. Keep startup
+readiness separate from the measured held-work progress condition.
+
 A deadlock regression must not hang its own runner: bound coordination, arrange
 fixture release even when assertions fail, and use an isolated process with an
 outer deadline when a synchronous lock cycle cannot be safely unwound. An async
@@ -970,7 +2153,9 @@ owner. Inheriting the real runner's owner marker can terminate the enclosing
 validation instead of only the synthetic command. The
 [process-owner fixture](../scripts/diagnostics/windows-process-owner.test.mjs)
 checks both the retained output-limit failure and successful enclosing supervisor
-through an actual nested execution.
+through an actual nested execution. When an assertion parses a child test report,
+select its reporter explicitly; terminal detection must not change the machine
+contract between TAP and human-readable output.
 
 Executable process fixtures must copy their image and assert independent file
 identity; a hard link aliases the live harness outside the child process owner.
@@ -983,6 +2168,16 @@ different evidence. A stack sample or total suite duration alone does not prove
 one test is deadlocked. Inspect the active operation, its duration and the actual
 wait dependencies. Preserve required assertions when fixing flaky setup; do not
 hide a failure with retries, larger sleeps, skipped tests or weaker selectors.
+
+Saved-login verification controls must select a complete credential policy, including
+failed-login cleanup and migration compensation. A mock that skips biometric reads
+does not prove the OS will not ask to authorize a changed application binary. The
+[desktop credential owner](../src-tauri/src/session_store.rs) and
+[startup policy](../src-tauri/src/settings/startup.rs) keep convenience recovery away
+from Keychain on success and failure. Their controls cover stale local passwords,
+retired writes and locking during provider replacement; native acceptance additionally
+requires two packaged builds with different code identities. Verify actual prompts,
+not merely the absence of an explicit authentication call.
 
 Record the tested source, command, environment, count and outcome. Reassess
 consumers after merging new callers or changing a shared helper. Static scans,

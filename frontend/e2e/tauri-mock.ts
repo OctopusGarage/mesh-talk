@@ -705,6 +705,7 @@ export const test = base.extend<{ mockCallsEnabled: boolean }>({
         notifications: true,
         download_dir: "/home/tester/Downloads",
         stay_signed_in: true,
+        startup_verification: true,
         last_user: null as string | null,
         retention_days: 0,
         calls_enabled: callsEnabled,
@@ -1810,6 +1811,24 @@ export const test = base.extend<{ mockCallsEnabled: boolean }>({
           read_file: () => new ArrayBuffer(0),
           // The durable chat-media store accessor. The mock has no store, so reject like the
           // real "no stored media" path → the preview hook falls back to read_file.
+          // Ordinary static previews use binary PNG responses independently of originals.
+          read_media_preview: () => {
+            const staged = (
+              window as unknown as { __lastWrittenFileBytes?: number[] }
+            ).__lastWrittenFileBytes;
+            if (staged?.length) return new Uint8Array(staged).buffer;
+            const canvas = document.createElement("canvas");
+            canvas.width = 320;
+            canvas.height = 180;
+            const context = canvas.getContext("2d");
+            if (!context) throw new Error("Canvas unavailable in preview mock");
+            context.fillStyle = "#1c293d";
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            return Uint8Array.from(
+              atob(canvas.toDataURL("image/png").split(",")[1]),
+              (char) => char.charCodeAt(0),
+            ).buffer;
+          },
           read_media: (a) => {
             const stickerBytes = stickerMediaFiles.get(String(a.fileConv));
             if (stickerBytes) return stickerBytes;
@@ -2801,7 +2820,7 @@ export const test = base.extend<{ mockCallsEnabled: boolean }>({
             }
             if (
               favoriteAttachment &&
-              /^(owner_.*favorite|read_media$|read_file$|save_file|plugin:dialog\|save$)/.test(
+              /^(owner_.*favorite|read_media$|read_media_preview$|read_file$|save_file|plugin:dialog\|save$)/.test(
                 cmd,
               )
             )

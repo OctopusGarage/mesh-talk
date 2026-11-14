@@ -114,31 +114,33 @@ pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool 
 impl Node {
     /// Publish after the inventory owner has committed its real local snapshot.
     /// References received from siblings are never activity publication sources.
+    #[cfg(test)]
     pub(in crate::node) fn publish_group_activity_for(&self, group: ConversationId) {
+        if let Err(error) = self.try_publish_group_activity_for(group) {
+            log::debug!("group activity publication deferred: {error}");
+        }
+    }
+    pub(super) fn try_publish_group_activity_for(
+        &self,
+        group: ConversationId,
+    ) -> Result<(), crate::eventlog::LogError> {
         if !self.device_sync_policy().enabled(SyncCategory::History) {
-            return;
+            return Ok(());
         }
         {
             let book = self.channels.lock().expect("channels mutex");
             let Some(state) = book.state(&group) else {
-                return;
+                return Ok(());
             };
             if !self.channel_identity_matches_account(state) {
-                return;
+                return Ok(());
             }
         }
         // The checkpoint owns presentation history. Read its latest bounded
         // page directly: this publisher already runs within group projection.
-        let page = match self
+        let page = self
             .channel_checkpoints
-            .activity_page(group, None, Default::default())
-        {
-            Ok(page) => page,
-            Err(error) => {
-                log::debug!("group activity publication deferred: {error}");
-                return;
-            }
-        };
+            .activity_page(group, None, Default::default())?;
         let entries = page
             .items
             .into_iter()
@@ -161,11 +163,11 @@ impl Node {
         };
         let changed = {
             let mut store = self.account_documents.lock().expect("documents mutex");
-            let Ok(Some(inventory)) = store.get(&inventory_key) else {
-                return;
+            let Some(inventory) = store.get(&inventory_key)? else {
+                return Ok(());
             };
             if !super::inventory::source_authenticated(inventory.payload()) {
-                return;
+                return Ok(());
             }
             let mut value = Observation {
                 channel,
@@ -201,11 +203,10 @@ impl Node {
             };
             store.merge(meta, &payload)
         };
-        match changed {
-            Ok(true) => self.documents_changed(),
-            Ok(false) => {}
-            Err(error) => log::debug!("group activity publication deferred: {error}"),
+        if changed? {
+            self.documents_changed();
         }
+        Ok(())
     }
 
     /// Optional history from precisely the source selected for descriptive facts.

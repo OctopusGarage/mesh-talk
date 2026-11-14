@@ -171,7 +171,12 @@ impl IndexedRelayState {
         conv: &ConversationId,
         cutoff: Option<u64>,
     ) -> Result<Option<MailboxMetadata>, LogError> {
-        let metadata = self.mailbox_on(c, conv)?;
+        Self::eligible_metadata(self.mailbox_on(c, conv)?, cutoff)
+    }
+    pub(super) fn eligible_metadata(
+        metadata: Option<MailboxMetadata>,
+        cutoff: Option<u64>,
+    ) -> Result<Option<MailboxMetadata>, LogError> {
         if let Some(m) = metadata {
             if m.retained.retiring {
                 return Err(LogError::ConversationRetiring);

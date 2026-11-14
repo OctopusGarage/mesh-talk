@@ -9,6 +9,273 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
+#[test]
+fn preferred_route_hints_bound_churn_and_retain_recent_successes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, _) = node(dir.path());
+    let address = "127.0.0.1:47479".parse().unwrap();
+    let mut routes = node.preferred_routes.lock().unwrap();
+    for index in 0..256 {
+        routes.insert(format!("{index:032x}"), address);
+    }
+    routes.insert(format!("{:032x}", 0), address);
+    routes.insert(format!("{:032x}", 256), address);
+    assert_eq!(
+        routes.len(),
+        256,
+        "successful peer churn must not grow advisory route memory"
+    );
+    assert_eq!(routes.get(&format!("{:032x}", 0)), Some(&address));
+    assert_eq!(routes.get(&format!("{:032x}", 256)), Some(&address));
+    assert!(
+        routes.get(&format!("{:032x}", 1)).is_none(),
+        "the oldest success should yield to the newly authenticated route"
+    );
+}
+
+#[tokio::test]
+async fn historical_authentication_failures_are_paced_across_callers_and_fresh_discovery_recovers()
+{
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&directory.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", address.port());
+    {
+        let mut guard = alice.privacy.state.write().unwrap();
+        let state = guard.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        state.routes.record(&proof.public(), address.ip()).unwrap();
+    }
+    let rejected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let server = {
+        let rejected = rejected.clone();
+        let accepted = accepted.clone();
+        let bob = bob.clone();
+        tokio::spawn(async move {
+            let mut exchanges = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    incoming = listener.accept() => {
+                        let (socket, _) = incoming.unwrap();
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                        if !rejected.load(Ordering::SeqCst) {
+                            let bob = bob.clone();
+                            exchanges.spawn(async move { bob.privacy_accept(socket).await });
+                        }
+                    }
+                }
+            }
+            exchanges.shutdown().await;
+        })
+    };
+    let expected = bob.identity.public();
+    assert!(alice.historical_route_candidate(address, &expected, std::time::Instant::now()));
+    assert!(alice.privacy_dial(address, &expected).await.is_err());
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    let second = tokio::time::timeout(
+        Duration::from_millis(200),
+        alice.privacy_dial(address, &expected),
+    )
+    .await
+    .expect("a separate background caller must defer without another network timeout");
+    assert!(second.is_err());
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "independent producers must not repeat the same unchanged failed historical authentication"
+    );
+    alice
+        .network_changes
+        .send_modify(|generation| *generation += 1);
+    assert!(alice.privacy_dial(address, &expected).await.is_err());
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        2,
+        "network change must bypass old pacing"
+    );
+    rejected.store(false, Ordering::SeqCst);
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, address.ip(), &alice.user_id());
+    let connected = tokio::time::timeout(
+        Duration::from_secs(1),
+        alice.privacy_dial(address, &expected),
+    )
+    .await
+    .expect("fresh signed discovery must recover without waiting for historical cooldown")
+    .unwrap();
+    assert_eq!(connected.peer_identity(), &expected);
+    assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    drop(connected);
+    let _ = stop.send(());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn evicted_preferred_route_falls_back_to_current_authenticated_peer_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", address.port());
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, address.ip(), &alice.user_id());
+    alice
+        .preferred_routes
+        .lock()
+        .unwrap()
+        .insert(bob.user_id(), address);
+    for index in 0..256 {
+        alice
+            .preferred_routes
+            .lock()
+            .unwrap()
+            .insert(format!("{index:032x}"), address);
+    }
+    assert!(
+        alice
+            .preferred_routes
+            .lock()
+            .unwrap()
+            .get(&bob.user_id())
+            .is_none()
+    );
+    let expected = bob.identity.public();
+    let (connected, accepted) = tokio::join!(alice.privacy_dial(address, &expected), async {
+        let (stream, _) = listener.accept().await.unwrap();
+        bob.privacy_accept(stream).await.unwrap()
+    });
+    let connected = connected.unwrap();
+    assert_eq!(connected.peer_identity(), &bob.identity.public());
+    assert_eq!(accepted.peer_identity(), &alice.identity.public());
+    assert_eq!(
+        alice.preferred_routes.lock().unwrap().get(&bob.user_id()),
+        Some(&address)
+    );
+}
+
+#[tokio::test]
+async fn periodic_private_probes_reuse_fresh_signed_discovery_but_network_change_forces_noise() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&directory.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", address.port());
+    bob.configure_privacy(
+        &directory.path().join("bob"),
+        "pw",
+        &proof,
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    {
+        let mut state = alice.privacy.state.write().unwrap();
+        let state = state.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        state.routes.record(&proof.public(), address.ip()).unwrap();
+    }
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, address.ip(), &alice.user_id());
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (authenticated, mut arrivals) = mpsc::unbounded_channel();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let server = {
+        let accepted = accepted.clone();
+        tokio::spawn(async move {
+            let mut exchanges = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    incoming = listener.accept() => {
+                        let (socket, _) = incoming.unwrap();
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                        let bob = bob.clone();
+                        let authenticated = authenticated.clone();
+                        exchanges.spawn(async move {
+                            if bob.privacy_accept(socket).await.is_ok() {
+                                let _ = authenticated.send(());
+                            }
+                        });
+                    }
+                }
+            }
+            exchanges.shutdown().await;
+        })
+    };
+    let probes = tokio::spawn(alice.clone().run_private_route_probes());
+    // Exercise startup and the actual five-second periodic owner, while ordinary
+    // signed discovery renews independently of any TCP authentication.
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        alice
+            .roster
+            .lock()
+            .unwrap()
+            .update(&proof, address.ip(), &alice.user_id());
+    }
+    let periodic_accepts = accepted.load(Ordering::SeqCst);
+    while arrivals.try_recv().is_ok() {}
+    alice
+        .network_changes
+        .send_modify(|generation| *generation += 1);
+    let forced = tokio::time::timeout(DEADLINE, arrivals.recv()).await;
+    // The last signed observation was at six seconds. Its 15-second lease
+    // requires recovery at eleven, between the ordinary ten/fifteen ticks.
+    // Waiting only for the next five-second tick would spend four seconds of
+    // the ten-second authentication budget after public evidence expires.
+    let recovery = tokio::time::timeout(Duration::from_secs(6), arrivals.recv()).await;
+    probes.abort();
+    let _ = probes.await;
+    let _ = stop.send(());
+    server.await.unwrap();
+    assert_eq!(
+        periodic_accepts, 0,
+        "fresh matching signed discovery must avoid redundant periodic Noise handshakes"
+    );
+    assert!(
+        matches!(forced, Ok(Some(()))),
+        "an explicit network change must still force a real authenticated probe"
+    );
+    assert!(
+        matches!(recovery, Ok(Some(()))),
+        "signed discovery silence must recover at deadline minus handshake budget, before the next periodic tick"
+    );
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+}
+
 #[tokio::test]
 async fn private_probe_refreshes_public_presence_before_its_lease_expires() {
     let dir = tempfile::tempdir().unwrap();
@@ -140,6 +407,90 @@ async fn private_probe_does_not_multiply_handshakes_for_one_devices_cached_addre
 }
 
 #[tokio::test]
+async fn failed_private_probe_is_paced_but_replaced_route_is_immediately_eligible() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", address.port());
+    {
+        let mut guard = alice.privacy.state.write().unwrap();
+        let state = guard.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        state.routes.record(&proof.public(), address.ip()).unwrap();
+    }
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = accepted.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            count.fetch_add(1, Ordering::SeqCst);
+            drop(socket); // Real remote authentication failure, not local capacity pressure.
+        }
+    });
+    alice
+        .probe_private_routes_with_budget(Duration::from_secs(2))
+        .await;
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    alice
+        .probe_private_routes_with_budget(Duration::from_secs(2))
+        .await;
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "an unchanged failed historical endpoint must not be retried on every wake"
+    );
+    alice.network_changes.send_modify(|revision| *revision += 1);
+    alice
+        .probe_private_routes_with_budget(Duration::from_secs(2))
+        .await;
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        2,
+        "a new network generation must invalidate old route pacing"
+    );
+    let replacement = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = bob.signed_announce("Bob", replacement.local_addr().unwrap().port());
+    alice
+        .privacy
+        .state
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .proofs
+        .record(&proof)
+        .unwrap();
+    let replacement_accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let newer = replacement_accepted.clone();
+    let next_server = tokio::spawn(async move {
+        let (socket, _) = replacement.accept().await.unwrap();
+        newer.fetch_add(1, Ordering::SeqCst);
+        drop(socket);
+    });
+    alice
+        .probe_private_routes_with_budget(Duration::from_secs(2))
+        .await;
+    assert_eq!(
+        replacement_accepted.load(Ordering::SeqCst),
+        1,
+        "a changed verified route must bypass an older failure deadline"
+    );
+    server.abort();
+    next_server.abort();
+}
+
+#[tokio::test]
 async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("alice");
@@ -181,7 +532,8 @@ async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
         });
     }
     assert_eq!(alice.cached_routing_peers().len(), 8);
-    let producer = tokio::spawn({
+    let mut producers = tokio::task::JoinSet::new();
+    producers.spawn({
         let alice = alice.clone();
         async move {
             alice
@@ -189,6 +541,14 @@ async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
                 .await
         }
     });
+    // Different background owners can dial the same historical inventory.
+    // A per-producer limit alone cannot protect the shared TCP budget.
+    for peer in alice.cached_routing_peers() {
+        let alice = alice.clone();
+        producers.spawn(async move {
+            let _ = alice.privacy_dial(peer.addr, &peer.public).await;
+        });
+    }
     tokio::time::timeout(Duration::from_secs(1), async {
         while accepted.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -204,6 +564,19 @@ async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
     let expected = healthy.identity.public();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let proof = healthy.signed_announce("Healthy", address.port());
+    {
+        let mut state = alice.privacy.state.write().unwrap();
+        let state = state.as_mut().unwrap();
+        state.routes.record(&expected, address.ip()).unwrap();
+    }
+    assert!(alice.historical_route_candidate(address, &expected, std::time::Instant::now()));
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, address.ip(), &alice.user_id());
+    assert!(!alice.historical_route_candidate(address, &expected, std::time::Instant::now()));
     let responder = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let channel = healthy.privacy_accept(socket).await.unwrap();
@@ -224,12 +597,16 @@ async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
         .map_err(|error| error.to_string())
     })
     .await;
-    producer.abort();
-    let _ = producer.await;
+    producers.abort_all();
+    while producers.join_next().await.is_some() {}
     responder.abort();
     let _ = responder.await;
     servers.abort_all();
     while servers.join_next().await.is_some() {}
+    assert!(
+        stalled_sockets <= 2,
+        "historical dials across producers opened {stalled_sockets} stalled sockets"
+    );
     assert!(
         round.is_ok_and(|result| result.is_ok()),
         "healthy foreground Noise+sync missed its one-second deadline while historical probes held {stalled_sockets} real stalled TCP sockets"
@@ -2345,9 +2722,21 @@ async fn concurrent_channel_snapshot_does_not_restore_departed_peer_sync() {
     );
     let leave_id = leave.id;
     alice.log.lock().unwrap().append(leave).unwrap();
+    let mut denied = false;
+    for _ in 0..1024 {
+        match alice.group_member(&bob.identity.public()) {
+            Ok(false) => {
+                denied = true;
+                break;
+            }
+            Err(LogError::StaleCursor) => {}
+            Ok(true) => panic!("a stale owner snapshot restored departed peer admission"),
+            Err(error) => panic!("membership preparation failed: {error}"),
+        }
+    }
     assert!(
-        !alice.group_member(&bob.identity.public()).unwrap(),
-        "admission must honor the signed leave despite the stale owner snapshot"
+        denied,
+        "bounded admission must finish honoring the signed leave despite the stale owner snapshot"
     );
     alice
         .append_event(group, EventKind::ChannelRename, b"After leave".to_vec())
@@ -3834,4 +4223,235 @@ fn fresh_one_off_routes_lead_and_signed_ports_supersede_cached_ports() {
     );
     assert!(candidates.contains(&replacement));
     assert!(!candidates.contains(&old));
+}
+
+#[tokio::test]
+async fn certified_sibling_session_ready_ignores_unrelated_held_history() {
+    use super::super::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion};
+    use super::super::test_support::IndependentPeerRuntime;
+    use crate::identity::account::Account;
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let mut peers = Vec::new();
+    for name in ["source", "client"] {
+        let path = directory.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let (tx, _) = mpsc::unbounded_channel();
+        let (ctx, _) = mpsc::unbounded_channel();
+        let (ftx, _) = mpsc::unbounded_channel();
+        let peer = Node::open_with_account(
+            DeviceIdentity::generate(),
+            Account::from_secret_bytes(account.secret_bytes()),
+            Arc::new(Mutex::new(crate::discovery::Roster::default())),
+            tx,
+            ctx,
+            ftx,
+            &path.join("messages.log"),
+            &path.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        peer.configure_privacy(
+            &path,
+            "pw",
+            &peer.signed_announce(name, 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        peer.set_invisible(true).await.unwrap();
+        let unrelated = DeviceIdentity::generate();
+        peer.create_channel("Unrelated", vec![unrelated.public()])
+            .await
+            .unwrap();
+        peers.push(peer);
+    }
+    let source = peers[0].clone();
+    let client = peers[1].clone();
+    let phases = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let mut host_ready = Vec::new();
+    for (label, node) in [("source", &source), ("client", &client)] {
+        let (ready, ready_rx) = tokio::sync::oneshot::channel();
+        host_ready.push(ready_rx);
+        let ready = Mutex::new(Some(ready));
+        let phases = phases.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            {
+                let mut phases = phases.lock().unwrap();
+                if phases.len() == 64 {
+                    phases.pop_front();
+                }
+                phases.push_back(format!("{label}: {phase}"));
+            }
+            if phase.starts_with("responder_admission_acquired_accept_begin")
+                && let Some(ready) = ready.lock().unwrap().take()
+            {
+                let _ = ready.send(());
+            }
+        }));
+    }
+    for (local, remote) in [(&source, &client), (&client, &source)] {
+        local
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(super::super::account_devices::AccountDevice {
+                public: remote.identity.public(),
+                certificate: account.certify(&remote.identity.public().ed25519_pub),
+            })
+            .unwrap();
+        assert!(local.certified_sibling(&remote.identity.public()));
+        local
+            .privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .proofs
+            .record(&remote.signed_announce("Sibling", 1234))
+            .unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    client.roster.lock().unwrap().update(
+        &source.signed_announce("Source", address.port()),
+        address.ip(),
+        &client.user_id(),
+    );
+    let peer = client.routing_peer(&source.user_id()).unwrap();
+    let mut owner = IndependentPeerRuntime::start_multithreaded(source.clone(), listener).await;
+    owner.launch();
+    let client_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client_owner =
+        IndependentPeerRuntime::start_multithreaded(client.clone(), client_listener).await;
+    client_owner.launch();
+    // Qualify that each full host has polled its real listener before blocking
+    // history. A newly spawned LIFO child need not run before its parent yields.
+    for ready in host_ready {
+        tokio::time::timeout(DEADLINE, ready)
+            .await
+            .expect("full host must poll its inbound listener before the hold")
+            .unwrap();
+    }
+    // Both actual log guards are owned by admitted blocking work. The test's
+    // independent reactor observes progress; cleanup releases before host joins.
+    let mut releases = Vec::new();
+    let mut workers = Vec::new();
+    for node in [&source, &client] {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let held = node.clone();
+        workers.push(node.runtime_work.admit().unwrap().spawn_blocking(move || {
+            let _log = held.log.lock().unwrap();
+            entered.send(()).unwrap();
+            let _ = released.recv();
+        }));
+        releases.push(release);
+        entered_rx.await.unwrap();
+    }
+    let client_task = client.clone();
+    let exchange = client_owner.runtime_handle().spawn(async move {
+        client_task
+            .begin_account_exchange(
+                &peer,
+                AccountSyncVersion::V2,
+                AccountHistoryFrame::Wake {
+                    account_id: client_task.account_id(),
+                    epoch: [1; 16],
+                    revision: 1,
+                },
+            )
+            .await
+    });
+    let mut exchange = exchange;
+    let mut joined = false;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let exchange = tokio::time::timeout(Duration::from_secs(2), &mut exchange)
+            .await
+            .expect("real Noise and SessionReady must finish while unrelated history is held");
+        joined = true;
+        drop(exchange.unwrap().unwrap());
+    })
+    .catch_unwind()
+    .await;
+    if outcome.is_err() {
+        eprintln!(
+            "held-history phases before release: {:?}",
+            phases.lock().unwrap()
+        );
+    }
+    drop(releases);
+    for worker in workers {
+        drop(worker.await.unwrap());
+    }
+    if !joined {
+        exchange.abort();
+        let _ = exchange.await;
+    }
+    owner.stop().await;
+    client_owner.stop().await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn remember_peer_rechecks_stricter_policy_and_fresh_group_fallback() {
+    for shared_group in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local");
+        let (local, _) = node(&path);
+        let (remote, _) = node(&dir.path().join("remote"));
+        local
+            .configure_privacy(
+                &path,
+                "pw",
+                &local.signed_announce("Local", 1),
+                Arc::new(DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+        if shared_group {
+            local
+                .create_channel("Shared", vec![remote.identity.public()])
+                .await
+                .unwrap();
+            assert!(local.group_member(&remote.identity.public()).unwrap());
+        }
+        let changed = local.clone();
+        *local.remember_peer_hook.lock().unwrap() = Some(Box::new(move || {
+            changed
+                .privacy
+                .state
+                .write()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .policy
+                .set_invisible(true)
+                .unwrap();
+        }));
+        let proof = remote.signed_announce("Remote", 1234);
+        local
+            .remember_peer_with_visibility(
+                &remote.identity.public(),
+                Some(&proof),
+                Ipv4Addr::LOCALHOST.into(),
+                false,
+            )
+            .unwrap();
+        let guard = local.privacy.state.read().unwrap();
+        let state = guard.as_ref().unwrap();
+        assert!(state.proofs.accepts_binding(&proof));
+        assert_eq!(
+            state
+                .routes
+                .routes()
+                .iter()
+                .any(|(public, _)| public == &remote.identity.public()),
+            shared_group,
+            "stricter current policy needs fresh group authority for routes"
+        );
+        assert!(local.roster.lock().unwrap().peers().is_empty());
+    }
 }

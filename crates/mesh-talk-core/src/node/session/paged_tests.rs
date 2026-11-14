@@ -6,6 +6,779 @@ use crate::storage::database::EncryptedDatabase;
 use std::sync::Arc;
 
 #[tokio::test]
+async fn metadata_query_does_not_dispatch_pending_file_reception() {
+    use crate::{discovery::Announce, identity::account::Account};
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.cached_peer_snapshot_async().await.unwrap();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+    // Retained but not yet decryptable file work is a legitimate retry state.
+    // A metadata query must not claim/rotate it or perform reception recovery.
+    let pending = Event::new(
+        &peer,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::FileManifest,
+        vec![0; 128],
+    );
+    let pending_id = pending.id;
+    node.log.lock().unwrap().append_durable(pending).unwrap();
+    // Use the receiving owner's storage scope, which is distinct from the
+    // public account identifier represented in discovery and UI.
+    let account: Vec<u8> = node
+        .storage
+        .database()
+        .read(|c| {
+            c.query_row("SELECT account FROM file_receive_scan", [], |r| r.get(0))
+                .map_err(Into::into)
+        })
+        .unwrap();
+    node.storage
+        .database()
+        .transaction(|c| {
+            let after: i64 =
+                c.query_row("SELECT max(commit_ordinal) FROM retained_events", [], |r| {
+                    r.get(0)
+                })?;
+            assert_eq!(
+                c.execute(
+                    "UPDATE file_receive_scan SET after_commit=?1,next_ticket=3 WHERE account=?2",
+                    rusqlite::params![after, &account]
+                )?,
+                1
+            );
+            c.execute(
+                "INSERT INTO file_receive_pending VALUES(?1,?2,?3,256,1)",
+                rusqlite::params![
+                    &account,
+                    pending_id.as_bytes().as_slice(),
+                    conversation.as_bytes().as_slice()
+                ],
+            )?;
+            c.execute(
+                "INSERT INTO file_receive_pending VALUES(?1,?2,?3,256,2)",
+                rusqlite::params![&account, [231_u8; 32].as_slice(), [232_u8; 32].as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let tickets = || {
+        node.storage
+            .database()
+            .read(|c| {
+                let ticket: i64 = c.query_row(
+                    "SELECT ticket FROM file_receive_pending WHERE account=?1 AND event=?2",
+                    rusqlite::params![&account, pending_id.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )?;
+                let next: i64 = c.query_row(
+                    "SELECT next_ticket FROM file_receive_scan WHERE account=?1",
+                    [account.as_slice()],
+                    |r| r.get(0),
+                )?;
+                Ok((ticket, next))
+            })
+            .unwrap()
+    };
+    let before = tickets();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = node.clone();
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let channel = SecureChannel::accept(socket, &server.identity)
+            .await
+            .unwrap();
+        server.serve_connection(channel).await;
+    });
+    let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut channel = SecureChannel::connect(socket, &peer, Some(&node.identity.public()))
+        .await
+        .unwrap();
+    channel
+        .send(
+            &encode(&SyncWire::FpRequestV5(FpRequest {
+                conversation,
+                fingerprint: [0; 32],
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        decode(&channel.recv().await.unwrap()).unwrap(),
+        SyncWire::FpResponse(_)
+    ));
+    drop(channel);
+    tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    // Observe after the actual production serving task, including callbacks, retired.
+    let after = tickets();
+    // Accepted payloads still publish reception work, including retryable
+    // duplicates; an invalid payload cannot manufacture the signal.
+    let owner = node.serve_sync_store(&peer.public());
+    {
+        let mut store = owner.lock().unwrap();
+        assert!(!store.take_received_work());
+        let body = crate::dm::seal(
+            &peer,
+            &node.identity.public().x25519_pub,
+            b"received payload",
+        )
+        .unwrap();
+        let message = Event::new(
+            &peer,
+            conversation,
+            2,
+            vec![pending_id],
+            2,
+            0,
+            EventKind::Message,
+            body,
+        );
+        assert!(matches!(
+            NetworkSyncStore::ingest(&mut *store, message.clone()).unwrap(),
+            crate::eventlog::AppendOutcome::Appended
+        ));
+        assert!(store.take_received_work());
+        assert!(!store.take_received_work());
+        assert!(matches!(
+            NetworkSyncStore::ingest(&mut *store, message.clone()).unwrap(),
+            crate::eventlog::AppendOutcome::Duplicate
+        ));
+        assert!(store.take_received_work());
+        let mut invalid = Event::new(
+            &peer,
+            conversation,
+            3,
+            vec![message.id],
+            3,
+            0,
+            EventKind::Message,
+            message.ciphertext.clone(),
+        );
+        invalid.sig[0] ^= 1;
+        assert!(NetworkSyncStore::ingest(&mut *store, invalid).is_err());
+        assert!(!store.take_received_work());
+    }
+    drop(owner);
+    if let Some(retirement) = node.retire_prepared_sync_views() {
+        retirement.await.unwrap();
+    }
+    node.runtime_work.drain().await;
+    assert_eq!(
+        after, before,
+        "read-only metadata must not mutate pending reception fair turns"
+    );
+}
+
+#[tokio::test]
+async fn partial_followup_storage_failure_dispatches_already_durable_dm_reception() {
+    use crate::{discovery::Announce, identity::account::Account};
+    use futures_util::FutureExt;
+    use std::time::Duration;
+
+    let source_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let source_identity = DeviceIdentity::generate();
+    let target_identity = DeviceIdentity::generate();
+    let source_account = Account::generate();
+    let target_account = Account::generate();
+    let source_proof = Announce::new_with_account(&source_identity, &source_account, "Source", 9);
+    let target_proof = Announce::new_with_account(&target_identity, &target_account, "Target", 9);
+    let (source, _, _) = super::super::test_support::node_with_files(
+        source_dir.path(),
+        source_identity,
+        source_account,
+        &target_proof,
+    );
+    let (target, mut incoming, _) = super::super::test_support::node_with_files(
+        target_dir.path(),
+        target_identity,
+        target_account,
+        &source_proof,
+    );
+    target.cached_peer_snapshot_async().await.unwrap();
+    let first_id = source
+        .enqueue_to_account(&target.account_id(), b"durable prefix", None)
+        .await
+        .unwrap();
+    let second_id = source
+        .enqueue_to_account(&target.account_id(), b"blocked suffix", None)
+        .await
+        .unwrap();
+    let [first, second] = {
+        let store = source.delivery.lock().unwrap();
+        [first_id, second_id].map(|id| store.message(id).unwrap().destinations[0].event.clone())
+    };
+    let conversation = first.conversation_id;
+    assert_eq!(second.conversation_id, conversation);
+    assert!(first.verify_integrity() && first.verify_signature());
+    assert!(second.verify_integrity() && second.verify_signature());
+    assert!(second.parents.contains(&first.id));
+    // Fail only the second authentic ciphertext's SQL insertion. Each ingest
+    // owns its own transaction; the successful prefix must remain durable.
+    target.storage.database().transaction(|c| {
+        c.execute_batch(&format!("CREATE TEMP TRIGGER fail_followup_suffix BEFORE INSERT ON retained_events WHEN NEW.id=X'{}' BEGIN SELECT RAISE(ABORT,'injected followup suffix storage failure'); END;", hex::encode(second.id.as_bytes())))?;
+        Ok(())
+    }).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = target.clone();
+    let mut task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let channel = SecureChannel::accept(socket, &serving.identity)
+            .await
+            .unwrap();
+        serving.serve_connection(channel).await;
+    });
+    let result = std::panic::AssertUnwindSafe(async {
+        let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut channel = SecureChannel::connect(socket, &source.identity, Some(&target.identity.public())).await.unwrap();
+        channel.send(&encode(&SyncWire::FollowupV5(SyncFollowup {
+            conversation,
+            events: vec![first.clone(), second.clone()],
+        })).unwrap()).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), channel.recv()).await.unwrap().is_err(), "actual storage failure must close the authenticated exchange");
+        tokio::time::timeout(Duration::from_secs(5), &mut task).await.unwrap().unwrap();
+        {
+            let log = target.log.lock().unwrap();
+            assert!(log.get(&first.id).unwrap().is_some(), "first ciphertext must actually survive the suffix failure");
+            assert!(log.get(&second.id).unwrap().is_none(), "the exact injected second insert must roll back");
+            log.sync().unwrap();
+        }
+        // No metadata/Have query, subsequent payload, manual emit or explicit
+        // reconciliation can manufacture the reception signal after failure.
+        let message = tokio::time::timeout(Duration::from_secs(2), incoming.recv()).await.expect("accepted durable prefix must automatically reach plaintext reception despite a later local storage error").unwrap();
+        assert_eq!(message.message_id, Some(first_id));
+        assert_eq!(message.text, b"durable prefix");
+        assert!(target.received.lock().unwrap().processed(first.id).unwrap());
+        let receipts = target.delivery.lock().unwrap().retry_receipts(8);
+        assert_eq!(receipts.len(), 1, "only the accepted prefix may publish a durable receipt");
+        assert_eq!(receipts[0].logical_id, first_id);
+        assert_eq!(receipts[0].original_event_id, first.id);
+        assert!(receipts[0].destination.event.verify_signature());
+        assert!(incoming.try_recv().is_err(), "rejected suffix must not emit plaintext");
+    }).catch_unwind().await;
+    let cleanup = std::panic::AssertUnwindSafe(async {
+        if !task.is_finished() {
+            task.abort();
+            let joined = task.await;
+            assert!(
+                joined.is_err_and(|error| error.is_cancelled()),
+                "owned serving task must retire on failed fixture"
+            );
+        }
+        if let Some(retirement) = target.retire_prepared_sync_views() {
+            retirement.await.unwrap();
+        }
+        target.runtime_work.drain().await;
+    })
+    .catch_unwind()
+    .await;
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+    if let Err(error) = cleanup {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[tokio::test]
+async fn ordinary_requester_reuses_selection_without_idle_commits() {
+    requester_selection_reuse_fixture(false, false).await;
+}
+
+#[tokio::test]
+async fn ordinary_requester_reuses_selection_across_connections_without_idle_commits() {
+    requester_selection_reuse_fixture(true, false).await;
+}
+
+#[tokio::test]
+async fn ordinary_requester_preserves_unchanged_selection_after_long_idle() {
+    requester_selection_reuse_fixture(true, true).await;
+}
+
+async fn requester_selection_reuse_fixture(fresh_connections: bool, age_entries: bool) {
+    use crate::{discovery::Announce, identity::account::Account};
+    let left_dir = tempfile::tempdir().unwrap();
+    let right_dir = tempfile::tempdir().unwrap();
+    let left_id = DeviceIdentity::generate();
+    let right_id = DeviceIdentity::generate();
+    let left_account = Account::generate();
+    let right_account = Account::generate();
+    let left_proof = Announce::new_with_account(&left_id, &left_account, "Left", 9);
+    let right_proof = Announce::new_with_account(&right_id, &right_account, "Right", 9);
+    let (left, _, _) = super::super::test_support::node_with_files(
+        left_dir.path(),
+        left_id,
+        left_account,
+        &right_proof,
+    );
+    let (right, _, _) = super::super::test_support::node_with_files(
+        right_dir.path(),
+        right_id,
+        right_account,
+        &left_proof,
+    );
+    left.cached_peer_snapshot_async().await.unwrap();
+    right.cached_peer_snapshot_async().await.unwrap();
+    let conversation = super::super::conversation::dm_conversation_id(
+        &left.identity.public(),
+        &right.identity.public(),
+    );
+    for seq in 1..=32 {
+        let event = Event::new(
+            &left.identity,
+            conversation,
+            seq,
+            vec![],
+            seq,
+            0,
+            EventKind::Message,
+            vec![7; 128],
+        );
+        for node in [&left, &right] {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(event.clone())
+                .unwrap();
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = right.clone();
+    let peer = left.identity.public();
+    let (finished, mut completions) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        for _ in 0..if fresh_connections { 12 } else { 1 } {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(socket, &server.identity)
+                .await
+                .unwrap();
+            let store = server.serve_sync_store(&peer);
+            loop {
+                if matches!(
+                    serve_one_paged(&mut channel, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+                finished.send(()).unwrap();
+            }
+            drop(store);
+            drop(channel);
+            if fresh_connections {
+                finished.send(()).unwrap();
+            }
+        }
+    });
+    let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut channel = Some(
+        SecureChannel::connect(socket, &left.identity, Some(&right.identity.public()))
+            .await
+            .unwrap(),
+    );
+    let counters = || {
+        (
+            left.storage
+                .database()
+                .read(|c| Ok(c.total_changes()))
+                .unwrap(),
+            left.storage.database().successful_write_commits(),
+            right
+                .storage
+                .database()
+                .read(|c| Ok(c.total_changes()))
+                .unwrap(),
+            right.storage.database().successful_write_commits(),
+        )
+    };
+    let mut baseline = None;
+    for round in 0..12 {
+        if age_entries && round % 6 > 2 {
+            for node in [&left, &right] {
+                node.prepared_sync_views
+                    .lock()
+                    .unwrap()
+                    .age_for_test(std::time::Duration::from_secs(60 * 60));
+            }
+        }
+        if channel.is_none() {
+            let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            channel = Some(
+                SecureChannel::connect(socket, &left.identity, Some(&right.identity.public()))
+                    .await
+                    .unwrap(),
+            );
+        }
+        // Production callers keep the socket but create a new request adapter.
+        let store = left.sync_store(&right.identity.public());
+        if round == 6 {
+            let tail = Event::new(
+                &left.identity,
+                conversation,
+                33,
+                vec![],
+                33,
+                0,
+                EventKind::Message,
+                vec![8; 128],
+            );
+            for node in [&left, &right] {
+                node.log
+                    .lock()
+                    .unwrap()
+                    .append_durable(tail.clone())
+                    .unwrap();
+            }
+        }
+        // An ordinary query remains valid even when the optional digest probe
+        // was skipped or differed. Exercise its actual paged network path.
+        let mut progress = SyncProgress {
+            started: true,
+            ..Default::default()
+        };
+        while !progress
+            .step_burst_paged(channel.as_mut().unwrap(), &store, conversation, 1)
+            .await
+            .unwrap()
+        {}
+        // Fence the server's final followup before observing committed rows.
+        for _ in 0..2 {
+            completions.recv().await.unwrap();
+        }
+        assert_eq!(progress.total.applied, 0);
+        assert_eq!(
+            progress.remote_have_count(),
+            Some(if round < 6 { 32 } else { 33 })
+        );
+        drop(store);
+        if fresh_connections {
+            drop(channel.take());
+            // Fence the actual server connection and adapter retirement.
+            completions.recv().await.unwrap();
+        }
+        if round % 6 == 2 {
+            baseline = Some(counters());
+        }
+        if round % 6 > 2 {
+            assert_eq!(
+                counters(),
+                baseline.unwrap(),
+                "unchanged ordinary requester must reuse its exclusive prepared selection"
+            );
+        }
+    }
+    // A surviving adapter owns no active query after its completed exchange.
+    let survivor = left.sync_store(&right.identity.public());
+    if let Some(channel) = channel.as_ref() {
+        NetworkSyncStore::bind_session_peer(
+            &mut *survivor.lock().unwrap(),
+            channel.peer_identity(),
+        );
+        // Another runtime cannot claim this socket's prepared state, even with
+        // a wrapper naming the same authenticated peer.
+        let foreign = right.sync_store(&right.identity.public());
+        NetworkSyncStore::bind_session_peer(&mut *foreign.lock().unwrap(), channel.peer_identity());
+        assert!(
+            NetworkSyncStore::take_custody_view(&mut *foreign.lock().unwrap(), &conversation,)
+                .unwrap()
+                .is_none()
+        );
+        drop(foreign);
+    }
+    drop(channel);
+    task.await.unwrap();
+    for node in [&left, &right] {
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .active_selection_count(),
+            0,
+            "completed sockets must release active admission while plans remain cached"
+        );
+        let retirement = node
+            .retire_prepared_sync_views()
+            .expect("node must retain its qualified derived plan across sockets");
+        retirement.await.unwrap();
+        node.runtime_work.drain().await;
+        let live: i64 = node
+            .storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM participant_work.participant_sync_views WHERE retired=0",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            live, 0,
+            "node cache retirement must release its prepared selection"
+        );
+    }
+    drop(survivor);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_request_connection_reuses_selection_and_rechecks_authority() {
+    use crate::discovery::{Announce, DiscoveryVisibility};
+    use crate::identity::account::Account;
+    async fn request(
+        channel: &mut SecureChannel<tokio::net::TcpStream>,
+        conversation: ConversationId,
+        have: Vec<EventId>,
+    ) -> Vec<EventId> {
+        channel
+            .send(
+                &encode(&SyncWire::RequestV4(SyncRequest {
+                    conversation,
+                    have: Vec::new(),
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        channel
+            .send(
+                &encode(&SyncWire::ReqHave(HaveChunk {
+                    conversation,
+                    ids: have,
+                    more: false,
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let SyncWire::Response(response) = decode(&channel.recv().await.unwrap()).unwrap() else {
+            panic!("ordinary request did not receive an ordinary response");
+        };
+        assert_eq!(response.conversation, conversation);
+        loop {
+            let SyncWire::RespHave(chunk) = decode(&channel.recv().await.unwrap()).unwrap() else {
+                panic!("ordinary response did not stream its complete Have set");
+            };
+            assert_eq!(chunk.conversation, conversation);
+            if !chunk.more {
+                break;
+            }
+        }
+        response.events.into_iter().map(|event| event.id).collect()
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let peer_account = Account::generate();
+    let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.configure_privacy(
+        directory.path(),
+        "pw",
+        &node.own_group_proof(),
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    node.privacy
+        .state
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .proofs
+        .record(&proof)
+        .unwrap();
+    node.set_allowed(&peer_account.account_id(), true)
+        .await
+        .unwrap();
+    node.set_invisible(true).await.unwrap();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+    let append = |seq| {
+        let event = Event::new(
+            &node.identity,
+            conversation,
+            seq,
+            vec![],
+            seq,
+            0,
+            EventKind::Message,
+            vec![7; 256],
+        );
+        let id = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        id
+    };
+    let first = append(1);
+    node.storage.database().read(|c| {
+        c.execute_batch("CREATE TEMP TABLE observed_selection_creations(value INTEGER); CREATE TEMP TRIGGER observe_selection_creation AFTER INSERT ON participant_work.participant_sync_views BEGIN INSERT INTO observed_selection_creations VALUES(1); END;")?;
+        Ok(())
+    }).unwrap();
+    let selection_creations = || {
+        node.storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM observed_selection_creations",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let counters = || {
+        (
+            node.storage
+                .database()
+                .read(|connection| Ok(connection.total_changes()))
+                .unwrap(),
+            node.storage.database().successful_write_commits(),
+        )
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = node.clone();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let channel = server.privacy_accept(stream).await.unwrap();
+        server.serve_connection(channel).await;
+    });
+    let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut channel = SecureChannel::connect_with_presence(
+        stream,
+        &peer,
+        Some(&node.identity.public()),
+        Some(&proof),
+    )
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        for _ in 0..3 {
+            assert_eq!(request(&mut channel, conversation, vec![]).await, vec![first]);
+            // An authenticated next request fences completion of the preceding
+            // response, including selection retention or retirement after send.
+            assert!(request_durable_have(&mut channel, conversation, first).await.unwrap());
+        }
+        // A changed file-scope qualification invalidates this selection without
+        // revoking the authenticated socket. Actual privacy revocation below
+        // must still be allowed to close the connection immediately.
+        node.privacy.projection_revision.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        channel.send(&encode(&SyncWire::FpRequestV4(FpRequest {
+            conversation, fingerprint: [0; 32],
+        })).unwrap()).await.unwrap();
+        assert!(matches!(decode(&channel.recv().await.unwrap()).unwrap(),
+            SyncWire::FpResponse(FpResponse { matched: false })));
+        let after_probe = selection_creations();
+        assert_eq!(request(&mut channel, conversation, vec![]).await, vec![first]);
+        assert!(request_durable_have(&mut channel, conversation, first).await.unwrap());
+        assert_eq!(selection_creations(), after_probe,
+            "ordinary request must take over its completed fingerprint selection");
+        let warm = counters();
+        for _ in 0..3 {
+            assert_eq!(request(&mut channel, conversation, vec![]).await, vec![first]);
+            assert!(request_durable_have(&mut channel, conversation, first).await.unwrap());
+        }
+        let quiet = counters();
+        let tail = append(2);
+        let changed = request(&mut channel, conversation, vec![first]).await;
+        assert!(request_durable_have(&mut channel, conversation, tail).await.unwrap());
+        let alternate_warm = counters();
+        let different_have = request(&mut channel, conversation, vec![tail]).await;
+        assert!(request_durable_have(&mut channel, conversation, tail).await.unwrap());
+        let mut alternate_responses = Vec::new();
+        for have in [vec![first], vec![], vec![first, tail]] {
+            alternate_responses.push(request(&mut channel, conversation, have).await);
+            assert!(request_durable_have(&mut channel, conversation, tail).await.unwrap());
+        }
+        let alternate_quiet = counters();
+        node.set_allowed(&peer_account.account_id(), false).await.unwrap();
+        // Privacy revocation may retire the authenticated socket itself. Either
+        // closure or a freshly empty response must withhold the retained data.
+        let revoked = match channel.send(&encode(&SyncWire::RequestV4(SyncRequest {
+            conversation, have: Vec::new(),
+        })).unwrap()).await {
+            Err(_) => true,
+            Ok(()) => match channel.send(&encode(&SyncWire::ReqHave(HaveChunk {
+                conversation, ids: Vec::new(), more: false,
+            })).unwrap()).await {
+                Err(_) => true,
+                Ok(()) => match channel.recv().await {
+                    Err(_) => true,
+                    Ok(bytes) => matches!(decode(&bytes), Ok(SyncWire::Response(response)) if response.events.is_empty()),
+                },
+            },
+        };
+        (warm, quiet, tail, changed, different_have, revoked,
+            alternate_warm, alternate_quiet, alternate_responses)
+    }).await;
+    drop(channel);
+    tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let (
+        warm,
+        quiet,
+        tail,
+        changed,
+        different_have,
+        revoked,
+        alternate_warm,
+        alternate_quiet,
+        alternate_responses,
+    ) = result.unwrap();
+    assert_eq!(
+        quiet, warm,
+        "repeated identical ordinary Requests must not commit selection or export mutations after warming"
+    );
+    assert_eq!(
+        changed,
+        vec![tail],
+        "new server data must invalidate the finite selection"
+    );
+    assert_eq!(
+        alternate_responses,
+        vec![vec![tail], vec![first, tail], vec![]],
+        "every changed remote Have must filter the current source independently"
+    );
+    assert_eq!(
+        alternate_quiet, alternate_warm,
+        "closure-free inbound exports must not mutate SQL selection or export state when only remote Have changes"
+    );
+    assert_eq!(
+        different_have,
+        vec![first],
+        "changed remote Have must select a fresh export"
+    );
+    assert!(
+        revoked,
+        "retained ordinary selection must not outlive current peer authority"
+    );
+}
+
+#[tokio::test]
 async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
     let preparation_started = std::time::Instant::now();
     let mut fixtures = Vec::new();
@@ -1548,6 +2321,7 @@ async fn budgeted_round_saturation_cancellation_and_healthy_retry_release_reserv
         true,
         ConversationId::new([7; 32]),
         Some(&budget),
+        false,
     );
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(20), receive)
@@ -1608,4 +2382,1115 @@ async fn paged_preparation_yields_unlocked_and_observes_concurrent_revocation() 
         "a competing task must run before preparation drains the source"
     );
     assert!(guard.preparation_rows.load(Ordering::Relaxed) > 0);
+}
+
+/// Inject only after the first complete application frame, never during Noise.
+struct TerminalHaveFaultIo {
+    inner: tokio::io::DuplexStream,
+    armed: Arc<AtomicBool>,
+    flushed: Arc<AtomicUsize>,
+    entered: Arc<AtomicBool>,
+    notification: Arc<tokio::sync::Notify>,
+    fail: bool,
+}
+impl tokio::io::AsyncRead for TerminalHaveFaultIo {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        tokio::io::AsyncRead::poll_read(std::pin::Pin::new(&mut self.inner), cx, buffer)
+    }
+}
+impl tokio::io::AsyncWrite for TerminalHaveFaultIo {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if self.armed.load(Ordering::SeqCst) && self.flushed.load(Ordering::SeqCst) > 0 {
+            self.entered.store(true, Ordering::SeqCst);
+            self.notification.notify_one();
+            return if self.fail {
+                std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "injected terminal Have send failure",
+                )))
+            } else {
+                // The test cancels the actual responder future at this boundary.
+                std::task::Poll::Pending
+            };
+        }
+        tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(&mut self.inner), cx, bytes)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let result = tokio::io::AsyncWrite::poll_flush(std::pin::Pin::new(&mut self.inner), cx);
+        if matches!(result, std::task::Poll::Ready(Ok(()))) {
+            self.flushed.fetch_add(1, Ordering::SeqCst);
+        }
+        result
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        tokio::io::AsyncWrite::poll_shutdown(std::pin::Pin::new(&mut self.inner), cx)
+    }
+}
+
+#[tokio::test]
+async fn ordinary_request_terminal_send_failure_and_cancellation_release_retained_selection() {
+    use crate::discovery::{Announce, DiscoveryVisibility};
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    use crate::identity::account::Account;
+    use std::time::Duration;
+
+    for fail in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let peer_account = Account::generate();
+        let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.configure_privacy(
+            directory.path(),
+            "pw",
+            &node.own_group_proof(),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .proofs
+            .record(&proof)
+            .unwrap();
+        node.set_allowed(&peer_account.account_id(), true)
+            .await
+            .unwrap();
+        node.set_invisible(true).await.unwrap();
+        let conversation =
+            super::super::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+        let event = Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![7; 256],
+        );
+        let event_id = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let armed = Arc::new(AtomicBool::new(false));
+        let flushed = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicBool::new(false));
+        let notification = Arc::new(tokio::sync::Notify::new());
+        let io = TerminalHaveFaultIo {
+            inner: server_io,
+            armed: armed.clone(),
+            flushed: flushed.clone(),
+            entered: entered.clone(),
+            notification: notification.clone(),
+            fail,
+        };
+        let server_public = node.identity.public();
+        let (client, server) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                SecureChannel::connect(client_io, &peer, Some(&server_public)),
+                SecureChannel::accept(io, &node.identity),
+            )
+        })
+        .await
+        .unwrap();
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+        let store = node.serve_sync_store(&peer.public());
+        let request = encode(&SyncWire::RequestV4(SyncRequest {
+            conversation,
+            have: vec![],
+        }))
+        .unwrap();
+        let have = encode(&SyncWire::ReqHave(HaveChunk {
+            conversation,
+            ids: vec![],
+            more: false,
+        }))
+        .unwrap();
+        // Qualify a genuinely retained ordinary-response selection first. A cold
+        // metadata stamp is not evidence that the cache lifetime was exercised.
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let (served, ()) = tokio::join!(serve_one_paged(&mut server, &store), async {
+                    client.send(&request).await.unwrap();
+                    client.send(&have).await.unwrap();
+                    assert!(matches!(
+                        decode(&client.recv().await.unwrap()).unwrap(),
+                        SyncWire::Response(_)
+                    ));
+                    assert!(matches!(
+                        decode(&client.recv().await.unwrap()).unwrap(),
+                        SyncWire::RespHave(HaveChunk { more: false, .. })
+                    ));
+                });
+                assert!(matches!(served.unwrap(), Served::Handled(c) if c == conversation));
+            })
+            .await
+            .unwrap();
+        }
+        let warm = NetworkSyncStore::take_custody_view(&mut *store.lock().unwrap(), &conversation)
+            .unwrap();
+        assert!(
+            warm.is_some(),
+            "ordinary response did not establish the retained-view precondition"
+        );
+        let uncached =
+            NetworkSyncStore::retain_custody_view(&mut *store.lock().unwrap(), warm.unwrap())
+                .unwrap();
+        assert!(uncached.is_none());
+        flushed.store(0, Ordering::SeqCst);
+        armed.store(true, Ordering::SeqCst);
+        client.send(&request).await.unwrap();
+        client.send(&have).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            if fail {
+                assert!(serve_one_paged(&mut server, &store).await.is_err());
+            } else {
+                let mut serving = Box::pin(serve_one_paged(&mut server, &store));
+                tokio::select! {
+                    result = &mut serving => panic!("terminal send did not remain admitted: {result:?}"),
+                    _ = notification.notified() => {},
+                }
+                drop(serving);
+            }
+        }).await.unwrap();
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "actual terminal Have send was not admitted"
+        );
+        let SyncWire::Response(response) = decode(&client.recv().await.unwrap()).unwrap() else {
+            panic!("first ordinary Response frame was not completed");
+        };
+        assert_eq!(
+            response
+                .events
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            vec![event_id]
+        );
+        // Keep the store alive: dropping the whole connection here would mask
+        // premature retention of an incompletely framed responder selection.
+        let cached =
+            NetworkSyncStore::take_custody_view(&mut *store.lock().unwrap(), &conversation)
+                .unwrap();
+        assert!(
+            cached.is_none(),
+            "incomplete response retained its SQL selection"
+        );
+        let active: i64 = node
+            .storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM participant_work.participant_sync_views WHERE retired=0",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            active, 0,
+            "failed/cancelled responder must release the owned selection while its store stays alive"
+        );
+        drop(server);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), client.recv())
+                .await
+                .unwrap()
+                .is_err(),
+            "partial response must not publish terminal Have"
+        );
+    }
+}
+
+/// Exercise the production requester over encrypted TCP, observing committed SQL
+/// admissions rather than wrapper calls or wall time. The peer pauses at ReqHave.
+#[tokio::test]
+async fn requester_have_selection_reuse_loopback() {
+    use crate::discovery::Announce;
+    use crate::identity::account::Account;
+    use std::sync::atomic::Ordering;
+    for mutation in ["unchanged", "append", "received", "delete", "revoke"] {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(), DeviceIdentity::generate(), Account::generate(), &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::conversation::dm_conversation_id(
+            &node.identity.public(), &peer.public(),
+        );
+        let append = |seq| {
+            let event = Event::new(&node.identity, conversation, seq, vec![], seq, 0,
+                EventKind::Message, vec![7; 128]);
+            let id = event.id;
+            node.log.lock().unwrap().append_durable(event).unwrap();
+            id
+        };
+        let first = append(1);
+        while !node.log.lock().unwrap().repository().unwrap()
+            .prepare_kind_metadata_step(crate::eventlog::sync::network::PreparationBudget::default())
+            .unwrap().ready {}
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TABLE test_selection_counts(views INTEGER, rows INTEGER);
+                INSERT INTO test_selection_counts VALUES(0,0);
+                CREATE TEMP TRIGGER test_selection_admission AFTER INSERT ON participant_work.participant_sync_views
+                BEGIN UPDATE test_selection_counts SET views=views+1; END;
+                CREATE TEMP TRIGGER test_selection_row AFTER INSERT ON participant_work.participant_sync_rows
+                BEGIN UPDATE test_selection_counts SET rows=rows+1; END;")?;
+            Ok(())
+        }).unwrap();
+        let counts = || node.storage.database().read(|c| {
+            Ok(c.query_row("SELECT views, rows FROM test_selection_counts", [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?)
+        }).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let received = Event::new(&peer, conversation, 2, vec![first], 2, 0,
+            EventKind::Message, vec![8; 128]);
+        let received_id = received.id;
+        let server_node = node.clone();
+        let (reached, barrier) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(stream, &peer).await.unwrap();
+            assert!(matches!(decode(&channel.recv().await.unwrap()).unwrap(),
+                SyncWire::Request(_)));
+            let have = recv_have(&mut channel, true, conversation).await.unwrap();
+            assert!(have.contains(&first));
+            reached.send(()).unwrap();
+            resume.await.unwrap();
+            channel.send(&encode(&SyncWire::Response(SyncResponse {
+                conversation, events: if mutation == "received" { vec![received] } else { vec![] }, have: vec![],
+            })).unwrap()).await.unwrap();
+            channel.send(&encode(&SyncWire::RespHave(HaveChunk {
+                conversation, ids: if mutation == "received" { vec![received_id] } else { vec![] }, more: false,
+            })).unwrap()).await.unwrap();
+            match channel.recv().await {
+                Ok(bytes) => match decode(&bytes).unwrap() {
+                    SyncWire::Followup(f) => f.events.into_iter().map(|e| e.id).collect::<Vec<_>>(),
+                    other => panic!("unexpected followup: {other:?}"),
+                },
+                Err(_) => Vec::new(),
+            }
+        });
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut channel = SecureChannel::connect(stream, &node.identity, Some(&proof.public()))
+            .await.unwrap();
+        // A continuing production round has already completed capability probing.
+        let mut progress = SyncProgress { started: true, ..Default::default() };
+        let store = node.sync_store(&proof.public());
+        let client = progress.step_burst_paged(&mut channel, &store, conversation, 1);
+        let mut appended = None;
+        let mutate = async {
+            barrier.await.unwrap();
+            assert_eq!(counts(), (1, 1));
+            if mutation == "append" { appended = Some(append(2)); }
+            if mutation == "delete" {
+                server_node.log.lock().unwrap().repository().unwrap()
+                    .drop_conversation(&conversation).unwrap();
+            }
+            if mutation == "revoke" {
+                server_node.privacy.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            release.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(client, mutate);
+        drop(channel);
+        let exported = task.await.unwrap();
+        if mutation == "revoke" || mutation == "delete" {
+            assert!(result.is_err());
+            assert!(exported.is_empty(), "revoked authority exported stale events");
+        } else {
+            result.unwrap();
+            assert!(exported.contains(&first));
+            if let Some(id) = appended {
+                assert!(exported.contains(&id), "fresh cutoff omitted concurrent append");
+                assert_eq!(counts(), (2, 3));
+            } else if mutation == "received" {
+                assert_eq!(progress.total.applied, 1, "peer event was not durably applied");
+                assert_eq!(counts(), (2, 3), "received causal event must select a new cutoff");
+                assert!(!exported.contains(&received_id), "remote Have was ignored");
+            } else {
+                assert_eq!(counts(), (1, 1), "unchanged round rebuilt its prepared selection");
+            }
+        }
+        }).await.unwrap_or_else(|_| panic!("requester selection scenario {mutation} timed out"));
+    }
+}
+
+/// A completed rejection is not acceptance, but does not invalidate an unchanged
+/// local SQL selection. Repeated attempts must still exchange Have and fail.
+#[tokio::test]
+async fn requester_no_progress_reuses_only_local_preparation_loopback() {
+    use crate::discovery::Announce;
+    use crate::identity::account::Account;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = Arc::new(DeviceIdentity::generate());
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(), DeviceIdentity::generate(), Account::generate(), &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::conversation::dm_conversation_id(
+            &node.identity.public(), &peer.public(),
+        );
+        let event = Event::new(&node.identity, conversation, 1, vec![], 1, 0,
+            EventKind::Message, vec![7; 128]);
+        let id = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        while !node.log.lock().unwrap().repository().unwrap()
+            .prepare_kind_metadata_step(crate::eventlog::sync::network::PreparationBudget::default())
+            .unwrap().ready {}
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TABLE test_no_progress_counts(views INTEGER, rows INTEGER);
+                INSERT INTO test_no_progress_counts VALUES(0,0);
+                CREATE TEMP TRIGGER test_no_progress_admission AFTER INSERT ON participant_work.participant_sync_views
+                BEGIN UPDATE test_no_progress_counts SET views=views+1; END;
+                CREATE TEMP TRIGGER test_no_progress_row AFTER INSERT ON participant_work.participant_sync_rows
+                BEGIN UPDATE test_no_progress_counts SET rows=rows+1; END;")?;
+            Ok(())
+        }).unwrap();
+        let store = node.sync_store(&proof.public());
+        // Both completed failure exits must preserve the derived local plan.
+        for max_round in [false, false, true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = peer.clone();
+            let task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut channel = SecureChannel::accept(stream, &peer).await.unwrap();
+                for round in 0..if max_round { 1 } else { 2 } {
+                    assert!(matches!(decode(&channel.recv().await.unwrap()).unwrap(), SyncWire::Request(_)));
+                    let have = recv_have(&mut channel, true, conversation).await.unwrap();
+                    assert_eq!(have, vec![id]);
+                    channel.send(&encode(&SyncWire::Response(SyncResponse {
+                        conversation, events: vec![], have: vec![],
+                    })).unwrap()).await.unwrap();
+                    channel.send(&encode(&SyncWire::RespHave(HaveChunk {
+                        conversation, ids: vec![], more: false,
+                    })).unwrap()).await.unwrap();
+                    if round == 0 {
+                        let SyncWire::Followup(followup) = decode(&channel.recv().await.unwrap()).unwrap() else {
+                            panic!("expected unaccepted push");
+                        };
+                        assert_eq!(followup.events.iter().map(|e| e.id).collect::<Vec<_>>(), vec![id]);
+                    }
+                }
+                assert!(channel.recv().await.is_err(), "NoProgress must close without another push");
+            });
+            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let mut channel = SecureChannel::connect(stream, &node.identity, Some(&proof.public())).await.unwrap();
+            let mut progress = SyncProgress { started: true,
+                rounds: if max_round { MAX_SYNC_ROUNDS - 1 } else { 0 }, ..Default::default() };
+            if !max_round {
+                assert!(!progress.step_burst_paged(&mut channel, &store, conversation, 1).await.unwrap());
+            }
+            assert!(matches!(progress.step_burst_paged(&mut channel, &store, conversation, 1).await,
+                Err(SessionError::NoProgress)));
+            assert_eq!(progress.remote_have_count(), Some(0), "retained preparation must not invent acceptance");
+            drop(channel);
+            task.await.unwrap();
+            let counts = node.storage.database().read(|c| {
+                Ok(c.query_row("SELECT views, rows FROM test_no_progress_counts", [],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?)
+            }).unwrap();
+            assert_eq!(counts, (1, 1), "completed NoProgress discarded unchanged local preparation");
+        }
+        // Failed delivery cannot turn preparation into authority: changing the
+        // local source or privacy generation still rejects the retained plan.
+        let added = Event::new(&node.identity, conversation, 2, vec![id], 2, 0,
+            EventKind::Message, vec![8; 128]);
+        node.log.lock().unwrap().append_durable(added).unwrap();
+        assert!(NetworkSyncStore::take_custody_view(&mut *store.lock().unwrap(), &conversation).unwrap().is_none(),
+            "source append must invalidate NoProgress preparation");
+        let backend = PagedNetworkBackend(&store, None);
+        let view = backend::open_prepared_view(&backend, &conversation).await.unwrap();
+        assert!(backend.retain_custody_view(view).unwrap().is_none());
+        node.privacy.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(NetworkSyncStore::take_custody_view(&mut *store.lock().unwrap(), &conversation).unwrap().is_none(),
+            "privacy replacement must invalidate NoProgress preparation");
+    }).await.expect("NoProgress retention scenario timed out");
+}
+
+#[test]
+fn unsupported_selection_reuse_stays_conservative() {
+    let (_dir, store, _, conversation) = tiny_fixture();
+    let view = NetworkSyncStore::open_view(&store, &conversation).unwrap();
+    assert!(!NetworkSyncStore::reusable_view(&store, &view).unwrap());
+    let legacy = Mutex::new(EventLog::default());
+    let backend = LegacyCollectingNetworkAdapter(&legacy);
+    let view = backend.open_view(&conversation).unwrap();
+    assert!(!backend.reusable_view(&view).unwrap());
+}
+
+#[tokio::test]
+async fn guarded_default_fingerprint_quiet_path_survives_unrelated_source_append() {
+    use crate::{discovery::Announce, identity::account::Account};
+    let left_directory = tempfile::tempdir().unwrap();
+    let right_directory = tempfile::tempdir().unwrap();
+    let left_identity = DeviceIdentity::generate();
+    let right_identity = DeviceIdentity::generate();
+    let left_account = Account::generate();
+    let right_account = Account::generate();
+    let left_proof = Announce::new_with_account(&left_identity, &left_account, "Left", 9);
+    let right_proof = Announce::new_with_account(&right_identity, &right_account, "Right", 9);
+    let (left, _, _) = super::super::test_support::node_with_files(
+        left_directory.path(),
+        left_identity,
+        left_account,
+        &right_proof,
+    );
+    let (right, _, _) = super::super::test_support::node_with_files(
+        right_directory.path(),
+        right_identity,
+        right_account,
+        &left_proof,
+    );
+    left.cached_peer_snapshot_async().await.unwrap();
+    right.cached_peer_snapshot_async().await.unwrap();
+    let conversation = super::super::conversation::dm_conversation_id(
+        &left.identity.public(),
+        &right.identity.public(),
+    );
+    let mut ids = Vec::new();
+    for sequence in 1..=32 {
+        let event = Event::new(
+            &left.identity,
+            conversation,
+            sequence,
+            vec![],
+            sequence,
+            0,
+            EventKind::Message,
+            vec![7; 128],
+        );
+        ids.push(event.id);
+        for node in [&left, &right] {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(event.clone())
+                .unwrap();
+        }
+    }
+    let expected = crate::eventlog::sync::fingerprint(ids.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let responder = right.clone();
+    let peer = left.identity.public();
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let server: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(socket, &responder.identity)
+                .await
+                .unwrap();
+            let store = responder.serve_sync_store(&peer);
+            let mut fingerprints = 0;
+            let mut requests = 0;
+            while let Ok(bytes) = channel.recv().await {
+                match decode(&bytes).unwrap() {
+                    SyncWire::FpRequest(_)
+                    | SyncWire::FpRequestV2(_)
+                    | SyncWire::FpRequestV3(_)
+                    | SyncWire::FpRequestV4(_)
+                    | SyncWire::FpRequestV5(_) => fingerprints += 1,
+                    SyncWire::Request(_)
+                    | SyncWire::RequestV2(_)
+                    | SyncWire::RequestV3(_)
+                    | SyncWire::RequestV4(_)
+                    | SyncWire::RequestV5(_) => requests += 1,
+                    _ => {}
+                }
+                serve_wire_bytes_paged(&mut channel, &store, &bytes)
+                    .await
+                    .unwrap();
+            }
+            let metadata =
+                NetworkSyncStore::probe_metadata(&*store.lock().unwrap(), &conversation).unwrap();
+            drop(store);
+            sent.send((fingerprints, requests, metadata)).unwrap();
+        }
+    });
+    let experiment = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut observations = Vec::new();
+        let mut positive = None;
+        for round in 0..14 {
+            if round == 6 {
+                let unrelated = Event::new(
+                    &left.identity,
+                    ConversationId::new([89; 32]),
+                    1,
+                    vec![],
+                    1,
+                    0,
+                    EventKind::Message,
+                    vec![9; 128],
+                );
+                left.log.lock().unwrap().append_durable(unrelated)?;
+            }
+            if round == 12 {
+                let tail = Event::new(
+                    &right.identity,
+                    conversation,
+                    1,
+                    vec![ids[31]],
+                    33,
+                    0,
+                    EventKind::Message,
+                    vec![8; 128],
+                );
+                positive = Some(tail.id);
+                ids.push(tail.id);
+                right.log.lock().unwrap().append_durable(tail)?;
+            }
+            let source = (
+                left.log.lock().unwrap().repository()?.source_revision()?,
+                right.log.lock().unwrap().repository()?.source_revision()?,
+            );
+            let socket = tokio::net::TcpStream::connect(address)
+                .await
+                .map_err(LogError::Io)?;
+            let mut channel =
+                SecureChannel::connect(socket, &left.identity, Some(&right.identity.public()))
+                    .await?;
+            let store = left.sync_store(&right.identity.public());
+            let mut progress = SyncProgress::default();
+            while !progress
+                .step_burst_paged(&mut channel, &store, conversation, 1)
+                .await?
+            {}
+            let metadata =
+                NetworkSyncStore::probe_metadata(&*store.lock().unwrap(), &conversation)?;
+            let applied = progress.total.applied;
+            let rounds = progress.rounds;
+            drop(store);
+            drop(channel);
+            let (fingerprints, requests, remote_metadata) = received
+                .recv()
+                .await
+                .ok_or(SessionError::UnexpectedMessage)?;
+            observations.push((
+                round,
+                source,
+                fingerprints,
+                requests,
+                rounds,
+                applied,
+                metadata,
+                remote_metadata,
+            ));
+        }
+        let converged = left.log.lock().unwrap().has(&positive.unwrap())?;
+        Ok::<_, SessionError>((
+            observations,
+            converged,
+            crate::eventlog::sync::fingerprint(ids),
+        ))
+    })
+    .await;
+    // Join the one owner before assessing failures; it owns its only live
+    // socket/adapter directly and has no detached connection tasks.
+    server.abort();
+    let cleanup = server.await;
+    if let Err(error) = cleanup {
+        assert!(error.is_cancelled(), "responder failed: {error}");
+    }
+    let (observations, converged, changed) = experiment
+        .expect("guarded fingerprint experiment deadline")
+        .unwrap();
+    for (round, source, fingerprints, requests, rounds, applied, metadata, remote_metadata) in
+        &observations
+    {
+        let expected = if *round < 12 { expected } else { changed };
+        assert!(
+            metadata.is_some_and(|m| m.fingerprint == Some(expected)),
+            "round{round}: requester metadata fingerprint must be present/current; source={source:?} metadata={metadata:?}"
+        );
+        assert!(
+            remote_metadata.is_some_and(|m| m.fingerprint == Some(expected)),
+            "round{round}: responder metadata fingerprint must be present/current; source={source:?} metadata={remote_metadata:?}"
+        );
+        if *round == 12 {
+            assert!(
+                *requests > 0 && *rounds > 0 && *applied == 1,
+                "new shared source must reconcile, not match stale fingerprints: round{round} fp={fingerprints} requests={requests} rounds={rounds} applied={applied}"
+            );
+        } else {
+            assert!(
+                *fingerprints > 0 && *requests == 0 && *rounds == 0 && *applied == 0,
+                "identical selected scope must use fingerprint-only exchange: round{round} source={source:?} fp={fingerprints} requests={requests} rounds={rounds} applied={applied}"
+            );
+        }
+    }
+    assert_ne!(
+        observations[5].1.0, observations[6].1.0,
+        "unrelated append must actually change the global source input"
+    );
+    assert_eq!(observations[5].1.1, observations[6].1.1);
+    assert!(
+        converged,
+        "the remote's new signed event must actually arrive"
+    );
+}
+
+#[tokio::test]
+async fn guarded_pull_only_remote_subset_quiet_round_reuses_remote_fingerprint() {
+    guarded_pull_subset_fixture("stable").await;
+}
+
+#[tokio::test]
+async fn guarded_pull_only_remote_subset_changes_fall_back() {
+    for change in [
+        "remote_add",
+        "remote_delete",
+        "local_add",
+        "local_delete",
+        "policy",
+        "duplex",
+        "hidden_remote",
+    ] {
+        guarded_pull_subset_fixture(change).await;
+    }
+}
+
+#[tokio::test]
+async fn guarded_pull_only_remote_subset_inflight_and_failure() {
+    for change in ["inflight", "failure", "cancel"] {
+        guarded_pull_subset_fixture(change).await;
+    }
+}
+
+async fn guarded_pull_subset_fixture(change: &'static str) {
+    use crate::{discovery::Announce, identity::account::Account};
+    let left_directory = tempfile::tempdir().unwrap();
+    let right_directory = tempfile::tempdir().unwrap();
+    let left_identity = DeviceIdentity::generate();
+    let right_identity = DeviceIdentity::generate();
+    let left_account = Account::generate();
+    let right_account = Account::generate();
+    let left_proof = Announce::new_with_account(&left_identity, &left_account, "Left", 9);
+    let right_proof = Announce::new_with_account(&right_identity, &right_account, "Right", 9);
+    let (left, _, _) = super::super::test_support::node_with_files(
+        left_directory.path(),
+        left_identity,
+        left_account,
+        &right_proof,
+    );
+    let (right, _, _) = super::super::test_support::node_with_files(
+        right_directory.path(),
+        right_identity,
+        right_account,
+        &left_proof,
+    );
+    left.cached_peer_snapshot_async().await.unwrap();
+    right.cached_peer_snapshot_async().await.unwrap();
+    let conversation = super::super::conversation::dm_conversation_id(
+        &left.identity.public(),
+        &right.identity.public(),
+    );
+    let retained = Event::new(
+        &left.identity,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![7; 128],
+    );
+    let id = retained.id;
+    left.log.lock().unwrap().append_durable(retained).unwrap();
+    let other = Event::new(
+        &right.identity,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![8; 128],
+    );
+    if change == "remote_delete" {
+        for node in [&left, &right] {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(other.clone())
+                .unwrap();
+        }
+    }
+    if change == "hidden_remote" {
+        right
+            .log
+            .lock()
+            .unwrap()
+            .append_durable(other.clone())
+            .unwrap();
+    }
+    let source = left
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .source_revision()
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let responder = right.clone();
+    let peer = left.identity.public();
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let requester = left.clone();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let server_reached = reached.clone();
+    let server: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        let mut connection = 0;
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(socket, &responder.identity)
+                .await
+                .unwrap();
+            // A real export-disabled Guarded view still advertises retained
+            // possession. Returning to the ordinary responder on the next
+            // connection changes eligibility without changing remote Have.
+            let store = if change == "hidden_remote" && connection == 0 {
+                responder.pull_sync_store(&peer)
+            } else {
+                responder.serve_sync_store(&peer)
+            };
+            let mut probes = 0;
+            let mut requests = 0;
+            let mut wire_events = 0;
+            while let Ok(bytes) = channel.recv().await {
+                match decode(&bytes).unwrap() {
+                    SyncWire::FpRequest(_)
+                    | SyncWire::FpRequestV2(_)
+                    | SyncWire::FpRequestV3(_)
+                    | SyncWire::FpRequestV4(_)
+                    | SyncWire::FpRequestV5(_) => probes += 1,
+                    SyncWire::Request(_)
+                    | SyncWire::RequestV2(_)
+                    | SyncWire::RequestV3(_)
+                    | SyncWire::RequestV4(_)
+                    | SyncWire::RequestV5(_) => requests += 1,
+                    SyncWire::Followup(frame)
+                    | SyncWire::FollowupV2(frame)
+                    | SyncWire::FollowupV3(frame)
+                    | SyncWire::FollowupV4(frame)
+                    | SyncWire::FollowupV5(frame) => wire_events += frame.events.len(),
+                    _ => {}
+                }
+                if change == "inflight" && connection == 1 && probes == 1 && requests == 0 {
+                    requester
+                        .log
+                        .lock()
+                        .unwrap()
+                        .append_durable(Event::new(
+                            &requester.identity,
+                            conversation,
+                            2,
+                            vec![],
+                            2,
+                            0,
+                            EventKind::Message,
+                            vec![9; 128],
+                        ))
+                        .unwrap();
+                }
+                if connection == 0 && matches!(change, "failure" | "cancel") {
+                    if change == "cancel" {
+                        server_reached.notify_one();
+                        let _ = channel.recv().await;
+                    }
+                    break;
+                }
+                serve_wire_bytes_paged(&mut channel, &store, &bytes)
+                    .await
+                    .unwrap();
+            }
+            drop(store);
+            connection += 1;
+            sent.send((probes, requests, wire_events)).unwrap();
+        }
+    });
+    let experiment = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let mut observations = Vec::new();
+        for round in 0..3 {
+            if round == 1 {
+                match change {
+                    "remote_add" => {
+                        right.log.lock().unwrap().append_durable(other.clone())?;
+                    }
+                    "remote_delete" => {
+                        right.log.lock().unwrap().drop_conversation(&conversation)?;
+                    }
+                    "local_add" => {
+                        left.log.lock().unwrap().append_durable(Event::new(
+                            &left.identity,
+                            conversation,
+                            2,
+                            vec![],
+                            2,
+                            0,
+                            EventKind::Message,
+                            vec![9; 128],
+                        ))?;
+                    }
+                    "local_delete" => {
+                        left.log.lock().unwrap().drop_conversation(&conversation)?;
+                    }
+                    "policy" => {
+                        left.set_device_sync_category(crate::node::SyncCategory::Profile, false)
+                            .map_err(|error| LogError::Serialization(error.to_string()))?;
+                    }
+                    _ => {}
+                }
+            }
+            let socket = tokio::net::TcpStream::connect(address)
+                .await
+                .map_err(LogError::Io)?;
+            let mut channel =
+                SecureChannel::connect(socket, &left.identity, Some(&right.identity.public()))
+                    .await?;
+            let store = if change == "duplex" {
+                left.sync_store(&right.identity.public())
+            } else {
+                left.pull_sync_store(&right.identity.public())
+            };
+            let mut progress = SyncProgress::default();
+            let running = async {
+                while !progress
+                    .step_burst_paged(&mut channel, &store, conversation, 1)
+                    .await?
+                {}
+                Ok::<_, SessionError>(())
+            };
+            let failed = if change == "cancel" && round == 0 {
+                let mut active = Box::pin(running);
+                tokio::select! {
+                    _ = reached.notified() => true,
+                    result = &mut active => { result?; false },
+                }
+            } else {
+                let result = running.await;
+                if change == "failure" && round == 0 {
+                    result.is_err()
+                } else {
+                    result?;
+                    false
+                }
+            };
+            let hint = NetworkSyncStore::quiet_comparison(&*store.lock().unwrap(), &conversation)?
+                .is_some();
+            let applied = progress.total.applied;
+            let pushed = progress.pushed_total;
+            let intersection = progress.remote_have_count();
+            drop(store);
+            drop(channel);
+            let (probes, requests, wire_events) = received
+                .recv()
+                .await
+                .ok_or(SessionError::UnexpectedMessage)?;
+            observations.push((
+                probes,
+                requests,
+                wire_events,
+                applied,
+                pushed,
+                intersection,
+                failed,
+                hint,
+            ));
+        }
+        Ok::<_, SessionError>(observations)
+    })
+    .await;
+    server.abort();
+    let cleanup = server.await;
+    assert!(cleanup.unwrap_err().is_cancelled());
+    let observations = experiment
+        .expect("real pull-only subset exchange deadline")
+        .unwrap();
+    eprintln!("guarded_pull_subset change={change} rounds={observations:?}");
+    if change == "local_delete" {
+        assert!(!left.log.lock().unwrap().has(&id).unwrap());
+    } else {
+        assert!(left.log.lock().unwrap().has(&id).unwrap());
+    }
+    if change == "duplex" {
+        assert!(right.log.lock().unwrap().has(&id).unwrap());
+    } else {
+        assert!(
+            !right.log.lock().unwrap().has(&id).unwrap(),
+            "pull-only cannot disclose retained data"
+        );
+    }
+    if change == "remote_add" {
+        assert!(left.log.lock().unwrap().has(&other.id).unwrap());
+        assert_eq!(observations[1].3, 1);
+        assert!(
+            !observations[1].7,
+            "a received wire event must not earn a hint"
+        );
+    }
+    if change == "stable" {
+        assert_eq!(
+            left.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .source_revision()
+                .unwrap(),
+            source
+        );
+        for row in &observations {
+            assert!(row.0 > 0);
+            assert_eq!(
+                (row.2, row.3, row.4, row.5, row.6),
+                (0, 0, 0, Some(0), false)
+            );
+            assert!(row.7);
+        }
+        assert!(observations[0].1 > 0);
+        assert_eq!(
+            observations.iter().skip(1).map(|row| row.1).sum::<usize>(),
+            0,
+            "unchanged pull-only strict subset must skip full Have"
+        );
+    } else if matches!(change, "failure" | "cancel") {
+        assert!(
+            observations[0].0 > 0,
+            "failure/cancel must reach the actual fingerprint await"
+        );
+        assert!(
+            observations[0].6 && !observations[0].7,
+            "failed/cancelled request cannot earn evidence"
+        );
+        assert!(observations[1].1 > 0 && observations[1].7);
+        assert_eq!(observations[2].1, 0);
+    } else if change == "duplex" {
+        assert!(
+            observations[0].4 > 0,
+            "ordinary duplex must actually transfer retained events"
+        );
+        assert!(observations.iter().all(|row| !row.7));
+    } else if change == "hidden_remote" {
+        let first = &observations[0];
+        assert!(first.1 > 0 && !first.7);
+        assert_eq!(
+            (first.2, first.3, first.4, first.5),
+            (0, 0, 0, Some(0)),
+            "missing remote advertised IDs cannot qualify when the real remote export gate suppresses them"
+        );
+        assert!(
+            observations[1].1 > 0 && observations[1].3 == 1 && !observations[1].7,
+            "unchanged remote Have with newly allowed export must deliver its missing event"
+        );
+        assert!(left.log.lock().unwrap().has(&other.id).unwrap());
+    } else if change == "local_delete" {
+        assert!(
+            !observations[1].7,
+            "actual destructive local change invalidates the hint even when normal equality becomes true"
+        );
+        assert_eq!(observations[1].5, Some(0));
+    } else {
+        assert!(
+            observations[1].1 > 0,
+            "{change} must fall back to ordinary Have"
+        );
+        if change == "remote_delete" {
+            assert_eq!(observations[0].5, Some(1));
+            assert_eq!(observations[1].5, Some(0));
+        }
+        if change == "inflight" {
+            assert!(
+                observations[1].0 >= 2,
+                "stale conditional response must be followed by a fresh ordinary probe"
+            );
+        }
+    }
+}
+
+#[test]
+fn guarded_pull_only_remote_subset_have_duplicates_and_budget() {
+    let first = EventId::new([1; 32]);
+    let second = EventId::new([2; 32]);
+    let budget = RemoteHaveBudget::default();
+    let observed = have_budget::ReceivedHave::from_vec_for_comparison(
+        vec![second, first],
+        Some(budget.try_admit().unwrap()),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        observed.comparison_fingerprint(),
+        Some(crate::eventlog::sync::fingerprint(vec![first, second]))
+    );
+    assert!(observed.accounted_bytes() <= 32 * 1024 * 1024);
+    let duplicate = have_budget::ReceivedHave::from_vec_for_comparison(
+        vec![first, first],
+        Some(budget.try_admit().unwrap()),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        duplicate.len(),
+        1,
+        "normal remote Have remains a unique inventory"
+    );
+    assert!(
+        duplicate.comparison_fingerprint().is_none(),
+        "wire duplicate cardinality cannot certify a remote subset"
+    );
+    let disabled = have_budget::ReceivedHave::from_vec_for_comparison(
+        vec![second, first],
+        Some(budget.try_admit().unwrap()),
+        false,
+    )
+    .unwrap();
+    assert!(
+        disabled.comparison_fingerprint().is_none(),
+        "noneligible modes must skip canonical hash work"
+    );
+    let fourth = budget.try_admit().unwrap();
+    assert!(budget.try_admit().is_err());
+    drop(observed);
+    drop(duplicate);
+    drop(disabled);
+    drop(fourth);
+    let mut all = Vec::new();
+    for _ in 0..4 {
+        all.push(budget.try_admit().unwrap());
+    }
+    assert!(budget.try_admit().is_err());
 }

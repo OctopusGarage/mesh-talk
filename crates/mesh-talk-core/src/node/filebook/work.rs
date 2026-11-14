@@ -41,6 +41,17 @@ impl IndexedFileBook {
         })
     }
     pub(crate) fn discover_downloads(&self, generation: u64) -> Result<(), LogError> {
+        let completed = self.profile.database().read(|c| {
+            self.check(c)?;
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM file_download_scan WHERE account=?1 AND policy=?2 AND done=1)",
+                params![self.account.as_slice(), generation.to_be_bytes().as_slice()],
+                |r| r.get::<_, bool>(0),
+            ).map_err(Into::into)
+        })?;
+        if completed {
+            return Ok(());
+        }
         self.request_download_scan(generation)?;
         self.profile.database().transaction(|c| {
             self.check(c)?;
@@ -56,13 +67,24 @@ impl IndexedFileBook {
     pub(crate) fn download_work_pending(&self) -> Result<bool, LogError> {
         self.profile.database().read(|c| {self.check(c)?;Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_download_pending WHERE account=?1) OR EXISTS(SELECT 1 FROM file_download_scan WHERE account=?1 AND done=0) OR EXISTS(SELECT 1 FROM file_receive_pending WHERE account=?1) OR EXISTS(SELECT 1 FROM retained_events WHERE domain=?2 AND commit_ordinal>COALESCE((SELECT after_commit FROM file_receive_scan WHERE account=?1),-1))",params![self.account.as_slice(),b"MeshPartEventsV1".as_slice()],|r|r.get(0))?)})
     }
+    /// Local metadata pages can advance without an available sender or key.
+    /// Unresolved receive/download rows alone do not certify productive work.
+    pub(crate) fn download_preparation_pending(&self) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {self.check(c)?;Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_download_scan WHERE account=?1 AND done=0) OR EXISTS(SELECT 1 FROM retained_events WHERE domain=?2 AND commit_ordinal>COALESCE((SELECT after_commit FROM file_receive_scan WHERE account=?1),-1))",params![self.account.as_slice(),b"MeshPartEventsV1".as_slice()],|r|r.get(0))?)})
+    }
     pub(crate) fn claim_downloads(&self) -> Result<Vec<FileDownload>, LogError> {
         self.profile.database().transaction(|c| {
             self.check(c)?;
-            let mut statement=c.prepare_cached("SELECT file,revision FROM file_download_pending WHERE account=?1 ORDER BY ticket,file LIMIT 8")?;
+            let mut statement=c.prepare_cached("SELECT file,revision FROM file_download_pending WHERE account=?1 ORDER BY ticket,file LIMIT 9")?;
             let mut rows=statement.query([self.account.as_slice()])?;
             let mut selected=Vec::new();while let Some(row)=rows.next()? {selected.push(FileDownload {file:ConversationId::new(blob(row,0)?),revision:row.get(1)?});}
             drop(rows);drop(statement);
+            // When the whole queue fits, every pending file already gets a turn.
+            // Only contention requires durable rotation; retain one lookahead row.
+            if selected.len() <= 8 {
+                return Ok(selected);
+            }
+            selected.truncate(8);
             for work in &selected {
                 let ticket=next_ticket(c,&self.account)?;
                 c.execute("UPDATE file_download_pending SET ticket=?1 WHERE account=?2 AND file=?3",params![ticket,self.account.as_slice(),work.file.as_bytes().as_slice()])?;

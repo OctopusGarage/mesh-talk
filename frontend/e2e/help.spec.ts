@@ -123,3 +123,27 @@ test("signed-out tray Help opens the offline reader", async ({ page }) => {
   await expect(page.getByTestId("help-search")).toBeFocused();
   await expect(page.getByTestId("help-open-target")).toHaveCount(0);
 });
+
+test("a failed help module retries inside the existing dialog", async ({
+  page,
+}) => {
+  let requests = 0;
+  await page.route("**/src/features/help/HelpReader.tsx*", async (route) => {
+    requests++;
+    if (requests === 1) await route.abort();
+    else await route.continue();
+  });
+  await page.goto("/");
+  await page.getByTestId("login-help").click();
+  const dialog = page.getByTestId("help-dialog");
+  await expect(dialog.getByRole("alert")).toBeVisible();
+  await dialog.evaluate((element) => {
+    element.setAttribute("data-load-owner", "preserved");
+  });
+  await page.getByTestId("help-retry").click();
+  await expect(page.getByTestId("help-search")).toBeFocused();
+  await expect(dialog).toHaveAttribute("data-load-owner", "preserved");
+  expect(requests).toBe(2);
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("login-help")).toBeFocused();
+});

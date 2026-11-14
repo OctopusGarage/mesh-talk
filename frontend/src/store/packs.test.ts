@@ -244,7 +244,7 @@ it("restores the selected private theme before unrelated library rows finish loa
   const use = createPacksStore(io);
   use.getState().setScope("owner", "account", "session");
   const loading = use.getState().load(pack.id);
-  await vi.waitFor(() => expect(use.getState().packs).toEqual([pack]));
+  await vi.waitFor(() => expect(use.getState().selectedTheme).toEqual(pack));
   expect(io.get).toHaveBeenCalledWith(
     { owner: "owner", account: "account", session: "session" },
     pack.id,
@@ -283,7 +283,7 @@ it("does not restore a delayed selected theme after the verified account changes
   expect(use.getState().preparedThemeId).toBeNull();
 });
 
-it("keeps full library restoration available when the selected-theme read fails", async () => {
+it("surfaces selected-theme storage failure without declaring a missing selection", async () => {
   const { io } = memory();
   const { parsePack } = await import("@/lib/pack");
   const pack = parsePack(archive("private.theme"));
@@ -304,9 +304,11 @@ it("keeps full library restoration available when the selected-theme read fails"
   try {
     const use = createPacksStore(io);
     use.getState().setScope("owner", "account");
-    await use.getState().load(pack.id);
-    expect(use.getState().packs).toEqual([pack]);
-    expect(use.getState().loaded).toBe(true);
+    await expect(use.getState().load(pack.id)).rejects.toThrow(
+      "read unavailable",
+    );
+    expect(use.getState().preparedThemeId).toBeNull();
+    expect(use.getState().selectedTheme).toBeUndefined();
   } finally {
     warning.mockRestore();
   }
@@ -342,7 +344,9 @@ it.each(["bundled", "missing", "tombstone"] as const)(
       expect(use.getState().preparedThemeId).toBe(pack.id),
     );
     expect(use.getState().loaded).toBe(false);
-    expect(use.getState().packs).toEqual(kind === "bundled" ? [pack] : []);
+    expect(use.getState().selectedTheme).toEqual(
+      kind === "bundled" ? pack : undefined,
+    );
     use.getState().setScope("owner", "account", "replacement-session");
     expect(use.getState().preparedThemeId).toBeNull();
     finish([]);
@@ -350,3 +354,456 @@ it.each(["bundled", "missing", "tombstone"] as const)(
     expect(use.getState().preparedThemeId).toBeNull();
   },
 );
+
+it("reads authoritative pending rows without enumerating installed assets", async () => {
+  const { io } = memory();
+  const pending = vi.fn(async () => [] as StoredPack[]);
+  const list = vi.spyOn(io, "list");
+  const store = createPacksStore({ ...io, pending }).getState();
+  store.setScope("owner", "account");
+  expect(await store.pendingChanges()).toEqual([]);
+  expect(pending).toHaveBeenCalledWith({
+    owner: "owner",
+    account: "account",
+    session: undefined,
+  });
+  expect(list).not.toHaveBeenCalled();
+});
+
+it("surfaces pending lookup failures without falling back to full asset enumeration", async () => {
+  const { io } = memory();
+  const list = vi.spyOn(io, "list");
+  const store = createPacksStore({
+    ...io,
+    pending: async () => {
+      throw new Error("pending storage unavailable");
+    },
+  }).getState();
+  store.setScope("owner", "account");
+  await expect(store.pendingChanges()).rejects.toThrow(
+    "pending storage unavailable",
+  );
+  expect(list).not.toHaveBeenCalled();
+});
+
+it("discards a pending lookup completed after the desktop session changes", async () => {
+  const { io } = memory();
+  let finish!: (rows: StoredPack[]) => void;
+  const store = createPacksStore({
+    ...io,
+    pending: () =>
+      new Promise<StoredPack[]>((resolve) => {
+        finish = resolve;
+      }),
+  }).getState();
+  store.setScope("owner", "account", "first");
+  const read = store.pendingChanges();
+  store.setScope("owner", "account", "next");
+  finish([
+    {
+      id: "old",
+      pack: null,
+      archive: null,
+      sequence: 1,
+      pending: true,
+      version: null,
+    },
+  ]);
+  expect(await read).toEqual([]);
+});
+
+it("loads metadata without reading unrelated payloads and discards held reads after removal", async () => {
+  const { parsePack } = await import("@/lib/pack");
+  const pack = parsePack(archive());
+  const { io } = memory();
+  io.publicCatalog = vi.fn(async () => []);
+  io.catalog = vi.fn(async () => [
+    { id: pack.id, pack, sequence: 0, pending: false, version: null },
+  ]);
+  const list = vi.spyOn(io, "list");
+  let finish!: (row: StoredPack) => void;
+  io.get = vi.fn(
+    () =>
+      new Promise<StoredPack>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const use = createPacksStore(io);
+  use.getState().setScope("owner", "account");
+  await use.getState().load();
+  expect(list).not.toHaveBeenCalled();
+  expect(io.get).not.toHaveBeenCalled();
+  const read = use.getState().readPack(pack.id);
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  await use.getState().remove(pack.id);
+  finish({
+    id: pack.id,
+    pack,
+    archive: null,
+    sequence: 0,
+    pending: false,
+    version: null,
+  });
+  expect(await read).toBeUndefined();
+});
+
+it("waits for bundled preparation before declaring a selected public theme missing", async () => {
+  const { parsePack } = await import("@/lib/pack");
+  const pack = parsePack(archive("public.theme"));
+  const { io } = memory();
+  let finish!: () => void;
+  io.publicCatalog = () =>
+    new Promise((resolve) => {
+      finish = () => resolve([pack]);
+    });
+  io.publicGet = vi.fn(async () => pack);
+  io.get = async () => undefined;
+  io.catalog = async () => [];
+  const use = createPacksStore(io);
+  use.getState().setScope("owner", "account");
+  const loading = use.getState().load(pack.id);
+  await Promise.resolve();
+  expect(use.getState().preparedThemeId).toBeNull();
+  expect(io.publicGet).not.toHaveBeenCalled();
+  finish();
+  await loading;
+  expect(use.getState().selectedTheme).toEqual(pack);
+});
+
+it("shares simultaneous reads and keeps the active theme on storage failure", async () => {
+  const { parsePack } = await import("@/lib/pack");
+  const pack = parsePack(archive());
+  const { io } = memory();
+  io.catalog = async () => [
+    { id: pack.id, pack, sequence: 0, pending: false, version: null },
+  ];
+  io.get = vi.fn(async () => ({
+    id: pack.id,
+    pack,
+    archive: null,
+    sequence: 0,
+    pending: false,
+    version: null,
+  }));
+  const use = createPacksStore(io);
+  use.getState().setScope("owner", "account");
+  await use.getState().load();
+  const [left, right] = await Promise.all([
+    use.getState().readPack(pack.id),
+    use.getState().readPack(pack.id),
+  ]);
+  expect(left).toBe(right);
+  expect(io.get).toHaveBeenCalledOnce();
+  await use.getState().prepareTheme(pack.id);
+  io.get = async () => {
+    throw new Error("storage unavailable");
+  };
+  await expect(use.getState().prepareTheme(pack.id)).rejects.toThrow(
+    "storage unavailable",
+  );
+  expect(use.getState().selectedTheme).toBe(pack);
+});
+
+it("catalog projection owns no artwork URLs or archive bytes", async () => {
+  const { packMetadata } = await import("./packs");
+  const full = {
+    format: 1 as const,
+    id: "test.stickers",
+    version: "1.0.0",
+    name: "Stickers",
+    kind: "sticker" as const,
+    stickers: [
+      {
+        id: "one",
+        label: "One",
+        fallback: "x",
+        url: "data:image/png;base64,AQID",
+      },
+    ],
+  };
+  expect(packMetadata(full)).toEqual({
+    ...full,
+    stickers: [{ id: "one", label: "One", fallback: "x" }],
+  });
+});
+
+it("keeps the latest requested theme through an unrelated library reload and returns an exact readiness receipt", async () => {
+  const { io } = memory();
+  const use = createPacksStore(io);
+  const store = use.getState();
+  store.setScope("owner", "account");
+  await store.install(archive("first.theme"));
+  await store.install(archive("second.theme"));
+  await store.prepareTheme("first.theme");
+  let finish!: () => void;
+  io.get = async (scope, id) => {
+    const row = (await io.list(scope)).find((row) => row.id === id);
+    if (id === "second.theme")
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    return row;
+  };
+  const selecting = store.prepareTheme("second.theme");
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  const mutation = store.install(archive("unrelated.theme"));
+  await vi.waitFor(() =>
+    expect(
+      use.getState().packs.some((pack) => pack.id === "unrelated.theme"),
+    ).toBe(true),
+  );
+  finish();
+  expect(await selecting).toBe(true);
+  await mutation;
+  expect(use.getState().selectedTheme?.id).toBe("second.theme");
+  expect(use.getState().preparedThemeId).toBe("second.theme");
+});
+
+it("bounds unique queued reads with a retryable capacity failure and recovers permits", async () => {
+  const { parsePack } = await import("@/lib/pack");
+  const pack = parsePack(archive());
+  const { io } = memory();
+  io.catalog = async () =>
+    Array.from({ length: 67 }, (_, index) => ({
+      id: `pack.${index}`,
+      pack: { ...pack, id: `pack.${index}` },
+      sequence: 0,
+      pending: false,
+      version: null,
+    }));
+  const finishes: Array<() => void> = [];
+  io.get = vi.fn(async (_scope, id) => {
+    await new Promise<void>((resolve) => finishes.push(resolve));
+    return {
+      id,
+      pack: { ...pack, id },
+      archive: null,
+      sequence: 0,
+      pending: false,
+      version: null,
+    };
+  });
+  const use = createPacksStore(io);
+  use.getState().setScope("owner", "account");
+  await use.getState().load();
+  const reads = Array.from({ length: 66 }, (_, index) =>
+    use.getState().readPack(`pack.${index}`),
+  );
+  let rejected = false;
+  const overflow = use
+    .getState()
+    .readPack("pack.66")
+    .catch((error) => {
+      rejected = /capacity/i.test(String(error));
+    });
+  for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+  expect(io.get).toHaveBeenCalledTimes(2);
+  expect(rejected).toBe(true);
+  for (let turn = 0; turn < 200; turn++) {
+    finishes.splice(0).forEach((finish) => finish());
+    await Promise.resolve();
+  }
+  await Promise.all([...reads, overflow]);
+  const recovered = use.getState().readPack("pack.66");
+  await vi.waitFor(() => expect(finishes.length).toBe(1));
+  finishes.shift()!();
+  expect((await recovered)?.id).toBe("pack.66");
+});
+
+it("publishes pending payloads one at a time from metadata and refreshes acknowledged version authority", async () => {
+  const { io } = memory();
+  const list = io.list;
+  io.catalog = async (scope) =>
+    (await list(scope)).map(({ archive: _archive, ...row }) => row);
+  io.get = vi.fn(async (scope, id) =>
+    (await list(scope)).find((row) => row.id === id),
+  );
+  io.pending = vi.fn(async (scope) => list(scope));
+  const use = createPacksStore(io);
+  const store = use.getState();
+  store.setScope("owner", "account");
+  await store.install(archive("first.theme"));
+  await store.install(archive("later.theme"));
+  vi.mocked(io.get).mockClear();
+  const visited: string[] = [];
+  await store.forEachPending(async (row) => {
+    visited.push(row.id);
+    expect(io.get).toHaveBeenCalledTimes(visited.length);
+    if (row.id === "later.theme")
+      await store.acknowledge(row.id, row.sequence, version);
+  });
+  expect(visited).toEqual(["first.theme", "later.theme"]);
+  expect(io.pending).not.toHaveBeenCalled();
+  expect(store.linkedVersion("later.theme")).toEqual(version);
+  expect(store.linkedVersion("first.theme")).toBeNull();
+});
+
+it("retires queued view demand without dropping a shared live reader or releasing active work early", async () => {
+  const { parsePack } = await import("@/lib/pack");
+  const pack = parsePack(archive());
+  const { io } = memory();
+  io.catalog = async () =>
+    Array.from({ length: 4 }, (_, index) => ({
+      id: `pack.${index}`,
+      pack: { ...pack, id: `pack.${index}` },
+      sequence: 0,
+      pending: false,
+      version: null,
+    }));
+  const finishes = new Map<string, () => void>();
+  io.get = vi.fn(async (_scope, id) => {
+    await new Promise<void>((resolve) => finishes.set(id, resolve));
+    return {
+      id,
+      pack: { ...pack, id },
+      archive: null,
+      sequence: 0,
+      pending: false,
+      version: null,
+    };
+  });
+  const use = createPacksStore(io);
+  use.getState().setScope("owner", "account");
+  await use.getState().load();
+  let active = true;
+  let open = true;
+  const first = use.getState().readPack("pack.0", () => active);
+  const second = use.getState().readPack("pack.1");
+  const retired = use.getState().readPack("pack.2", () => open);
+  const sharedRetired = use.getState().readPack("pack.3", () => open);
+  const live = use.getState().readPack("pack.3", () => true);
+  open = false;
+  active = false;
+  for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+  expect(io.get).toHaveBeenCalledTimes(2); // retiring the observer did not release actual work
+  finishes.get("pack.0")!();
+  await vi.waitFor(() => expect(finishes.has("pack.3")).toBe(true));
+  expect(finishes.has("pack.2")).toBe(false);
+  expect(io.get).toHaveBeenCalledTimes(3);
+  finishes.get("pack.1")!();
+  finishes.get("pack.3")!();
+  expect(await first).toBeUndefined();
+  expect(await retired).toBeUndefined();
+  expect(await sharedRetired).toBeUndefined();
+  expect((await live)?.id).toBe("pack.3");
+  await second;
+});
+
+it("keeps idle library version confirmation outside write admission", async () => {
+  const { io } = memory();
+  io.get = async (scope, id) =>
+    (await io.list(scope)).find((row) => row.id === id);
+  const use = createPacksStore(io);
+  const store = use.getState();
+  store.setScope("owner", "account", "session");
+  await store.applyLinked("test.library", archive(), version, () => true);
+  const updates = vi.spyOn(io, "update");
+  expect(
+    await store.applyLinked("test.library", archive(), version, () => true),
+  ).toBe(true);
+  expect(updates).not.toHaveBeenCalled();
+  expect(use.getState().packs[0].id).toBe("test.library");
+});
+
+it("keeps an admitted library read current across an equal-version confirmation", async () => {
+  const { io } = memory();
+  const use = createPacksStore(io);
+  const store = use.getState();
+  store.setScope("owner", "account");
+  await store.applyLinked("test.library", archive(), version, () => true);
+  io.getCatalog = async (scope, id) =>
+    (await io.list(scope)).find((row) => row.id === id);
+  let finish!: () => void;
+  io.get = async (scope, id) => {
+    const row = (await io.list(scope)).find((row) => row.id === id);
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return row;
+  };
+  const reading = store.readPack("test.library");
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  await store.applyLinked("test.library", archive(), version, () => true);
+  finish();
+  expect((await reading)?.id).toBe("test.library");
+});
+
+it("revalidates local deletion after a held library metadata preflight", async () => {
+  const { io } = memory();
+  const use = createPacksStore(io);
+  const store = use.getState();
+  store.setScope("owner", "account");
+  await store.applyLinked("test.library", archive(), version, () => true);
+  let finish!: () => void;
+  io.getCatalog = async (scope, id) => {
+    const row = (await io.list(scope)).find((row) => row.id === id);
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return row;
+  };
+  const remote = store.applyLinked(
+    "test.library",
+    archive(),
+    { ...version, revision: 2 },
+    () => true,
+  );
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  await store.remove("test.library");
+  finish();
+  expect(await remote).toBe(false);
+  expect((await store.pendingChanges())[0]).toMatchObject({
+    pack: null,
+    pending: true,
+  });
+});
+
+it("rereads the current library row atomically after metadata changed elsewhere", async () => {
+  const { io } = memory();
+  const use = createPacksStore(io);
+  const store = use.getState();
+  const scope = { owner: "owner", account: "account" };
+  store.setScope(scope.owner, scope.account);
+  await store.applyLinked("test.library", archive(), version, () => true);
+  let finish!: () => void;
+  io.getCatalog = async (scope, id) => {
+    const row = (await io.list(scope)).find((row) => row.id === id);
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return row;
+  };
+  const remote = store.applyLinked(
+    "test.library",
+    archive(),
+    { ...version, revision: 2 },
+    () => true,
+  );
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  await io.update(scope, "test.library", (row) => ({
+    ...row!,
+    version: { ...version, revision: 3 },
+  }));
+  finish();
+  expect(await remote).toBe(true);
+  expect((await io.list(scope))[0].version?.revision).toBe(3);
+});
+
+it("retries a failed library metadata read without qualifying a write", async () => {
+  const { io } = memory();
+  const store = createPacksStore(io).getState();
+  store.setScope("owner", "account");
+  io.getCatalog = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("read failed"))
+    .mockResolvedValue(undefined);
+  const updates = vi.spyOn(io, "update");
+  await expect(
+    store.applyLinked("test.library", null, version, () => true),
+  ).rejects.toThrow("read failed");
+  expect(updates).not.toHaveBeenCalled();
+  expect(
+    await store.applyLinked("test.library", null, version, () => true),
+  ).toBe(true);
+  expect(updates).toHaveBeenCalledTimes(1);
+});

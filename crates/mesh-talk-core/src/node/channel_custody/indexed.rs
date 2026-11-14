@@ -17,6 +17,7 @@ const SCHEMA: &str = "CREATE TABLE channel_custody_observations(event BLOB NOT N
 pub(in crate::node) struct IndexedChannelCustodyStore {
     profile: Arc<ProfileStorage>,
     source: PublishedHistorySource,
+    revision: u64,
     #[cfg(test)]
     pub(super) replayed_records: usize,
 }
@@ -78,13 +79,18 @@ impl IndexedChannelCustodyStore {
         Ok(Self {
             profile,
             source,
+            revision: 0,
             #[cfg(test)]
             replayed_records,
         })
     }
-    fn put_on(c: &Connection, event: EventId, peer: &str, held: bool) -> Result<(), LogError> {
-        c.execute("INSERT INTO channel_custody_observations(event,peer,held) VALUES(?1,?2,?3) ON CONFLICT(event,peer) DO UPDATE SET held=excluded.held WHERE held<>excluded.held", params![event.as_bytes().as_slice(), peer, held])?;
-        Ok(())
+    fn put_on(c: &Connection, event: EventId, peer: &str, held: bool) -> Result<bool, LogError> {
+        let changed = c.execute("INSERT INTO channel_custody_observations(event,peer,held) VALUES(?1,?2,?3) ON CONFLICT(event,peer) DO UPDATE SET held=excluded.held WHERE held<>excluded.held", params![event.as_bytes().as_slice(), peer, held])?;
+        Ok(changed != 0)
+    }
+    /// Runtime invalidation only; durable rows remain authoritative.
+    pub(in crate::node) fn revision(&self) -> u64 {
+        self.revision
     }
     pub(in crate::node) fn peers(&self, event: EventId) -> Result<HashSet<String>, LogError> {
         self.profile.database().read(|c| {
@@ -123,13 +129,26 @@ impl IndexedChannelCustodyStore {
             return Err(LogError::CorruptFile("invalid custody peer".into()));
         }
         self.source.check_write()?;
-        self.profile
+        let next = self
+            .revision
+            .checked_add(1)
+            .ok_or(LogError::RepositoryCounterExhausted)?;
+        let changed = self
+            .profile
             .database()
-            .transaction(|c| Self::put_on(c, event, peer, true))
+            .transaction(|c| Self::put_on(c, event, peer, true))?;
+        if changed {
+            self.revision = next;
+        }
+        Ok(())
     }
     pub(in crate::node) fn revoke(&mut self, event: EventId, peer: &str) -> Result<(), LogError> {
         self.source.check_write()?;
-        self.profile.database().transaction(|c| {
+        let next = self
+            .revision
+            .checked_add(1)
+            .ok_or(LogError::RepositoryCounterExhausted)?;
+        let changed = self.profile.database().transaction(|c| {
             let held: Option<bool> = c
                 .query_row(
                     "SELECT held FROM channel_custody_observations WHERE event=?1 AND peer=?2",
@@ -138,9 +157,13 @@ impl IndexedChannelCustodyStore {
                 )
                 .optional()?;
             if held == Some(true) {
-                Self::put_on(c, event, peer, false)?;
+                return Self::put_on(c, event, peer, false);
             }
-            Ok(())
-        })
+            Ok(false)
+        })?;
+        if changed {
+            self.revision = next;
+        }
+        Ok(())
     }
 }

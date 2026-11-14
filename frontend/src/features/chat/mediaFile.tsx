@@ -14,6 +14,8 @@ import {
   Folder,
 } from "lucide-react";
 import { chat } from "@/lib/api";
+import { startRecoveryRefresh } from "@/lib/recoveryRefresh";
+import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
 import { isDirectoryAttachment } from "@/lib/directoryAttachment";
 import {
   IMAGE_INLINE_CAP,
@@ -163,7 +165,16 @@ export function useVideoPoster(
     function fail() {
       if (settled) return;
       finish();
-      if (cacheKey) POSTER_FAILED.add(cacheKey);
+      if (cacheKey) {
+        if (
+          POSTER_FAILED.size >= POSTER_CACHE_MAX &&
+          !POSTER_FAILED.has(cacheKey)
+        ) {
+          const oldest = POSTER_FAILED.values().next().value;
+          if (oldest !== undefined) POSTER_FAILED.delete(oldest);
+        }
+        POSTER_FAILED.add(cacheKey);
+      }
       if (alive) setFailed(true);
     }
     function grab() {
@@ -260,7 +271,7 @@ function observeMediaOwnership() {
 }
 if (import.meta.hot) import.meta.hot.dispose(() => stopMediaCleanup?.());
 
-/** Serial durable-first reads keep retrying missing bytes while this identity is mounted.
+/** Serial durable-first reads use a short commit-race burst, then semantic/sparse recovery.
  * Cleanup prevents later fallback/blob creation; already-admitted native reads may finish. */
 export function useFileObjectUrl(
   fileConv: string,
@@ -269,6 +280,7 @@ export function useFileObjectUrl(
   options?: {
     onReadError?: (error: unknown) => void;
     retryKey?: number;
+    preview?: boolean;
     /** Bounded reuse for ordinary previews; never enable for protected reveals. */
     reuse?: boolean;
   },
@@ -279,6 +291,7 @@ export function useFileObjectUrl(
   }, [options?.onReadError]);
   const retryKey = options?.retryKey;
   const reuse = options?.reuse === true;
+  const preview = options?.preview === true;
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const run = useChat((s) => s.runEpoch);
@@ -290,6 +303,7 @@ export function useFileObjectUrl(
     run,
     identityEpoch,
     fileConv,
+    preview,
     mime,
     retryKey,
   ]);
@@ -308,12 +322,31 @@ export function useFileObjectUrl(
     let releaseShared: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
+    let inFlight = false;
+    let dirty = false;
+    let succeeded = false;
+    let stopRecovery: (() => void) | undefined;
+    const clearRetry = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    };
     const current = () =>
       alive && lease.current() && useChat.getState().runEpoch === run;
     const read = async () => {
-      if (!current()) return;
+      if (!current() || succeeded) return;
+      if (inFlight) {
+        dirty = true;
+        return;
+      }
+      clearRetry();
+      inFlight = true;
+      dirty = false;
       try {
         const readBlob = async (admitted: () => boolean) => {
+          if (preview) {
+            const bytes = await chat.readMediaPreview(fileConv);
+            return new Blob([bytes], { type: "image/png" });
+          }
           let bytes: ArrayBuffer;
           try {
             bytes = await chat.readMedia(fileConv);
@@ -331,34 +364,55 @@ export function useFileObjectUrl(
           );
           releaseShared = shared.release;
           const url = await shared.result;
-          if (current() && url) setResult({ key, url, ownership });
+          if (!current() || !url) return;
+          setResult({ key, url, ownership });
         } else {
           const blob = await readBlob(current);
           if (!current()) return;
           objectUrl = URL.createObjectURL(blob);
           setResult({ key, url: objectUrl, ownership });
         }
+        succeeded = true;
+        dirty = false;
+        stopRecovery?.();
+        stopRecovery = undefined;
+        clearRetry();
       } catch (error) {
         releaseShared?.();
         releaseShared = undefined;
         if (!current()) return;
         onReadError.current?.(error);
-        const delay = Math.min(200 * 2 ** failures, 2000);
-        failures = Math.min(failures + 1, 4);
-        timer = setTimeout(() => {
-          void read();
-        }, delay);
+        if (preview || !current()) return;
+        // Activation stays prompt while failures retain only sparse lost-event recovery.
+        // Re-arm after a failure so the short burst cannot shorten the sparse interval.
+        stopRecovery?.();
+        stopRecovery = startRecoveryRefresh(() => void read());
+        if (failures < 3) {
+          const delay = 200 * 2 ** failures;
+          failures++;
+          timer = setTimeout(() => void read(), delay);
+        }
+      } finally {
+        inFlight = false;
+        if (dirty && !succeeded && current() && !preview) void read();
       }
     };
+    const unsubscribe = preview
+      ? undefined
+      : subscribeSyncInvalidation((change) => {
+          if (change.owner === owner && change.kind === "files") void read();
+        });
     void read();
     return () => {
       alive = false;
       ownership.alive = false;
-      if (timer !== undefined) clearTimeout(timer);
+      clearRetry();
+      stopRecovery?.();
+      unsubscribe?.();
       releaseShared?.();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [key, enabled, owner, ready, fileConv, mime, run, reuse]);
+  }, [key, enabled, owner, ready, fileConv, mime, run, reuse, preview]);
   if (!enabled || !owner || !ready) return null;
   // Reused URLs are owned by the cache, which can revoke them independently of
   // a component render during session retirement. Never return a stale copy.

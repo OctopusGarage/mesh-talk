@@ -43,7 +43,16 @@ struct SelectedAttachment {
     scope: Option<archive::PrivateChannelScope>,
 }
 
+/// Decision-local account routes only. Eligibility, rows and recalls stay live;
+/// publication constructs a fresh context through `account_file_recalled`.
+struct AccountFileRecallContext {
+    file_book: super::filebook::indexed::IndexedFileBook,
+    peers: HashMap<ConversationId, String>,
+}
+
 mod archive;
+mod attachment_selection;
+mod availability;
 mod fanout;
 mod favorites;
 mod local_maintenance;
@@ -62,6 +71,7 @@ use page::{PageBuilder, PendingRecord};
 const RECORDS_PER_PAGE: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 const ATTACHMENT_AVAILABILITY_TTL: Duration = Duration::from_secs(60);
 const MAX_UNAVAILABLE_ATTACHMENTS: usize = 256;
 
@@ -111,6 +121,7 @@ pub struct DeviceSyncStatus {
 #[derive(Default)]
 struct PeerCursor {
     history_retry_at: Option<std::time::Instant>,
+    history_failures: u8,
     favorite_next: Option<String>,
     favorite_digest: [u8; 32],
     favorite_sweep_digest: [u8; 32],
@@ -120,7 +131,6 @@ struct PeerCursor {
     next: Option<HistoryCursor>,
     known_digest: [u8; 32],
     sweep_digest: [u8; 32],
-    next_file: usize,
 }
 
 fn initial_sync_status(device_id: String) -> DeviceSyncStatus {
@@ -248,12 +258,14 @@ impl ControlComparisonStart {
 struct DocumentCheckpoint {
     cursor: super::account_documents::sync::DocumentSyncCursor,
     control_start: Option<ControlComparisonStart>,
+    exchange_failures: u8,
 }
 impl From<super::account_documents::sync::DocumentSyncCursor> for DocumentCheckpoint {
     fn from(cursor: super::account_documents::sync::DocumentSyncCursor) -> Self {
         Self {
             cursor,
             control_start: None,
+            exchange_failures: 0,
         }
     }
 }
@@ -814,7 +826,8 @@ impl Node {
         let current = self
             .account_sync_status
             .lock()
-            .expect("account sync status mutex not poisoned");
+            .expect("account sync status mutex not poisoned")
+            .clone();
         let mut statuses = self
             .linked_devices()
             .into_iter()
@@ -831,6 +844,12 @@ impl Node {
                     document_requires_upgrade: false,
                     error: None,
                 });
+                if !self.sibling_sync_available(&device.public) {
+                    status.phase = SyncPhase::Offline;
+                    status.document_phase = SyncPhase::Offline;
+                    status.error = None;
+                    status.document_error = None;
+                }
                 if !policy.history && !policy.attachments && !policy.appearance && !policy.contacts
                 {
                     status.phase = SyncPhase::Disabled;
@@ -879,12 +898,11 @@ impl Node {
     }
 
     pub(in crate::node) fn certified_sibling(&self, public: &PublicIdentity) -> bool {
-        self.linked_devices().iter().any(|device| {
-            device.public == *public
-                && device.certificate.verify()
-                && device.certificate.account_id() == self.account_id()
-                && device.certificate.device_ed25519_pub == public.ed25519_pub
-        })
+        let account = self.account_id();
+        self.account_devices
+            .lock()
+            .expect("account_devices mutex not poisoned")
+            .is_certified_device(public, &account)
     }
 
     pub(in crate::node) fn device_sync_policy_snapshot(&self) -> (DeviceSyncPolicy, u64) {
@@ -900,16 +918,21 @@ impl Node {
         category: SyncCategory,
         enabled: bool,
     ) -> Result<(), NodeError> {
-        {
+        let changed = {
             let _commit = self
                 .account_sync_commit
                 .lock()
                 .expect("account sync commit mutex not poisoned");
-            self.account_sync_policy
+            let mut policy = self
+                .account_sync_policy
                 .lock()
-                .expect("account sync policy mutex not poisoned")
-                .set(category, enabled)
-                .map_err(NodeError::Log)?;
+                .expect("account sync policy mutex not poisoned");
+            let before = policy.revision();
+            policy.set(category, enabled).map_err(NodeError::Log)?;
+            policy.revision() != before
+        };
+        if changed {
+            self.storage.database().maintenance_waker().notify();
         }
         self.account_sync_notify.notify_one();
         self.note_ui_change();
@@ -1677,6 +1700,15 @@ impl Node {
         }
     }
     fn account_file_recalled(&self, file: ConversationId) -> Result<bool, NodeError> {
+        let context = self.account_file_recall_context()?;
+        self.account_file_recalled_with(file, &context)
+    }
+
+    fn account_file_recall_context(&self) -> Result<AccountFileRecallContext, NodeError> {
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "attachment_recall_context_begin".into()
+        });
         let file_book = self.files.lock().expect("file book mutex").clone();
         let own = self.account_id();
         let mut peers: HashMap<_, _> = self
@@ -1685,6 +1717,14 @@ impl Node {
             .map(|peer| (account_conversation_id(&own, &peer), peer))
             .collect();
         peers.insert(account_conversation_id(&own, &own), own);
+        Ok(AccountFileRecallContext { file_book, peers })
+    }
+
+    fn account_file_recalled_with(
+        &self,
+        file: ConversationId,
+        context: &AccountFileRecallContext,
+    ) -> Result<bool, NodeError> {
         let mut cursor = None;
         loop {
             let page = self
@@ -1701,10 +1741,10 @@ impl Node {
             }
             for header in page.rows {
                 cursor = Some(header.ordinal);
-                if !file_book.eligible_ordinal(header.ordinal)? {
+                if !context.file_book.eligible_ordinal(header.ordinal)? {
                     continue;
                 }
-                let Some(peer) = peers.get(&header.conversation) else {
+                let Some(peer) = context.peers.get(&header.conversation) else {
                     continue;
                 };
                 let Some(row) = self
@@ -2799,7 +2839,7 @@ impl Node {
     }
 
     pub(in crate::node) async fn run_account_history_loop(self: Arc<Self>) {
-        let mut tick = tokio::time::interval(RETRY_INTERVAL);
+        let mut tick = tokio::time::interval(RECONCILE_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.run_account_history_loop_with_tick(Some(tick)).await;
     }
@@ -2817,6 +2857,81 @@ impl Node {
         const HISTORY_WORKERS: usize = 1;
         const DOCUMENT_WORKERS: usize = DocumentLane::ALL.len();
         const ATTACHMENT_WORKERS: usize = 2;
+        // Subscribe before the first snapshot: discovery is receiver demand.
+        let mut roster_changes = self.roster.lock().expect("roster lock").subscribe_changes();
+        let mut availability_changes = self.account_wake.availability.changed.subscribe();
+        let mut fanout_network = self.network_changes.subscribe();
+        let mut fanout_routes = fanout::FanoutRoutes::default();
+        // Subscribe before snapshotting so a concurrent semantic change remains
+        // observable, but an unchanged first heartbeat grants no retry credit.
+        let observe_fanout_routes = |tracker: &mut fanout::FanoutRoutes| {
+            let peers = self.roster.lock().expect("roster lock").peers();
+            let now = std::time::Instant::now();
+            tracker.observe(
+                peers.into_iter().map(|peer| {
+                    let deadline = peer.presence_deadline(now);
+                    let routes = peer
+                        .routes
+                        .iter()
+                        .map(|route| route.addr)
+                        .chain([peer.addr]);
+                    (
+                        wake::wake_identity(&peer.public),
+                        (
+                            (routes.collect(), peer.account_id, peer.post_office),
+                            deadline,
+                        ),
+                    )
+                }),
+                now,
+            )
+        };
+        observe_fanout_routes(&mut fanout_routes);
+        // Hash only roster-owned semantic inputs. Local publication can change
+        // document/source revisions and must not make the next heartbeat dirty.
+        // This is work admission, never an authorization or delivery proof.
+        let observe_roster_work = || {
+            let (mut proofs, mut live, peers) = {
+                let roster = self.roster.lock().expect("roster lock");
+                (
+                    roster.historical_announcements(),
+                    roster.announcements(),
+                    roster.peers(),
+                )
+            };
+            proofs.sort_by_key(|proof| proof.user_id.clone());
+            live.sort_by_key(|proof| proof.user_id.clone());
+            let now = std::time::Instant::now();
+            let mut peers: Vec<_> = peers
+                .into_iter()
+                .map(|peer| {
+                    let online = peer.presence_deadline(now).is_some_and(|at| at > now);
+                    let routes = peer.scheduling_endpoints();
+                    (
+                        peer.public,
+                        peer.account_id,
+                        peer.name,
+                        peer.post_office,
+                        routes,
+                        online,
+                    )
+                })
+                .collect();
+            peers.sort_by_key(|peer| (peer.0.ed25519_pub, peer.0.x25519_pub));
+            bincode::serialize(&(proofs, live, peers))
+                .ok()
+                .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)))
+        };
+        let mut roster_projection = observe_roster_work();
+        let mut online_routes: HashMap<
+            wake::WakeIdentity,
+            (
+                Vec<std::net::SocketAddr>,
+                std::time::Instant,
+                availability::Scope,
+            ),
+        > = HashMap::new();
+        let mut initial_refresh = true;
         let mut cursors: HashMap<String, PeerCursor> = HashMap::new();
         let mut queue: VecDeque<(String, PeerRecord)> = VecDeque::new();
         let mut active = HashSet::new();
@@ -2850,7 +2965,18 @@ impl Node {
         // lane's failure or falsely declare its unfinished page done.
         let mut document_statuses: HashMap<DocumentPeer, DocumentStatus> = HashMap::new();
         let mut attachment_owners: HashMap<tokio::task::Id, String> = HashMap::new();
+        let mut sibling_attachment_generations = HashMap::new();
         let mut attachments = tokio::task::JoinSet::new();
+        // A successful source negotiation owns a bounded local selection handoff.
+        // Attachment terminals drain it without restarting history or scanning files.
+        let mut sibling_attachments: HashMap<String, attachment_selection::AttachmentSelection> =
+            HashMap::new();
+        let mut attachment_selections = tokio::task::JoinSet::new();
+        let mut attachment_selection_active = HashSet::new();
+        let mut attachment_selection_owners = HashMap::new();
+        let mut attachment_failures: HashMap<String, u8> = HashMap::new();
+        let mut attachment_selection_generation = 0u64;
+        let mut attachment_source_cursor = 0usize;
         let mut local_maintenance = Some(local_maintenance::LocalMaintenance::default());
         let mut local_tasks = tokio::task::JoinSet::new();
         let mut maintenance_requested = true;
@@ -2865,11 +2991,186 @@ impl Node {
         let mut fanout_tasks = tokio::task::JoinSet::new();
         let mut fanout_owners = HashMap::new();
         loop {
+            // Park intent, retaining checkpoints, while no current source is available.
+            queue.retain(|(_, peer)| self.sibling_sync_available(&peer.public));
+            for queue in &mut document_queues {
+                queue.retain(|(_, peer)| self.sibling_sync_available(&peer.public));
+            }
             if self
                 .delivery_suspended
                 .load(std::sync::atomic::Ordering::Acquire)
             {
                 return;
+            }
+            let expired_sources: HashSet<_> = unavailable
+                .iter()
+                .filter(|(_, until)| **until <= tokio::time::Instant::now())
+                .map(|((id, _), _)| id.clone())
+                .collect();
+            for (id, selection) in &mut sibling_attachments {
+                if (selection.page.files.is_empty()
+                    && selection.page.total > 0
+                    && expired_sources.contains(id))
+                    || selection
+                        .retry_at
+                        .is_some_and(|at| at <= std::time::Instant::now())
+                {
+                    selection.refill = true;
+                    selection.retry_at = None;
+                }
+            }
+            unavailable.retain(|_, until| *until > tokio::time::Instant::now());
+            attachment_unsupported.retain(|_, until| *until > tokio::time::Instant::now());
+            if self.device_sync_policy().attachments {
+                let mut sources: Vec<_> = sibling_attachments.keys().cloned().collect();
+                sources.sort();
+                if !sources.is_empty() {
+                    let count = sources.len();
+                    sources.rotate_left(attachment_source_cursor % count);
+                    attachment_source_cursor = attachment_source_cursor.wrapping_add(1);
+                }
+                for id in &sources {
+                    let selection = sibling_attachments
+                        .get_mut(id)
+                        .expect("captured attachment source");
+                    let peer = &selection.peer;
+                    if selection.refill
+                        && attachment_selections.is_empty()
+                        && self.sibling_sync_available(&peer.public)
+                        && !attachment_selection_active.contains(id)
+                    {
+                        let excluded = unavailable
+                            .keys()
+                            .filter(|(source, _)| source == id)
+                            .map(|(_, file)| *file)
+                            .collect();
+                        let node = self.clone();
+                        let id = id.clone();
+                        let generation = selection.generation;
+                        let after = selection.page.after;
+                        let favorites_supported = selection.favorites_supported;
+                        let Some(permit) = self.runtime_work.admit() else {
+                            return;
+                        };
+                        attachment_selection_active.insert(id.clone());
+                        let owner = id.clone();
+                        let task = attachment_selections.spawn(permit.track(async move {
+                            let page = node
+                                .account_blocking(move |node| {
+                                    node.select_sibling_attachment_page(
+                                        after,
+                                        excluded,
+                                        favorites_supported,
+                                    )
+                                })
+                                .await;
+                            (id, generation, page)
+                        }));
+                        attachment_selection_owners.insert(task.id(), (owner, generation));
+                    }
+                    if selection.refill || attachment_selection_active.contains(id) {
+                        continue;
+                    }
+                    let missing = &mut selection.page.files;
+                    let version = &selection.version;
+                    if attachments.len() >= ATTACHMENT_WORKERS {
+                        break;
+                    }
+                    if active_attachments.contains(id)
+                        || !self.sibling_sync_available(&peer.public)
+                        || retry_attachment
+                            .get(id)
+                            .is_some_and(|at| *at > std::time::Instant::now())
+                    {
+                        continue;
+                    }
+                    let Some(index) = missing
+                        .iter()
+                        .position(|(file, _)| !unavailable.contains_key(&(id.clone(), *file)))
+                    else {
+                        continue;
+                    };
+                    let (file, favorite) =
+                        missing.remove(index).expect("selected attachment exists");
+                    missing.push_back((file, favorite));
+                    active_attachments.insert(id.clone());
+                    let node = self.clone();
+                    let peer = peer.clone();
+                    let id = id.clone();
+                    let version = *version;
+                    let transfer_size = if favorite {
+                        self.favorite_file_size(file).unwrap_or(0)
+                    } else {
+                        self.files
+                            .lock()
+                            .expect("files mutex not poisoned")
+                            .manifest(file)
+                            .map(|manifest| manifest.map_or(0, |manifest| manifest.size()))
+                            .unwrap_or_else(|error| {
+                                log::warn!("attachment size lookup deferred: {error}");
+                                0
+                            })
+                    };
+                    // Bound the complete exchange without rejecting large legitimate
+                    // archives solely because they need more than a fixed short timeout.
+                    let deadline = attachment_deadline(transfer_size);
+                    let Some(permit) = self.runtime_work.admit() else {
+                        return;
+                    };
+                    let owner = id.clone();
+                    let generation = selection.generation;
+                    let checked = !attachment_unsupported.contains_key(&id);
+                    let task = attachments.spawn(permit.track(async move {
+                        let mut unsupported = false;
+                        let result = tokio::time::timeout(deadline, async {
+                            if favorite {
+                                if node
+                                    .account_blocking(move |node| {
+                                        node.preserve_favorite_file(file, revision)
+                                    })
+                                    .await?
+                                {
+                                    Ok(AttachmentOutcome::Complete)
+                                } else {
+                                    node.pull_favorite_attachment(&peer, file, revision)
+                                        .await
+                                        .map(|_| AttachmentOutcome::Complete)
+                                }
+                            } else if node
+                                .account_blocking(move |node| {
+                                    node.preserve_available_attachment(file, revision)
+                                })
+                                .await?
+                            {
+                                Ok(AttachmentOutcome::Complete)
+                            } else {
+                                Box::pin(node.pull_account_attachment_optional(
+                                    &peer,
+                                    file,
+                                    version,
+                                    checked,
+                                    &mut unsupported,
+                                ))
+                                .await
+                            }
+                        })
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(NodeError::File(
+                                "account attachment exchange timed out".into(),
+                            ))
+                        });
+                        #[cfg(test)]
+                        if matches!(result, Ok(AttachmentOutcome::Complete)) {
+                            node.trace_account_client(&peer.public, || {
+                                format!("attachment_terminal_ready generation={generation}")
+                            });
+                        }
+                        (id, file, unsupported, result, None)
+                    }));
+                    sibling_attachment_generations.insert(task.id(), generation);
+                    attachment_owners.insert(task.id(), owner);
+                }
             }
             if maintenance_requested && let Some(state) = local_maintenance.take() {
                 maintenance_requested = false;
@@ -2878,12 +3179,30 @@ impl Node {
                     return;
                 };
                 let select_data = attachments.len() < ATTACHMENT_WORKERS;
-                local_tasks.spawn_blocking(move || {
-                    // The actual filesystem closure owns admission even if its
-                    // scheduler is cancelled before the blocking work retires.
-                    let _permit = permit;
-                    state.run(node, fanout_cursor, select_data)
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "account_local_work_scheduled".into()
                 });
+                local_tasks.spawn(permit.track(async move {
+                    // Only this child waits; the parent keeps polling network
+                    // lanes and coalesces one dirty followup in its owned state.
+                    let capacity = node.runtime_work.local_repair_capacity().await?;
+                    let work = node.runtime_work.admit()?;
+                    let result = work
+                        .spawn_local_repair_blocking(capacity, move || {
+                            state.run(node, fanout_cursor, select_data)
+                        })
+                        .await;
+                    match result {
+                        Ok(value) => Some(value.into_inner()),
+                        Err(error) if error.is_panic() => {
+                            std::panic::resume_unwind(error.into_panic())
+                        }
+                        Err(error) => {
+                            panic!("owned account local worker was unexpectedly cancelled: {error}")
+                        }
+                    }
+                }));
             }
             // Reuse the cursor's existing authenticated observation-time rule
             // before calculating a paired cooldown. A successful newer proof
@@ -3176,6 +3495,7 @@ impl Node {
                         hints.iter().any(|hint| hint.public == key.public())
                     )
                 });
+                let availability_scope = node.sibling_availability_scope();
                 #[cfg(test)]
                 let paid_resume = key.lane == DocumentLane::Control
                     && paid_control_resume_for_test(control_pairs.get(&key), protected);
@@ -3201,7 +3521,20 @@ impl Node {
                             hook(peer.public.clone(), paid_resume).await;
                         }
                     }
-                    let _ = node.pull_account_documents_page(&peer, &mut state).await;
+                    let result = node.pull_account_documents_page(&peer, &mut state).await;
+                    if result.is_ok() {
+                        state.exchange_failures = 0;
+                        if state.control_page_completed() {
+                            node.renew_sibling_availability(&peer.public, availability_scope);
+                        }
+                    } else if !result.as_ref().is_err_and(local_sync_capacity_busy) {
+                        let delay =
+                            Duration::from_secs((5u64 << state.exchange_failures.min(6)).min(300));
+                        state.exchange_failures = state.exchange_failures.saturating_add(1);
+                        if let Some(at) = state.retry_at {
+                            state.retry_at = Some(at.max(std::time::Instant::now() + delay));
+                        }
+                    }
                     (key, peer, state)
                 }));
                 if protected {
@@ -3265,6 +3598,10 @@ impl Node {
                     return;
                 };
                 let owner = id.clone();
+                let wanted = node.device_sync_policy();
+                let history_exchange_expected =
+                    wanted.history || wanted.attachments || wanted.appearance || wanted.contacts;
+                let availability_scope = node.sibling_availability_scope();
                 let task = history.spawn(permit.track(async move {
                     #[cfg(test)]
                     node.trace_account_client(&peer.public, || {
@@ -3287,6 +3624,9 @@ impl Node {
                             super::account_session::client_trace_outcome(&result)
                         )
                     });
+                    if result.is_ok() && history_exchange_expected {
+                        node.renew_sibling_availability(&peer.public, availability_scope);
+                    }
                     state.favorite_error = None;
                     if result.is_ok() && node.device_sync_policy().history {
                         if state
@@ -3347,46 +3687,27 @@ impl Node {
                     }
                     // Selection belongs to this existing history worker. A slow
                     // local store must not park the parent document scheduler.
-                    let missing = if node.device_sync_policy().attachments {
+                    let missing = if result.is_ok() && node.device_sync_policy().attachments {
                         let favorites_supported = state.favorites_supported;
                         node.account_blocking(move |node| {
-                            #[cfg(test)]
-                            node.trace_account_client(&node.identity.public(), || {
-                                "attachment_selection_begin".into()
-                            });
-                            let files =
-                                node.files.lock().expect("files mutex not poisoned").files();
-                            let mut missing = Vec::new();
-                            for file in files {
-                                let file = file?;
-                                if !node.media.contains(file)
-                                    && !node.account_file_recalled(file)?
-                                {
-                                    missing.push(file);
-                                }
-                            }
-                            missing.sort_by_key(|id| *id.as_bytes());
-                            let mut queue: Vec<_> =
-                                missing.into_iter().map(|file| (file, false)).collect();
-                            if favorites_supported && node.device_sync_policy().history {
-                                queue.extend(
-                                    node.missing_favorite_files()
-                                        .into_iter()
-                                        .map(|file| (file, true)),
-                                );
-                            }
-                            Ok(queue)
+                            node.select_sibling_attachment_page(
+                                None,
+                                HashSet::new(),
+                                favorites_supported,
+                            )
                         })
                         .await
-                        .unwrap_or_default()
+                        .map(Some)
                     } else {
-                        Vec::new()
+                        Ok(None)
                     };
                     (id, peer, state, result, missing)
                 }));
                 history_owners.insert(task.id(), owner);
             }
-            let mut enqueue_all = false;
+            let mut enqueue_all = initial_refresh;
+            let mut reconcile_all = initial_refresh;
+            initial_refresh = false;
             let fanout_retry = fanout.next_retry();
             // Deferred peers keep their cursor and queued refresh, but do not
             // consume another worker/maintenance turn before the exact deadline.
@@ -3409,11 +3730,60 @@ impl Node {
                     })
                 })
                 .flatten();
-            let worker_retry = document_retry.into_iter().chain(history_retry).min();
+            let attachment_retry = retry_attachment
+                .iter()
+                .filter(|(id, at)| {
+                    **at > std::time::Instant::now() && !active_attachments.contains(*id)
+                })
+                .filter(|(id, _)| {
+                    sibling_attachments.get(*id).is_some_and(|selection| {
+                        !selection.page.files.is_empty()
+                            && self.sibling_sync_available(&selection.peer.public)
+                    })
+                })
+                .map(|(_, at)| *at)
+                .min();
+            let refill_retry = sibling_attachments
+                .values()
+                .filter(|selection| self.sibling_sync_available(&selection.peer.public))
+                .filter_map(|selection| selection.retry_at)
+                .filter(|at| *at > std::time::Instant::now())
+                .min();
+            let unavailable_retry = unavailable
+                .iter()
+                .filter(|((id, _), _)| {
+                    sibling_attachments.get(id).is_some_and(|selection| {
+                        selection.page.files.is_empty()
+                            && selection.page.total > 0
+                            && self.sibling_sync_available(&selection.peer.public)
+                    })
+                })
+                .map(|(_, at)| {
+                    std::time::Instant::now()
+                        + at.saturating_duration_since(tokio::time::Instant::now())
+                })
+                .min();
+            let worker_retry = document_retry
+                .into_iter()
+                .chain(history_retry)
+                .chain(attachment_retry)
+                .chain(refill_retry)
+                .chain(unavailable_retry)
+                .min();
+            let publication_deadline = local_maintenance
+                .as_ref()
+                .and_then(local_maintenance::LocalMaintenance::publication_deadline);
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!(
+                    "account_owner_local_state idle={}",
+                    !maintenance_requested && local_tasks.is_empty() && local_maintenance.is_some(),
+                )
+            });
             tokio::select! {
                 result = local_tasks.join_next(), if !local_tasks.is_empty() => {
                     match result {
-                        Some(Ok(turn)) => {
+                        Some(Ok(Some(turn))) => {
                             maintenance_requested |= turn.more_inventory;
                             local_maintenance = Some(turn.state);
                             #[cfg(test)]
@@ -3474,6 +3844,7 @@ impl Node {
                                 }
                             }
                         }
+                        Some(Ok(None)) => return,
                         Some(Err(error)) => {
                             if error.is_panic() {
                                 std::panic::resume_unwind(error.into_panic());
@@ -3483,6 +3854,13 @@ impl Node {
                         None => unreachable!("owned local maintenance task"),
                     }
                 }
+                _ = async {
+                    if let Some(at) = publication_deadline {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => { maintenance_requested = true; }
                 _ = async {
                     if let Some(at) = worker_retry {
                         tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
@@ -3504,8 +3882,49 @@ impl Node {
                     }
                 } => {
                     enqueue_all = true;
+                    reconcile_all = true;
                 }
-                _ = self.account_sync_notify.notified() => { enqueue_all = true; }
+                _ = roster_changes.changed() => {
+                    let changed = observe_fanout_routes(&mut fanout_routes);
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), ||
+                        "account_owner_roster_observed".into());
+                    if !changed.is_empty() {
+                        fanout.wake_pending_for(|group| self.channel_members(group).iter().any(
+                            |member| changed.contains(&wake::wake_identity(member)),
+                        ));
+                    }
+                    let projection = observe_roster_work();
+                    let semantic_change = !changed.is_empty()
+                        || projection.is_none()
+                        || projection != roster_projection;
+                    if !semantic_change {
+                        // A steady heartbeat renews freshness, not retry credit.
+                        // Otherwise the previous cached lease would manufacture
+                        // a reconnect despite continuously observed presence.
+                        let scope = self.sibling_availability_scope();
+                        for (identity, (_, deadline, known_scope)) in &mut online_routes {
+                            let public = PublicIdentity { ed25519_pub: identity.0, x25519_pub: identity.1 };
+                            if *known_scope == scope
+                                && let Some(current) = self.sibling_availability_deadline(&public) {
+                                *deadline = current;
+                            }
+                        }
+                    }
+                    enqueue_all |= semantic_change
+                        || online_routes.values().any(|(_, deadline, _)|
+                            *deadline <= std::time::Instant::now());
+                    roster_projection = projection;
+                }
+                // This coalesced watch carries no peer identity; it grants one
+                // conservative wake, never a fresh-to-fresh lease renewal.
+                _ = availability_changes.changed() => { fanout.wake_pending(); enqueue_all = true; }
+                _ = fanout_network.changed() => { fanout.wake_pending(); enqueue_all = true; }
+                _ = self.account_sync_notify.notified() => {
+                    enqueue_all = true;
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || "account_local_work_dirty".into());
+                }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
                     maintenance_requested = true;
                     let completion = match result {
@@ -3615,7 +4034,10 @@ impl Node {
                             if !control_pairs.contains_key(&key) && refresh && state.begin_refresh() {
                                 document_refresh.remove(&key);
                             }
-                            let continuation = control_pairs.contains_key(&key) || (refresh && !state.admission_deferred()) || state.pending;
+                            // A locally deferred page owns a retry deadline even
+                            // though it has no remote continuation. Keep it queued
+                            // so the existing deadline selector can resume it.
+                            let continuation = control_pairs.contains_key(&key) || (refresh && !state.admission_deferred()) || state.pending || state.admission_deferred();
                             let projection = control_pairs.get(&key).map_or_else(|| state.status(policy), |pair| pair.status(&state, policy));
                             document_statuses.insert(key.clone(), projection);
                             let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
@@ -3661,8 +4083,13 @@ impl Node {
                             let favorites_pending = (state.favorite_next.is_some() || (state.favorites_supported && state.favorite_digest==[0;32] && state.favorite_error.is_none()))
                                 && !favorites_waiting;
                             let mut continuation = favorites_pending;
+                            let source_ready = result.is_ok();
+                            if !source_ready {
+                                status.pending_attachments = self.account_sync_status.lock().expect("account sync status mutex").get(&id).map_or(0, |old| old.pending_attachments);
+                            }
                             match result {
                                 Ok((next, digest, version)) => {
+                                    state.history_failures = 0;
                                     status.legacy_file_metadata = version == AccountSyncVersion::V1;
                                     let history_complete = state.complete_page(next, digest);
                                     #[cfg(test)]
@@ -3696,52 +4123,50 @@ impl Node {
                                 Err(error) => {
                                     status.phase = SyncPhase::Error;
                                     status.error = Some(error.to_string().chars().take(160).collect());
+                                    // Favorites demand is not successful history progress.
+                                    // Retain this peer's cursors and refresh, but let the
+                                    // existing retry owner gate failures even across wakes.
+                                    let delay = Duration::from_secs((5u64 << state.history_failures.min(6)).min(300));
+                                    state.history_failures = state.history_failures.saturating_add(1);
+                                    state.history_retry_at = Some(std::time::Instant::now() + delay);
+                                    continuation = false;
                                 }
                             }
-                            if policy.attachments {
+                            if let Err(error) = &missing {
+                                status.phase = SyncPhase::Error;
+                                status.error = Some(format!("local attachment selection: {error}").chars().take(160).collect());
+                                status.pending_attachments = self.account_sync_status.lock().expect("account sync status mutex").get(&id).map_or(0, |old| old.pending_attachments);
+                                attachment_selection_generation = attachment_selection_generation.wrapping_add(1);
+                                sibling_attachments.insert(id.clone(), attachment_selection::AttachmentSelection {
+                                    peer: peer.clone(), page: attachment_selection::AttachmentPage { files: VecDeque::new(), total: status.pending_attachments, after: None }, version: if status.legacy_file_metadata { AccountSyncVersion::V1 } else { AccountSyncVersion::V2 }, generation: attachment_selection_generation, favorites_supported: state.favorites_supported, refill: false,
+                                    retry_at: Some(std::time::Instant::now() + Duration::from_secs(5)), read_failures: 1,
+                                });
+                            }
+                            if policy.attachments && source_ready && self.sibling_sync_available(&peer.public) && let Ok(Some(missing)) = missing {
                                 unavailable.retain(|_, until| *until > tokio::time::Instant::now());
                                 attachment_unsupported.retain(|_, until| *until > tokio::time::Instant::now());
-                                status.pending_attachments = missing.len();
-                                let selected = (0..missing.len()).map(|offset| (state.next_file.wrapping_add(offset)) % missing.len())
-                                    .find(|index| !unavailable.contains_key(&(id.clone(), missing[*index].0)));
-                                if let Some(index) = selected.filter(|_| attachments.len() < ATTACHMENT_WORKERS
-                                    && !active_attachments.contains(&id)
-                                    && retry_attachment.get(&id).is_none_or(|at| *at <= std::time::Instant::now())) {
-                                    let (file,favorite) = missing[index];
-                                    state.next_file = index.wrapping_add(1);
-                                    active_attachments.insert(id.clone());
-                                    let node = self.clone(); let peer = peer.clone(); let id = id.clone();
-                                    let version = if status.legacy_file_metadata { AccountSyncVersion::V1 } else { AccountSyncVersion::V2 };
-                                    let transfer_size = if favorite { self.favorite_file_size(file).unwrap_or(0) } else { self.files.lock().expect("files mutex not poisoned")
-                                        .manifest(file).map(|manifest|manifest.map_or(0,|manifest|manifest.size())).unwrap_or_else(|error| {log::warn!("attachment size lookup deferred: {error}");0}) };
-                                    // Bound the complete exchange without rejecting large legitimate
-                                    // archives solely because they need more than a fixed short timeout.
-                                    let deadline = attachment_deadline(transfer_size);
-                                    let Some(permit) = self.runtime_work.admit() else { return; };
-                                    let owner = id.clone();
-                                    let checked = !attachment_unsupported.contains_key(&id);
-                                    let task = attachments.spawn(permit.track(async move {
-                                        let mut unsupported = false;
-                                        let result = tokio::time::timeout(deadline, async {
-                                            if favorite {
-                                                if node.account_blocking(move |node|node.preserve_favorite_file(file,revision)).await? {Ok(AttachmentOutcome::Complete)}
-                                                else {node.pull_favorite_attachment(&peer,file,revision).await.map(|_|AttachmentOutcome::Complete)}
-                                            } else if node.account_blocking(move |node| node.preserve_available_attachment(file, revision)).await? {
-                                                Ok(AttachmentOutcome::Complete)
-                                            } else { Box::pin(node.pull_account_attachment_optional(&peer, file, version, checked, &mut unsupported)).await }
-                                        }).await.unwrap_or_else(|_| Err(NodeError::File("account attachment exchange timed out".into())));
-                                        (id, file, unsupported, result, None)
-                                    }));
-                                    attachment_owners.insert(task.id(), owner);
-                                }
+                                status.pending_attachments = missing.total;
+                                let version = if status.legacy_file_metadata { AccountSyncVersion::V1 } else { AccountSyncVersion::V2 };
+                                attachment_selection_generation = attachment_selection_generation.wrapping_add(1);
+                                let waiting = missing.files.iter().any(|(file, _)| unavailable.contains_key(&(id.clone(), *file)));
+                                sibling_attachments.insert(id.clone(), attachment_selection::AttachmentSelection {
+                                    peer: peer.clone(), page: missing, version, generation: attachment_selection_generation, favorites_supported: state.favorites_supported, refill: false, retry_at: None, read_failures: 0,
+                                });
                                 if status.pending_attachments > 0 && status.phase == SyncPhase::UpToDate {
-                                    status.phase = if missing.iter().any(|(file,_)|unavailable.contains_key(&(id.clone(),*file))) { SyncPhase::WaitingForFiles } else { SyncPhase::CatchingUp };
+                                    status.phase = if waiting { SyncPhase::WaitingForFiles } else { SyncPhase::CatchingUp };
                                 }
                             }
                             if continuation && matches!(status.phase,SyncPhase::UpToDate|SyncPhase::WaitingForFiles) {
                                 status.phase = SyncPhase::CatchingUp;
                             }
                             self.set_account_sync_status(id.clone(), status);
+                            #[cfg(test)]
+                            if let Some(selection) = sibling_attachments.get(&id) {
+                                self.trace_account_client(&peer.public, || format!(
+                                    "attachment_handoff_published generation={} pending={}",
+                                    selection.generation, selection.page.total
+                                ));
+                            }
                             let deferred_history = state.history_retry_at.is_some();
                             cursors.insert(id.clone(), state);
                             if continuation || deferred_history {
@@ -3753,6 +4178,59 @@ impl Node {
                         }
                     }
                 }
+                result = attachment_selections.join_next_with_id(), if !attachment_selections.is_empty() => {
+                    if let Some(Ok((task, (id, generation, page)))) = result {
+                        attachment_selection_owners.remove(&task);
+                        attachment_selection_active.remove(&id);
+                        if let Some(selection) = sibling_attachments.get_mut(&id) && selection.generation == generation {
+                            selection.refill = false;
+                            match page {
+                              Ok(page) => {
+                                selection.page = page;
+                                selection.read_failures = 0;
+                                selection.retry_at = None;
+                                let mut status = self.account_sync_status.lock().expect("account sync status mutex").get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
+                                status.pending_attachments = selection.page.total;
+                                if status.error.as_deref().is_some_and(|error| error.starts_with("local attachment selection")) {
+                                    status.error = None;
+                                }
+                                let history_settled = !active.contains(&id) && !pending_refresh.contains(&id)
+                                    && !queue.iter().any(|(queued, _)| queued == &id)
+                                    && cursors.get(&id).is_some_and(|cursor| cursor.next.is_none() && cursor.favorite_next.is_none() && cursor.history_retry_at.is_none() && cursor.favorite_retry_at.is_none()
+                                        && !(cursor.favorites_supported && cursor.favorite_digest == [0;32] && cursor.favorite_error.is_none()));
+                                if status.error.is_none() {
+                                    status.phase = if !history_settled { SyncPhase::CatchingUp }
+                                        else if selection.page.total == 0 { SyncPhase::UpToDate }
+                                        else if selection.page.files.is_empty() || selection.page.files.iter().any(|(file, _)| unavailable.contains_key(&(id.clone(), *file))) { SyncPhase::WaitingForFiles }
+                                        else { SyncPhase::CatchingUp };
+                                }
+                                #[cfg(test)]
+                                self.trace_account_client(&selection.peer.public, || format!("attachment_refill_ready pending={} selected={}", selection.page.total, selection.page.files.len()));
+                                self.set_account_sync_status(id, status);
+                              }
+                              Err(error) => {
+                                let mut status = self.account_sync_status.lock().expect("account sync status mutex").get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
+                                status.phase = SyncPhase::Error;
+                                status.error = Some(format!("local attachment selection: {error}").chars().take(160).collect());
+                                let delay = Duration::from_secs((5u64 << selection.read_failures.min(6)).min(300));
+                                selection.read_failures = selection.read_failures.saturating_add(1);
+                                selection.retry_at = Some(std::time::Instant::now() + delay);
+                                self.set_account_sync_status(id, status);
+                              }
+                            }
+                        }
+                    } else if let Some(Err(error)) = result
+                        && let Some((id, generation)) = attachment_selection_owners.remove(&error.id()) {
+                        attachment_selection_active.remove(&id);
+                        if let Some(selection) = sibling_attachments.get_mut(&id) && selection.generation == generation {
+                        selection.refill = false; selection.retry_at = Some(std::time::Instant::now() + RECONCILE_INTERVAL);
+                        let mut status = self.account_sync_status.lock().expect("account sync status mutex").get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
+                        status.phase = SyncPhase::Error;
+                        status.error = Some("local attachment selection worker terminated".into());
+                        self.set_account_sync_status(id, status);
+                        }
+                    }
+                }
                 result = attachments.join_next_with_id(), if !attachments.is_empty() => {
                     // Actual capacity release is an ordinary local-data turn;
                     // it does not manufacture an all-peer network refresh.
@@ -3760,12 +4238,34 @@ impl Node {
                     if let Some(Err(error)) = &result
                         && let Some(id) = attachment_owners.remove(&error.id()) {
                             active_attachments.remove(&id);
-                            retry_attachment.insert(id, std::time::Instant::now() + RETRY_INTERVAL);
+                            let generation = sibling_attachment_generations.remove(&error.id());
+                            if generation.is_none() || sibling_attachments.get(&id).is_some_and(|selection| Some(selection.generation) == generation) {
+                                retry_attachment.insert(id, std::time::Instant::now() + RETRY_INTERVAL);
+                            } else if let Some(selection) = sibling_attachments.get_mut(&id) { selection.refill = true; }
                     }
                     if let Some(Ok((task, (id, file, unsupported, result, file_operation)))) = result {
                         attachment_owners.remove(&task);
                         active_attachments.remove(&id);
-                        if file_operation.is_some() {
+                        let generation = sibling_attachment_generations.remove(&task);
+                        if generation.is_some() && !sibling_attachments.get(&id).is_some_and(|selection| Some(selection.generation) == generation) {
+                            #[cfg(test)]
+                            let pending_before = self.account_sync_status.lock().unwrap()
+                                .get(&id).map(|status| status.pending_attachments);
+                            if let Some(selection) = sibling_attachments.get_mut(&id) {
+                                #[cfg(test)]
+                                let total_before = selection.page.total;
+                                selection.refill = true;
+                                #[cfg(test)]
+                                {
+                                    let pending_after = self.account_sync_status.lock().unwrap()
+                                        .get(&id).map(|status| status.pending_attachments);
+                                    self.trace_account_client(&selection.peer.public, || format!(
+                                        "attachment_stale_terminal generation={} replacement={} total_before={total_before} total_after={} status_before={pending_before:?} status_after={pending_after:?}",
+                                        generation.expect("stale terminal generation"), selection.generation, selection.page.total
+                                    ));
+                                }
+                            }
+                        } else if file_operation.is_some() {
                             if result.is_ok() {
                                 retry_attachment.remove(&id);
                             } else {
@@ -3778,7 +4278,13 @@ impl Node {
                             attachment_unsupported.insert(id.clone(), tokio::time::Instant::now() + ATTACHMENT_AVAILABILITY_TTL);
                         }
                         if let Err(error) = result {
-                            retry_attachment.insert(id.clone(), std::time::Instant::now() + RETRY_INTERVAL);
+                            let delay = if local_sync_capacity_busy(&error) { RETRY_INTERVAL } else {
+                                let failures = attachment_failures.entry(id.clone()).or_default();
+                                let delay = Duration::from_secs((10u64 << (*failures).min(5)).min(300));
+                                *failures = failures.saturating_add(1);
+                                delay
+                            };
+                            retry_attachment.insert(id.clone(), std::time::Instant::now() + delay);
                             let previous_status = self.account_sync_status.lock().expect("account sync status mutex not poisoned").get(&id).cloned();
                             if let Some(mut status) = previous_status && !local_sync_capacity_busy(&error) {
                                 status.phase = SyncPhase::Error;
@@ -3787,6 +4293,19 @@ impl Node {
                             }
                         } else {
                             retry_attachment.remove(&id);
+                            attachment_failures.remove(&id);
+                            if matches!(result, Ok(AttachmentOutcome::Complete))
+                                && let Some(selection) = sibling_attachments.get_mut(&id) {
+                                selection.page.files.retain(|(candidate, _)| *candidate != file);
+                                selection.page.total = selection.page.total.saturating_sub(1);
+                                selection.refill = selection.page.files.is_empty() && selection.page.total > 0;
+                                let mut status = self.account_sync_status.lock().expect("account sync status mutex").get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
+                                status.pending_attachments = selection.page.total;
+                                if selection.page.total == 0 && cursors.get(&id).is_some_and(|cursor| cursor.next.is_none() && cursor.favorite_next.is_none() && cursor.history_retry_at.is_none()) && !active.contains(&id) {
+                                    status.phase = SyncPhase::UpToDate;
+                                }
+                                self.set_account_sync_status(id.clone(), status);
+                            }
                             if matches!(result, Ok(AttachmentOutcome::Unavailable | AttachmentOutcome::SourceDisabled)) {
                                 if unavailable.len() >= MAX_UNAVAILABLE_ATTACHMENTS {
                                     // Keep the metadata bound without an immediate eviction/reprobe loop.
@@ -3794,6 +4313,15 @@ impl Node {
                                     if let Some(oldest)=unavailable.iter().min_by_key(|(_,until)|**until).map(|(key,_)|key.clone()) { unavailable.remove(&oldest); }
                                 }
                                 unavailable.insert((id.clone(),file),tokio::time::Instant::now()+ATTACHMENT_AVAILABILITY_TTL);
+                                if let Some(selection) = sibling_attachments.get_mut(&id) {
+                                    selection.refill = selection.page.files.iter().all(|(file, _)| unavailable.contains_key(&(id.clone(), *file)));
+                                    if !active.contains(&id) && cursors.get(&id).is_some_and(|cursor| cursor.next.is_none() && cursor.favorite_next.is_none() && cursor.history_retry_at.is_none()) {
+                                        let mut status = self.account_sync_status.lock().expect("account sync status mutex").get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
+                                        status.phase = SyncPhase::WaitingForFiles;
+                                        status.pending_attachments = selection.page.total;
+                                        self.set_account_sync_status(id.clone(), status);
+                                    }
+                                }
 
                             }
                             enqueue_all = true;
@@ -3835,6 +4363,12 @@ impl Node {
                 document_cursors.clear();
                 document_statuses.clear();
                 attachment_owners.clear();
+                sibling_attachment_generations.clear();
+                sibling_attachments.clear();
+                // Read-only refills retain their actual work slot across policy
+                // replacement. Their old generation cannot replace a new handoff;
+                // waiting here would park independent network/control lanes.
+                attachment_failures.clear();
                 queue.clear();
                 cursors.clear();
                 retry_attachment.clear();
@@ -3842,6 +4376,7 @@ impl Node {
                 attachment_unsupported.clear();
                 revision = current_revision;
                 enqueue_all = true;
+                reconcile_all = true;
             }
             if enqueue_all {
                 maintenance_requested = true;
@@ -3866,18 +4401,85 @@ impl Node {
                 {
                     foreground_next = None;
                 }
+                sibling_attachments.retain(|id, _| certified.contains(id));
                 queue.retain(|(id, _)| certified.contains(id));
                 for queue in &mut document_queues {
                     queue.retain(|(key, _)| document_identities.contains(&key.identity()));
                 }
                 pending_refresh.retain(|id| certified.contains(id));
                 document_refresh.retain(|key| document_identities.contains(&key.identity()));
+                let directed = self.take_sibling_pull_requests();
+                let selected_sources = self.pending_account_operation_source_requests();
+                let mut current_routes = HashMap::new();
                 for device in devices {
                     let id = device.public.user_id();
                     if id == self.user_id() {
                         continue;
                     }
+                    let Some(availability_deadline) =
+                        self.sibling_availability_deadline(&device.public)
+                    else {
+                        let mut status = self
+                            .account_sync_status
+                            .lock()
+                            .expect("account sync status mutex")
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_else(|| initial_sync_status(id.clone()));
+                        status.phase = SyncPhase::Offline;
+                        status.document_phase = SyncPhase::Offline;
+                        status.error = None;
+                        status.document_error = None;
+                        self.set_account_sync_status(id, status);
+                        continue;
+                    };
+                    let identity = wake::wake_identity(&device.public);
+                    let routes = self
+                        .routing_peer(&id)
+                        .map(|peer| {
+                            let mut routes: Vec<_> =
+                                peer.routes.iter().map(|route| route.addr).collect();
+                            routes.push(peer.addr);
+                            routes.sort_unstable();
+                            routes.dedup();
+                            routes
+                        })
+                        .unwrap_or_default();
+                    let changed = online_routes.get(&identity).is_none_or(
+                        |(known_routes, deadline, scope)| {
+                            *deadline <= std::time::Instant::now()
+                                || known_routes != &routes
+                                || *scope != self.sibling_availability_scope()
+                        },
+                    );
+                    if changed && let Some(cursor) = cursors.get_mut(&id) {
+                        cursor.history_failures = 0;
+                        cursor.history_retry_at = None;
+                    }
+                    if changed {
+                        retry_attachment.remove(&id);
+                        attachment_failures.remove(&id);
+                    }
+                    current_routes.insert(
+                        identity,
+                        (
+                            routes,
+                            availability_deadline,
+                            self.sibling_availability_scope(),
+                        ),
+                    );
+                    let mandatory_only =
+                        !reconcile_all && !changed && !directed.contains(&identity);
+                    if mandatory_only && !selected_sources.contains_key(&identity) {
+                        continue;
+                    }
+                    if id == self.user_id() {
+                        continue;
+                    }
                     for lane in DocumentLane::ALL {
+                        if mandatory_only && lane != DocumentLane::Control {
+                            continue;
+                        }
                         let key = DocumentPeer::new(&device.public, lane);
                         let queue = &mut document_queues[lane.index()];
                         #[cfg(test)]
@@ -3910,6 +4512,9 @@ impl Node {
                             }
                             queue.push_back((key, peer));
                         }
+                    }
+                    if mandatory_only {
+                        continue;
                     }
                     if active.contains(&id) {
                         pending_refresh.insert(id);
@@ -3958,6 +4563,7 @@ impl Node {
                     }
                     queue.push_back((id, peer));
                 }
+                online_routes = current_routes;
             }
             // Self notifications may already be ready on every turn. Let the
             // bounded data and public fanout tasks run before another synchronous
@@ -3974,7 +4580,7 @@ impl Node {
         if statuses.get(&id) != Some(&status) {
             statuses.insert(id, status);
             drop(statuses);
-            self.note_ui_change();
+            self.ui_changes.sync_status();
         }
     }
 }

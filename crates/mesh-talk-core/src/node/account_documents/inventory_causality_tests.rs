@@ -475,7 +475,17 @@ fn group_inventory_directory_wide_frontier_receipt_is_atomic_and_recovers_after_
         .lock()
         .unwrap()
         .publication_budget_for_test(0);
-    let rejected = group_inventory_source_document(&source, group);
+    assert!(
+        matches!(
+            try_group_inventory_source_document(&source, group),
+            Err(NodeError::Log(crate::eventlog::LogError::CorruptFile(_)))
+        ),
+        "the injected receipt-budget failure must remain observable"
+    );
+    let rejected = source
+        .account_document(&previous.meta.key)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         rejected.meta, previous.meta,
         "insufficient atomic receipt budget must leave the prior committed source untouched"

@@ -10,7 +10,9 @@ const mocks = vi.hoisted(() => ({
   set: vi.fn(),
   update: vi.fn(),
   manage: vi.fn(),
+  mac: vi.fn(),
 }));
+vi.mock("@/lib/platform", () => ({ isMacOverlay: mocks.mac }));
 vi.mock("@/lib/api/localAgentAccess", () => ({ localAgentAccess: mocks }));
 vi.mock("../HiddenContactsDialog", () => ({
   HiddenContactsDialog: () => null,
@@ -23,6 +25,7 @@ let access: LocalAgentAccess;
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.resetAllMocks();
+  mocks.mac.mockReturnValue(false);
   await i18n.changeLanguage("en");
   access = {
     enabled: false,
@@ -46,6 +49,7 @@ beforeEach(async () => {
     settings: {
       privacy_level: "balanced",
       stay_signed_in: true,
+      startup_verification: true,
       notification_preview: true,
       auto_lock_seconds: 0,
       clipboard_clear_seconds: 0,
@@ -318,4 +322,54 @@ it("keeps lock and clipboard editors separate from related permission links", as
     section("relatedPermissions").querySelector('select,[role="switch"]'),
   ).toBeNull();
   expect(host.querySelectorAll("#setting-stay-signed-in")).toHaveLength(1);
+});
+
+it("changes macOS startup verification independently and waits for acknowledgement", async () => {
+  mocks.mac.mockReturnValue(true);
+  await render();
+  const toggle = () =>
+    host.querySelector<HTMLButtonElement>("#setting-startup-verification")!;
+  expect(toggle().getAttribute("aria-checked")).toBe("true");
+  await act(async () => toggle().click());
+  expect(mocks.update).toHaveBeenCalledWith(
+    { startup_verification: false },
+    "privacy",
+  );
+  expect(toggle().getAttribute("aria-checked")).toBe("true");
+  controller = {
+    ...controller,
+    settings: { ...controller.settings!, startup_verification: false },
+  };
+  await render();
+  expect(toggle().getAttribute("aria-checked")).toBe("false");
+  expect(host.textContent).toContain(
+    i18n.t("settings.startupVerificationLocal"),
+  );
+  expect(
+    host.querySelector<HTMLSelectElement>("#setting-auto-lock")!.value,
+  ).toBe("0");
+});
+it("disables startup verification without saved login or during a pending save", async () => {
+  mocks.mac.mockReturnValue(true);
+  for (const state of [
+    { saving: true, stay: true },
+    { saving: false, stay: false },
+  ]) {
+    controller = {
+      ...controller,
+      saving: state.saving,
+      settings: { ...controller.settings!, stay_signed_in: state.stay },
+    };
+    await render();
+    const toggle = host.querySelector<HTMLButtonElement>(
+      "#setting-startup-verification",
+    )!;
+    expect(toggle.disabled).toBe(true);
+    await act(async () => toggle.click());
+  }
+  expect(mocks.update).not.toHaveBeenCalled();
+});
+it("does not expose the macOS startup verification policy on other platforms", async () => {
+  await render();
+  expect(host.querySelector("#setting-startup-verification")).toBeNull();
 });

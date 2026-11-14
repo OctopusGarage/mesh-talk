@@ -17,6 +17,42 @@ const scriptCommand = text => [powershell, "-NoProfile", "-NonInteractive", "-En
 const run = (command, options = {}) => execute(command, { cwd: process.cwd(), env: process.env, onOutput() {}, ...options });
 const leader = fileURLToPath(new URL("./fixtures/windows-native-leader.ps1", import.meta.url));
 
+test("cancellation before helper retirement preserves its reason and drained output", { timeout: 12000 }, async t => {
+  const { executeWindows } = await import("../validation/windows-process-owner.mjs");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-cancel-before-final-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const app = path.join(directory, "target.exe");
+  await writeFile(app, "Protocol fixture; no native target is launched.\n");
+  const controller = new AbortController(), reason = Error("Original diagnostic deadline expired");
+  let text = "", helper, endedAfterDestroy = 0;
+  t.after(() => { controller.abort(reason); if (helper?.exitCode === null && helper.signalCode === null) helper.kill(); });
+  const output = new Writable({ write(chunk, _encoding, done) { text += chunk; done(); } });
+  const end = output.end; output.end = function (...args) { if (this.destroyed) endedAfterDestroy++; return end.apply(this, args); };
+  const fixture = `let input='';process.stdin.on('data',chunk=>{input+=chunk;const lines=input.split('\\n');if(lines.length<2)return;const request=JSON.parse(lines[0]);if(lines.includes('abort')){require('node:fs').writeFileSync(request.receipt,JSON.stringify({schema:1,nonce:request.nonce,result:{retired:true,forcedRetirement:true,exitCode:0}}));process.stdout.write('retired-output\\n',()=>process.exit(0));}else process.stdout.write('ready\\n');});`;
+  const result = await executeWindows([app], { signal: controller.signal, logPath: "fixture-owned-log", createLogStream: () => output,
+    cwd: process.cwd(), env: process.env, onOutput(chunk) { if (String(chunk).includes("ready")) controller.abort(reason); },
+    spawnOwner(_program, _args, options) { helper = spawn(process.execPath, ["-e", fixture], options); return helper; },
+  });
+  assert.equal(result.code, 130);
+  assert.equal(endedAfterDestroy, 0, "never end an already destroyed log");
+  assert.equal(result.error, reason.message);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.forcedRetirement, true);
+  assert.equal(result.cleanupUnverified, false);
+  assert.equal(text, "ready\nretired-output\n", "drain all owned output before log retirement");
+  assert.throws(() => process.kill(helper.pid, 0), { code: "ESRCH" });
+});
+
+async function retireHeldLogFixture(controller, release, completion, originalFailure) {
+  controller.abort(originalFailure); release?.();
+  try { if (completion) await completion; }
+  catch (error) {
+    if (!originalFailure) throw error;
+    // Preserve the failed setup as primary without discarding cleanup evidence.
+    if (error !== originalFailure) originalFailure.cleanupFailure = error;
+  }
+}
+
 // These portable cases exercise the actual parent bridge and an actual child
 // process. They validate receipt interpretation, not Windows kernel retirement.
 for (const mode of ["verified", "missing", "unavailable"]) for (const cancelled of [true, false]) test(`${cancelled ? "cancelled held" : "failed"} log finalization preserves ${mode} Windows retirement evidence`, { timeout: 12000 }, async t => {
@@ -26,11 +62,11 @@ for (const mode of ["verified", "missing", "unavailable"]) for (const cancelled 
   const app = path.join(directory, "target.exe");
   if (mode !== "unavailable") await writeFile(app, "Protocol fixture; no native target is launched.\n");
   const fixture = `let input='';process.stdin.on('data',chunk=>{input+=chunk;const end=input.indexOf('\\n');if(end<0)return;const request=JSON.parse(input.slice(0,end));if(process.argv[1]==='verified')require('node:fs').writeFileSync(request.receipt,JSON.stringify({schema:1,nonce:request.nonce,result:{retired:true,exitCode:0}}));process.exit(0);});`;
-  const controller = new AbortController();
-  let release, timer, completion, entered = false, helper;
+  const controller = new AbortController(), reason = Error("Controlled log finalization cancelled");
+  let release, timer, completion, failure, entered = false, helper;
   const output = new Writable({ write(_chunk, _encoding, done) { done(); }, final(done) {
     entered = true;
-    if (cancelled) { release = done; queueMicrotask(() => controller.abort()); }
+    if (cancelled) { release = done; queueMicrotask(() => controller.abort(reason)); }
     else done(Error("Controlled log final failure"));
   } });
   try {
@@ -43,13 +79,50 @@ for (const mode of ["verified", "missing", "unavailable"]) for (const cancelled 
     assert.equal(result.code, mode === "unavailable" || !cancelled ? 1 : 130);
     assert.equal(result.failureKind, "failed");
     assert.match(result.error, cancelled ? /log.*cancel/i : /Controlled log final failure/);
+    if (cancelled) assert.equal(result.error, reason.message);
     if (mode === "verified") assert.equal(result.exitCode, 0);
     assert.equal(result.cleanupUnverified, mode === "missing");
     assert.equal(output.destroyed, true);
     if (helper) assert.throws(() => process.kill(helper.pid, 0), { code: "ESRCH" });
+  } catch (error) {
+    failure = error; throw error;
   } finally {
-    clearTimeout(timer); controller.abort(); release?.();
-    if (completion) await completion;
+    clearTimeout(timer);
+    await retireHeldLogFixture(controller, release, completion, failure);
+  }
+});
+
+for (const admitted of [false, true]) test(`held-log setup failure ${admitted ? "after" : "before"} admission retires work without replacing the original failure`, { timeout: 12000 }, async t => {
+  const { executeWindows } = await import("../validation/windows-process-owner.mjs");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "mesh-held-log-setup-failure-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const app = path.join(directory, "target.exe");
+  await writeFile(app, "Protocol fixture; no native target is launched.\n");
+  const controller = new AbortController(), originalFailure = Error("Original fixture setup failed before readiness");
+  let completion, helper, release, result, text = "", entered = false;
+  let began; const admission = new Promise(resolve => { began = resolve; });
+  const output = new Writable({ write(chunk, _encoding, done) { text += chunk; done(); }, final(done) { release = done; } });
+  const fixture = `let input='';process.stdin.on('data',chunk=>{input+=chunk;const lines=input.split('\\n');if(lines.length<2)return;const request=JSON.parse(lines[0]);if(lines.includes('abort')){require('node:fs').writeFileSync(request.receipt,JSON.stringify({schema:1,nonce:request.nonce,result:{retired:true,exitCode:0}}));process.stdout.write('retired-output\\n',()=>process.exit(0));}});`;
+  t.after(() => { controller.abort(originalFailure); release?.(); if (helper?.exitCode === null && helper.signalCode === null) helper.kill(); });
+  await assert.rejects(async () => {
+    try {
+      completion = executeWindows([app], { signal: controller.signal, logPath: "fixture-owned-log", createLogStream: () => output,
+        cwd: process.cwd(), env: process.env, onOutput() {}, spawnOwner(_program, _args, options) {
+          entered = true; helper = spawn(process.execPath, ["-e", fixture], options); began(); return helper;
+        } }).then(value => { result = value; return value; });
+      if (admitted) await admission;
+      throw originalFailure;
+    } finally {
+      await retireHeldLogFixture(controller, release, completion, originalFailure);
+    }
+  }, error => error === originalFailure);
+  assert.equal(entered, admitted);
+  if (admitted) {
+    assert.equal(result.code, 130);
+    assert.equal(result.error, originalFailure.message);
+    assert.equal(result.cleanupUnverified, false);
+    assert.equal(text, "retired-output\n", "all helper output drains despite failed setup");
+    assert.throws(() => process.kill(helper.pid, 0), { code: "ESRCH" });
   }
 });
 
@@ -591,7 +664,7 @@ test("an output-limit control cannot cancel its enclosing validation supervisor"
     ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "", NODE_TEST_CONTEXT: undefined,
   });
   const result = spawnSync(process.execPath, [stage, "stream-control", "--result", output, "--", process.execPath,
-    "--test", `--test-name-pattern=^${caseName}$`, fileURLToPath(import.meta.url)], {
+    "--test", "--test-reporter=tap", `--test-name-pattern=^${caseName}$`, fileURLToPath(import.meta.url)], {
     cwd: root,
     // This synthetic supervisor owns the expected cancellation, independently
     // of the real runner executing this regression.

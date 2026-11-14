@@ -150,6 +150,7 @@ impl Node {
         enabled: bool,
         mut authorize: impl FnMut(&mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()>,
     ) -> std::io::Result<()> {
+        let _wake = self.profile_policy_wake();
         let _guard = self.privacy.gate.write().await;
         authorize(&mut || {
             if self.origin_sharing_enabled.swap(enabled, Ordering::AcqRel) != enabled {
@@ -179,6 +180,10 @@ impl Node {
         }
         self.delivery_notify.notify_one();
         self.bridge_notify.notify_one();
+        self.post_office_receive_notify.notify_one();
+        if !enabled {
+            self.storage.database().maintenance_waker().notify();
+        }
     }
 
     pub(in crate::node) fn clear_bridge_introductions(&self) {

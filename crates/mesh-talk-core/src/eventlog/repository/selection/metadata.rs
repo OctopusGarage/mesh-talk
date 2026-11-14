@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS participant_destructive_revisions(
  domain BLOB PRIMARY KEY CHECK(length(domain)=16),
  revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>=0)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS participant_semantic_compaction_revisions(
+ domain BLOB PRIMARY KEY CHECK(length(domain)=16),
+ counter INTEGER NOT NULL CHECK(typeof(counter)='integer' AND counter>=0)
+) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS participant_policy_destructive_update
 AFTER UPDATE OF destructive_epoch,lifecycle ON event_conversations
 WHEN NEW.destructive_epoch<>OLD.destructive_epoch OR NEW.lifecycle<>OLD.lifecycle BEGIN
@@ -47,6 +51,64 @@ impl EventRepository {
             nonnegative(revision.unwrap_or(0))
         })
     }
+    /// Global destructive changes that can invalidate cross-conversation
+    /// authority. Classified Profile compaction deletes only unreferenced leaves;
+    /// each affected view still checks its own physical destructive epoch.
+    /// Missing or corrupt classification is an error, never reusable evidence.
+    pub(crate) fn authority_destructive_revision(&self) -> Result<i64, LogError> {
+        self.database.read(|c| {
+            let (destructive, classified) = self.compaction_revisions_on(c)?;
+            Ok(destructive - classified)
+        })
+    }
+    /// Incoming traversal survives the same classified leaf retirement, while
+    /// every other destructive change still invalidates its coverage.
+    pub(crate) fn receive_repair_revision(&self) -> Result<i64, LogError> {
+        self.authority_destructive_revision()
+    }
+    /// Called exactly once after each affected conversation's destructive epoch
+    /// update in the SAME Profile publication transaction. This classifies the
+    /// trigger's increment; affected scopes retain their raw epoch invalidation.
+    pub(crate) fn record_profile_compaction_on(&self, c: &Connection) -> Result<(), LogError> {
+        // Raw repository users (including relays) need not initialize participant
+        // selections. Only an entirely absent registry permits this no-op;
+        // partially missing initialized metadata must fail closed.
+        let initialized: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('participant_kind_scan','participant_kind_revisions','participant_policy_revisions','participant_destructive_revisions','participant_semantic_compaction_revisions'))",
+            [],
+            |row| row.get(0),
+        )?;
+        if !initialized {
+            return Ok(());
+        }
+        let (destructive, classified) = self.compaction_revisions_on(c)?;
+        let next = advance(classified)?;
+        if next > destructive {
+            return Err(corrupt(
+                "Profile compaction classification exceeds destructive revision",
+            ));
+        }
+        c.execute(
+            "INSERT INTO participant_semantic_compaction_revisions(domain,counter) VALUES(?1,?2) ON CONFLICT(domain) DO UPDATE SET counter=excluded.counter",
+            params![self.domain.0.as_slice(), next],
+        )?;
+        Ok(())
+    }
+    fn compaction_revisions_on(&self, c: &Connection) -> Result<(i64, i64), LogError> {
+        // One SQLite snapshot observes both sides of the partition, including
+        // concurrent publication. Legacy databases start with no classified row.
+        let (destructive, classified): (i64, i64) = c.prepare_cached(
+            "SELECT coalesce((SELECT revision FROM participant_destructive_revisions WHERE domain=?1),0),coalesce((SELECT counter FROM participant_semantic_compaction_revisions WHERE domain=?1),0)",
+        )?.query_row([self.domain.0.as_slice()], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        nonnegative(destructive)?;
+        nonnegative(classified)?;
+        if classified > destructive {
+            return Err(corrupt(
+                "Profile compaction classification exceeds destructive revision",
+            ));
+        }
+        Ok((destructive, classified))
+    }
     pub(crate) fn prepare_kind_metadata_step(
         &self,
         budget: PreparationBudget,
@@ -69,7 +131,7 @@ impl EventRepository {
                 c.execute("INSERT INTO participant_policy_revisions VALUES(?1,?2,?3) ON CONFLICT(domain,kind) DO UPDATE SET ordinal=max(ordinal,excluded.ordinal)",params![self.domain.0.as_slice(),kind,ordinal])?;
             }
             let next=if rows.len()<limit {cutoff-1} else {rows.last().expect("nonempty metadata page").0};
-            c.execute("UPDATE participant_kind_scan SET ordinal=?2 WHERE domain=?1",params![self.domain.0.as_slice(),next])?;
+            c.execute("UPDATE participant_kind_scan SET ordinal=?2 WHERE domain=?1 AND ordinal<>?2",params![self.domain.0.as_slice(),next])?;
             Ok(PreparationStep{ready:next>=cutoff-1,rows:rows.len(),bytes:rows.len()*row_bytes,edges:0})
         })
     }
@@ -94,9 +156,9 @@ impl EventRepository {
     }
     pub(crate) fn raw_policy_revisions(&self) -> Result<Option<[i64; 32]>, LogError> {
         self.database.read(|c| {
-            let ready:bool=c.query_row("SELECT s.ordinal>=d.next_commit-1 FROM participant_kind_scan s JOIN event_domains d ON d.domain=s.domain WHERE s.domain=?1",[self.domain.0.as_slice()],|r|r.get(0))?;
+            let ready:bool=c.prepare_cached("SELECT s.ordinal>=d.next_commit-1 FROM participant_kind_scan s JOIN event_domains d ON d.domain=s.domain WHERE s.domain=?1")?.query_row([self.domain.0.as_slice()],|r|r.get(0))?;
             if !ready{return Ok(None);}
-            let mut revisions=[-1;32];let mut stmt=c.prepare("SELECT kind,ordinal FROM participant_policy_revisions WHERE domain=?1 ORDER BY kind")?;let mut rows=stmt.query([self.domain.0.as_slice()])?;
+            let mut revisions=[-1;32];let mut stmt=c.prepare_cached("SELECT kind,ordinal FROM participant_policy_revisions WHERE domain=?1 ORDER BY kind")?;let mut rows=stmt.query([self.domain.0.as_slice()])?;
             while let Some(row)=rows.next()?{let kind=usize::try_from(row.get::<_,i64>(0)?).map_err(|_|corrupt("invalid policy kind revision"))?;*revisions.get_mut(kind).ok_or_else(||corrupt("unsupported policy kind revision"))?=nonnegative(row.get(1)?)?;}
             Ok(Some(revisions))
         })
@@ -149,7 +211,443 @@ impl EventRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eventlog::repository::pages::PageBudget;
     use crate::identity::device::DeviceIdentity;
+
+    use crate::eventlog::repository::{
+        maintenance::{MaintenanceState, ProfileMaintenanceToken},
+        tests::{database, event},
+    };
+
+    #[test]
+    fn idle_resource_kind_metadata_terminal_is_read_only_and_appends_advance() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = database(&directory);
+        let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let budget = PreparationBudget::default();
+        assert!(repository.prepare_kind_metadata_step(budget).unwrap().ready);
+        let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = db.successful_write_commits();
+        for _ in 0..8 {
+            let step = repository.prepare_kind_metadata_step(budget).unwrap();
+            assert!(step.ready);
+            assert_eq!(step.rows, 0);
+        }
+        assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(db.successful_write_commits(), commits);
+        let author = DeviceIdentity::generate();
+        let appended = event(&author, 1, vec![], 1, EventKind::Message);
+        repository.append(&appended).unwrap();
+        assert!(repository.prepare_kind_metadata_step(budget).unwrap().ready);
+        assert!(
+            repository
+                .raw_kind_revisions(appended.conversation_id)
+                .unwrap()
+                .unwrap()[EventKind::Message as usize]
+                >= 0
+        );
+        db.transaction(|c| {
+            c.execute("DELETE FROM participant_kind_scan", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(repository.prepare_kind_metadata_step(budget).is_err());
+        db.transaction(|c| {
+            c.execute(
+                "INSERT INTO participant_kind_scan(domain,ordinal) VALUES(?1,-1)",
+                [repository.domain.0.as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let recovered = repository.prepare_kind_metadata_step(budget).unwrap();
+        assert!(recovered.ready);
+        assert_eq!(recovered.rows, 1);
+        assert!(
+            repository
+                .raw_kind_revisions(appended.conversation_id)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    fn profile_snapshot(repository: &EventRepository) -> ProfileMaintenanceToken {
+        let identity = DeviceIdentity::generate();
+        let conversation = ConversationId::new([1; 32]);
+        for seq in 1..=12 {
+            repository
+                .append(&event(&identity, seq, vec![], seq, EventKind::Profile))
+                .unwrap();
+        }
+        repository
+            .request_profile_maintenance(&conversation)
+            .unwrap();
+        let token = repository.begin_profile_maintenance().unwrap();
+        for _ in 0..100 {
+            if repository
+                .step_profile_maintenance(token, PageBudget::default())
+                .unwrap()
+                .state
+                == MaintenanceState::Ready
+            {
+                return token;
+            }
+        }
+        panic!("profile snapshot did not finish");
+    }
+
+    #[test]
+    fn participant_receive_repair_revision_survives_profile_compaction_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let domain = EventDomainId([1; 16]);
+        let repository = EventRepository::new(database(&directory), domain).unwrap();
+        repository.initialize_selections().unwrap();
+        let token = profile_snapshot(&repository);
+        let repair = repository.receive_repair_revision().unwrap();
+        let destructive = repository.destructive_policy_revision().unwrap();
+        assert_eq!(
+            repository.apply_profile_maintenance(token).unwrap().dropped,
+            10
+        );
+        assert_eq!(
+            repository.destructive_policy_revision().unwrap(),
+            destructive + 1
+        );
+        assert_eq!(
+            repository.receive_repair_revision().unwrap(),
+            repair,
+            "semantic Profile compaction preserves incoming traversal coverage"
+        );
+        drop(repository);
+        let database = database(&directory);
+        EventRepository::validate_existing_domain(&database, domain).unwrap();
+        let reopened = EventRepository::new(database, domain).unwrap();
+        reopened.initialize_selections().unwrap();
+        assert_eq!(
+            reopened.destructive_policy_revision().unwrap(),
+            destructive + 1
+        );
+        assert_eq!(reopened.receive_repair_revision().unwrap(), repair);
+        assert_eq!(reopened.count(&ConversationId::new([1; 32])).unwrap(), 2);
+    }
+
+    #[test]
+    fn participant_receive_repair_revision_preserves_real_erase_and_append_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository =
+            EventRepository::new(database(&directory), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let identity = DeviceIdentity::generate();
+        let first = event(&identity, 1, vec![], 1, EventKind::Message);
+        let repair = repository.receive_repair_revision().unwrap();
+        repository.append(&first).unwrap();
+        assert_eq!(repository.receive_repair_revision().unwrap(), repair);
+        repository
+            .drop_conversation(&first.conversation_id)
+            .unwrap();
+        let erased = repository.receive_repair_revision().unwrap();
+        assert!(
+            erased > repair,
+            "real retained-history erasure requires repair"
+        );
+        assert_eq!(erased, repository.destructive_policy_revision().unwrap());
+    }
+
+    #[test]
+    fn participant_receive_repair_revision_profile_failure_rolls_back_before_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = database(&directory);
+        let repository = EventRepository::new(database.clone(), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let token = profile_snapshot(&repository);
+        let repair = repository.receive_repair_revision().unwrap();
+        let destructive = repository.destructive_policy_revision().unwrap();
+        database.transaction(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER fail_classified_compaction BEFORE DELETE ON retained_events BEGIN SELECT RAISE(ABORT,'injected classified compaction failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(repository.apply_profile_maintenance(token).is_err());
+        assert_eq!(
+            repository.destructive_policy_revision().unwrap(),
+            destructive
+        );
+        assert_eq!(repository.receive_repair_revision().unwrap(), repair);
+        assert_eq!(repository.count(&ConversationId::new([1; 32])).unwrap(), 12);
+        database
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_classified_compaction")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            repository.apply_profile_maintenance(token).unwrap().dropped,
+            10
+        );
+        assert_eq!(
+            repository.destructive_policy_revision().unwrap(),
+            destructive + 1
+        );
+        assert_eq!(repository.receive_repair_revision().unwrap(), repair);
+    }
+
+    #[test]
+    fn participant_receive_repair_revision_classifies_each_conversation_and_scopes_domain() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = database(&directory);
+        let repository = EventRepository::new(database.clone(), EventDomainId([1; 16])).unwrap();
+        let other_domain = EventRepository::new(database, EventDomainId([2; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        other_domain.initialize_selections().unwrap();
+        let identity = DeviceIdentity::generate();
+        for conversation in [ConversationId::new([1; 32]), ConversationId::new([2; 32])] {
+            for seq in 1..=12 {
+                repository
+                    .append(&Event::new(
+                        &identity,
+                        conversation,
+                        seq,
+                        vec![],
+                        seq,
+                        seq,
+                        EventKind::Profile,
+                        vec![42; 128],
+                    ))
+                    .unwrap();
+            }
+            repository
+                .request_profile_maintenance(&conversation)
+                .unwrap();
+        }
+        let token = repository.begin_profile_maintenance().unwrap();
+        for turn in 0..100 {
+            let progress = repository
+                .step_profile_maintenance(token, PageBudget::default())
+                .unwrap();
+            if progress.state == MaintenanceState::Ready {
+                break;
+            }
+            assert!(turn < 99, "multi-conversation snapshot did not finish");
+        }
+        assert_eq!(
+            repository.apply_profile_maintenance(token).unwrap().dropped,
+            20
+        );
+        assert_eq!(repository.destructive_policy_revision().unwrap(), 2);
+        assert_eq!(repository.receive_repair_revision().unwrap(), 0);
+        for conversation in [ConversationId::new([1; 32]), ConversationId::new([2; 32])] {
+            assert_eq!(
+                repository
+                    .conversation_destructive_epoch(&conversation)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                other_domain
+                    .conversation_destructive_epoch(&conversation)
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(other_domain.destructive_policy_revision().unwrap(), 0);
+        assert_eq!(other_domain.receive_repair_revision().unwrap(), 0);
+        repository
+            .drop_conversation(&ConversationId::new([1; 32]))
+            .unwrap();
+        let raw = repository.destructive_policy_revision().unwrap();
+        assert!(raw > 2);
+        assert_eq!(repository.receive_repair_revision().unwrap(), raw - 2);
+        assert_eq!(other_domain.receive_repair_revision().unwrap(), 0);
+        assert!(
+            repository
+                .conversation_destructive_epoch(&ConversationId::new([1; 32]))
+                .unwrap()
+                > 1
+        );
+        assert_eq!(
+            repository
+                .conversation_destructive_epoch(&ConversationId::new([2; 32]))
+                .unwrap(),
+            1
+        );
+        repository
+            .append(&Event::new(
+                &identity,
+                ConversationId::new([2; 32]),
+                13,
+                vec![],
+                13,
+                13,
+                EventKind::Profile,
+                vec![42; 128],
+            ))
+            .unwrap();
+        assert_eq!(
+            repository
+                .conversation_destructive_epoch(&ConversationId::new([2; 32]))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn participant_receive_repair_revision_legacy_migration_preserves_prior_destruction() {
+        let directory = tempfile::tempdir().unwrap();
+        let domain = EventDomainId([1; 16]);
+        let db = database(&directory);
+        let repository = EventRepository::new(db.clone(), domain).unwrap();
+        repository.initialize_selections().unwrap();
+        let row = event(
+            &DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repository.append(&row).unwrap();
+        repository.drop_conversation(&row.conversation_id).unwrap();
+        let raw = repository.destructive_policy_revision().unwrap();
+        assert!(raw > 0);
+        db.transaction(|c| {
+            c.execute_batch("DROP TABLE participant_semantic_compaction_revisions")?;
+            Ok(())
+        })
+        .unwrap();
+        drop(repository);
+        drop(db);
+        let db = database(&directory);
+        EventRepository::validate_existing_domain(&db, domain).unwrap();
+        let repository = EventRepository::new(db, domain).unwrap();
+        repository.initialize_selections().unwrap();
+        assert_eq!(repository.receive_repair_revision().unwrap(), raw);
+        let token = profile_snapshot(&repository);
+        assert_eq!(
+            repository.apply_profile_maintenance(token).unwrap().dropped,
+            10
+        );
+        assert_eq!(repository.destructive_policy_revision().unwrap(), raw + 1);
+        assert_eq!(repository.receive_repair_revision().unwrap(), raw);
+    }
+
+    #[test]
+    fn participant_receive_repair_revision_bare_repository_compaction_needs_no_registry() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository =
+            EventRepository::new(database(&directory), EventDomainId([1; 16])).unwrap();
+        let token = profile_snapshot(&repository);
+        assert_eq!(
+            repository.apply_profile_maintenance(token).unwrap().dropped,
+            10
+        );
+        repository.database.read(|c| {
+            let exists: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='participant_semantic_compaction_revisions')",
+                [], |row| row.get(0),
+            )?;
+            assert!(!exists, "raw repository compaction does not create participant metadata");
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn participant_receive_repair_revision_partial_registry_fails_closed() {
+        for missing in [
+            "participant_semantic_compaction_revisions",
+            "participant_destructive_revisions",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let repository =
+                EventRepository::new(database(&directory), EventDomainId([1; 16])).unwrap();
+            repository.initialize_selections().unwrap();
+            repository
+                .database
+                .transaction(|c| {
+                    c.execute_batch(&format!("DROP TABLE {missing}"))?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(repository.receive_repair_revision().is_err());
+            assert!(
+                repository
+                    .database
+                    .transaction(|c| repository.record_profile_compaction_on(c))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn participant_receive_repair_revision_rejects_invalid_classified_counts() {
+        use rusqlite::types::Value;
+        for invalid in [
+            Value::Integer(-1),
+            Value::Integer(2),
+            Value::Real(0.5),
+            Value::Text("invalid".into()),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let repository =
+                EventRepository::new(database(&directory), EventDomainId([1; 16])).unwrap();
+            repository.initialize_selections().unwrap();
+            repository
+                .database
+                .transaction(|c| {
+                    c.execute(
+                        "INSERT INTO participant_destructive_revisions VALUES(?1,1)",
+                        [repository.domain.0.as_slice()],
+                    )?;
+                    c.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+                    c.execute(
+                        "INSERT INTO participant_semantic_compaction_revisions VALUES(?1,?2)",
+                        params![repository.domain.0.as_slice(), invalid],
+                    )?;
+                    c.execute_batch("PRAGMA ignore_check_constraints=OFF")?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(repository.receive_repair_revision().is_err());
+            assert!(
+                repository
+                    .database
+                    .transaction(|c| repository.record_profile_compaction_on(c))
+                    .is_err()
+            );
+            assert_eq!(repository.destructive_policy_revision().unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn participant_receive_repair_revision_exhaustion_rolls_back_profile_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository =
+            EventRepository::new(database(&directory), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let token = profile_snapshot(&repository);
+        repository
+            .database
+            .transaction(|c| {
+                c.execute(
+                    "INSERT INTO participant_destructive_revisions VALUES(?1,?2)",
+                    params![repository.domain.0.as_slice(), i64::MAX],
+                )?;
+                c.execute(
+                    "INSERT INTO participant_semantic_compaction_revisions VALUES(?1,?2)",
+                    params![repository.domain.0.as_slice(), i64::MAX],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            repository
+                .database
+                .transaction(|c| repository.record_profile_compaction_on(c)),
+            Err(LogError::RepositoryCounterExhausted)
+        ));
+        assert!(repository.apply_profile_maintenance(token).is_err());
+        assert_eq!(repository.destructive_policy_revision().unwrap(), i64::MAX);
+        assert_eq!(repository.receive_repair_revision().unwrap(), 0);
+        assert_eq!(repository.count(&ConversationId::new([1; 32])).unwrap(), 12);
+    }
 
     #[test]
     fn participant_ciphertext_prefix_reads_exact_slice_after_large_parent_vectors() {

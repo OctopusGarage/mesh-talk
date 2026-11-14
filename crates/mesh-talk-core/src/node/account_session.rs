@@ -198,13 +198,25 @@ impl Node {
                 "account session requires a certified sibling".into(),
             ));
         }
-        let result = tokio::time::timeout(
+        let started = std::time::Instant::now();
+        let mut phase = "checkout";
+        let result = match tokio::time::timeout(
             NEGOTIATION_TIMEOUT,
-            self.begin_account_exchange_inner(peer, version, request),
+            self.begin_account_exchange_inner(peer, version, request, &mut phase),
         )
         .await
-        .map_err(|_| NodeError::Channel("account session negotiation timed out".into()))
-        .and_then(|result| result);
+        {
+            Ok(result) => result,
+            Err(_) => {
+                // Static phase labels only: no identity, address or message content.
+                log::warn!(target: "mesh_talk::delivery",
+                    "account session negotiation timed out phase={} elapsed_ms={}",
+                    phase, started.elapsed().as_millis());
+                Err(NodeError::Channel(
+                    "account session negotiation timed out".into(),
+                ))
+            }
+        };
         #[cfg(test)]
         if let Some(trace) = trace {
             self.trace_account_client(&peer.public, || {
@@ -223,12 +235,15 @@ impl Node {
         peer: &PeerRecord,
         version: AccountSyncVersion,
         request: AccountHistoryFrame,
+        phase: &mut &'static str,
     ) -> Result<AccountExchange, NodeError> {
         if version == AccountSyncVersion::V1 {
+            *phase = "authenticated_dial";
             let mut channel = self
                 .privacy_dial(peer.addr, &peer.public)
                 .await
                 .map_err(transport)?;
+            *phase = "request_write";
             send(&mut channel, version, &request)
                 .await
                 .map_err(transport)?;
@@ -259,6 +274,7 @@ impl Node {
             _ => super::session_pool::AuthenticationPriority::Ordinary,
         };
         for fresh in [false, true] {
+            *phase = "checkout";
             #[cfg(test)]
             self.trace_account_client(&peer.public, || {
                 format!("session_checkout_begin fresh={fresh}")
@@ -277,10 +293,12 @@ impl Node {
             });
             let mut channel = match pooled {
                 Some(channel) => channel,
-                None => self
-                    .privacy_dial_priority(peer.addr, &peer.public, authentication_priority)
-                    .await
-                    .map_err(transport)?,
+                None => {
+                    *phase = "authenticated_dial";
+                    self.privacy_dial_priority(peer.addr, &peer.public, authentication_priority)
+                        .await
+                        .map_err(transport)?
+                }
             };
             #[cfg(test)]
             self.trace_account_client(&peer.public, || "session_channel_ready".into());
@@ -291,6 +309,7 @@ impl Node {
                 &peer.public,
             );
             if !reused && !self.sessions.account_capability_due(&key) {
+                *phase = "request_write";
                 send(&mut channel, version, &request)
                     .await
                     .map_err(transport)?;
@@ -304,6 +323,7 @@ impl Node {
                 rand_core::OsRng.fill_bytes(&mut request_id);
             }
             let opening = async {
+                *phase = "request_write";
                 #[cfg(test)]
                 self.trace_account_client(&peer.public, || "session_request_send_begin".into());
                 send(
@@ -319,6 +339,7 @@ impl Node {
                 self.trace_account_client(&peer.public, || {
                     "session_request_send_end_ready_wait".into()
                 });
+                *phase = "ready_wait";
                 channel.recv().await
             }
             .await;
@@ -355,10 +376,12 @@ impl Node {
                     // authenticated pre-ack close permits legacy fallback.
                     drop(channel);
                     self.sessions.note_account_unsupported(key);
+                    *phase = "authenticated_dial";
                     let mut channel = self
                         .privacy_dial_priority(peer.addr, &peer.public, authentication_priority)
                         .await
                         .map_err(transport)?;
+                    *phase = "request_write";
                     send(&mut channel, version, &request)
                         .await
                         .map_err(transport)?;

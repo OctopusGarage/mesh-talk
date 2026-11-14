@@ -274,8 +274,9 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
     );
     let public = bob.node.identity.public();
     let new = bob.rekey_account().unwrap();
-    drop(bob);
-    tokio::task::yield_now().await;
+    // Reopening requires retirement of actual workers and their storage lease;
+    // dropping the runtime only requests cancellation.
+    bob.stop().await;
     let (bob, mut brx) = start(dir.path(), "bob", 0).await;
     assert_eq!(bob.node.identity.public(), public);
     assert_eq!(bob.account_id(), new);
@@ -879,4 +880,316 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
     contact.stop().await;
     bob.stop().await;
     alice.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_runtime_automatically_delivers_text_and_sticker_after_recipient_cold_restart() {
+    bounded_runtime_cold_recovery_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_runtime_private_reply_survives_public_peer_cold_restart_and_manual_regrant() {
+    bounded_runtime_cold_recovery_case(true).await;
+}
+
+async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
+    use crate::eventlog::EventId;
+    use crate::node::delivery_observation::DeliveryObservationKind;
+    use crate::node::delivery_store::DeliveryStatus;
+    use futures_util::FutureExt;
+
+    async fn start_bounded(base: &Path, owner: &str, public: bool) -> NodeRuntime {
+        // A cold public fixture launches privately until its named ambient
+        // producers retire. This changes startup generation before traffic,
+        // never the CLI's cached receipt channels after cold recovery.
+        let lease = public.then(|| {
+            let directory = base.join("accounts").join(owner);
+            let lease = crate::storage::profile::ProfileStorageLease::acquire(&directory).unwrap();
+            crate::node::privacy::PrivacyPolicy::open(&directory.join("privacy.policy"), "pw")
+                .unwrap()
+                .set_invisible(true)
+                .unwrap();
+            lease
+        });
+        let reserve = crate::transport::net::discovery_socket(0).unwrap();
+        let port = reserve.local_addr().unwrap().port();
+        drop(reserve);
+        let startup = crate::node::RuntimeStartup::bounded(RuntimeConfig {
+            base_dir: base,
+            account_id: owner,
+            display_name: owner,
+            password: "pw",
+            discovery_port: port,
+            post_office_enabled: false,
+            candidate_source: None,
+        });
+        let startup = if let Some(lease) = lease {
+            startup.with_lease(lease)
+        } else {
+            startup
+        };
+        let mut runtime = NodeRuntime::start_owned(startup, |_| Ok(()), |launch| launch(owner))
+            .await
+            .unwrap();
+        if public {
+            assert!(runtime.privacy_snapshot().invisible);
+            let retired = runtime
+                .participant
+                .retire_ambient_discovery_for_test()
+                .await;
+            assert_eq!(retired.removed, 3);
+            assert_eq!(retired.joined, 3);
+            assert!(
+                retired.failures.is_empty(),
+                "named ambient discovery must retire before public loopback traffic"
+            );
+            runtime.set_invisible(false).await.unwrap();
+            assert!(!runtime.privacy_snapshot().invisible);
+        }
+        runtime
+    }
+    async fn received_and_confirmed(
+        source: &NodeRuntime,
+        target: &NodeRuntime,
+        id: EventId,
+        text: &[u8],
+        sticker: Option<&str>,
+    ) {
+        loop {
+            let present = match target.account_history(source.account_id(), 20) {
+                Ok(history) => {
+                    let rows = history
+                        .iter()
+                        .filter(|entry| entry.id == id)
+                        .collect::<Vec<_>>();
+                    assert!(rows.len() <= 1, "accepted original ID must not duplicate");
+                    rows.first().is_some_and(|entry| {
+                        assert_eq!(entry.text, text);
+                        assert_eq!(entry.sticker.as_deref(), sticker);
+                        !entry.from_me
+                    })
+                }
+                Err(NodeError::Log(LogError::StaleCursor)) => false,
+                Err(error) => panic!("bounded receiver history observation failed: {error}"),
+            };
+            if present && source.node.delivery_status(id) == Some(DeliveryStatus::Delivered) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    // Suppress LAN disclosure BEFORE startup launches discovery. This fixture
+    // keeps all auxiliary tasks with explicit private grants in the original
+    // case. The public case retires only ambient discovery before traffic; it
+    // does not claim to reproduce native public multicast discovery timing.
+    for owner in ["sender", "recipient"] {
+        let directory = root.path().join("accounts").join(owner);
+        std::fs::create_dir_all(&directory).unwrap();
+        crate::node::privacy::PrivacyPolicy::open(&directory.join("privacy.policy"), "pw")
+            .unwrap()
+            .set_invisible(true)
+            .unwrap();
+    }
+    let mut sender = None;
+    let mut recipient = None;
+    let result = std::panic::AssertUnwindSafe(async {
+        sender = Some(start_bounded(root.path(), "sender", public_regrant).await);
+        recipient = Some(start_bounded(root.path(), "recipient", public_regrant).await);
+        let a = sender.as_ref().unwrap();
+        let b = recipient.as_ref().unwrap();
+        let a_proof = a.node.signed_announce("sender", a.listen_tcp_port());
+        let b_proof = b.node.signed_announce("recipient", b.listen_tcp_port());
+        for (runtime, proof) in [(a, &b_proof), (b, &a_proof)] {
+            runtime.roster.lock().unwrap().update(
+                proof,
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                runtime.user_id(),
+            );
+            runtime.node.cached_peer_snapshot().unwrap();
+        }
+        if !public_regrant {
+            a.node.set_allowed(b.account_id(), true).await.unwrap();
+            b.node.set_allowed(a.account_id(), true).await.unwrap();
+        }
+        let recipient_account = b.account_id().to_owned();
+        let recipient_device = b.user_id().to_owned();
+        let old_port = b.listen_tcp_port();
+        let old_node = Arc::downgrade(&b.node);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let first = a.node.enqueue_to_account(&recipient_account, b"before restart", None).await.unwrap();
+            received_and_confirmed(a, b, first, b"before restart", None).await;
+            let reply = b.node.enqueue_to_account(a.account_id(), b"established reply", None).await.unwrap();
+            received_and_confirmed(b, a, reply, b"established reply", None).await;
+            for body in ["你好 🌍 café".as_bytes().to_vec(), b"first\nsecond\nthird".to_vec(), "mesh消息🙂 ".repeat(300).into_bytes()] {
+                let id = a.node.enqueue_to_account(&recipient_account, &body, None).await.unwrap();
+                received_and_confirmed(a, b, id, &body, None).await;
+            }
+        }).await.expect("full bounded runtimes must establish bidirectional persisted ratchets");
+
+        recipient.take().unwrap().stop().await;
+        assert!(old_node.upgrade().is_none(), "full old receiver runtime must release its Node");
+        let profile = root.path().join("accounts/recipient");
+        drop(crate::storage::profile::ProfileStorageLease::acquire(&profile).unwrap());
+        // The real stable-listener fallback chooses a new TCP port while the
+        // old endpoint is reserved but has no protocol server.
+        let old_listener = crate::node::bind_dual_stack_listener(old_port).await.unwrap();
+        let text_id = a.node.enqueue_to_account(&recipient_account, b"queued after close", None).await.unwrap();
+        let sticker_id = a.node.enqueue_sticker_to_account(&recipient_account, "1f44b", b"wave after close").await.unwrap();
+        let file_path = root.path().join("offline-receipt-file.txt");
+        let file_bytes = b"outbound custody fixture original\n";
+        std::fs::write(&file_path, file_bytes).unwrap();
+        let (file_id, file_conversation) = a.node.enqueue_file_to_account(
+            &recipient_account, &file_path, crate::file::FileKind::File,
+        ).await.unwrap();
+        let ids = [text_id, sticker_id, file_id];
+        assert_eq!(ids.into_iter().collect::<std::collections::BTreeSet<_>>().len(), 3);
+        let originals = {
+            let store = a.node.delivery.lock().unwrap();
+            ids.map(|id| {
+                assert_eq!(store.status(id), Some(DeliveryStatus::Awaiting));
+                let message = store.message(id).unwrap();
+                assert_eq!(message.destinations.len(), 1);
+                message.destinations[0].event.id
+            })
+        };
+        recipient = Some(start_bounded(root.path(), "recipient", public_regrant).await);
+        let b = recipient.as_ref().unwrap();
+        let public_generation = b.node.privacy.generation.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(b.account_id(), recipient_account);
+        assert_eq!(b.user_id(), recipient_device);
+        assert_ne!(b.listen_tcp_port(), old_port);
+        let fresh = b.node.signed_announce("recipient", b.listen_tcp_port());
+        assert!(fresh.verify());
+        // Publish the actual signed replacement route once. The wait below
+        // does not call peers(), flush, transfer, or explicit reconciliation.
+        a.roster.lock().unwrap().update(&fresh, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), a.user_id());
+        let recovered = tokio::time::timeout(Duration::from_secs(8), async {
+            received_and_confirmed(a, b, ids[0], b"queued after close", None).await;
+            received_and_confirmed(a, b, ids[1], b"wave after close", Some("1f44b")).await;
+            // Delivered confirms durable recipient manifest custody, not an
+            // attachment approval, chunk download, export, or read receipt.
+            received_and_confirmed(a, b, ids[2], b"", None).await;
+            let history = b.account_history(a.account_id(), 20).unwrap();
+            let card = history.iter().find(|entry| entry.id == file_id).unwrap();
+            let file = card.file.as_ref().expect("original file ID retains manifest metadata");
+            assert_eq!(file.file_conv, file_conversation);
+            assert_eq!(file.name, "offline-receipt-file.txt");
+            assert_eq!(file.size, file_bytes.len() as u64);
+            assert!(!file.media);
+        }).await;
+        let evidence = recovered.is_err().then(|| originals.map(|id| {
+            let held = { b.node.log.lock().unwrap().get(&id).map(|event| event.is_some()) };
+            let processed = { b.node.received.lock().unwrap().processed(id) };
+            (held, processed)
+        }));
+        let sender_evidence = recovered.is_err().then(|| {
+            // A private projection includes message IDs. Failure diagnostics
+            // retain only fixed status labels for these three fixture messages.
+            let mut labels = [("unknown", "unknown"); 3];
+            for ((_, status, observation), label) in a.node
+                .account_delivery_observations(&recipient_account, &ids)
+                .into_iter()
+                .zip(labels.iter_mut())
+            {
+                *label = (
+                    match status {
+                        DeliveryStatus::Awaiting => "awaiting",
+                        DeliveryStatus::Delivered => "delivered",
+                    },
+                    match observation.map(|item| item.kind) {
+                        Some(DeliveryObservationKind::Attempting) => "attempting",
+                        Some(DeliveryObservationKind::RetryScheduled) => "retry_scheduled",
+                        None => "unknown",
+                    },
+                );
+            }
+            labels
+        });
+        assert!(recovered.is_ok(), "full runtime cold recovery failed: sender(status,last-attempt)={sender_evidence:?}; receiver(ciphertext-held,plaintext-processed)={evidence:?}");
+        if !public_regrant {
+            drop(old_listener);
+            return;
+        }
+        assert!(!a.privacy_snapshot().invisible && !b.privacy_snapshot().invisible);
+        assert_eq!(b.node.privacy.generation.load(std::sync::atomic::Ordering::SeqCst), public_generation);
+        // Native hidden-contacts sends one additional GUI -> CLI message after
+        // all three receipts, before its GUI visibility/regrant sequence.
+        // Match the native plaintext-only boundary: a receipt can still be
+        // in flight when the GUI changes its privacy generation.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let id = a.node.enqueue_to_account(b.account_id(), b"before privacy cut", None).await.unwrap();
+            loop {
+                if b.account_history(a.account_id(), 20).unwrap().iter().any(|row|
+                    row.id == id && !row.from_me && row.text == b"before privacy cut"
+                ) { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("the original pre-privacy GUI message must reach the cold CLI");
+        assert_eq!(b.node.privacy.generation.load(std::sync::atomic::Ordering::SeqCst), public_generation);
+        a.set_invisible(true).await.unwrap();
+        assert!(a.privacy_snapshot().invisible);
+        assert!(!b.privacy_snapshot().invisible, "CLI must remain public with its post-cold receipt sessions");
+        a.node.set_allowed(b.account_id(), false).await.unwrap();
+        assert!(!a.privacy_snapshot().allowed_accounts.iter().any(|grant| grant.id == b.account_id()));
+        assert_eq!(b.node.privacy.generation.load(std::sync::atomic::Ordering::SeqCst), public_generation);
+        let private_reply = b"private reply after manual regrant";
+        let private_recovered = tokio::time::timeout(Duration::from_secs(60), async {
+            // Observe the committed grant concurrently with best-effort presence
+            // publication, matching the native UI's acceptance boundary.
+            let (grant, ()) = tokio::join!(
+                a.node.set_allowed(b.account_id(), true),
+                async {
+                    loop {
+                        if a.privacy_snapshot().allowed_accounts.iter().any(|grant| {
+                            grant.id == b.account_id()
+                                && grant.source == crate::node::privacy::PermissionSource::Manual
+                        }) { break; }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    assert!(a.node.known_account_allowed(&b.node.identity.public()));
+                    b.node.send_to_account(a.account_id(), private_reply, None).await.unwrap();
+                    let accepted = loop {
+                        match b.account_history(a.account_id(), 20) {
+                            Ok(history) => {
+                                let rows = history.iter().filter(|row| row.from_me && row.text == private_reply).collect::<Vec<_>>();
+                                assert_eq!(rows.len(), 1, "one original private reply must be locally accepted");
+                                break rows[0].id;
+                            }
+                            Err(NodeError::Log(LogError::StaleCursor)) => tokio::time::sleep(Duration::from_millis(10)).await,
+                            Err(_) => panic!("CLI accepted reply history observation failed"),
+                        }
+                    };
+                    received_and_confirmed(b, a, accepted, private_reply, None).await;
+                }
+            );
+            grant.expect("manual grant must commit through its owning policy method");
+        }).await;
+        let return_route_current = b.node.routing_peer(a.user_id()).is_some_and(|peer| {
+            peer.public == a.node.identity.public()
+                && peer.account_id.as_deref() == Some(a.account_id())
+                && peer.addr.port() == a.listen_tcp_port()
+        });
+        let reply_accepted = b.account_history(a.account_id(), 20).is_ok_and(|rows| rows.iter().any(|row| row.from_me && row.text == private_reply));
+        let reply_received = a.account_history(b.account_id(), 20).is_ok_and(|rows| rows.iter().any(|row| !row.from_me && row.text == private_reply));
+        assert_eq!(b.node.privacy.generation.load(std::sync::atomic::Ordering::SeqCst), public_generation);
+        assert!(private_recovered.is_ok(), "authorized private reply did not recover: return_route_current={return_route_current} locally_accepted={reply_accepted} receiver_plaintext={reply_received}");
+        drop(old_listener);
+    }).catch_unwind().await;
+    let mut cleanup_failure = None;
+    for runtime in [recipient.take(), sender.take()].into_iter().flatten() {
+        let stopped = std::panic::AssertUnwindSafe(runtime.stop())
+            .catch_unwind()
+            .await;
+        if cleanup_failure.is_none() {
+            cleanup_failure = stopped.err();
+        }
+    }
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+    if let Some(error) = cleanup_failure {
+        std::panic::resume_unwind(error);
+    }
 }

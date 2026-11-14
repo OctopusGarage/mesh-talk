@@ -134,6 +134,10 @@
         "guide": "docs/network-design-reference.md#cost-aware-group-attachment-sharing",
         "invariants": [
           {
+            "name": "Windows/Linux native change notifications feed one serial coalescing query owner with fresh five-minute repair, retained in-query demand, conservative failure recovery and runtime-owned registration/stream cancellation; unchanged idle input does not trigger two-second provider polling. macOS keeps its native callback owner.",
+            "reference": "docs/network-design-reference.md#cost-aware-group-attachment-sharing"
+          },
+          {
             "name": "Unknown startup protection precedes participant producers; observers cannot retain a retired Node, and lock/replacement or mismatched cost rejects override mutations.",
             "reference": "docs/module-boundaries.md#network-cost-protection"
           },
@@ -236,7 +240,11 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["chat_commands::presence::tests::", "settings::tests::"]
+          "filters": [
+            "chat_commands::presence::tests::",
+            "settings::tests::",
+            "chat_commands::diagnostics::tests::diagnostics_expose_a_live_runtime_and_reject_invalid_manual_targets"
+          ]
         }
       ],
       "capability": {
@@ -250,6 +258,10 @@
           {
             "name": "Sharing belongs to the active participant and stale owners or missing legacy settings cannot enable it",
             "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Incremental presence refreshes people without group body reads for equal revisions; forced repair and changed inputs hydrate groups, while missing tokens preserve legacy maps.",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]
       },
@@ -350,7 +362,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "Sibling-authored outgoing history can expose confirmed external-member counts; stale sessions and wrong accounts cannot release old runtime projections.",
+            "name": "Sibling-authored outgoing history can expose confirmed external-member counts; stale sessions and wrong accounts cannot release old runtime projections. The existing bounded batch query combines member and post-office observations under one runtime admission, preserves input order, and omits unknown rows without turning them into zero.",
             "reference": "docs/module-boundaries.md#account-document-projections"
           }
         ]
@@ -446,7 +458,7 @@
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device’s draft",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
@@ -772,7 +784,9 @@
       "paths": [
         "src-tauri/src/contact_policy.rs",
         "src-tauri/src/contact_policy/",
-        "src-tauri/src/chat_commands/account.rs"
+        "src-tauri/src/chat_commands/account.rs",
+        "src-tauri/src/owner_commands/group_operations.rs",
+        "crates/mesh-talk-core/src/node/account_documents/personal.rs"
       ],
       "rust": [
         {
@@ -781,7 +795,8 @@
             "contact_policy::",
             "owner_commands::group_operations::tests::history_floor_identity_includes_writer_and_content_hash",
             "owner_commands::tests::registered_account_group_operation_reads_preserve_account_scope",
-            "owner_commands::tests::registered_account_group_operations_reject_queued_logout"
+            "owner_commands::tests::registered_account_group_operations_reject_queued_logout",
+            "owner_commands::tests::personal_state_enumeration_uses_controls_without_reading_unrelated_inventory"
           ]
         }
       ],
@@ -796,6 +811,10 @@
           {
             "name": "Account personal-state reads require exact runtime and account authority; local cleanup never removes network membership, verified identity, favorites or exports, and queued session retirement rejects destructive producers.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Personal-state enumeration selects authenticated control-index conversations without hydrating unrelated group inventory; deleted groups and reopened accounts retain exact current state.",
+            "reference": "docs/network-design-reference.md#personal-conversation-removal"
           }
         ]
       },
@@ -1317,6 +1336,10 @@
           {
             "name": "Shared-login profile publication retains runtime retirement, while native saved-login I/O retains only authentication ordering; cancellation and retirement cannot publish stale metadata or events after runtime, session or app-lock revision changes.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Shared-login reconciliation subscribes before initial observation, retains a coalesced follow-up during application and uses five-minute settled repair; locked, failed and unadmitted work retain two-second recovery and fresh session/runtime/app-lock authority.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
       },
@@ -1355,6 +1378,14 @@
           {
             "name": "Notifications begin at launch high-water and coalesce a bounded live window independently of durable unread processing.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "ACK-qualified fixed invalidation domains preserve newer pending changes; empty/progress pages do not create global state, roster-only pages avoid unrelated payload reloads and legacy receipts retain full repair.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Six fixed reception domains preserve document/status scope through coalescing and pending ACKs; installation captures cumulative revisions before waiting and never loses a broad change behind a narrow one.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },
@@ -1389,6 +1420,77 @@
           }
         ]
       }
+    },
+    {
+      "id": "desktop-inline-media-preview",
+      "paths": ["src-tauri/src/chat_commands/files.rs", "src-tauri/src/lib.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "chat_commands::files::tests::preview_decode_wait_times_out_without_releasing_actual_work_capacity",
+            "app_lock::tests::locked_commands_allow_only_unlock_and_preferences",
+            "commands::tests::attachment_ipc_enforces_bounded_queries_and_persists_receive_policy",
+            "owner_commands::tests::registered_protected_image_reveal_requires_exact_authority_and_blocks_ordinary_reads",
+            "owner_commands::tests::registered_plaintext_and_trust_commands_reject_replaced_entry_authority",
+            "chat_commands::files::tests::preview_deadline_bounds_runtime_writer_wait_without_starting_work",
+            "chat_commands::files::tests::preview_timeout_keeps_actual_worker_owned_without_holding_session_lock"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Expose binary bounded media previews under existing runtime authority with bounded queue/decode admission.",
+        "guide": "docs/module-boundaries.md#inline-media-presentation",
+        "invariants": [
+          {
+            "name": "Ordinary static previews are bounded derived images with current consent, expiry and immutable-source rechecks; originals and protected reveals retain independent access paths.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
+          {
+            "name": "One observer deadline covers semaphore, runtime and blocking-pool admission; queued stale work cannot decode, actual child work retains permits and runtime ownership, and expensive decode holds no session guard.",
+            "reference": "docs/ai-coding-reliability.md#r03-actual-work-owns-its-lifetime"
+          }
+        ]
+      },
+      "escalation": [
+        "Require the focused native admission/lock/protected-command cases plus real desktop receive/preview/full-size verification. Browser mocks alone do not certify native image decoding or worker retirement."
+      ]
+    },
+    {
+      "id": "desktop-startup-verification",
+      "paths": [
+        "src-tauri/src/settings/startup.rs",
+        "src-tauri/src/session_store/local.rs",
+        "src-tauri/src/session_store.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/settings.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "settings::startup::tests::",
+            "startup_verification_defaults",
+            "startup_verification_off_stale_local_login",
+            "startup_verification_cancel_preserves_saved_session",
+            "session_store::local::tests::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Switch macOS cold saved-login verification independently of automatic sign-in using explicitly consented private local recovery.",
+        "guide": "docs/privacy-controls.md#startup-verification",
+        "invariants": [
+          {
+            "name": "Convenience mode never reads Keychain; switching acknowledges durable destination credentials under exact session authority and protected mode removes local recovery.",
+            "reference": "docs/privacy-controls.md#startup-verification"
+          }
+        ]
+      },
+      "escalation": [
+        "Require two packaged macOS builds with distinct code hashes: convenience-mode restart and update must restore without Keychain or device-owner prompts; protected-mode startup and cancellation must retain manual recovery. Mocks do not prove native prompt behavior."
+      ],
+      "consumers": ["frontend-sensitive-operations"]
     }
   ],
   "prScenarios": [
@@ -1446,6 +1548,15 @@
       ],
       "browser": ["e2e/google-drive-backup.spec.ts", "e2e/recovery.spec.ts"],
       "native": ["host"]
+    },
+    {
+      "id": "desktop-startup-verification-native",
+      "paths": [
+        "src-tauri/src/settings/startup.rs",
+        "src-tauri/src/session_store/local.rs"
+      ],
+      "browser": ["e2e/privacy.spec.ts"],
+      "native": ["darwin"]
     }
   ]
 }

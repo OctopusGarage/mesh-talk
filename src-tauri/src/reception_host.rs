@@ -81,6 +81,13 @@ impl ReceptionHostState {
     }
 }
 pub(crate) fn invalidate<R: tauri::Runtime>(app: &tauri::AppHandle<R>, scope: &Scope) {
+    invalidate_kind(app, scope, Some("state"));
+}
+fn invalidate_kind<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    scope: &Scope,
+    kind: Option<&str>,
+) {
     let Some(state) = app.try_state::<ReceptionHostState>() else {
         return;
     };
@@ -88,7 +95,7 @@ pub(crate) fn invalidate<R: tauri::Runtime>(app: &tauri::AppHandle<R>, scope: &S
         let mut guard = state.0.lock().expect("reception host lock not poisoned");
         guard
             .as_mut()
-            .is_some_and(|state| state.gate.scope == *scope && state.gate.invalidate())
+            .is_some_and(|state| state.gate.scope == *scope && state.gate.invalidate_kind(kind))
     };
     if publish {
         let success = app.emit("node-reception-wake", scope).is_ok();
@@ -109,6 +116,15 @@ pub(crate) fn invalidate_identity<R: tauri::Runtime>(
     account: &str,
     device: &str,
 ) -> bool {
+    invalidate_identity_kind(app, owner, account, device, "state")
+}
+pub(crate) fn invalidate_identity_kind<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    owner: &str,
+    account: &str,
+    device: &str,
+    kind: &str,
+) -> bool {
     let Some(scope) = app
         .try_state::<ReceptionHostState>()
         .and_then(|state| state.scope())
@@ -118,7 +134,7 @@ pub(crate) fn invalidate_identity<R: tauri::Runtime>(
     if scope.owner != owner || scope.account_id != account || scope.device_id != device {
         return true;
     }
-    invalidate(app, &scope);
+    invalidate_kind(app, &scope, Some(kind));
     true
 }
 pub(crate) fn progress<R: tauri::Runtime>(
@@ -137,13 +153,13 @@ pub(crate) fn progress<R: tauri::Runtime>(
         let key = (event.file_conv.clone(), event.direction);
         if state.progress.len() == 64 && !state.progress.contains_key(&key) {
             // Progress is a current-value hint. Authoritative transfer status is
-            // queried on the same wake, including terminals evicted from this cache.
+            // repaired by file invalidations and bounded recovery, including evicted terminals.
             state.progress.pop_first();
         }
         let generation = state.gate.generation.wrapping_add(1);
         state.progress.insert(key, (generation, event));
     }
-    invalidate(app, scope);
+    invalidate_kind(app, scope, None);
 }
 
 #[derive(Serialize)]
@@ -155,7 +171,7 @@ pub(crate) enum Receipt {
     Profile(crate::events::ProfileReceivedEvent),
     Call(crate::events::CallSignalEvent),
     Progress(crate::events::FileProgressEvent),
-    State,
+    State { kinds: Vec<&'static str> },
 }
 #[derive(Serialize)]
 pub(crate) struct Page {
@@ -310,11 +326,13 @@ pub(crate) async fn owner_reception_page(
         }
         receipts.extend(handle.take_call_signals(16,256*1024)?.into_iter().map(|signal|Receipt::Call(crate::events::CallSignalEvent{from:signal.from,payload:String::from_utf8_lossy(&signal.payload).into_owned()})));
         receipts.extend(delivery.progress.values().map(|(_,event)|Receipt::Progress(event.clone())));
-        receipts.push(Receipt::State);
+        let domains = delivery.gate.domains;
+        let kinds = ["state", "roster", "delivery", "files", "documents", "sync_status"].into_iter().zip(domains).filter_map(|(kind, version)| (version != 0).then_some(kind)).collect::<Vec<_>>();
+        if !kinds.is_empty() { receipts.push(Receipt::State { kinds }); }
         let token=format!("{:032x}",rand::random::<u128>());
         let after:Cursor=page.after.into();let next:Cursor=page.next.into();
         let complete=page.complete && profiles.complete;
-        delivery.gate.pending=Some(Pending{token:token.clone(),after:after.clone(),next:next.clone(),generation:delivery.gate.generation,profiles});
+        delivery.gate.pending=Some(Pending{token:token.clone(),after:after.clone(),next:next.clone(),generation:delivery.gate.generation,domains,profiles});
         Ok(Page{scope:scope.clone(),token,after,next,through:page.through.into(),complete,receipts})
     }).await
 }
@@ -352,6 +370,7 @@ pub(crate) async fn owner_reception_ack(
                 // A delayed duplicate ACK must not clear a later reserved page.
                 return Ok(true);
             }
+            let duplicate = delivery.gate.pending.is_none();
             let pending = delivery
                 .gate
                 .pending
@@ -367,6 +386,13 @@ pub(crate) async fn owner_reception_ack(
                 next.core()?,
             )?;
             let more = handle.reception_head()?.sequence > next.core()?.sequence;
+            if duplicate {
+                // A duplicate is already committed. It must not replay its old
+                // profile/domain snapshot over a failed renderer reset.
+                return Ok(more
+                    || delivery.gate.generation != pending.generation
+                    || !delivery.gate.profiles.complete);
+            }
             delivery
                 .progress
                 .retain(|_, (generation, _)| *generation > pending.generation);
@@ -389,6 +415,52 @@ mod tests {
         }
     }
     #[test]
+    fn qualified_non_group_emitter_preserves_domains_and_unknown_fallback() {
+        let app = tauri::test::mock_app();
+        let state = ReceptionHostState::default();
+        let scope = scope();
+        state.install(scope.clone());
+        app.manage(state.clone());
+        state
+            .0
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .gate
+            .domains
+            .fill(0);
+        for kind in ["documents", "sync_status"] {
+            crate::events::emit_node_state_changed(
+                app.handle(),
+                crate::events::NodeStateChangedEvent {
+                    owner: scope.owner.clone(),
+                    account_id: scope.account_id.clone(),
+                    device_id: scope.device_id.clone(),
+                    kind,
+                },
+            );
+        }
+        let domains = state.0.lock().unwrap().as_ref().unwrap().gate.domains;
+        assert_eq!(
+            domains.first().copied(),
+            Some(0),
+            "Qualified narrow producers must not dirty broad group state"
+        );
+        assert!(domains.get(4).is_some_and(|revision| *revision != 0));
+        assert!(domains.get(5).is_some_and(|revision| *revision != 0));
+        crate::events::emit_node_state_changed(
+            app.handle(),
+            crate::events::NodeStateChangedEvent {
+                owner: scope.owner,
+                account_id: scope.account_id,
+                device_id: scope.device_id,
+                kind: "future-unknown",
+            },
+        );
+        assert_ne!(state.0.lock().unwrap().as_ref().unwrap().gate.domains[0], 0);
+    }
+    #[test]
     fn actual_emitter_coalesces_stalled_renderer_state_and_progress() {
         let app = tauri::test::mock_app();
         let state = ReceptionHostState::default();
@@ -407,6 +479,10 @@ mod tests {
                 observed.fetch_add(1, Ordering::Relaxed);
             });
         }
+        {
+            let mut guard = state.0.lock().unwrap();
+            guard.as_mut().unwrap().gate.domains = [0; 6];
+        }
         for n in 0..10_000 {
             crate::events::emit_node_state_changed(
                 app.handle(),
@@ -414,7 +490,7 @@ mod tests {
                     owner: scope.owner.clone(),
                     account_id: scope.account_id.clone(),
                     device_id: scope.device_id.clone(),
-                    kind: "state",
+                    kind: "roster",
                 },
             );
             progress(
@@ -428,6 +504,10 @@ mod tests {
                 },
             );
         }
+        let domains = state.0.lock().unwrap().as_ref().unwrap().gate.domains;
+        assert_eq!(domains[0], 0);
+        assert_ne!(domains[1], 0);
+        assert_eq!(domains[2..], [0, 0, 0, 0]);
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
         assert_eq!(old_pushes.load(Ordering::Relaxed), 0);
         assert_eq!(state.0.lock().unwrap().as_ref().unwrap().progress.len(), 64);

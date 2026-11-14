@@ -1,4 +1,4 @@
-import type { CustomizationPack } from "./pack";
+import type { PackCatalogEntry } from "@/store/packs";
 import {
   cleanStickerLabel,
   decodeStickerMedia,
@@ -20,7 +20,7 @@ interface MessageContent {
 
 export function messageSticker(
   message: MessageContent,
-  packs: CustomizationPack[] = [],
+  packs: PackCatalogEntry[] = [],
   now = Date.now(),
 ) {
   if (
@@ -46,7 +46,7 @@ export function messageSticker(
 export function messageSummary(
   message: MessageContent,
   t: (key: string) => string,
-  packs: CustomizationPack[] = [],
+  packs: PackCatalogEntry[] = [],
   now = Date.now(),
 ): string {
   if (message.recalled) return t("message.recalledSummary");

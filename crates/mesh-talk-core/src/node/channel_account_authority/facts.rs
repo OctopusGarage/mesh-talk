@@ -7,6 +7,7 @@ use bincode::Options;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::sync::Arc;
 
+const SOURCE_REVISION_SQL: &str = "SELECT source_revision FROM event_order_current WHERE domain=?1 AND conversation=?2 AND order_kind=0 AND job=?3";
 const CONTROL: i64 = 1;
 const REVOKED: i64 = 2;
 const ADDED: i64 = 3;
@@ -50,12 +51,14 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, LogError> {
         .deserialize(bytes)
         .map_err(|e| invalid(&e.to_string()))
 }
+#[derive(Clone)]
 pub(in crate::node) struct AuthorityHistory {
     profile: Arc<ProfileStorage>,
     job: [u8; 16],
     channel: ConversationId,
     source_revision: i64,
     source_job: [u8; 16],
+    append_only_network: bool,
     _query_lease: Option<Arc<crate::node::channel::checkpoint::causal::Query>>,
 }
 impl AuthorityHistory {
@@ -79,9 +82,16 @@ impl AuthorityHistory {
         source_job: [u8; 16],
         channel: ConversationId,
     ) -> Result<AccountAuthority, LogError> {
-        let source_revision=profile.database().read(|c| {
-            let revision:i64=c.query_row("SELECT source_revision FROM event_order_current WHERE domain=?1 AND conversation=?2 AND order_kind=0 AND job=?3",params![b"MeshPartEventsV1".as_slice(),channel.as_bytes().as_slice(),source_job.as_slice()],|r|r.get(0))?;
-            crate::node::channel::graph::require_source_on(c,channel,source_job,revision)?;
+        let source_revision = profile.database().read(|c| {
+            let revision: i64 = c.prepare_cached(SOURCE_REVISION_SQL)?.query_row(
+                params![
+                    b"MeshPartEventsV1".as_slice(),
+                    channel.as_bytes().as_slice(),
+                    source_job.as_slice()
+                ],
+                |r| r.get(0),
+            )?;
+            crate::node::channel::graph::require_source_on(c, channel, source_job, revision)?;
             Ok(revision)
         })?;
         let bytes: Option<Vec<u8>> = profile.database().read(|c| {
@@ -104,11 +114,20 @@ impl AuthorityHistory {
             channel,
             source_revision,
             source_job,
+            append_only_network: false,
             _query_lease: None,
         }));
         Ok(authority)
     }
     fn guard_on(&self, c: &Connection) -> Result<(), LogError> {
+        if self.append_only_network {
+            return crate::node::channel::graph::require_source_prefix_on(
+                c,
+                self.channel,
+                self.source_job,
+                self.source_revision,
+            );
+        }
         crate::node::channel::graph::require_source_on(
             c,
             self.channel,
@@ -168,6 +187,14 @@ impl AuthorityHistory {
             },
             |removed| Ok(!graph.descends(event, removed)?),
         )?)
+    }
+}
+
+impl AccountAuthority {
+    pub(in crate::node) fn allow_network_prefix(&mut self) {
+        if let Some(history) = self.history.as_mut() {
+            Arc::make_mut(history).append_only_network = true;
+        }
     }
 }
 impl AccountAuthority {

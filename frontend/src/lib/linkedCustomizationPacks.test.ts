@@ -1,3 +1,4 @@
+import { RECOVERY_REFRESH_MS } from "./recoveryRefresh";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import { useAuth } from "@/store/auth";
@@ -182,7 +183,7 @@ it("imports validated assets and tombstones without republishing them", async ()
       meta: record("test.library", 2, true),
       bytes: null,
     });
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(usePacks.getState().packs).toEqual([]);
     expect(mocks.remove).not.toHaveBeenCalled();
   } finally {
@@ -197,7 +198,7 @@ it("retries durable pending archives after a CAS failure and binds every transfe
     await usePacks.getState().install(archive());
     await vi.waitFor(() => expect(mocks.put).toHaveBeenCalledTimes(1));
     expect(await usePacks.getState().pendingChanges()).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     await vi.waitFor(async () =>
       expect(await usePacks.getState().pendingChanges()).toHaveLength(0),
     );
@@ -308,4 +309,126 @@ it("reports a local library storage failure after canonical source publication",
     /quota/,
   );
   expect(mocks.documents.has("test.library")).toBe(true);
+});
+
+it("compares persisted versions before reading canonical archives after coordinator restart", async () => {
+  mocks.documents.set("test.library", {
+    meta: record("test.library", 8),
+    bytes: archive(),
+  });
+  const first = startLinkedCustomizationPacks("owner");
+  await vi.waitFor(() =>
+    expect(usePacks.getState().packs[0]?.id).toBe("test.library"),
+  );
+  first();
+  mocks.read.mockClear();
+  mocks.list.mockClear();
+  const second = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+    expect(mocks.read).not.toHaveBeenCalled();
+  } finally {
+    second();
+  }
+});
+
+it("does not replay the startup theme after a later user selection wakes reconciliation", async () => {
+  mocks.documents.set("test.library", {
+    meta: record("test.library", 8),
+    bytes: archive(),
+  });
+  const stop = startLinkedCustomizationPacks("owner", "dark");
+  try {
+    await vi.waitFor(() =>
+      expect(usePacks.getState().packs[0]?.id).toBe("test.library"),
+    );
+    await usePacks.getState().prepareTheme("test.library");
+    for (let turn = 0; turn < 40; turn++) await Promise.resolve();
+    expect(usePacks.getState().selectedTheme?.id).toBe("test.library");
+    expect(usePacks.getState().preparedThemeId).toBe("test.library");
+  } finally {
+    stop();
+  }
+});
+
+it("continues later pending library publication when the first ID fails", async () => {
+  const store = usePacks.getState();
+  store.setScope("owner", "crypto-account");
+  await store.install(archive("first.library"));
+  await store.install(archive("later.library"));
+  mocks.put.mockRejectedValueOnce(new Error("first temporarily unavailable"));
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const stop = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() =>
+      expect(mocks.documents.has("later.library")).toBe(true),
+    );
+    const ids = mocks.put.mock.calls.map((call) => call[2].pack_id);
+    expect(ids.indexOf("later.library")).toBeGreaterThan(
+      ids.indexOf("first.library"),
+    );
+  } finally {
+    stop();
+    warning.mockRestore();
+  }
+});
+
+it("keeps idle library selection changes out of linked reconciliation", async () => {
+  const stop = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(0);
+    const settled = mocks.list.mock.calls.length;
+    await usePacks.getState().prepareTheme("dark");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.list).toHaveBeenCalledTimes(settled);
+  } finally {
+    stop();
+  }
+});
+
+it("publishes a new absent-pack tombstone after the local edit token retires", async () => {
+  const stop = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(0);
+    await usePacks.getState().remove("never.visible");
+    await vi.waitFor(() =>
+      expect(mocks.remove).toHaveBeenCalledWith(
+        "owner",
+        "crypto-account",
+        key("never.visible"),
+        null,
+      ),
+    );
+    expect(mocks.documents.get("never.visible")?.meta.tombstone).toBe(true);
+  } finally {
+    stop();
+  }
+});
+
+it("does not query library documents for qualified sync-status invalidations", async () => {
+  const { notifySyncInvalidation } = await import("./syncInvalidation");
+  const stop = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.list.mockClear();
+    notifySyncInvalidation({
+      owner: "owner",
+      kind: "state",
+      scope: "sync_status",
+    } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.list).not.toHaveBeenCalled();
+    for (const scope of ["documents", "future-unknown", undefined]) {
+      mocks.list.mockClear();
+      notifySyncInvalidation({ owner: "owner", kind: "state", scope } as never);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.list).toHaveBeenCalledOnce();
+    }
+  } finally {
+    stop();
+  }
 });

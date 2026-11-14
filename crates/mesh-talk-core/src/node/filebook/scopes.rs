@@ -15,6 +15,11 @@ use crate::{
 use rusqlite::{Connection, params};
 use std::{path::Path, sync::Arc};
 
+#[cfg(test)]
+thread_local! {
+    pub(in crate::node) static SCOPE_PAGE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const SCHEMA: &str = "
 CREATE TABLE sent_file_scope_revision(account BLOB PRIMARY KEY CHECK(length(account)=32),revision INTEGER NOT NULL CHECK(revision>=0)) WITHOUT ROWID;
 CREATE TABLE sent_file_scopes(account BLOB NOT NULL CHECK(length(account)=32),file BLOB NOT NULL CHECK(length(file)=32),event BLOB NOT NULL CHECK(length(event)=32),parent BLOB NOT NULL CHECK(length(parent)=32),author BLOB NOT NULL CHECK(length(author)=32),PRIMARY KEY(account,file,event)) WITHOUT ROWID;
@@ -166,6 +171,8 @@ impl IndexedManifestScopes {
     ) -> Result<Vec<ManifestScope>, LogError> {
         self.source.profile().database().read(|c| {
             self.check(c)?;
+            #[cfg(test)]
+            SCOPE_PAGE_QUERIES.with(|count| count.set(count.get() + 1));
             let mut statement=c.prepare_cached("SELECT s.event,s.parent,s.author FROM sent_file_scopes s WHERE s.account=?1 AND s.file=?2 AND s.event>coalesce(?3,x'') AND s.author=?4 AND EXISTS(SELECT 1 FROM file_book_offers b WHERE b.account=s.account AND b.file=s.file AND b.author=?4) ORDER BY s.event LIMIT 128")?;
             let mut rows=statement.query(params![self.account.as_slice(),file.as_bytes().as_slice(),after.as_ref().map(|id|id.as_bytes().as_slice()),self.device.ed25519_pub().as_slice()])?;
             let mut result=Vec::new();

@@ -12,13 +12,17 @@ impl IndexedRelayState {
         now: u64,
         session: &SessionLease,
     ) -> Result<AppendOutcome, LogError> {
-        if !session.belongs_to(&self.profile) {
-            return Err(LogError::StaleCursor);
-        }
-        self.session_policy_transaction(now, session, true, |c, cutoff| {
-            let origin = session.origin_on(c, &event.conversation_id, now)?;
-            self.record_on(c, cutoff, event, now, origin)
-        })
+        let result = if !session.belongs_to(&self.profile) {
+            Err(LogError::StaleCursor)
+        } else {
+            self.session_policy_transaction(now, session, true, |c, cutoff| {
+                let origin = session.origin_on(c, &event.conversation_id, now)?;
+                self.record_on(c, cutoff, event, now, origin)
+            })
+        };
+        // Count only after final session authority and commit/rollback finish.
+        self.observe_ingest(&result);
+        result
     }
     pub(crate) fn correct_known_origins_at(
         &self,

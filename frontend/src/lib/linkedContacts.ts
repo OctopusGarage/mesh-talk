@@ -1,6 +1,10 @@
+import { startRecoveryRefresh } from "./recoveryRefresh";
 import { captureRuntimeOwner } from "@/store/ownership";
 import { readWithDeadline } from "./readDeadline";
-import { subscribeSyncInvalidation } from "./syncInvalidation";
+import {
+  isDocumentInvalidation,
+  subscribeSyncInvalidation,
+} from "./syncInvalidation";
 import type { FavoriteInfo, HiddenContactsSnapshot } from "./types";
 import { chat } from "@/lib/api/chat";
 import { contactPolicy, favorites } from "@/lib/api";
@@ -298,16 +302,16 @@ export function startLinkedContacts(owner: string): () => void {
   const unlisten = subscribeSyncInvalidation((change) => {
     if (
       change.owner === owner &&
-      (change.kind === "state" || change.kind === "contacts")
+      (isDocumentInvalidation(change) || change.kind === "contacts")
     )
       void reconcile();
   });
   void reconcile();
-  const timer = window.setInterval(() => void reconcile(), 10_000);
+  const stopRecovery = startRecoveryRefresh(() => void reconcile());
   return () => {
     active = false;
     publisher.stop();
     unlisten();
-    window.clearInterval(timer);
+    stopRecovery();
   };
 }

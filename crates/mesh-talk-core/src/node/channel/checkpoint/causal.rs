@@ -1,11 +1,58 @@
 //! Causal membership queries share the channel reducer and its exact indexed
-//! facts. A serialized, disposable query never retains an ancestor ID set in RAM.
+//! facts. Construction is serialized; a bounded memo retains completed current
+//! membership projections and their fact leases, never an ancestor ID set in RAM.
 use super::*;
 use crate::{
     eventlog::repository::EventRepository,
     identity::device::DeviceIdentity,
     node::channel::{graph::IndexedGraph, projection_facts::ProjectionFacts},
 };
+
+// Eight current-membership reducers and at most 256 root IDs per cut. This is
+// a count bound, not an RSS cap; historical authority/ancestry facts stay in SQL.
+const MAX_COMPLETED_PROJECTIONS: usize = 8;
+type CompletedProjection = Arc<super::super::ChannelMembershipProjection>;
+
+#[derive(PartialEq, Eq)]
+struct ProjectionKey {
+    repository: crate::eventlog::repository::network::HistorySyncBinding,
+    channel: ConversationId,
+    source_job: [u8; 16],
+    source_revision: i64,
+    roots: Vec<EventId>,
+    include_roots: bool,
+}
+
+#[derive(Default)]
+pub(super) struct CompletedProjections {
+    entries: std::collections::VecDeque<(ProjectionKey, CompletedProjection)>,
+}
+impl CompletedProjections {
+    fn get(&mut self, key: &ProjectionKey) -> Option<CompletedProjection> {
+        let index = self.entries.iter().position(|(stored, _)| stored == key)?;
+        let entry = self
+            .entries
+            .remove(index)
+            .expect("completed causal projection");
+        let projection = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(projection)
+    }
+    // Return the evicted lease, never destroy it while holding the memo lock.
+    fn insert(
+        &mut self,
+        key: ProjectionKey,
+        projection: CompletedProjection,
+    ) -> Option<CompletedProjection> {
+        let retired = if self.entries.len() == MAX_COMPLETED_PROJECTIONS {
+            self.entries.pop_front().map(|(_, projection)| projection)
+        } else {
+            None
+        };
+        self.entries.push_back((key, projection));
+        retired
+    }
+}
 
 mod query;
 pub(in crate::node) use query::{CausalProjectionQuery, CausalProjectionStep};
@@ -22,9 +69,10 @@ pub(super) fn initialize(c: &Connection, fresh: bool) -> Result<(), LogError> {
     }
     c.execute_batch("CREATE INDEX IF NOT EXISTS channel_projection_queries_retired ON channel_projection_queries(retired,job);")?;
     crate::storage::profile::manifest::validate_ddl(c, SCHEMA)?;
-    // At most one serialized query can be active. Its potentially large facts
-    // remain deferred cleanup, never an all-row warm-start replay.
-    c.execute("UPDATE channel_projection_queries SET retired=1 WHERE job NOT IN (SELECT query FROM channel_legacy_cuts)", [])?;
+    // Only one query constructs under serialization. Completed memo/caller
+    // leases retain their facts during this store's lifetime; reopening retires
+    // prior runtime queries without an all-row warm-start replay.
+    c.execute("UPDATE channel_projection_queries SET retired=1 WHERE retired=0 AND job NOT IN (SELECT query FROM channel_legacy_cuts)", [])?;
     Ok(())
 }
 
@@ -61,7 +109,7 @@ impl Drop for Query {
     fn drop(&mut self) {
         if let Err(error) = self.profile.database().transaction(|c| {
             c.execute(
-                "UPDATE channel_projection_queries SET retired=1 WHERE job=?1",
+                "UPDATE channel_projection_queries SET retired=1 WHERE retired=0 AND job=?1",
                 [self.job.as_slice()],
             )?;
             Ok(())
@@ -235,7 +283,7 @@ impl ChannelCheckpointStore {
                 ],
             )?;
             c.execute(
-                "UPDATE channel_projection_queries SET retired=1 WHERE job=?1",
+                "UPDATE channel_projection_queries SET retired=1 WHERE retired=0 AND job=?1",
                 [query.job.as_slice()],
             )?;
             Ok(())
@@ -252,7 +300,7 @@ impl ChannelCheckpointStore {
         repository: &EventRepository,
         channel: ConversationId,
         event: EventId,
-    ) -> Result<Option<super::super::ChannelMembershipProjection>, LogError> {
+    ) -> Result<Option<CompletedProjection>, LogError> {
         self.causal_projection_roots(repository, channel, &[event], false)
     }
 
@@ -261,7 +309,7 @@ impl ChannelCheckpointStore {
         repository: &EventRepository,
         channel: ConversationId,
         basis: &[EventId],
-    ) -> Result<Option<super::super::ChannelMembershipProjection>, LogError> {
+    ) -> Result<Option<CompletedProjection>, LogError> {
         self.causal_projection_roots(repository, channel, basis, true)
     }
     fn causal_projection_roots(
@@ -270,88 +318,175 @@ impl ChannelCheckpointStore {
         channel: ConversationId,
         roots: &[EventId],
         include_roots: bool,
-    ) -> Result<Option<super::super::ChannelMembershipProjection>, LogError> {
-        let _serial = self.causal_query.lock().expect("channel causal query lock");
-        let Some(mut selection) =
-            repository.start_ancestor_selection_roots(channel, roots, include_roots)?
-        else {
-            return Ok(None);
-        };
-        selection.retire_with_owner();
-        while !repository.ancestor_selection_step(&selection)? {}
-        let (source_job, revision) = selection.generation();
-        let query = Arc::new(Query {
-            profile: self.profile.clone(),
-            job: *uuid::Uuid::new_v4().as_bytes(),
-        });
-        self.profile.database().transaction(|c| {
-            self.check_account_on(c)?;
-            replay::require_source_on(c, channel, source_job, revision)?;
-            cleanup_on(c)?;
-            c.execute(
-                "INSERT INTO channel_projection_queries VALUES(?1,?2,0)",
-                params![query.job.as_slice(), channel.as_bytes().as_slice()],
-            )?;
-            Ok(())
-        })?;
-        let (mut reducer, _) =
-            ProjectionFacts::load_bound(self.profile.clone(), query.job, source_job, channel)?;
-        reducer.authority.retain_query_lease(query.clone())?;
-        Arc::get_mut(
-            reducer
-                .history
-                .as_mut()
-                .ok_or_else(|| invalid("causal projection facts missing"))?,
-        )
-        .ok_or_else(|| invalid("causal projection already shared"))?
-        ._query_lease = Some(query.clone());
-        reducer.legacy_checks = true;
-        let graph = IndexedGraph {
-            repository,
-            conversation: channel,
-        };
-        let mut after = -1;
-        loop {
-            let page = repository.ancestor_headers_page(&selection, after, 64)?;
-            for (rank, header) in page.items {
-                let allowed = if super::super::projection_facts::is_membership_control(header.kind)
-                {
-                    let event = repository
-                        .get(&header.id)?
-                        .ok_or_else(|| invalid("causal channel control disappeared"))?;
-                    reducer.step(&event, &graph)?
-                } else {
-                    reducer.step_header(&header, &graph)?
+    ) -> Result<Option<CompletedProjection>, LogError> {
+        if roots.is_empty() || roots.len() > 256 || (!include_roots && roots.len() != 1) {
+            return Err(LogError::InvalidPageBudget);
+        }
+        // These owners outlive the serialization scope, including every error
+        // return. Their final Drop may write query/selection retirement to SQL.
+        let mut selection_owner = None;
+        let mut query_owner = None;
+        let mut evicted = None;
+        let result = {
+            let _serial = self.causal_query.lock().expect("channel causal query lock");
+            (|| {
+                self.check_account()?;
+                let Some(generation) = repository.order_generation(
+                    &channel,
+                    crate::eventlog::repository::order::CausalOrder::Logical,
+                )?
+                else {
+                    return Ok(None);
                 };
-                let facts = reducer
-                    .history
-                    .as_ref()
-                    .ok_or_else(|| invalid("missing causal fact owner"))?
-                    .clone();
-                let after_accept = facts.after_accept(&reducer, &header, &graph)?;
+                let mut normalized = roots.to_vec();
+                normalized.sort_unstable();
+                normalized.dedup();
+                let key = ProjectionKey {
+                    repository: repository.history_sync_binding(&channel)?,
+                    channel,
+                    source_job: generation.job,
+                    source_revision: generation.source_revision,
+                    roots: normalized,
+                    include_roots,
+                };
+                self.check_completed_projection(repository, &key)?;
+                let cached = self
+                    .causal_completed
+                    .lock()
+                    .expect("completed causal projection lock")
+                    .get(&key);
+                if let Some(cached) = cached {
+                    // A cache hit reuses immutable facts, never a live account
+                    // permission or caller-specific SourceAccess decision.
+                    self.check_completed_projection(repository, &key)?;
+                    return Ok(Some(cached));
+                }
+                selection_owner = repository.start_ancestor_selection_roots(
+                    channel,
+                    &key.roots,
+                    include_roots,
+                )?;
+                let Some(selection) = selection_owner.as_mut() else {
+                    return Ok(None);
+                };
+                selection.retire_with_owner();
+                while !repository.ancestor_selection_step(selection)? {}
+                let (source_job, revision) = selection.generation();
+                let query = Arc::new(Query {
+                    profile: self.profile.clone(),
+                    job: *uuid::Uuid::new_v4().as_bytes(),
+                });
+                query_owner = Some(query.clone());
                 self.profile.database().transaction(|c| {
                     self.check_account_on(c)?;
                     replay::require_source_on(c, channel, source_job, revision)?;
-                    facts.checkpoint_on(
-                        c,
-                        &mut reducer,
-                        &header,
-                        rank,
-                        (allowed, after_accept),
-                        "",
+                    cleanup_on(c)?;
+                    c.execute(
+                        "INSERT INTO channel_projection_queries VALUES(?1,?2,0)",
+                        params![query.job.as_slice(), channel.as_bytes().as_slice()],
                     )?;
                     Ok(())
                 })?;
-            }
-            let Some(next) = page.next else {
-                break;
-            };
-            after = next;
+                let (mut reducer, _) = ProjectionFacts::load_bound(
+                    self.profile.clone(),
+                    query.job,
+                    source_job,
+                    channel,
+                )?;
+                reducer.authority.retain_query_lease(query.clone())?;
+                Arc::get_mut(
+                    reducer
+                        .history
+                        .as_mut()
+                        .ok_or_else(|| invalid("causal projection facts missing"))?,
+                )
+                .ok_or_else(|| invalid("causal projection already shared"))?
+                ._query_lease = Some(query.clone());
+                reducer.legacy_checks = true;
+                let graph = IndexedGraph {
+                    repository,
+                    conversation: channel,
+                };
+                let mut after = -1;
+                loop {
+                    let page = repository.ancestor_headers_page(selection, after, 64)?;
+                    for (rank, header) in page.items {
+                        let allowed =
+                            if super::super::projection_facts::is_membership_control(header.kind) {
+                                let event = repository
+                                    .get(&header.id)?
+                                    .ok_or_else(|| invalid("causal channel control disappeared"))?;
+                                reducer.step(&event, &graph)?
+                            } else {
+                                reducer.step_header(&header, &graph)?
+                            };
+                        let facts = reducer
+                            .history
+                            .as_ref()
+                            .ok_or_else(|| invalid("missing causal fact owner"))?
+                            .clone();
+                        let after_accept = facts.after_accept(&reducer, &header, &graph)?;
+                        self.profile.database().transaction(|c| {
+                            self.check_account_on(c)?;
+                            replay::require_source_on(c, channel, source_job, revision)?;
+                            facts.checkpoint_on(
+                                c,
+                                &mut reducer,
+                                &header,
+                                rank,
+                                (allowed, after_accept),
+                                "",
+                            )?;
+                            Ok(())
+                        })?;
+                    }
+                    let Some(next) = page.next else {
+                        break;
+                    };
+                    after = next;
+                }
+                repository.retire_ancestor_selection(selection.id())?;
+                // Explicit retirement succeeded. On failures the outer owner still
+                // retires the selection, after releasing causal serialization.
+                selection.persist_with_owner();
+                let mut projection = reducer.finish();
+                projection._query_lease = Some(query);
+                self.check_completed_projection(repository, &key)?;
+                let projection = Arc::new(projection);
+                evicted = self
+                    .causal_completed
+                    .lock()
+                    .expect("completed causal projection lock")
+                    .insert(key, projection.clone());
+                Ok(Some(projection))
+            })()
+        };
+        drop(selection_owner);
+        drop(query_owner);
+        drop(evicted);
+        result
+    }
+
+    fn check_completed_projection(
+        &self,
+        repository: &EventRepository,
+        key: &ProjectionKey,
+    ) -> Result<(), LogError> {
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            replay::require_source_on(c, key.channel, key.source_job, key.source_revision)
+        })?;
+        let generation = repository.order_generation(
+            &key.channel,
+            crate::eventlog::repository::order::CausalOrder::Logical,
+        )?;
+        if !generation.is_some_and(|current| {
+            current.job == key.source_job && current.source_revision == key.source_revision
+        }) || repository.history_sync_binding(&key.channel)? != key.repository
+        {
+            return Err(LogError::StaleCursor);
         }
-        repository.retire_ancestor_selection(selection.id())?;
-        let mut projection = reducer.finish();
-        projection._query_lease = Some(query);
-        Ok(Some(projection))
+        Ok(())
     }
 }
 
@@ -626,7 +761,7 @@ impl ChannelCheckpointStore {
                 ],
             )?;
             c.execute(
-                "UPDATE channel_projection_queries SET retired=1 WHERE job=?1",
+                "UPDATE channel_projection_queries SET retired=1 WHERE retired=0 AND job=?1",
                 [query.as_slice()],
             )?;
             cleanup_on(c)?;

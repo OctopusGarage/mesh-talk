@@ -9,12 +9,41 @@ use std::{
     io,
     path::Path,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 use tokio::net::TcpStream;
+
+/// Captured before operation guards, so even a later error/cancellation retires
+/// those guards before publishing an actual policy-generation dependency change.
+pub(super) struct ProfilePolicyWake<'a> {
+    generation: &'a AtomicU64,
+    before: u64,
+    wake: crate::storage::database::MaintenanceWake,
+}
+impl Drop for ProfilePolicyWake<'_> {
+    fn drop(&mut self) {
+        if self.generation.load(Ordering::Acquire) != self.before {
+            self.wake.notify();
+        }
+    }
+}
+
+struct ProfileFactWake {
+    changed: bool,
+    wake: Option<crate::storage::database::MaintenanceWake>,
+}
+impl Drop for ProfileFactWake {
+    fn drop(&mut self) {
+        if self.changed
+            && let Some(wake) = &self.wake
+        {
+            wake.notify();
+        }
+    }
+}
 
 /// A valid signed account change for an otherwise unchanged, previously pinned device.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -45,15 +74,28 @@ pub(in crate::node) struct StoredManifestScope {
     pub(in crate::node) author: crate::eventlog::Author,
     pub(in crate::node) event: crate::eventlog::EventId,
 }
-#[derive(Default)]
 pub(in crate::node) struct PrivacyControl {
     pub state: RwLock<Option<PrivacyState>>,
     pub gate: Arc<tokio::sync::RwLock<()>>,
     pub generation: AtomicU64,
     pub projection_revision: AtomicU64,
     pub route_probe_cursor: AtomicU64,
+    pub route_probe_retries: Mutex<super::privacy_routing::PrivateProbeRetries>,
     // Last: legacy privacy files and admission captures drop before storage.
     _storage: Option<Arc<crate::storage::profile::context::ProfileStorage>>,
+}
+impl Default for PrivacyControl {
+    fn default() -> Self {
+        Self {
+            state: RwLock::default(),
+            gate: Arc::default(),
+            generation: AtomicU64::default(),
+            projection_revision: AtomicU64::default(),
+            route_probe_cursor: AtomicU64::default(),
+            route_probe_retries: Mutex::new(super::privacy_routing::private_probe_retries()),
+            _storage: None,
+        }
+    }
 }
 impl PrivacyControl {
     pub(in crate::node) fn with_storage(
@@ -69,6 +111,14 @@ fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "privacy operation denied")
 }
 impl Node {
+    pub(super) fn profile_policy_wake(&self) -> ProfilePolicyWake<'_> {
+        ProfilePolicyWake {
+            generation: &self.privacy.generation,
+            before: self.privacy.generation.load(Ordering::Acquire),
+            wake: self.storage.database().maintenance_waker(),
+        }
+    }
+
     /// Restrict public discovery to enumerated physical LAN interfaces. Known,
     /// explicitly authorized contacts can still use existing TCP routes.
     pub fn physical_lan_only(&self) -> bool {
@@ -92,6 +142,7 @@ impl Node {
         enabled: bool,
         mut authorize: impl FnMut(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         let _policy_guard = self.privacy.gate.write().await;
         let visibility = self
             .privacy
@@ -212,6 +263,7 @@ impl Node {
         invisible: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         let _operation = self.privacy.gate.write().await;
         let (visibility, previous) = {
             let state = self.privacy.state.read().map_err(|_| denied())?;
@@ -279,6 +331,7 @@ impl Node {
         allowed: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         {
             let _operation = self.privacy.gate.write().await;
             self.change_allowed_locked_guarded(
@@ -323,6 +376,7 @@ impl Node {
         expected: &AccountBindingChange,
         authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         {
             let _operation = self.privacy.gate.write().await;
             self.change_allowed_locked_guarded_selected(
@@ -356,6 +410,7 @@ impl Node {
         account: &str,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        let _profile_wake = self.profile_policy_wake();
         // Reusing a durable grant is an observation, not a policy transition.
         // Handshakes hold the disclosure gate while doing network IO; taking
         // its writer for every message makes local acceptance depend on them.
@@ -419,6 +474,7 @@ impl Node {
         account: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         {
             let _operation = self.privacy.gate.write().await;
             self.change_allowed_locked_guarded(
@@ -439,6 +495,7 @@ impl Node {
         source: PermissionSource,
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        let _profile_wake = self.profile_policy_wake();
         let _operation = self.privacy.gate.write().await;
         self.change_allowed_locked(account, allowed, source, authorize)
     }
@@ -706,18 +763,57 @@ impl Node {
             let book = self.channels.lock().expect("channels lock not poisoned");
             book.channel_ids()
         };
-        // Admission must use the durable, signed membership controls, including
-        // leaves and transfers that the live book has not processed yet.
-        let log = self.log.lock().expect("log lock not poisoned");
+        // One shared allowance advances stale signed authority without replaying
+        // historical message bodies or granting from the live display cache.
+        let mut budget = crate::eventlog::sync::network::PreparationBudget::default();
+        let mut pending = false;
+        let me = self.identity.public();
         for id in channel_ids {
-            let events = log.events(&id)?;
-            if crate::node::channel::ChannelBook::projected_members(id, &events).is_some_and(
-                |members| members.contains(public) && members.contains(&self.identity.public()),
-            ) {
-                return Ok(true);
+            let query = || -> Result<Option<bool>, LogError> {
+                // Retain the existing append/decision fence, but release it
+                // before preparation acquires its own channel/log guards.
+                let log = self.log.lock().expect("log lock not poisoned");
+                match self.channel_checkpoints.current_state(id)? {
+                    Some(state) => Ok(Some(
+                        state.members().contains(public) && state.members().contains(&me),
+                    )),
+                    None => {
+                        // A published non-local state cannot grant membership.
+                        // An absent checkpoint for retained controls is pending.
+                        if self.channel_checkpoints.source_binding(id)?.is_some()
+                            || !log
+                                .repository()?
+                                .has_kind(&id, crate::eventlog::EventKind::MembershipChange)?
+                        {
+                            Ok(Some(false))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                }
+            };
+            match query() {
+                Ok(Some(true)) => return Ok(true),
+                Ok(Some(false)) => continue,
+                Ok(None) | Err(LogError::StaleCursor) => {}
+                Err(error) => return Err(error),
+            }
+            match self.prepare_channel_admission(id, &mut budget) {
+                Ok(()) => match query() {
+                    Ok(Some(true)) => return Ok(true),
+                    Ok(Some(false)) => {}
+                    Ok(None) | Err(LogError::StaleCursor) => pending = true,
+                    Err(error) => return Err(error),
+                },
+                Err(LogError::StaleCursor) => pending = true,
+                Err(error) => return Err(error),
             }
         }
-        Ok(false)
+        if pending {
+            Err(LogError::StaleCursor)
+        } else {
+            Ok(false)
+        }
     }
 
     pub(in crate::node) fn group_departure_peer(&self, public: &PublicIdentity) -> bool {
@@ -927,40 +1023,78 @@ impl Node {
         if announce.public() != *public || !announce.verify() {
             return Err(TransportError::IdentityMismatch);
         }
-        let group_member = self
-            .group_member(public)
-            .map_err(|error| TransportError::Io(io::Error::other(error)))?
-            || self.group_departure_peer(public);
+        let direct_route_allowed = |state: &PrivacyState| {
+            !state.policy.snapshot().invisible
+                || announce.account_id().is_some_and(|account| {
+                    account == self.account_id() || state.policy.allows(&account)
+                })
+        };
+        let group_allowed = || {
+            self.group_member(public)
+                .map(|member| member || self.group_departure_peer(public))
+                .map_err(|error| TransportError::Io(io::Error::other(error)))
+        };
+        let needs_group = {
+            let guard = self
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned");
+            guard
+                .as_ref()
+                .is_some_and(|state| !direct_route_allowed(state))
+        };
+        let mut group_member = if needs_group {
+            Some(group_allowed()?)
+        } else {
+            None
+        };
         #[cfg(test)]
         if let Some(hook) = self.remember_peer_hook.lock().unwrap().take() {
             hook();
         }
-        {
-            let mut state = self
+        // Declared before the policy/roster guards: even a later route-write
+        // failure wakes retry work only after those guards have retired.
+        let mut proof_wake = ProfileFactWake {
+            changed: false,
+            wake: Some(self.storage.database().maintenance_waker()),
+        };
+        loop {
+            let mut guard = self
                 .privacy
                 .state
                 .write()
                 .expect("privacy lock not poisoned");
-            if let Some(state) = state.as_mut() {
-                if announce.account_id().is_some() {
-                    state
-                        .proofs
-                        .record(announce)
-                        .map_err(|_| TransportError::AdmissionDenied)?;
-                }
-                if !state.policy.snapshot().invisible
-                    || announce
-                        .account_id()
-                        .is_some_and(|a| a == self.account_id() || state.policy.allows(&a))
-                    || group_member
-                {
-                    state
-                        .routes
-                        .record(public, ip)
-                        .map_err(|_| TransportError::AdmissionDenied)?;
-                }
+            let Some(state) = guard.as_mut() else {
+                break;
+            };
+            let direct = direct_route_allowed(state);
+            if !direct && group_member.is_none() {
+                // Policy may have tightened since the read above. Query current
+                // membership without the privacy guard, then recheck the owner.
+                drop(guard);
+                group_member = Some(group_allowed()?);
+                continue;
             }
+            if announce.account_id().is_some() {
+                let revision = state.proofs.revision();
+                state
+                    .proofs
+                    .record(announce)
+                    .map_err(|_| TransportError::AdmissionDenied)?;
+                proof_wake.changed |= state.proofs.revision() != revision;
+            }
+            if direct || group_member.unwrap_or(false) {
+                let known_route = state.routes.contains(public, ip);
+                state
+                    .routes
+                    .record(public, ip)
+                    .map_err(|_| TransportError::AdmissionDenied)?;
+                proof_wake.changed |= !known_route;
+            }
+            break;
         }
+        self.observe_sibling_availability(public);
         let mut roster = self.roster.lock().expect("roster lock not poisoned");
         if publicly_visible {
             roster.update_authenticated(announce, ip, &self.user_id());
@@ -968,6 +1102,7 @@ impl Node {
         } else {
             roster.forget(public);
         }
+        drop(roster);
         Ok(())
     }
 
@@ -1019,6 +1154,13 @@ impl Node {
         privacy: &PrivacyControl,
         (proofs, peers): (Vec<Announce>, Vec<crate::discovery::PeerRecord>),
     ) -> io::Result<Vec<crate::discovery::PeerRecord>> {
+        let mut dependency = ProfileFactWake {
+            changed: false,
+            wake: privacy
+                ._storage
+                .as_ref()
+                .map(|storage| storage.database().maintenance_waker()),
+        };
         let mut guard = privacy.state.write().map_err(|_| denied())?;
         let Some(state) = guard.as_mut() else {
             return Ok(peers);
@@ -1034,17 +1176,23 @@ impl Node {
                 }
                 continue;
             }
-            if let Err(error) = state.proofs.record(&proof) {
+            let before = state.proofs.revision();
+            let recorded = state.proofs.record(&proof);
+            dependency.changed |= state.proofs.revision() != before;
+            if let Err(error) = recorded {
                 // Rejected bindings are ineligible peers; failed persistence is
                 // an unavailable snapshot, never a successful empty roster.
                 if error.kind() != io::ErrorKind::InvalidData {
                     return Err(error);
                 }
-                log::warn!("discovered peer proof was not cached");
+                log::warn!(
+                    "discovered peer proof was not cached: {}",
+                    super::peer_directory::rejection_code(&error)
+                );
                 continue;
             }
-            if let Some(peer) = peers.iter().find(|p| p.public == proof.public())
-                && (if peer.routes.is_empty() {
+            if let Some(peer) = peers.iter().find(|p| p.public == proof.public()) {
+                let ips = if peer.routes.is_empty() {
                     vec![peer.addr.ip()]
                 } else {
                     peer.routes
@@ -1054,11 +1202,14 @@ impl Node {
                         })
                         .map(|route| route.addr.ip())
                         .collect()
-                })
-                .into_iter()
-                .any(|ip| state.routes.record(&peer.public, ip).is_err())
-            {
-                return Err(io::Error::other("discovered peer route was not cached"));
+                };
+                for ip in ips {
+                    let known = state.routes.contains(&peer.public, ip);
+                    if state.routes.record(&peer.public, ip).is_err() {
+                        return Err(io::Error::other("discovered peer route was not cached"));
+                    }
+                    dependency.changed |= !known;
+                }
             }
             successful.push(proof);
         }
@@ -1163,6 +1314,50 @@ impl Node {
         candidates
     }
 
+    /// Resource classification only: neither cached routes nor this hint grant
+    /// identity, admission or public presence. All are checked at their owners.
+    pub(in crate::node) fn historical_route_candidate(
+        &self,
+        address: std::net::SocketAddr,
+        expected: &PublicIdentity,
+        now: std::time::Instant,
+    ) -> bool {
+        let key = self.peer_endpoint_key(address, expected);
+        if self.sessions.recently_authenticated_route(&key, now) {
+            return false;
+        }
+        let fresh = self
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .get(&expected.user_id())
+            .is_some_and(|peer| {
+                peer.public == *expected
+                    && peer.presence_routes(now).any(|(route, _, _)| {
+                        !matches!(
+                            route.source,
+                            crate::discovery::roster::RouteSource::PostOffice
+                                | crate::discovery::roster::RouteSource::Gateway
+                        ) && route.addr.port() == address.port()
+                            && crate::transport::net::canonical_peer_ip(route.addr.ip())
+                                == crate::transport::net::canonical_peer_ip(address.ip())
+                    })
+            });
+        !fresh
+            && self
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned")
+                .as_ref()
+                .is_some_and(|state| {
+                    state.routes.contains(
+                        expected,
+                        crate::transport::net::canonical_peer_ip(address.ip()),
+                    )
+                })
+    }
+
     pub(in crate::node) async fn privacy_dial(
         &self,
         addr: std::net::SocketAddr,
@@ -1182,12 +1377,58 @@ impl Node {
         expected: &PublicIdentity,
         priority: super::session_pool::AuthenticationPriority,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_dial_budgeted(addr, expected, priority, false, false)
+            .await
+    }
+
+    /// Explicit call/pairing actions bypass only speculative-route admission;
+    /// privacy, pinned authentication and the shared TCP limit remain mandatory.
+    pub(in crate::node) async fn privacy_dial_interactive(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_dial_budgeted(
+            addr,
+            expected,
+            super::session_pool::AuthenticationPriority::Ordinary,
+            true,
+            false,
+        )
+        .await
+    }
+
+    /// Dedicated bounded mailbox watch, with the same privacy, identity and
+    /// authentication admission as an ordinary outgoing connection.
+    pub(in crate::node) async fn privacy_watch_dial(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_dial_budgeted(
+            addr,
+            expected,
+            super::session_pool::AuthenticationPriority::Ordinary,
+            false,
+            true,
+        )
+        .await
+    }
+
+    async fn privacy_dial_budgeted(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+        priority: super::session_pool::AuthenticationPriority,
+        interactive: bool,
+        watch: bool,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
         // One caller owns every route attempt and the disclosure lease. Keep
         // that lease across Noise identity disclosure, but never accumulate a
         // fresh full deadline for each capacity wait or candidate wave.
         tokio::time::timeout(
             super::route_timing::MAX_AUTHENTICATION_DEADLINE,
-            self.privacy_dial_inner(addr, expected, priority),
+            self.privacy_dial_inner(addr, expected, priority, interactive, watch),
         )
         .await
         .map_err(|_| TransportError::Noise("dial deadline exceeded".into()))?
@@ -1198,6 +1439,8 @@ impl Node {
         addr: std::net::SocketAddr,
         expected: &PublicIdentity,
         priority: super::session_pool::AuthenticationPriority,
+        interactive: bool,
+        watch: bool,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
@@ -1249,20 +1492,34 @@ impl Node {
                     let _authentication = match priority {
                         super::session_pool::AuthenticationPriority::Ordinary => {
                             self.sessions
-                                .authentication_admission(authentication_key)
+                                .authentication_admission(authentication_key.clone())
                                 .await?
                         }
                         super::session_pool::AuthenticationPriority::Control => {
                             self.sessions
-                                .authentication_admission_priority(authentication_key, priority)
+                                .authentication_admission_priority(authentication_key.clone(), priority)
                                 .await?
                         }
                     };
+                    // Re-evaluate freshness after the per-endpoint wait. An
+                    // old failure cannot suppress newly eligible discovery.
+                    let historical = !interactive && self.historical_route_candidate(candidate, expected, std::time::Instant::now());
+                    let mut historical_attempt = if historical {
+                        Some(self.sessions.historical_authentication(&authentication_key,
+                            *self.network_changes.borrow(), std::time::Instant::now())?)
+                    } else { None };
+                    let _historical = historical
+                        .then(|| self.sessions.historical_dial())
+                        .transpose()?;
                     #[cfg(test)]
                     self.trace_account_client(expected, || {
                         "dial_authentication_admission_acquired_outbound_wait".into()
                     });
-                    let permits = self.sessions.outbound().await?;
+                    let permits = if watch {
+                        self.sessions.watch_outbound().await?
+                    } else {
+                        self.sessions.outbound().await?
+                    };
                     #[cfg(test)]
                     self.trace_account_client(expected, || "dial_outbound_acquired".into());
                     let started = std::time::Instant::now();
@@ -1305,6 +1562,9 @@ impl Node {
                         self.sessions.authentication_timed_out(expected, candidate);
                         Err(TransportError::Noise("dial timed out".into()))
                     });
+                    if let Some(attempt) = &mut historical_attempt {
+                        attempt.complete(result.is_ok(), std::time::Instant::now());
+                    }
                     #[cfg(test)]
                     self.trace_account_client(expected, || {
                         format!(
@@ -1313,12 +1573,16 @@ impl Node {
                             super::account_session::client_transport_outcome(&result)
                         )
                     });
-                    if started.elapsed() >= Duration::from_secs(2) {
-                        log::warn!(
-                            target: "mesh_talk::delivery",
-                            "slow peer authentication endpoint={} elapsed_ms={} authenticated={}",
-                            candidate, started.elapsed().as_millis(), result.is_ok(),
-                        );
+                    let elapsed = started.elapsed();
+                    if elapsed >= Duration::from_secs(2) {
+                        log::debug!(target: "mesh_talk::delivery",
+                            "slow peer authentication endpoint={} elapsed_ms={} authenticated={} historical={} interactive={}",
+                            candidate, elapsed.as_millis(), result.is_ok(), historical, interactive);
+                        if let Some(summary) = self.sessions.observe_slow_authentication(elapsed, result.is_ok(), historical, interactive) {
+                            log::warn!(target: "mesh_talk::delivery",
+                                "slow peer authentication summary attempts={} failures={} historical={} max_elapsed_ms={} last_endpoint={} interactive={}",
+                                summary.attempts, summary.failures, summary.historical, summary.longest.as_millis(), candidate, interactive);
+                        }
                     }
                     result.map(|channel| (channel, permits, started.elapsed()))
                 }
@@ -1376,6 +1640,7 @@ impl Node {
             addr.ip(),
             channel.peer_publicly_visible(),
         )?;
+        self.observe_sibling_availability(channel.peer_identity());
         self.preferred_routes
             .lock()
             .expect("routes lock not poisoned")
@@ -1488,6 +1753,7 @@ impl Node {
                 ip,
                 channel.peer_publicly_visible(),
             )?;
+            self.observe_sibling_availability(channel.peer_identity());
         }
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         self.guard_channel(&mut channel, generation);
@@ -1504,3 +1770,7 @@ mod tests;
 #[cfg(test)]
 #[path = "session_pool_tests.rs"]
 mod session_pool_tests;
+
+#[cfg(test)]
+#[path = "group_membership_query_tests.rs"]
+mod group_membership_query_tests;

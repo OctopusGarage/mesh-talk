@@ -131,6 +131,7 @@
             "paired_control_followup_requires_a_new_admitted_operation_or_wake_token",
             "paired_control_new_publication_reuses_completed_background_without_dropping_partial_foreground",
             "paired_control_recycles_parked_completed_background_only_for_genuine_followup",
+            "queued_setup_retires_wake_replacement_before_arming_the_natural_hold",
             "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
             "queued_background_hold_distinguishes_foreground_pair_from_interrupted_resume",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
@@ -149,7 +150,8 @@
             "new_account_group_rejects_a_route_whose_authenticated_account_changed",
             "queued_recovery_observes_retirement_before_its_deadline_between_periodic_checks",
             "queued_functional_recovery_keeps_all_predicates_after_the_receipt_budget",
-            "queued_functional_recovery_fails_without_actual_pair_retirement"
+            "queued_functional_recovery_fails_without_actual_pair_retirement",
+            "group_control_repeated_access_reuses_intrinsic_validation"
           ]
         }
       ],
@@ -276,6 +278,10 @@
           {
             "name": "Direct owner-control commits retain an exact internal event receipt; asynchronous completion releases authorization, privacy and membership guards before bounded metadata preparation and validates that exact admitted event before fanout or public success.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Inventory references and control heads share one bounded intrinsic memo. Every hit first validates current durable bytes and full metadata; current bindings, log authority and receipt-derived publication frontiers remain fresh. Missing or corrupt data cannot reuse prior validation.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           }
         ]
       },
@@ -287,7 +293,7 @@
       ],
       "escalation": [
         "Require signed legacy-owner/member/reference sibling scenarios, current account binding, offline availability, transfer/revocation replay, durable pending operations and exact committed effects. Role display tests do not prove mutation authority or native cross-device convergence. Explicit File result/retry fixtures run each simulated source, requester, external recipient and launched fresh sibling through the existing independent two-worker host owner. Preserve the inactive fresh requester through matching-retry admission, all original operation/public manifest/byte assertions and budgets, and join fault helpers plus actual host retirement before propagating a body panic. Shared-reactor delay alone does not establish a historical root cause; retain the held-worker and independent-host controls. Explicit File result/retry fixtures must observe exact authenticated File capabilities in both directions before admission; a forward role view does not establish the executor's reverse asset-fetch capability. Verify setup with a held real reverse Control response while preserving operation deadlines, capability-refusal coverage, byte identity and matching-retry assertions. Finish both initial and fresh requester cold capability setup before the unchanged signed-role proof. Preserve the fresh requester's intentionally inactive background owner through retry admission; drive its required Control setup with the shared cursor and narrow interruption/admission policy. A real held fresh Control response must cross the role budget without consuming it. Keep phase-only failure evidence for initial/fresh setup, executor commitment, requester result adoption and external manifest receipt.",
-        "For scenarios measuring later account operations, observe exact directional capabilities before signed-role proof and establish the first live public-fanout fault through the existing cold setup owner. Require real delayed-response controls for the Text and consecutive-control callers. A retryable transport interruption during Noise authentication or before the first application frame does not qualify a public hold; retain cryptographic authentication, other nonretryable and malformed-frame failures and the same live actual-request witness before and after the second commit. Verify a real pre-Noise TCP close only after the exact accepted port is observed, and keep its typed-close processing observation separate from the authenticated-close counter. Require final task retirement through owned joins and the tracked-work drain. Neither that interrupted dial nor a controlled unused authenticated dial may replace the qualified witness. Preserve deliberate refusal and role-protocol tests, both eight-second operation assertions, canonical metadata-at-connection evidence and owned fault cleanup. Publication delay inside a measured receipt remains operation work, not cold preparation. Run both requester and responder source-invalidation fanout regressions over real Noise, preserving the original eight-second effect/sequence oracle and typed failure evidence; permanent policy/protocol rejections retain their existing behavior."
+        "For scenarios measuring later account operations, observe exact directional capabilities before signed-role proof and establish the first live public-fanout fault through the existing cold setup owner. Require real delayed-response controls for the Text and consecutive-control callers. A retryable transport interruption during Noise authentication or before the first application frame does not qualify a public hold; retain cryptographic authentication, other nonretryable and malformed-frame failures and the same live actual-request witness before and after the second commit. Verify a real pre-Noise TCP close only after the exact accepted port is observed, and keep its typed-close processing observation separate from the authenticated-close counter. Require final task retirement through owned joins and the tracked-work drain. Neither that interrupted dial nor a controlled unused authenticated dial may replace the qualified witness. Preserve deliberate refusal and role-protocol tests, both eight-second operation assertions, canonical metadata-at-connection evidence and owned fault cleanup. Publication delay inside a measured receipt remains operation work, not cold preparation. Run both requester and responder source-invalidation fanout regressions over real Noise, preserving the original eight-second effect/sequence oracle through two consecutive real view invalidations and typed failure evidence. Run the fanout queue paused-clock regressions for 1s-to-300s capped retry growth, unchanged observations, revision replacement during cooldown/active work, semantic wake races, overflow cleanup and success deduplication; permanent policy/protocol rejections retain their existing behavior."
       ]
     },
     {
@@ -296,6 +302,8 @@
         "crates/mesh-talk-core/src/node/account_documents/inventory.rs",
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/availability.rs",
+        "crates/mesh-talk-core/src/node/account_sync/attachment_selection.rs",
         "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
         "crates/mesh-talk-core/src/node/channels.rs",
@@ -307,9 +315,12 @@
           "filters": [
             "node::account_documents::",
             "node::account_sync::personal_replay_tests::",
+            "node::account_group::tests::owner_targets::modern_owner_transfers_to_the_target_account_without_changing_grants",
+            "node::account_group::tests::owner_targets::legacy_owner_transfers_to_a_deterministic_accepted_target_device",
             "node::account_sync::",
             "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
-            "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery"
+            "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery",
+            "node::account_profile_io::tests::unchanged_profile_publication_reuses_retained_events_across_retries_and_reopen"
           ]
         }
       ],
@@ -332,6 +343,18 @@
           {
             "name": "Modern memberships from a previous account remain archived for the exact local device unless the current account has a valid accepted or pending account-wide grant; legacy membership and genuine current-account departure remain distinct.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Receiver-owned sibling pulls follow targeted fresh availability and authenticated change hints; cached routes, local maintenance notifications and unchanged heartbeats create no bulk demand. Offline work retains progress and missing-byte counts; five-minute eligible-source repair preserves legacy and lost-hint recovery without delaying productive pages.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Routine local access and inventory publication compares complete pre-work input revisions before body reads, retains bounded page progress and newer dirty work, and owns failed retry and sparse integrity-repair deadlines independently of peer polling. Direct document integrity checks remain authoritative.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Physical local groups exclude already-unused inventory rows before body hydration; nonlocal references and direct readers retain current binding and missing/corrupt-body checks.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },
@@ -351,7 +374,8 @@
         "crates/mesh-talk-core/src/node/node_tests.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
         "crates/mesh-talk-core/src/node/media_store/**",
-        "crates/mesh-talk-core/src/node/account_documents/tests.rs"
+        "crates/mesh-talk-core/src/node/account_documents/tests.rs",
+        "crates/mesh-talk-core/src/node/serving.rs"
       ],
       "rust": [
         {
@@ -365,15 +389,22 @@
             "node::account_sync::",
             "node::media_store::",
             "node::node::tests::channel_custody_inherited_holder_requires_signed_account_authority",
+            "node::node::tests::channel_custody_batch_",
+            "node::channels::fanout_tests::channel_custody_batch_",
             "node::node::tests::channel_custody_post_office_observation_survives_sibling_sync_without_relay",
             "node::node::tests::channel_member_recovers_missed_message_from_peer",
             "channel_custody_retry_skips_own_siblings_and_already_confirmed_account",
+            "channel_custody_retry_turn_verifies_shared_certificate_once_across_rows",
             "custody_retry_classes_each_rotate_through_all_competing_peers",
             "routed_offline_member_does_not_starve_sibling_custody_report_after_history_recovers",
             "custody_report_progresses_while_unrelated_channel_recovery_is_held",
             "account_wake_requires_exact_linked_noise_identity_and_deduplicates_revisions",
             "account_preference_local_edit_wakes_sibling_before_periodic_retry",
-            "legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_repairs"
+            "legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_repairs",
+            "channel_custody_noop_",
+            "node::channels::fanout_tests::channel_custody_failed_remote_work_backs_off_without_losing_event_recovery",
+            "node::channels::fanout_tests::channel_custody_blocked_group_does_not_delay_other_groups_or_keep_rescanning",
+            "node::channels::fanout_tests::custody_retry_backoff_is_bounded_without_changing_other_recovery_limits"
           ]
         }
       ],
@@ -382,12 +413,28 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
+            "name": "One bounded status request or 128-row custody repair turn reuses only intrinsic verification under complete fixed-size certificate keys; document readability, holder binding, tombstones, membership and replica policy remain live per row. Status requests combine member and post-office counts. Member-count qualification reads each signed holder witness once within that decision; subsequent observations recheck durable readability. Unknown counts stay distinct from zero and turn/request-local reuse expires on return or error.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
             "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Direct certificate projection starts with a locally enqueued message and zero custody, then explicitly owns fresh serial authenticated sync/Have exchanges with both legacy holders inside its existing thirty-second preparation bound; typed protocol results and an exact positive Have must precede each canonical signed custody witness, which must commit before the cold sibling import and certificate-binding change. Explicit group sync installs the sibling's real message baseline while its account-document negotiation and custody key remain cold. A read-only observer does not drive an inbound-only fixture's missing recovery work. Custody and paired group-inventory fixture hosts, including both failed-initial-custody recovery scenarios, use independent two-worker reactors alongside synchronous observation; prepare hosts before observation, launch after the real failed send and empty custody checks, and join both owners while retaining the original eight-second History and repair assertions. Channel-specific signed metadata preparation uses serial authenticated requests before full-host startup. The independent Directory and durable custody scenarios retain real automatic propagation; global Optional/Wake readiness and helper-only controls are removed. Wake authentication, exact revision deduplication, local-edit notification and legacy periodic repair retain their dedicated real-protocol controls rather than a full-host self-test of the preparation helper. First failures plus admitted-work retirement survive setup panics.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
             "name": "Custody keys retain a separate bounded quota; legal document counts survive reopening, and orphan cleanup scans owned regular files once while preserving live data.",
             "reference": "docs/module-boundaries.md#account-document-projections"
+          },
+          {
+            "name": "Media cleanup checks current references and exact revisions per deletion, but checkpoints a protected metadata page once rather than writing per read. Failed pages remain pending and replay at most the bounded page after reopen.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
+          {
+            "name": "Successful unchanged member or relay custody confirmation does not publish a presentation invalidation. Actual durable journal changes and independently changed shared witnesses still notify; negative rechecks, failed writes and current authorization retain their owning contracts.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
+          {
+            "name": "Unchanged failed custody exchanges and missing-report attempts back off per group from three to at most 300 seconds; ready groups and local pages retain prompt continuation, parked work is not confirmed completion, and meaningful input generations bypass old waits without losing fair cursor positions. Other recovery owners retain their existing sixty-second cap.",
+            "reference": "docs/network-design-reference.md"
           }
         ]
       },
@@ -417,6 +464,8 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "node::participant_runtime_tests::routed_inventory_",
+            "shared_local_repair_actual_owners",
             "startup_identity_precedes_blocked_durable_store_and_matches_runtime",
             "startup_identity_rejection_stops_before_listener_and_durable_stores",
             "runtime_zero_discovery_port_owns_a_reachable_assigned_endpoint",
@@ -434,6 +483,10 @@
         "guide": "docs/ARCHITECTURE.md",
         "invariants": [
           {
+            "name": "RuntimeWork keeps retirement accounting separate from one fair local-repair capacity slot shared by Profile and account-local scans. Queued account work does not park foreground/network scheduling; actual blocking captures and undelivered outputs retain capacity through cancellation/panic, dirty demand survives waiting, and runtime retirement cancels queued owners before draining actual workers.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
             "name": "OS-assigned discovery sockets retain their actual bound endpoint across IPv4, optional IPv6, runtime reporting and discovery producers; callers never release a port reservation before runtime binding.",
             "reference": "docs/network-design-reference.md#managed-discovery-ports"
           },
@@ -448,6 +501,10 @@
           {
             "name": "Participant event publication authenticates legacy owners before first authority, resumes under the held profile lease before journal recovery, rejects retired-source fallback, and warm-opens only persisted publication metadata and the exact downgrade barrier.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Routed provider inventories refresh serially at startup, explicit rescan, network/disclosure or optional topology changes, coalescing in-flight demand and using five-minute repair. At most 256 endpoint hints retain independent five-second protocol probes; timeout hints grant no authority, empty results clear them and runtime retirement cancels the active source. CLI-only unseen topology may wait for repair.",
+            "reference": "docs/routed-network-discovery.md"
           }
         ]
       },
@@ -460,6 +517,7 @@
       "id": "core-private-route-probe-capacity",
       "paths": [
         "crates/mesh-talk-core/src/node/privacy_routing.rs",
+        "crates/mesh-talk-core/src/node/account_sync.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime_tests.rs",
         "crates/mesh-talk-core/src/node/session_pool.rs",
         "crates/mesh-talk-core/src/node/session_pool_tests.rs",
@@ -468,16 +526,29 @@
         "crates/mesh-talk-core/src/transport/channel.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
-        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs"
+        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_retry.rs",
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/outgoing_message.rs",
+        "crates/mesh-talk-core/src/node/call.rs",
+        "crates/mesh-talk-core/src/node/linking.rs",
+        "crates/mesh-talk-core/src/node/privacy_routes.rs",
+        "crates/mesh-talk-core/src/discovery/roster.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
             "historical_route_probes_leave_capacity_for_healthy_foreground_sync",
+            "historical_authentication_failures_are_paced_across_callers_and_fresh_discovery_recovers",
+            "node::privacy_routing::tests::",
+            "node::delivery_retry::tests::",
+            "node::account_sync::tests::",
             "pinned_private_probe_keeps_routes_without_online_presence_or_new_grants",
             "private_probe_does_not_multiply_handshakes_for_one_devices_cached_addresses",
             "private_probe_refreshes_public_presence_before_its_lease_expires",
+            "failed_private_probe_is_paced_but_replaced_route_is_immediately_eligible",
             "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
             "node::session_pool::",
             "completed_receipt_scope_keeps_the_authenticated_connection_for_the_next_message",
@@ -518,8 +589,18 @@
             "liveness_dial_deadline_includes_admission_and_releases_policy_writer",
             "liveness_control_dial_deadline_includes_admission_and_releases_policy_writer",
             "liveness_control_dial_cancellation_releases_authentication_and_socket_owners",
+            "certified_sibling_session_ready_ignores_unrelated_held_history",
+            "remember_peer_rechecks_stricter_policy_and_fresh_group_fallback",
             "only_remote_dial_timeout_allows_wake_recovery",
-            "account_history_capacity_backoff_retains_demand_without_periodic_repair"
+            "account_history_capacity_backoff_retains_demand_without_periodic_repair",
+            "clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances",
+            "quiet_pull_deadline_and_changed_admission_do_not_requeue_as_progress",
+            "refreshing_same_verified_pull_set_does_not_invalidate_quiet_deadline",
+            "unchanged_direct_custody_does_not_keep_destination_retry_hot",
+            "node::call::tests::",
+            "node::linking::pairing_selection_tests::",
+            "two_nodes_exchange_a_call_signal_and_bind_from_to_the_authenticated_peer",
+            "periodic_private_probes_reuse_fresh_signed_discovery_but_network_change_forces_noise"
           ]
         }
       ],
@@ -540,7 +621,7 @@
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
-            "name": "At most two background device probes race candidates concurrently; canceled queued devices retain their next turn and healthy foreground Noise exchanges retain capacity against this producer.",
+            "name": "All background producers share at most two unauthenticated historical-route attempts; fresh exact routes, recent scoped authentication and explicit call/pairing preserve shared capacity. Canceled or capacity-deferred probe turns remain fair and actual socket owners retire before completed rounds publish retry hints. Historical peer failures back off up to 300 seconds; local deferral preserves learned failures and exact reservation authority while success and changed routes recover promptly.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
@@ -548,7 +629,7 @@
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
-            "name": "Local admission backpressure preserves account-sync cursors and verified protocol support, releases bounded workers and resumes through delayed retry without exposing an authentication failure or spinning on coalesced wakes.",
+            "name": "Local admission backpressure preserves account-sync cursors and verified protocol support, releases bounded workers and retains document pages in their deadline-gated scheduler queue even without a remote continuation; recovery needs no fresh discovery or user wake and cannot spin on coalesced wakes.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
@@ -562,6 +643,22 @@
           {
             "name": "Capacity-deferred history retains its peer and cursors through the existing five-second backoff; the queued deadline wakes the available history worker without periodic repair, premature retry or a busy loop.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Successful empty proactive recovery is quiet rather than progress: it retains a finite 60-second repair deadline without accelerating retries, while failed/cooling routes remain deferred and actual incoming progress continues promptly. Admitted route/policy/semantic verification generations qualify bounded hints; unchanged verification refreshes do not create demand and eligible route or verification changes bypass old deadlines. Transport success alone never establishes custody or delivery.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Repeated positive custody does not accelerate an awaiting destination; delivery retry progress requires durable queue advancement and failed destination/receipt retirement remains deferred. A newly accepted durable intent bypasses older retry hints, while idempotent acceptance of a pending intent does not manufacture a new demand generation. Generic projection/poll completion notifications never create new intent demand.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "A failed unchanged historical endpoint waits five minutes across background callers; cancellation and local pressure do not learn remote failure. Exact identity/endpoint, privacy/network generations, fresh discovery and successful authentication retain prompt recovery.",
+            "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Periodic private probes reuse only sufficiently fresh direct signed discovery for the exact full binding and endpoint; deadline-minus-handshake-budget recovery, forced network/manual probes, authenticated-only lease renewal and fair cancellation ownership remain intact.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           }
         ]
       },
@@ -605,7 +702,10 @@
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
             "access_only_v5_keeps_its_role_scope_when_operation_rows_exist",
             "completed_v5_role_digest_retains_received_epoch_after_source_publication",
-            "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot"
+            "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot",
+            "group_inventory_repeated_queries_reuse_intrinsic_validation_but_check_live_binding",
+            "inventory_cache_bounds_replacement_and_oversized_entries",
+            "group_control_current_account_binding_replacement_revokes_old_owner_observation"
           ]
         }
       ],
@@ -636,6 +736,10 @@
           {
             "name": "Negotiated operation patches omit only exactly known nonzero role digests before page limits, complete a normal-operation prefix before loading a following legacy payload, preserve lexical continuations and full-scope authenticated atomic completion, and repair roles or operation heads changed behind a continuation on a fresh scope. Legacy-only pages retain 64 rows and existing byte, worker and deadline bounds. Operation maintenance reuses its existing processed metadata hashes before payload decoding; changed, currently unbound or unfinished foreign inputs retain verification/retry and generic input readers remain complete. A newer authenticated same-device Wake received during or after a failed initial remote-dial attempt may restart that comparison once for an original pending operation without a comparison pair; token identity, partial/parked cooldowns, authentication and local-capacity rules remain unchanged.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Intrinsic inventory validation reuses only exact signed metadata after every durable blob integrity read; bounded decoded caches never replace live account binding checks, retain errors, or survive committed replacement/tombstones.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
       },
@@ -650,6 +754,7 @@
       "paths": [
         "crates/mesh-talk-core/src/node/account_sync.rs",
         "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
+        "crates/mesh-talk-core/src/node/account_sync/attachment_selection.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/account_sync_wire.rs"
@@ -658,10 +763,13 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "shared_local_repair_actual_owners",
             "node::account_sync::selection_tests::",
             "node::account_sync_wire::",
             "account_sync_attachment_preparation_releases_commit_guards_and_rechecks_changes",
-            "account_sync_attachment_selection_does_not_park_document_scheduler"
+            "account_sync_attachment_selection_does_not_park_document_scheduler",
+            "account_history_failure_after_favorites_failure_retains_backoff",
+            "account_history_negotiation_timeout_after_favorites_failure_retains_backoff"
           ]
         }
       ],
@@ -669,6 +777,10 @@
         "summary": "Distinguish unavailable sibling file copies from transfer failures without starving ordinary history, documents or later available files.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
         "invariants": [
+          {
+            "name": "One missing-attachment selection lazily prepares its account-to-conversation mapping once instead of once per missing file. This stack-local scheduling context retains no guards or recall decisions; each file keeps current eligibility, row, author and recall checks, errors propagate, and final attachment publication builds a fresh context under its existing commit checks.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
           {
             "name": "Typed availability requires exact certified account admission, preserves legacy wire layouts and never treats corrupt bytes or transport closure as a missing copy",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
@@ -691,6 +803,7 @@
     {
       "id": "core-account-binding-transitions",
       "paths": [
+        "crates/mesh-talk-core/src/node/peer_directory.rs",
         "crates/mesh-talk-core/src/identity/account_transition.rs",
         "crates/mesh-talk-core/src/node/account_transition_store.rs",
         "crates/mesh-talk-core/src/node/account_transition_adoption.rs",
@@ -701,6 +814,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "identity::account_transition::tests::",
+            "node::peer_directory::",
             "node::account_transition_store::tests::",
             "node::account_transition_runtime::tests::",
             "transition_auth_binds_the_chain_visibility_and_noise_session",
@@ -738,6 +852,8 @@
     {
       "id": "core-channel-account-membership",
       "paths": [
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/group_membership_query_tests.rs",
         "crates/mesh-talk-core/src/node/channel.rs",
         "crates/mesh-talk-core/src/node/channel_account_authority.rs",
         "crates/mesh-talk-core/src/node/channel_account_bootstrap.rs",
@@ -754,6 +870,9 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::channel::tests::content_events_preserve_membership_without_rebuilding_account_proofs",
+            "node::privacy_runtime::group_membership_query_tests::",
+            "concurrent_channel_snapshot_does_not_restore_departed_peer_sync",
+            "projected_group_removal_takes_effect_before_channel_book_refresh",
             "node::channel_account_authority::tests::",
             "node::account_group::access::raw_view_tests::",
             "group_inventory_directory_",
@@ -823,7 +942,7 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Owner-root signed controls and account-root full-device inheritance bind immutable grants, exact key tuples and causal authority; discovery and late adoption cannot manufacture membership",
+            "name": "Owner-root signed controls and account-root full-device inheritance bind immutable grants, exact key tuples and causal authority; discovery and late adoption cannot manufacture membership. The immutable runtime self-binding is signed at most once per Node; account adoption creates a fresh proof, while current external binding and group authority checks remain fresh.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -835,12 +954,16 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route",
+            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route. Ordinary unchanged wakes respect retained retry deadlines even for incomplete cycles; scheduling observation never acknowledges success, while fresh semantics, failed observations, explicit drivers and timer-disabled recovery remain live.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
             "name": "Compatible legacy migration requires established verified bindings and bounded capability checks; V4 sync protects older envelopes from new control kinds",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Account maintenance does not recreate a completed reception lane after actual drain: existing account/source/generation/presentation qualification runs under the same log guard before preparation, while exhausted initial budgets and changed sources retain durable retry demand.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -922,7 +1045,11 @@
           "filters": [
             "node::favorites::",
             "node::account_sync::favorites::",
-            "node::account_sync_wire::"
+            "node::account_sync_wire::",
+            "bounded_attachment_handoff_keeps_exact_total_and_rotates_past_page",
+            "attachment_recall_context_",
+            "initial_attachment_selection_failure_retries_locally_without_history_restart",
+            "attachment_refill_observes_other_source_bytes_and_settles_without_history"
           ]
         }
       ],
@@ -948,7 +1075,7 @@
             "reference": "docs/favorites.md#synchronization"
           },
           {
-            "name": "Favorite file access requires a nonremoved unexpired reference and never grants transfer consent",
+            "name": "Favorite file access requires a nonremoved unexpired reference and never grants transfer consent; empty attachment queues and unrelated file lookups skip canonical projection, while actual candidates retain current protection and final eligibility checks",
             "reference": "docs/favorites.md#lifetime-and-files"
           },
           {
@@ -1039,11 +1166,15 @@
             "channel_owner_query_preserves_later_unobserved_ownership_loss",
             "channel_projection_control_does_not_drain_historical_ancestry_in_one_turn",
             "channel_receiver_and_source_handles_stay_stale_after_account_returns",
+            "channel_completed_causal_cut_",
             "channel_decision_replacement_rejects_old_predicate_publication",
             "participant_network_canonical_authority_respects_each_preparation_budget",
             "channel_canonical_readiness_does_not_publish_history_before_recall_attempt",
             "ancestor_preparation_obeys_caller_work_budget_across_wide_parents",
             "ancestor_disposable_query_crash_retires_incrementally",
+            "ordinary_dm_receive_does_not_schedule_channel_projection",
+            "ordinary_dm_receive_retires_legacy_channel_demand_without_rebuilding_order",
+            "channel_receive_resumes_when_membership_arrives_after_nonchannel_rows",
             "channel_departure_retry_preserves_original_event_after_owner_reconnects",
             "join_history_transferred_owner_can_invite_before_first_send",
             "ownership_transfer_pins_observed_metadata_and_rejects_backdated_owner_fork",
@@ -1068,7 +1199,7 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Exact retained commit cutoffs distinguish pre-open sources from later message and invitation-release arrivals within one bounded continuation, preserving expiry, silent repair and visible legacy batch completion without changing durable receipt counts. Legacy-stream fixtures distinguish explicitly typed metadata-only batch terminals from content, preserve empty content and retain the original message deadlines and payload assertions. Exact discard evidence and independent role terminal facts survive retries and restart.",
+            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Repeated completed historical membership cuts perform no SQL mutations under the same repository, exact canonical source, normalized roots and inclusion mode. A fixed eight-entry shared memo retains indexed query leases, rechecks account lifetimes and source fences, preserves borrowed eviction facts and never caches failed construction or current authorization decisions. Exact retained commit cutoffs distinguish pre-open sources from later message and invitation-release arrivals within one bounded continuation, preserving expiry, silent repair and visible legacy batch completion without changing durable receipt counts. Legacy-stream fixtures distinguish explicitly typed metadata-only batch terminals from content, preserve empty content and retain the original message deadlines and payload assertions. Exact discard evidence and independent role terminal facts survive retries and restart.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1076,12 +1207,16 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Canonical preparation shares caller row, edge and byte limits across all phases; plaintext read readiness also fences unattempted admitted recalls and exact dependency wakes without blocking dormant unknown-target retries.",
+            "name": "Canonical preparation shares caller row, edge and byte limits across all phases; plaintext read readiness also fences unattempted admitted recalls and exact dependency wakes without blocking dormant unknown-target retries. Legacy-departure discovery charges bounded header pages and at most one causal cut, commits its source-qualified cursor once per page, and preserves pending ranks and unchanged-read silence.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
             "name": "Indexed current-state installation preserves the canonical device-local acceptance cutoff and retry ticket without changing current-epoch sender retention or indexed receiver retirement; a fresh invitation clears the former cutoff while pure authority projections retain their separate semantics.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Plaintext recovery schedules only retained membership controls or a known-local checkpoint; ordinary DMs and stale dirty/runtime artifacts cannot create group projections, while delayed membership and existing incomplete groups retain their continuation.",
+            "reference": "docs/network-design-reference.md"
           },
           {
             "name": "The real member-invitation scenario owns epoch delivery, pre-join isolation and role rejection only. Ownership transfer and offline departure do not form a compound prerequisite chain: existing focused transfer/authority cases retain those contracts, while a two-node real-Noise departure case retains original signed-event and parent-cut retry after actual owner pause/relaunch. No fixture-only self-tests or broader host orchestration are added.",
@@ -1094,6 +1229,48 @@
         "Receiver candidate or checkpoint changes require the separate integration selection: cargo test -p mesh-talk-core --test forward_secrecy_boundaries signed_channel_text_and_manifest_retry_over_noise_loopback. The local codec alone does not certify durable receiver/transcript atomicity or demand-loaded startup."
       ],
       "consumers": ["core-node"]
+    },
+    {
+      "id": "core-channel-control-recovery",
+      "paths": [
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/serving.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::channels::fanout_tests::accept_owner_",
+            "node::channels::fanout_tests::two_full_accept_owners_settle_signed_controls_without_replay_feedback",
+            "node::work_observation::tests::distribution_origins_record_actual_first_poll_not_construction_and_keep_variants",
+            "channel_departure_retry_preserves_original_event_after_owner_reconnects",
+            "channel_departure_automatic_recovery_preserves_original_event_after_owner_reconnects",
+            "signed_channel_replica_preference_survives_restart_and_ignores_outsiders",
+            "join_history_round_trip_over_noise_loopback_preserves_silent_provenance",
+            "local_channel_owner_notify_advances_local_work_without_restarting_held_remote",
+            "group_inventory_publication_progresses_while_unrelated_peer_sync_is_held"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Replay durable signed group controls through the existing recovery owner with finite fair cuts, semantic wakes and sparse settled repair.",
+        "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
+        "invariants": [
+          {
+            "name": "The production accept host has one control-recovery producer; unchanged source and identical presence do not rescan below five-minute repair, while semantic route or control changes retain recovery and explicit public retries remain immediate.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "A finite ordered cut visits at most 32 existing channel IDs and prepares/distributes at most one pending group per turn, retains an unfinished tail and coalesced resweep, rereads current recipients after preparation and retries only failed groups without restarting healthy or settled local lanes. Durable replay flags are not acknowledgements; departed-group outbound control, current authority, cancellation and held-remote local progress remain intact.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          }
+        ]
+      },
+      "consumers": ["core-node", "desktop-chat"],
+      "escalation": [
+        "Validate actual installed desktop and CLI idle behavior separately from unit timing. Require original signed-event offline/reconnect and held-remote progress evidence; pure-helper counters do not establish production-parent scheduling or physical cross-device convergence."
+      ]
     },
     {
       "id": "core-discovery",
@@ -1115,6 +1292,16 @@
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
         "Pinned gateway queries must recover when another loopback client consumes the existing per-source UDP reply quota. Preserve the absolute four-second deadline, at most four datagrams, exact endpoint and signed pinned-identity validation, and cancellation ownership. Run the real responder quota regression and existing gateway lifecycle/security tests; repeat bridge_cross_lan and channel_peer_recovery against the production CLI."
       ],
+      "capability": {
+        "summary": "Authenticate bounded signed discovery proofs while preserving current presence, account and transport authority.",
+        "guide": "docs/network-design-reference.md#person-presence-contract",
+        "invariants": [
+          {
+            "name": "Exact complete successful announcement proofs, including both signatures, may reuse intrinsic verification in a process-local 128-entry, 256-KiB metadata owner. Invalid results are not retained; changed fields reverify. Oversized inputs, contention, poison and eviction preserve original verification semantics without waiting or crypto under a guard. Current presence, account binding, revocation, visibility, discovery challenges and Noise authorization remain fresh; wire, SDK and storage formats are unchanged. Relayed name-only updates publish the existing roster observation while same-name route renewals remain quiet; descriptive-name invalidation grants no presence or account authority.",
+            "reference": "docs/ai-coding-reliability.md#r08-durable-state-and-failure-semantics"
+          }
+        ]
+      },
       "consumers": ["core-node", "core-postoffice", "core-transport"]
     },
     {
@@ -1141,7 +1328,9 @@
             "eventlog::",
             "node::node::tests::participant_event_",
             "participant_ciphertext_prefix_",
-            "participant_kind_metadata_"
+            "participant_kind_metadata_",
+            "ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress",
+            "idle_resource_kind_metadata_terminal_is_read_only_and_appends_advance"
           ]
         }
       ],
@@ -1162,7 +1351,7 @@
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
-            "name": "Legacy profile maintenance preserves required ancestors, latest leaves and paced rewrites; indexed participant maintenance uses bounded metadata selection and atomic SQL application with the same reclamation thresholds.",
+            "name": "Legacy profile maintenance preserves required ancestors, latest leaves and paced rewrites; indexed participant maintenance uses bounded metadata selection and atomic SQL application with the same reclamation thresholds. Indexed reads retain fresh body/header/canonical/integrity checks while a repository-local 256-entry positive memo reuses only exact event-ID/author/signature proofs; failed, tampered, retired and reopened inputs retain their original authentication and visibility boundaries.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1182,7 +1371,11 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Indexed maintenance selects profile leaves through bounded metadata snapshots, preserves the newest pair and referenced ancestors, retains amortization and pending work, and atomically updates counters and ordering without unrelated body reads; drop and recreate cannot revive stale cursors",
+            "name": "Opt-in work observations read at most sixty-four order metadata rows through a fenced indexed cursor and one Profile-maintenance job, including stale selection revisions and an opaque progress tag, without body hydration, writes, raw message identifiers or authority grants; default runtime operation performs no observation query.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Indexed maintenance selects profile leaves through bounded metadata snapshots, preserves the newest pair and referenced ancestors, retains amortization and pending work, and atomically updates counters and ordering without unrelated body reads; semantic compaction captures per-request eligible commit cuts, fences old workers when fresh demand advances and excludes processed late replay from renewed deletion, while preserving charged scans, current parent references and bounded legacy initialization; semantic compaction preserves incoming coverage while retaining full outgoing destructive authority, retires both order bindings immediately and defers derived-row reclamation to budgeted maintenance; drop and recreate cannot revive stale cursors",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1212,6 +1405,14 @@
           {
             "name": "Production participant Nodes retain one indexed profile event owner without a body cache; owned fallible reads preserve storage errors, bounded network pages tolerate ordinary appends and revalidate policy, and delivery-journal recovery remains authoritative across independent source publication.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Only a complete current below-threshold Profile snapshot can follow an ordinary non-Profile append without a retained Profile parent; the exact revision rebinding and append commit or roll back together. New requests, Profile dependencies, stale or partial work and destructive changes retain invalidation; old tokens remain stale.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Terminal direct export and incremental upload preparation retain current selection and network authority checks while unchanged rank/parent/closure cursors perform no SQL mutations or write commits; partial query cursors remain connection-owned and rebuildable, while authoritative mailbox/receipt progress and failure rollback retain their durability.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           }
         ]
       }
@@ -1232,11 +1433,19 @@
     },
     {
       "id": "core-identity",
-      "paths": ["crates/mesh-talk-core/src/identity/"],
+      "paths": [
+        "crates/mesh-talk-core/src/identity/",
+        "crates/mesh-talk-core/src/node/account_devices.rs",
+        "crates/mesh-talk-core/src/node/account_sync.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["identity::"]
+          "filters": [
+            "identity::",
+            "node::account_devices::tests::",
+            "certified_sibling_session_ready_ignores_unrelated_held_history"
+          ]
         }
       ],
       "escalation": [
@@ -1263,6 +1472,14 @@
           {
             "name": "Device-keystore temporary decoded and serialized secrets are zeroized while encrypted format, identity signatures and password rejection remain compatible.",
             "reference": "docs/privacy-controls.md#limits"
+          },
+          {
+            "name": "Immutable device keys retain one fixed public projection derived at creation or restoration; repeated public reads return owned copies without new X25519 work or retained query state.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Immutable linked-device bindings are signature-validated on admission and reopen; hot sibling membership queries add no certificate verification or roster materialization, reject account/exchange-key mismatches and retain fresh runtime/policy fences.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       }
@@ -1295,11 +1512,11 @@
       ],
       "consumers": ["core-node"],
       "capability": {
-        "summary": "Authorize equal relay reconciliation and own bounded indexed dedicated-relay serving, maintenance and lifecycle without weakening event admission.",
+        "summary": "Authorize equal relay reconciliation and own bounded indexed dedicated-relay serving, maintenance and lifecycle without weakening event admission; empty selected slices preserve session validation without rewriting unchanged charges.",
         "guide": "docs/post-office-federation.md",
         "invariants": [
           {
-            "name": "Unchanged mailbox metadata probes reuse persistent indexes and digests without exporting ciphertext; bounded responses clone only their causal page; rejected inner events are deferred only within a bounded mailbox operation and retried by a later operation",
+            "name": "Unchanged mailbox metadata probes reuse persistent indexes and digests without exporting ciphertext; network validation reads arrival once within its guarded transaction while retaining current owner, lifecycle, cutoff and storage checks; bounded responses clone only their causal page; rejected inner events are deferred only within a bounded mailbox operation and retried by a later operation",
             "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
           },
           {
@@ -1357,6 +1574,14 @@
           {
             "name": "The actual dedicated worker interleaves a physical class with a trigger at 256 free pages, a target at 64 free pages, up to 64 vacuum iterations and a 100 ms success cooldown plus duty pacing; typed BUSY/LOCKED or incomplete PASSIVE transfers back off independently without starving other classes. Restart discovers pending truncation from one known-main stat; idle/ordinary growth does not checkpoint, and shutdown drains admitted work before lease release.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Conditional V5 refresh uses bounded exact-peer scalar proofs only after bilateral complete zero-mismatch acknowledgment; unchanged populated inventories perform no repeated SQL staging or page writes while preserving origin-expiring presence. Append, source/visibility/origin/expiry, readiness, restart, cancellation and unsupported legacy peers cannot authorize an unsafe shortcut. Address aliases share one bounded identity scheduler without lost wakes or bypassed backoff.",
+            "reference": "docs/post-office-federation.md#unchanged-federation-refreshes"
+          },
+          {
+            "name": "Default-off per-office ingestion observation counts final transaction outcomes after rollback/authority validation, uses five saturating atomics without SQL, and samples only enabled counters on an owned 30-second skipped-tick CLI timer outside core guards. Approximate cumulative appends are not retained growth or custody evidence.",
+            "reference": "docs/post-office-federation.md#opt-in-ingestion-observation"
           }
         ]
       }
@@ -1422,7 +1647,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Streaming replay preserves the encrypted file format, authenticated decode errors and platform-specific repair ownership",
+            "name": "Streaming replay preserves the encrypted file format, authenticated decode errors and platform-specific repair ownership. Confirmed record-log prefixes skip redundant sync; reopen, nondurable writes, rollback and failed post-rename synchronization remain pending, and poison checks precede the fast path.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1472,6 +1697,10 @@
           {
             "name": "Checked physical scalars and one known-main startup length comparison require no history-body scan; logical charges, free pages, SQL estimates, main/WAL file lengths and filesystem block release stay distinct. PASSIVE completion is outside the vacuum transaction, validates partial/no-WAL counters and has no 64-page engine-work cap.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Opt-in transaction work observations retain at most 64 static callers with bounded interval/overflow counts, contain no SQL values or private runtime identities, and never block database work or log under database/observer guards. Disabled observation allocates no collector; reads, rollback and commit failure retain their original transaction semantics. Logical work counters do not certify native disk throughput.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -1479,7 +1708,11 @@
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["storage::"]
+          "filters": [
+            "storage::",
+            "node::received_log::tests::",
+            "node::sentlog::tests::"
+          ]
         }
       ],
       "escalation": [
@@ -1542,20 +1775,27 @@
         "crates/mesh-talk-core/src/node/account_profile_io_tests.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/runtime_routed_tests.rs",
+        "crates/mesh-talk-core/src/node/relay_policy.rs",
+        "crates/mesh-talk-core/src/node/bridge_client.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/postbox.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
-        "crates/mesh-talk-core/src/node/profile_receive_work.rs"
+        "crates/mesh-talk-core/src/node/profile_receive_work.rs",
+        "crates/mesh-talk-core/src/storage/profile/profile_receive.rs",
+        "crates/mesh-talk-core/src/storage/profile/profile_receive/retry.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
+            "shared_local_repair_actual_owners",
             "node::account_profile::tests::",
             "node::profile::tests::",
             "node::profile_store::tests::",
             "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
             "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
             "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
-            "node::runtime::tests::profile_republish_targets_fires_on_first_sight_and_on_reconnect",
+            "node::runtime::tests::profile_",
             "node::opaque_relay::",
             "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
             "node::trust_card::tests::",
@@ -1567,11 +1807,20 @@
             "node::node::tests::account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent",
             "node::account_profile_data::tests::",
             "node::account_profile_io::tests::",
-            "node::profile_receive_work::tests::",
+            "storage::profile::profile_receive::tests::",
+            "node::profile_io::compaction_lease_tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled",
+            "unrelated_profile_callbacks_leave_unknown_pending_work_quiet",
+            "unknown_profile_callback_skips_body_then_verified_proof_resumes",
+            "known_profile_callback_progresses_behind_blocked_other_conversation",
+            "global_profile_recovery_retries_unknown_work_after_verified_proof_arrives",
+            "existing_conversation_profile_callbacks_preserve_completed_negative_maintenance",
+            "discovered_profile_demand_precedes_cursor_ack_and_retries_after_reopen",
+            "discovered_profile_batch_revalidates_retained_metadata_and_deduplicates",
             "node::runtime_work::tests::",
             "node::runtime::retirement_tests::retirement_joins_actual_expiry_writer_before_profile_reopen",
-            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
+            "storage::profile::profile_receive::retry::tests::"
           ]
         },
         {
@@ -1583,7 +1832,7 @@
             "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
             "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
             "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
-            "node::runtime::tests::profile_republish_targets_fires_on_first_sight_and_on_reconnect",
+            "node::runtime::tests::profile_",
             "node::opaque_relay::",
             "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
             "node::trust_card::tests::",
@@ -1597,16 +1846,19 @@
             "node::runtime::tests::contact_nickname_survives_a_stale_signed_card_name_and_restart",
             "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
             "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
-            "node::profile_receive_work::tests::",
+            "storage::profile::profile_receive::tests::",
+            "node::profile_io::compaction_lease_tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
             "node::runtime_work::tests::",
             "node::runtime::retirement_tests::retirement_joins_actual_expiry_writer_before_profile_reopen",
-            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
+            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled",
+            "storage::profile::profile_receive::retry::tests::"
           ]
         }
       ],
       "escalation": [
-        "Profile publication changes require publishing_profile_projects_newer_sibling_profile_pulled_in_same_round, proving durable import and immediate authenticated projection without a reverse connection. Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
+        "Profile publication changes require publishing_profile_projects_newer_sibling_profile_pulled_in_same_round, proving durable import and immediate authenticated projection without a reverse connection. Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly.",
+        "Superseded Profile retirement requires exact source-account qualification and atomic receive-fact/deletion rollback; old own-device replay, undiscovered foreign replay, missing optional checkpoints and explicit causal-parent recovery must remain covered."
       ],
       "consumers": [
         "desktop-chat",
@@ -1626,7 +1878,11 @@
             "reference": "docs/peer-trust.md"
           },
           {
-            "name": "Failed public profile publication and avatar clears retry without duplicate events, reconnects or blocking behind one unresponsive peer",
+            "name": "Empty Profile retry polls preserve durable ticket state; conversation-scoped indexed callbacks avoid unrelated pending work and pre-body metadata gates retain unknown or disabled sources for global recovery. Final authentication, exact completion and bounded fair rotation remain authoritative.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Failed public profile publication and avatar clears retry without duplicate events, reconnects or blocking behind one unresponsive peer; unchanged reconnect/reopen reuses exact retained event IDs through bounded sender provenance committed atomically with the canonical event. The single publisher subscribes before initial work, gates broad observations semantically, preserves actual two-future capacity and exact stale-owner fencing, and uses eligible retry/presence deadlines plus nonrenewing five-minute repair. Missing configuration and relayed-name changes publish existing observations; held capacity and unavailable source cannot spin on expired retries. Only freshly qualified unchanged history publication across all required recipients/scopes earns a five-minute quiet retry; empty, denied, unfinished and unknown results remain retryable. Direct completion takes precedence; quiet scheduling proves neither delivery nor current relay custody",
             "reference": "docs/peer-trust.md"
           },
           {
@@ -1640,6 +1896,14 @@
           {
             "name": "Verified contact nicknames survive stale public card labels, presence expiry and restart without personal aliases or changing signed claims",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Only newly discovered retained active Profile headers create maintenance demand, including own-author sources; bounded deduplicated demand commits before cursor acknowledgement. Account-fenced retry and atomic one-time legacy header bootstrap preserve pending tickets and completed receive facts without replaying completed payloads.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Accept-loop-owned Profile maintenance retains meaningful source, proof/route, policy, lease and cleanup wakes; finite retry cuts and later discovery suffixes preserve fairness. Settled or dependency-blocked work uses sparse repair, while real lease expiry, failure recovery and unfinished pages retain their own deadlines and cancellation-owned admission.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
@@ -1799,7 +2063,10 @@
             "node::delivery_runtime_tests::expiring_account_message_arrives_over_loopback_and_expires_on_both_sides",
             "node::delivery_runtime_tests::accepted_account_file_card_carries_fixed_deadline",
             "node::delivery_runtime_tests::expired_pending_acceptance_erases_text_and_file_before_sidecar_recovery",
-            "node::delivery_runtime_tests::outgoing_expiry_rejects_past_and_unbounded_deadlines"
+            "node::delivery_runtime_tests::outgoing_expiry_rejects_past_and_unbounded_deadlines",
+            "node::expiry_policy::tests::",
+            "node::node::tests::unchanged_expiry_maintenance_does_not_rescan_future_received_deadlines",
+            "node::favorites::capture_tests::unchanged_expiry_maintenance_does_not_rescan_favorite_media"
           ]
         }
       ],
@@ -1817,6 +2084,10 @@
           },
           {
             "name": "Wire compatibility and recipient clock and restart protections remain intact",
+            "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
+          },
+          {
+            "name": "Unchanged expiry and favorite-media maintenance skips repeated metadata/media scans only for successfully completed matching revision/authority inputs before their earliest wall or monotonic deadline; restart, mutations and failures retain erasure and retry semantics. Completed media GC performs no inactive namespace writes; fresh schedules and failed-completion recovery retain their existing cutoff owner.",
             "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
           }
         ]
@@ -1962,6 +2233,7 @@
         "crates/mesh-talk-core/src/node/network_cost.rs",
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/files/chunks.rs",
+        "crates/mesh-talk-core/src/node/files/channel_receive.rs",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
         "crates/mesh-talk-core/src/node/media_store/**",
@@ -1971,7 +2243,8 @@
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/privacy_sync/",
         "crates/mesh-talk-core/src/eventlog/repository/selection.rs",
-        "crates/mesh-talk-core/src/node/channels.rs"
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/selection/preparation.rs"
       ],
       "rust": [
         {
@@ -1986,7 +2259,7 @@
             "paged_preparation_yields_unlocked_and_observes_concurrent_revocation",
             "node::privacy_sync::causal_export_tests::",
             "node::session::paged_tests::",
-            "participant_durable_have_request_uses_no_historical_bodies",
+            "participant_durable_have_",
             "participant_selection_retirement_",
             "background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
             "multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
@@ -2003,7 +2276,8 @@
             "borrowed_peer_round_parent_defers_other_receiver_until_held_view_release",
             "node::channels::fanout_tests::applied_metadata_only_recovery_retains_one_fresh_group_turn_without_quiet_spin",
             "node::channels::fanout_tests::applied_group_continuations_rotate_past_requeued_low_ids_and_deleted_cursor",
-            "node::channels::fanout_tests::hot_group_sweeps_do_not_alias_four_peer_rotation_across_four_batches"
+            "node::channels::fanout_tests::hot_group_sweeps_do_not_alias_four_peer_rotation_across_four_batches",
+            "unchanged_selection_resume_preserves_authority_without_durable_writes"
           ]
         }
       ],
@@ -2024,7 +2298,7 @@
             "reference": "docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities"
           },
           {
-            "name": "Production principal preparation yields between bounded header/edge turns, persists resumable SQL selection facts, and rejects changed authorization before publication; fresh views do not collect retained event bodies. Legal wide-parent events retain progress and exact Have-dependent eligibility.",
+            "name": "Production principal preparation yields between bounded header/edge turns, persists resumable SQL selection facts, and rejects changed authorization before publication; fresh views do not collect retained event bodies. Legal wide-parent events retain progress and exact Have-dependent eligibility. Accepted rows, receipt marks and their scalar cursor commit together per bounded turn; pending parent closure is exact and failed batches restore prior durable progress.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -2249,6 +2523,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "incremental_selected_identity_control_rechecks_current_binding",
             "node::file_message_identity::",
             "account_file_history_deduplicates_recipient_device_manifest_copies",
             "optional_file_message_identity_exchange_keeps_metadata_out_of_history",
@@ -2277,6 +2552,10 @@
           {
             "name": "Failed physical media cleanup retains its exact indexed candidate and retryable persistence status; a missing child is idempotent only within a usable storage directory.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "One current identity selection reuses its verified immutable event and decoded proof without caching permission; current peer policy, alias rows, expiry, erasure, suppression and source errors are still checked within every selection.",
+            "reference": "docs/ai-coding-reliability.md"
           }
         ]
       },
@@ -2302,7 +2581,9 @@
         "crates/mesh-talk-core/src/eventlog/sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
         "crates/mesh-talk-core/src/node/node.rs",
-        "crates/mesh-talk-core/src/node/group_metadata/**"
+        "crates/mesh-talk-core/src/node/group_metadata/**",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs"
       ],
       "rust": [
         {
@@ -2313,7 +2594,12 @@
             "node::session::tests::",
             "eventlog::event::tests::",
             "eventlog::persist::legacy::tests::",
-            "node::join_history::tests::"
+            "node::join_history::tests::",
+            "settled_local_channel_owner_does_not_reenter_business_between_repair_deadlines",
+            "node::channels::fanout_tests::local_channel_owner_",
+            "final_selected_metadata_rank_is_ready_in_its_exhausted_paid_turn",
+            "final_rejected_metadata_rank_is_ready_in_its_exhausted_paid_turn",
+            "empty_metadata_index_initialization_publishes_ready_once"
           ]
         }
       ],
@@ -2328,6 +2614,10 @@
           {
             "name": "Announcement deletion tombstones and bounded group artwork survive replay; metadata event kind 19 requires appended V5 sync envelopes before transfer to older decoders.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "One event/deadline-owned local recovery lane parks settled work for five minutes, drains finite plaintext/history/metadata tails promptly, retains real I/O retry deadlines and arrivals behind its cut, and publishes actual metadata readiness without cache-eviction feedback.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },
@@ -2340,6 +2630,7 @@
       "id": "core-group-file-relay",
       "paths": [
         "crates/mesh-talk-core/src/node/group_file_delivery.rs",
+        "crates/mesh-talk-core/src/node/group_file_authorization_tests.rs",
         "crates/mesh-talk-core/src/node/group_file_delivery_tests.rs",
         "crates/mesh-talk-core/src/node/file_consent.rs",
         "crates/mesh-talk-core/src/node/file_consent_store.rs",
@@ -2349,21 +2640,34 @@
         "crates/mesh-talk-core/src/node/delivery_store.rs",
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/files/chunks.rs",
+        "crates/mesh-talk-core/src/node/files/channel_receive.rs",
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
-        "crates/mesh-talk-core/src/node/participant_runtime.rs"
+        "crates/mesh-talk-core/src/node/participant_runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_retry.rs",
+        "crates/mesh-talk-core/src/node/filebook/work.rs",
+        "crates/mesh-talk-core/src/node/filebook/custody_dispatch.rs",
+        "crates/mesh-talk-core/src/node/filebook/indexed.rs",
+        "crates/mesh-talk-core/src/node/filebook.rs",
+        "crates/mesh-talk-core/src/node/attachment_consent/indexed.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
             "node::group_file_delivery_tests::",
+            "node::serving::file_recovery_tests::",
+            "node::group_file_delivery::authorization_tests::",
             "node::file_consent_tests::",
             "node::file_consent::",
             "node::file_consent_store::",
+            "node::filebook::indexed::tests::group_custody_dispatch_",
+            "node::files::channel_receive::tests::",
             "node::file_completion::",
             "file_retention_",
             "indexed_file_payload_tests",
+            "node::delivery_runtime_tests::accepted_channel_file_sidecar_failure_recovers_same_identity_and_protection",
+            "node::delivery_runtime_tests::channel_file_authorization_rejects_before_staging_or_wal_acceptance",
             "node::opaque_relay::",
             "retained_relay_file_exchange_rechecks_signed_consent_and_relay_role",
             "relay_file_worker_preserves_progress_across_slow_mailbox_exchanges",
@@ -2371,7 +2675,12 @@
             "stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_member",
             "channel_media_source_keeps_signed_chunks_when_local_preview_completes",
             "node::delivery_store::tests::",
-            "node::delivery_runtime_tests::account_file_own_copy_first_stays_canonical_and_never_confirms_target"
+            "node::delivery_retry::tests::",
+            "node::delivery_runtime::diagnostic_tests::",
+            "private_file_restart_advances_twenty_four_pending_scopes_fairly",
+            "queued_private_file_work_stops_on_permission_revoke_and_exact_account_rebind",
+            "node::delivery_runtime_tests::account_file_own_copy_first_stays_canonical_and_never_confirms_target",
+            "node::participant_runtime_tests::"
           ]
         }
       ],
@@ -2380,16 +2689,52 @@
         "guide": "docs/network-design-reference.md#ordinary-file-custody",
         "invariants": [
           {
-            "name": "Ciphertext custody may precede approval; recipient durable chunk admission and direct pushes still require approval. Only verified recipient completion retires delivery work. A canonical own-device copy cannot confirm external recipient delivery, and a stalled sibling host cannot prevent target confirmation; the full-host fixture keeps independent two-worker reactors and both original five-second confirmation windows.",
+            "name": "Accepted group-file dispatch is persisted against an exact retained offer/full recipient/request before active retirement. Historical scans and remote buffer eviction do not perpetually replenish settled data; new per-file receiver actions reactivate bounded work, stale completions cannot consume newer requests, and offer deletion cascades scheduling metadata. Unrelated account preferences do not regenerate unchanged Accepted demand. Direct missing-file recovery remains independent; bounded custody does not promise equivalent offline availability after eviction.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
-            "name": "Group controls remain bound to the exact retained offer, current signed membership and recipient device; group permission never grants private-DM access.",
+            "name": "Group custody requires retained signed ciphertext and the self-authored final chunk header; managed plaintext may satisfy UI export/progress but never network dispatch. Missing ciphertext causes zero relay attempts and no false settlement, and restored original signed chunks can re-enter the owning queue.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
-            "name": "Refusal, removal, expiry, recall and runtime retirement stop further custody publication; bounded rotating jobs keep old controls from starving new work.",
+            "name": "Ciphertext custody may precede approval; recipient durable chunk admission and direct pushes still require approval. Only verified recipient completion retires recipient-delivery work; actual durable HAVE settles its finite group custody dispatch without claiming current custody. A canonical own-device copy cannot confirm external recipient delivery, and a stalled sibling host cannot prevent target confirmation; the full-host fixture keeps independent two-worker reactors and both original five-second confirmation windows.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Group controls remain bound to the exact retained offer, current signed membership and recipient device; group permission never grants private-DM access. A synchronous consent decision reads and authenticates its retained manifest once, preserving legacy verification, fresh retained visibility and read failures. Identical validated durable file-card reservations avoid repeated certificate verification while retaining erasure/conflict checks and pending durability retry.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Refusal, removal, expiry, recall and runtime retirement stop further custody publication; bounded rotating jobs keep old controls from starving new work. Cancellation reserves retry deadlines, failed routes and unchanged dependencies retain backoff, actual paid preparation remains runnable, and scoped checkpoint/selection completion wakes matching registered waiters without granting authority. Cooling jobs avoid authorization work, and unchanged discovery rests without discarding periodic eligibility repair or independent progress after scan failures.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Four heavy authorization views retain and advance finite pending work; bounded job qualifications compare current nonmissing authority versions before unchanged retries, without replacing fresh offer, consent or exact custody checks. Consent discovery coalesces replayable cursor checkpoints while preserving bounded fair rotation, restart progress and exact owner fencing. Indexed ordinary-message, group-control and group-file custody publication has an explicit outgoing intent and local checkpoint namespace: it performs no incoming ID processing, pending repair or unrelated consent sweep, preserves old duplex receipt bytes, retains identity supplements and renews group-file custody after a fresh signed receiver request following remote replacement, and consumes approvals/refusals from independent runtime drains. Legacy duplex fallback and global receive policy remain unchanged.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Completed group-file discovery parks for 300 seconds only with unchanged pre/post source and semantic inputs. Fresh eligibility changes and exact receiver demand remain prompt; finite preparation is distinct from blocked discovery, actual checkpoint/authorization readiness reaches discovery before job admission and survives concurrent failures, expired waits cannot leave zero-delay source-error loops, and errors or overflow never acknowledge EOF.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Private file failure reservations bind exact attempts and eligible routes, survive cancelled awaits, start bounded backoff at completion and cannot be evicted while active or cooling. Quiet wakes preserve durable destinations; clean steps and route replacements retain progress, while failed retirement remains cooled.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Each admitted retry shares one immutable validated offer descriptor without repeated hydration, decoding or signature work; row rewrites invalidate it, every callback retains live source and authority checks, and cancellation releases payloads instead of retaining them in the 10000-job index or cooldown state.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Unchanged signed consent reuse survives reopen only with a durable-policy marker, exact persisted policy generation and complete fresh Decision equality. Legacy UUID/NULL generations refresh once; policy ABA, changed completion and owner retirement still invalidate reuse, and failed publication rolls back both event and marker. Repeated selected reads may reuse only intrinsic verification in a store-owned 1024-entry positive memo keyed by the complete bounded serialized control; fresh source/owner/SQL selection and requested manifest/recipient checks remain mandatory, same-ID tampering fails, and eviction requires real verification again. The group-file consumer reuses the same selected decoded decision without a second signature check; current row replacement, corruption and source/owner failures remain observable. No event bodies or authorization snapshots are retained.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Allowed direct-offer consent excludes redundant group hydration only when retained membership-kind metadata and the local checkpoint both exclude a group. Each direct manifest still crosses authenticated incoming-offer validation once; ambiguous signed membership scopes retain original group checks and exact completion behavior.",
+            "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"
+          },
+          {
+            "name": "Blocked receive/download rows retain recovery without forcing a three-second retry or resetting backoff; local metadata continuations remain prompt. Outgoing custody uses an independently owned producer, retained notification and retry clock; its queue/preparation cannot wake receive/download repair. Existing route/group/file invalidations and canonical stop/join preserve recovery; the public one-shot pull API retains both directions. Meaningful route, availability and accepted group metadata events wake the producer, including group subscription lag and changes during an active turn; ordinary presence renewals do not. Actual received-byte progress, rather than failed attempts, publishes file changes and resumes pulling. Cyclic old-offer discovery never checkpoints a lower/equal durable watermark; advancing discovery preserves failed-write retry, restart fairness and exact owner fencing. Signed consent and delivery evidence retain their durability.",
+            "reference": "docs/performance-requirements.md"
           }
         ]
       },
@@ -2526,24 +2871,28 @@
     },
     {
       "id": "core-opaque-receive-hints",
-      "paths": ["crates/mesh-talk-core/src/node/opaque_receive_cache.rs"],
+      "paths": [
+        "crates/mesh-talk-core/src/node/opaque_receive_cache.rs",
+        "crates/mesh-talk-core/src/node/opaque_receive_cache/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
             "node::opaque_receive_cache::tests::",
             "node::opaque_relay::permission_tests::",
-            "federated_file_consent_and_complete_bytes_need_no_direct_client_route"
+            "federated_file_consent_and_complete_bytes_need_no_direct_client_route",
+            "node::opaque_receive_cache::checkpoints::tests::"
           ]
         }
       ],
       "consumers": ["core-node"],
       "capability": {
-        "summary": "Keep optional opaque receive mappings on encrypted disk and load only the active mailbox's bounded protocol identifiers.",
+        "summary": "Keep durable optional opaque receive mappings on encrypted disk and runtime-only progress in bounded in-memory TEMP tables; load only the active mailbox's bounded protocol identifiers.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
-            "name": "Warm open decodes no historical hints; only retained inner events qualify durable hints, session progress cannot survive restart, and corrupt or foreign optional sources remain preserved without blocking login.",
+            "name": "Warm open decodes no historical hints; only retained inner events qualify durable hints, session progress uses bounded memory-backed TEMP tables with UUID isolation and atomic cleanup/accounting, never renews persistent session tables, and cannot survive restart; TEMP failure or non-memory configuration remains a cache miss, and corrupt or foreign optional sources remain preserved without blocking login. Reads and proven no-ops validate the fresh publication barrier without directory synchronization; changed writes retain durability checks and failed-sync retry.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -2575,7 +2924,13 @@
             "node::files::channel_receive::tests::",
             "node::serving::channel_plaintext_retry_tests::",
             "node::node::tests::group_reception_terminal_is_independent_of_erased_and_expired_rows",
-            "node::node::tests::channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance"
+            "node::node::tests::channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance",
+            "channel_hot_source_queries_reuse_prepared_vms_and_read_fresh_state",
+            "completed_channel_receive_callbacks_are_quiet_and_new_messages_resume",
+            "completed_channel_metadata_retains_demand_when_source_changes_before_install",
+            "node::ui_state::tests::",
+            "node::account_sync::wake::tests::imported_signed_sibling_document_notifies_locally_without_originating_wake",
+            "node::account_sync::availability::tests::private_evidence_rejects_network_policy_and_identity_replacement"
           ]
         }
       ],
@@ -2599,6 +2954,22 @@
           {
             "name": "Source-revision continuation preserves its reception provenance and does not create or increase a storage retry deadline; actual I/O, database and encrypted-storage failures retain catch-up provenance and the existing exponential retry schedule.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Hot canonical source, event-owner and projection queries reuse the existing bounded compiled-statement cache while executing every fresh parameter, source and owner-lifetime check. Warm bytecode cannot revive stale projections, old owners or missing records.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Completed channel receive callbacks reuse exact source/rank/owner/presentation qualification without recreating demand; source changes between canonical preparation and installation retain durable recovery work before mutation.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Settled fixed-consumer retirement performs no SQL mutation; retained committed ACKs continue bounded pending retirement after failure and reopen, with current account/lifetime validation on idle calls.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Desktop cumulative observation domains retain mixed changes and narrow document/status updates without suppressing legacy core wakes; unknown or authority-bearing changes retain broad reconciliation.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },
@@ -2610,6 +2981,8 @@
     {
       "id": "core-indexed-transcripts",
       "paths": [
+        "crates/mesh-talk-core/src/node/delivery_receipt.rs",
+        "crates/mesh-talk-core/src/node/delivery_receipt_tests.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/account_sync/archive.rs",
@@ -2632,6 +3005,8 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "receipt_retirement",
+            "node::delivery_receipt::tests::",
             "node::transcript_repository::tests::",
             "node::delivery_runtime::lock_order_tests::",
             "node::account_sync::archive::lock_order_tests::",
@@ -2652,6 +3027,8 @@
             "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
             "failed_media_",
             "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work",
+            "completed_ordinary_receive_callbacks_are_quiet_without_body_reads",
+            "unresolved_complete_receive_pages_preserve_tickets_but_partial_pages_rotate",
             "node::node::participant_storage_tests::public_account_history_rejects_incomplete_ready_selector_without_hanging",
             "node::node::tests::linked_device_catches_up_incoming_dm_after_reconnect",
             "node::node::tests::ready_history_",
@@ -2666,6 +3043,10 @@
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
+            "name": "Authenticated delivery receipt controls retire exact retained receive work after durable delivery; Message discovery and pending selection honor processed-control evidence without replacing transcript evidence. Current-owner retirement retries after failure/reopen. Terminal irrelevance requires exact completed modern account-message scope, wall clock and an absent remaining original; it never grants delivery or retires another destination. Unknown, cancelled, legacy, file-alias and still-pending work retain authentication and recovery.",
+            "reference": "docs/network-design-reference.md#state-and-concurrency-contract"
+          },
+          {
             "name": "Account archive snapshots, history projections and delivery recovery acquire sent, received and received-file sidecars in the same order, preserving coherent snapshots without a received/sent lock cycle.",
             "reference": "docs/ai-coding-reliability.md#r01-lock-order-and-reentrant-calls"
           },
@@ -2676,6 +3057,10 @@
           {
             "name": "Owned fallible lookups and forward, reverse or insertion-order pages preserve exact keys and unsigned ordering; private validated budgets select at most 128 rows and 8 MiB before body reads, while invalid budgets and oversized first rows fail without payload fetches.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Empty file receive turns, exact fully admitted global-tail retries and completed exact-policy download discovery validate current ownership without rewriting unchanged tickets or scan progress; interleaved conversations, new work and byte-skipped candidates retain fair rotation; changed policy and new offers retain bounded discovery and transactional enqueueing. Channel-file read preflight validates the publication barrier without directory synchronization, while actual file publication retains its write barrier and transactional guards.",
+            "reference": "docs/module-boundaries.md"
           },
           {
             "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
@@ -2695,6 +3080,10 @@
           },
           {
             "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Settled ordinary and control receive callbacks and complete scoped unresolved pages preserve unchanged queue ordering without SQL mutations, committed writes or body reads. Bounded lookahead retains partial-page and oversized-attempt fairness; terminal rows retire and account fences remain current.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -2764,6 +3153,221 @@
       },
       "escalation": [
         "Run cargo test --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 separately, then validate the saved stdout/stderr with scripts/evals/backend-runner.mjs --validate-large-folder. The real 110 MiB fixture is explicit backend acceptance, not an ordinary affected-suite test; it proves enqueue/staging and persisted compact-manifest identity, not recipient transfer."
+      ]
+    },
+    {
+      "id": "core-incremental-opaque-mailbox",
+      "paths": [
+        "crates/mesh-talk-core/src/eventlog/repository/network.rs",
+        "crates/mesh-talk-core/src/node/session/paged_tests.rs",
+        "crates/mesh-talk-core/src/node/opaque_relay.rs",
+        "crates/mesh-talk-core/src/node/relay_policy.rs",
+        "crates/mesh-talk-core/src/node/file_consent.rs",
+        "crates/mesh-talk-core/src/node/opaque_relay/",
+        "crates/mesh-talk-core/src/node/session/mailbox.rs",
+        "crates/mesh-talk-core/src/node/session/mailbox/",
+        "crates/mesh-talk-core/src/postoffice/storage/role/delta.rs",
+        "crates/mesh-talk-core/src/postoffice/storage/role/delta/",
+        "crates/mesh-talk-core/src/node/privacy_sync/network.rs",
+        "crates/mesh-talk-core/src/postoffice/federation/indexed.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync/admission_tests.rs",
+        "crates/mesh-talk-core/src/node/opaque_receive_cache.rs",
+        "crates/mesh-talk-core/src/node/channel_projection_cache.rs",
+        "crates/mesh-talk-core/src/node/session/backend.rs",
+        "crates/mesh-talk-core/src/eventlog/sync/network.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/current.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/replay.rs",
+        "crates/mesh-talk-core/src/node/channel/graph/preparing.rs",
+        "crates/mesh-talk-core/src/node/work_observation.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync/prepared_views.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync/principal.rs",
+        "crates/mesh-talk-core/src/eventlog/repository.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/selection.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/selection/preparation.rs",
+        "crates/mesh-talk-core/src/node/participant_runtime.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/storage/database.rs",
+        "crates/mesh-talk-core/src/storage/database/work_clock.rs",
+        "crates/mesh-talk-core/src/storage/database/selection_work.rs",
+        "crates/mesh-talk-core/src/storage/database/query_scratch.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/selection/export.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/selection/metadata.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs",
+        "crates/mesh-talk-core/src/node/session/mailbox_watch.rs",
+        "crates/mesh-talk-core/src/node/serving/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "eventlog::repository::network::tests::",
+            "peer_known_export_ids_skip_sql_membership_and_preserve_unknown_authority",
+            "hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh",
+            "guarded_default_fingerprint_quiet_path_survives_unrelated_source_append",
+            "guarded_pull_only_remote_subset_",
+            "node::opaque_relay::",
+            "node::session::mailbox::tests::",
+            "requester_have_selection_reuse_loopback",
+            "unsupported_selection_reuse_stays_conservative",
+            "postoffice::storage::role::delta::tests::",
+            "participant_history_upload_",
+            "ready_history_upload_owner_retirement_",
+            "ready_history_retention_",
+            "partial_followup_storage_failure_dispatches_already_durable_dm_reception",
+            "cancelled_timed_out_and_external_drop_owners_retain_capacity_until_reception_drains",
+            "automatic_text_and_sticker_delivery_survives_established_recipient_cold_restart",
+            "bounded_runtime_automatically_delivers_text_and_sticker_after_recipient_cold_restart",
+            "bounded_runtime_private_reply_survives_public_peer_cold_restart_and_manual_regrant",
+            "file_manifest_requester_dispatches_the_remote_dm_and_queues_its_receipt",
+            "participant_history_sync_stamp_",
+            "participant_network_unrelated_profile_compaction_",
+            "participant_network_profile_compaction_sql_failure_",
+            "participant_network_missing_or_corrupt_compaction_classification_",
+            "participant_network_parent_retirement_",
+            "participant_receive_repair_revision_",
+            "participant_probe_metadata_",
+            "node::opaque_receive_cache::checkpoints::tests::",
+            "node::opaque_receive_cache::tests::",
+            "node::channel::checkpoint::",
+            "node::channel::tests::",
+            "node::channel_account_authority::",
+            "node::privacy_sync::principal::",
+            "node::privacy_sync::admission_tests::",
+            "invisible_late_invitation_can_arrive_through_an_allowed_post_office",
+            "node::work_observation::tests::",
+            "work_observation_enabled_and_disabled_preserve_wrapper_receive_results",
+            "committed_kind_observation_baselines_then_bounds_pages_without_writes_or_bodies",
+            "ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress",
+            "participant_durable_have_",
+            "node::session::paged_tests::ordinary_request_",
+            "node::session::paged_tests::ordinary_requester_",
+            "node::delivery_store::control_index_tests::",
+            "ordinary_requester_reuses_selection_without_idle_commits",
+            "ordinary_requester_reuses_selection_across_connections_without_idle_commits",
+            "node::privacy_sync::prepared_views::tests::",
+            "parked_selection_preserves_active_capacity_owner_and_quiet_checkout",
+            "metadata_query_does_not_dispatch_pending_file_reception",
+            "federated_file_consent_and_complete_bytes_need_no_direct_client_route",
+            "main_data_version_ignores_temp_and_reads_but_detects_owner_commits",
+            "storage::database::",
+            "disposable_selection_prepare_export_and_drop_leave_main_storage_unchanged",
+            "empty_selection_cleanup_preserves_cached_read_plans",
+            "node::session::mailbox_watch::",
+            "node::serving::mailbox_watch::",
+            "modern_relay_receive_",
+            "source_notifications_exclude_reads_rollbacks_and_derived_work",
+            "parked_mailbox_watches_preserve_normal_capacity_and_release_on_drop",
+            "healthy_relay_receive_",
+            "receive_worker_"
+          ]
+        }
+      ],
+      "consumers": ["core-node", "desktop-chat"],
+      "capability": {
+        "summary": "Reconcile opaque mailboxes through finite indexed deltas and bounded on-demand participant exports, preserving current authority and durable retry evidence.",
+        "guide": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization",
+        "invariants": [
+          {
+            "name": "Ordinary Guarded outbound pull-only zero-wire reconciliation can reuse a proved unique remote subset under exact current local source and authority, empty pending work, a fresh existing wire fingerprint probe and a nonrenewing five-minute maximum deadline. It preserves the remote intersection count and the shared 128-entry metadata quota, never grants equality, custody or delivery, and leaves unsupported, changed, failed and duplex requests on ordinary reconciliation.",
+            "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"
+          },
+          {
+            "name": "Peer-known IDs skip export membership SQL and body hydration while preserving current view/owner validation, examined-row accounting and cursor progression; unknown IDs retain fresh outgoing authorization. Fixed hot revision SQL queries reuse bounded compiled statements without caching values, preserving fresh source/control/destructive revisions and corruption errors. One synchronous network-view validation executes scope/retirement checks once and combines current capability metadata with indexed control existence; it preserves owner/epoch precedence, retiring/corrupt rejection and capability escalation, and never reuses authority across operations or replaces final live session checks. Real Guarded default-progress quiet rounds use fingerprint-only exchange despite unrelated appends, and a shared append requires reconciliation.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
+          {
+            "name": "Unchanged scoped versions precede historical body access; finite cursor windows bind store, mailbox, arrival incarnation and destructive epoch. A requester can reuse its ready Have selection after response admission only under fresh complete source/authority stamp equality; changed or unknown stamps and unsupported backends prepare afresh, retaining peer-Have closure and per-page/final-send validation.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Rotating beyond four heavyweight views preserves bounded completed-upload qualifications; exact current authority and remote destructive identity qualify duplex custody skips. Send-only publication preserves past source dispatch across remote buffer retirement without claiming present custody; an explicit selected target requires fresh HAVE and selectively repairs only that missing event, while failures propagate and changed local source input remains eligible. A selection reconstructed solely for a finished exact confirmation retires after the validated lookup instead of occupying protected unfinished capacity; genuine partial preparation and preexisting incomplete uploads retain their progress protection without fabricated bulk completion. Repeated absent-target confirmations reuse at most 64 runtime-only facts under exact full scope and current completed local history/authority stamps, without warm SQL changes or commits. Each retained scope is at most 256 bytes; unknown versions, incomplete views, missing payloads and errors never establish absence, source changes retry normally, and no absence becomes custody, permission or a durable deletion marker. Genuine retained file requests use a distinct send-only publication-priority namespace and redispatch all signed chunks; receive traversal remains Duplex-only. Cancellation-safe cleanup retains exact admission until a newly ready temporary view retires, while genuine partial and preexisting preparation retain protection; four cancelled ready repairs cannot exhaust unrelated admission.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Ready evicted history selections reuse the existing shared prepared-view cache only under exact full recipient, source, authority, mode and distinct protocol purpose; reducers are released, incomplete or failed plans do not qualify, and runtime closure fences checkout and publication. Mailbox progress and custody evidence remain independent, while parked and active selections retain their existing shared limits.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Incremental supplemental controls discover a bounded set once and refresh only the selected identity or consent offer under current authorization; stale queued IDs never send changed payloads and eight real controls require at most sixteen offer checks. Individually confirmed consent offers may suppress repeated preparation and HAVE only under an unchanged runtime MAIN-file version/policy/certificate fingerprint, exact fresh remote binding/mailbox revision, a nondecreasing relay-domain upper and a nonrenewable sixty-second deadline. Fully checked Pending offers with no previously published control may skip only background preparation through an explicit NoControlDue outcome under qualified before/after source/mailbox scope; generic empty, deferred and error results never qualify, and direct include-pending reads remain fresh. NoControlDue hints cannot evict live confirmed hints; positive admission reclaims NoControlDue hints first. Both variants retain the existing nonrenewable sixty-second deadline. The 256-entry metadata cache retains no bodies, preserves fair cyclic offer discovery, and cannot grant authority or custody; source mutation, relay replacement, expiry and eviction restore normal checks. TEMP query/session changes never invalidate a MAIN-only quiet hint; current-owner commits do, unknown backend support falls back, and database fault fences remain enforced.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Restart-stable incoming coverage requires completed admission, exact account-scoped terminal Profile-processing facts or bounded pending retry evidence; session-only transport classification remains fenced to its runtime; semantic handling never grants retained custody, and caches never authorize admission, deletion reversal, custody or recipient delivery. Finite parent-repair work resumes owner-bound partial pages after watchdog cancellation; at most 64 fixed-expiry scheduling fingerprints preserve only exact completed same-runtime work after heavy-owner eviction, while restart, policy/state changes, corruption and missing evidence retain recovery; a fixed-size pending bitmap cannot transfer one child's failed scan to another, and bounded runtime leases protect dependencies while advancing and release on completion, revocation, eviction or progress expiry.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Repeated current-session hints with identical nullable inner references perform no SQL writes; real transitions, capacity limits and bounded old-session retirement retain exact usage accounting and cannot invent receipt evidence.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Direct paged fingerprint probes reuse only exact current scalar summaries under the shared 128-entry projection bound; an append during finite preparation cannot qualify the older cutoff as current, and mismatches retain fresh export authorization.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Capability negotiation preserves legacy wire messages and authorization; malformed or unavailable modern exchanges never silently downgrade.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Optional progress observation uses fixed counters and a bounded exact recent-ID window, never logs identities or payloads, and cannot change transfer authority or persistence. Nonblocking hooks and reservation-qualified cursor publication keep observation outside owner guards; header-kind baselines skip history and retain finite upper cutoffs.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Account/mailbox/outer-bound signed semantic Profile and exact consent mappings share the existing bounded wrapper bucket and require current repair epoch, account ownership and exact foreign processing facts before ordinary GET reuse. Own-device classification still checks the current account; consent requires its exact current received event or full local recipient exclusion, never supersession inference; dependency repair bypasses hints, real deletion invalidates them, optional failures fall back to GET, and no hint enters retained HAVE or custody.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Terminal direct export and incremental upload preparation retain current selection and network authority checks while unchanged rank/parent/closure cursors perform no SQL mutations or write commits; partial query cursors remain connection-owned and rebuildable, while authoritative mailbox/receipt progress and failure rollback retain their durability.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Repeated exact custody and ordinary history queries reuse exclusively checked-out node-owned prepared indexes under their complete source, full principal, account, inbound/pull modes, denied state and current authority stamp, including across fresh authenticated connections. Only ready plans without pending uninvited ancestry enter the 64-entry/64 MiB charged SQL cache; finished reducers and event bodies are not retained. Active query admission stays at 16 and parked plans cannot serve reads before reactivation by their exact repository owner. Cached charges are recomputed after export changes, including Have-dependent closure; every custody outcome and page retains current durability and authority checks. Failed/incomplete exchanges retire checked-out work; quota and version invalidation extract leases outside cache admission; idle duration alone cannot retire an otherwise current bounded plan. Runtime retirement closes publication, extracts indexes and joins actual SQL cleanup under its work permit. Stable fresh-socket queries have zero warm SQL mutations/commits; append, erasure, revocation, cancellation, concurrency and quota recovery remain mandatory. The serving owner dispatches reception only after accepted event or identity/control payloads, consuming the adapter signal after releasing its mutex. Metadata/Have/custody queries and empty followups do not claim receive queues or trigger message/profile recovery. Duplicate admitted payloads may repair ownership and retain reception; invalid event payloads cannot create the signal.",
+            "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"
+          },
+          {
+            "name": "Four scoped upload slots preserve unfinished preparation across cancelled rounds. Two independent bounded receive-only owners never acquire history views and permit incoming processing under bulk saturation. New bulk scopes defer under productive saturation; completed or empty owners are preferred for eviction, and privacy-generation changes or 30 seconds without actual progress permit reclamation. Acquiring and validating do not renew progress; contended entries do not block unrelated admission. Evicted selection destruction occurs outside global cache admission. Validated cold receipts warm these same bounded owners without writes or deadline renewal; current-runtime rebinding follows session-only validation, while cold repair spent reset, lease ownership and recovery remain unchanged.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Channel queue-only writes cannot invalidate settled consent work; account/source/reopen changes retain ordinary fences, closed SQL purposes cannot mutate each other, and absent/duplicate queue operations preserve cached read plans.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Opt-in work observation emits captured counters even when supplemental repository ownership is busy; static distribution origins count first-polled work only, retain at most 64 sites plus overflow, and add no task, timer, persistence or authority.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise real Noise loopback negotiation, legacy fallback, unchanged populated sync, incremental append, interrupted/revoked permission, retry, restart, expiry and destructive reset. Run normal production node acceptance separately; synthetic tests do not certify installed desktop startup.",
+        "Cancellation-repair fixtures independently bound setup and arm the unchanged progress deadline at exact repair-body admission. Held metadata must not consume that budget, while a held repair body must still cancel and retire the actual future and server. Preserve backward-ancestor recovery, optional-write faults, finite frontier progress and existing attempt/deadline limits."
+      ]
+    },
+    {
+      "id": "core-inline-media-preview",
+      "paths": ["crates/mesh-talk-core/src/node/files.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::files::bounded_preview_tests::",
+            "node::files::indexed_file_payload_tests::bounded_preview_"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Derive bounded ordinary static thumbnails without changing stored originals or receive authority.",
+        "guide": "docs/module-boundaries.md#inline-media-presentation",
+        "invariants": [
+          {
+            "name": "Ordinary static previews are bounded derived images with current consent, expiry and immutable-source rechecks; originals and protected reveals retain independent access paths.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          }
+        ]
+      },
+      "escalation": [
+        "Validate encoded/pixel/decode allocation limits, current consent, expiry/protection rejection and EXIF/alpha behavior. Browser mock bytes do not prove native decode bounds."
       ]
     },
     {

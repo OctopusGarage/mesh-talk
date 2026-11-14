@@ -226,10 +226,14 @@ test("ASan compiles once and binds every consumer to the current producer archiv
   assert.equal(workflow.match(/node --test scripts\/ci\/asan-cli\.test\.mjs/gu)?.length, 1);
   assert.match(producer, /archive_sha256: \$\{\{ steps.build.outputs.archive_sha256 \}\}/u);
   assert.match(producer, /manifest_sha256: \$\{\{ steps.build.outputs.manifest_sha256 \}\}/u);
+  assert.match(producer, /artifact_id: \$\{\{ steps.archive.outputs.artifact-id \}\}/u);
+  assert.match(producer, /name: Upload this attempt's compiled ASan archive\n        id: archive\n/u);
   assert.match(producer, /compression-level: 0/u);
   assert.match(producer, /retention-days: 1/u);
   assert.doesNotMatch(consumers, /Swatinem\/rust-cache|runner-storage.mjs|cargo (?:build|test)/u);
-  for (const part of [producer, consumers]) assert.match(part, /asan-build-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/u);
+  assert.match(producer, /asan-build-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/u);
+  assert.match(consumers, /artifact-ids: \$\{\{ needs.cohort.outputs.artifact_id \}\}/u);
+  assert.doesNotMatch(consumers, /name: asan-build-/u, "consumers must use the producer's immutable ID instead of a second name lookup");
   for (const part of [consumers, workflow.split("  asan:\n")[1]]) {
     assert.match(part, /MESH_ASAN_ARCHIVE_SHA256: \$\{\{ needs.cohort.outputs.archive_sha256 \}\}/u);
     assert.match(part, /MESH_ASAN_MANIFEST_SHA256: \$\{\{ needs.cohort.outputs.manifest_sha256 \}\}/u);

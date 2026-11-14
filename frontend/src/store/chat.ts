@@ -1,3 +1,9 @@
+import { receptionKinds } from "@/lib/api/reception";
+import {
+  startRecoveryRefresh,
+  RECOVERY_REFRESH_MS,
+} from "@/lib/recoveryRefresh";
+import { startChatExpiry } from "./chatExpiry";
 import {
   reception as receptionApi,
   type HostReception,
@@ -10,7 +16,7 @@ import {
 import type { PersonalConversationState } from "@/lib/types";
 import { useDrafts } from "./drafts";
 import { usePacks } from "./packs";
-import { stickerById } from "@/lib/stickerPacks";
+import { stickerPackId, stickerById } from "@/lib/stickerPacks";
 import { snapshotSticker } from "@/lib/stickerMedia";
 import { mentionsName } from "@/lib/mentions";
 import { useAuth } from "./auth";
@@ -295,7 +301,11 @@ async function pollUntilReady(
         }
         set({ startupId: startup.startup_id });
       }
-      if (identity.display_name && useAuth.getState().user?.id === owner)
+      if (
+        identity.display_name &&
+        useAuth.getState().user?.id === owner &&
+        useAuth.getState().user?.display_name !== identity.display_name
+      )
         useAuth.setState((state) => ({
           user: state.user
             ? { ...state.user, display_name: identity.display_name! }
@@ -602,6 +612,12 @@ const rosterRefresh = createRosterRefresh({
     refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending),
 });
 
+const presenceRosterRefresh = createRosterRefresh({
+  capture: () => captureChat(useChat.getState),
+  refresh: (hasPending) =>
+    refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending, true),
+});
+
 /** Apply explicit local-complete floors before archive work can refill deleted caches. */
 function applyPersonalConversationStates(
   rawSet: Set,
@@ -681,17 +697,40 @@ function applyPersonalConversationStates(
   return { changed: true, reloadActive };
 }
 
+let rosterObservationSequence = 0;
+let publishedRosterObservation = 0;
+let publishedIdentityObservation = 0;
+
+// Qualification for skipping a descriptive account read, never an authority cache.
+let publishedAccountRoster: {
+  projection: string;
+  observation: number;
+  current(): boolean;
+} | null = null;
+function accountRosterProjection(peers: PeerInfo[]): string {
+  return JSON.stringify(
+    peers
+      .map(({ user_id, account_id, name, post_office }) =>
+        JSON.stringify([user_id, account_id, name, post_office]),
+      )
+      .sort(),
+  );
+}
+
 async function refreshRosterSnapshot(
   rawSet: Set,
   get: Get,
   hasPending: () => boolean,
+  presenceOnly = false,
 ) {
   const lease = captureChat(get);
   const set = guardedSet(rawSet, lease.current);
   if (!lease.current()) return;
   if (!get().ready) return;
-  const request = get().rosterRequest + 1;
-  set({ rosterRequest: request });
+  const observation = ++rosterObservationSequence;
+  // Presence observations must not cancel a full state refresh in flight.
+  const request = get().rosterRequest + (presenceOnly ? 0 : 1);
+  if (!presenceOnly) set({ rosterRequest: request });
   try {
     let identity;
     try {
@@ -723,18 +762,46 @@ async function refreshRosterSnapshot(
       get().retryBoot();
       return;
     }
-    if (identity.display_name && useAuth.getState().user?.id === lease.owner)
-      useAuth.setState((state) => ({
-        user: state.user
-          ? { ...state.user, display_name: identity.display_name! }
-          : null,
-      }));
-    const [peers, listedAccounts, personal] = await Promise.all([
-      readWithDeadline(() => chat.listPeers()),
-      readWithDeadline(() => chat.listAccounts()),
-      readWithDeadline(() =>
-        chat.personalConversationStates(lease.owner!, identity.account_id),
-      ).catch(() => null),
+    // Identity metadata has its own publication point: a newer identity can
+    // finish before its roster reads. Replacement checks above remain mandatory.
+    if (observation >= publishedIdentityObservation) {
+      publishedIdentityObservation = observation;
+      if (
+        identity.display_name &&
+        useAuth.getState().user?.id === lease.owner &&
+        useAuth.getState().user?.display_name !== identity.display_name
+      )
+        useAuth.setState((state) => ({
+          user: state.user
+            ? { ...state.user, display_name: identity.display_name! }
+            : null,
+        }));
+    }
+    if (!publishedAccountRoster?.current()) publishedAccountRoster = null;
+    // Keep full reads concurrent. Heartbeats first inspect cheap discovery facts;
+    // route-only changes still publish peers without rereading account history/policy.
+    const observedPeers = presenceOnly
+      ? await readWithDeadline(() => chat.listPeers())
+      : null;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
+    const reuseAccounts =
+      presenceOnly &&
+      publishedAccountRoster?.current() &&
+      publishedAccountRoster.projection ===
+        accountRosterProjection(observedPeers!);
+    const [peersSnapshot, listedAccounts, personal] = await Promise.all([
+      observedPeers === null
+        ? readWithDeadline(() => chat.listPeers())
+        : Promise.resolve(observedPeers),
+      reuseAccounts
+        ? Promise.resolve(null)
+        : readWithDeadline(() => chat.listAccounts()),
+      presenceOnly
+        ? Promise.resolve(null)
+        : readWithDeadline(() =>
+            chat.personalConversationStates(lease.owner!, identity.account_id),
+          ).catch(() => null),
     ]);
     if (!lease.current() || get().rosterRequest !== request || hasPending())
       return;
@@ -744,17 +811,41 @@ async function refreshRosterSnapshot(
       lease,
       personal,
     );
-    const accounts = listedAccounts.filter((account) => {
+    // Full state work can wait on personal documents after its roster facts
+    // were read. Keep any newer published presence while still applying those
+    // personal documents and continuing the full history reconciliation.
+    const publishObservation = observation >= publishedRosterObservation;
+    // Reusing accounts only observes presence. It must not supersede a pending
+    // full account read of durable metadata independent of discovery facts.
+    const publishAccounts =
+      listedAccounts !== null &&
+      (!publishedAccountRoster?.current() ||
+        observation >= publishedAccountRoster.observation);
+    const peers = publishObservation ? peersSnapshot : get().peers;
+    const accounts = (
+      publishAccounts && listedAccounts !== null
+        ? listedAccounts
+        : get().accounts
+    ).filter((account) => {
       const personal =
         get().personalConversationStates[`account:${account.account_id}`];
       return !(personal?.hidden && personal.local_cleanup_complete);
     });
     setPushStateSupport(identity.supports_push_state ? lease.owner : null);
-    const channelWork = personalEffects.changed
-      ? channelRefresh.invalidate()
-      : channelRefresh.ifDue();
+    const channelWork = presenceOnly
+      ? Promise.resolve()
+      : personalEffects.changed
+        ? channelRefresh.invalidate()
+        : channelRefresh.ifDue();
     // Polling returns fresh arrays even when discovery has not changed. Preserve
     // the previous references so sidebar subscribers do not redraw every tick.
+    if (publishObservation) publishedRosterObservation = observation;
+    if (publishAccounts)
+      publishedAccountRoster = {
+        projection: accountRosterProjection(peersSnapshot),
+        observation,
+        current: lease.current,
+      };
     const previous = get();
     const rosterChanged =
       JSON.stringify([previous.peers, previous.accounts]) !==
@@ -775,6 +866,7 @@ async function refreshRosterSnapshot(
         ...(resolved.length ? { unread, pendingUnknownUnread } : {}),
       });
     }
+    if (presenceOnly) return;
     await channelWork;
     if (!lease.current() || get().rosterRequest !== request || hasPending())
       return;
@@ -859,6 +951,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   setError: (msg) => rawSet({ error: msg }),
 
   resetForLock: () => {
+    publishedAccountRoster = null;
     setPushStateSupport(null);
     lastUnknownSenderRefresh = 0;
     rawSet((state) => ({
@@ -1070,6 +1163,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     let receiptCursor: ReceptionCursor | null = null;
     let receiptScope: ReceptionScope | null = null;
     let receiptPending = false;
+    let receiptDirty = false;
     const snapshot = (cursor: ReceptionCursor) => {
       const state = get();
       return {
@@ -1096,6 +1190,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       receiptCursor = null;
       receiptScope = null;
       receiptPending = false;
+      receiptDirty = false;
       if (!runtime || !lease.current() || !lease.owner) return;
       const scope: ReceptionScope = {
         owner: lease.owner,
@@ -1106,6 +1201,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       try {
         receiptCursor = loadReceptionSnapshot(scope)?.cursor ?? null;
         receiptScope = scope;
+        // A restored cursor proves the saved snapshot, not equality with live
+        // state changed while delivery was unavailable. Establish that once.
+        receiptDirty = true;
         let firstPull = true;
         let avatarIdentityLoaded = false;
         delivery = createReceptionDelivery({
@@ -1141,6 +1239,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
               // older per-field persistence, including legacy rows without IDs.
               saveReceptionSnapshot(scope, snapshot(page.after));
               receiptCursor = page.after;
+              receiptDirty = false;
             }
             for (const receipt of page.receipts) {
               switch (receipt.kind) {
@@ -1163,10 +1262,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
                   applyChatFileProgress(receipt.event);
                   break;
                 case "state":
-                  void get().refreshRoster();
-                  void get().refreshChannels();
-                  void get().refreshStatuses(undefined, true);
-                  notifySyncInvalidation({ owner: scope.owner, kind: "state" });
+                  for (const kind of receptionKinds(receipt.event))
+                    applyInvalidation(kind);
                   break;
               }
             }
@@ -1182,7 +1279,16 @@ export const useChat = create<ChatState>((rawSet, get) => ({
             }
           },
           persist: (cursor) => {
-            saveReceptionSnapshot(scope, snapshot(cursor));
+            // Observation-only wakes can reserve an empty page at the already
+            // committed prefix. They still ACK, without rewriting the ledger.
+            if (
+              receiptDirty ||
+              receiptCursor?.epoch !== cursor.epoch ||
+              receiptCursor?.sequence !== cursor.sequence
+            ) {
+              saveReceptionSnapshot(scope, snapshot(cursor));
+              receiptDirty = false;
+            }
             receiptCursor = cursor;
             receiptPending = false;
           },
@@ -1196,20 +1302,18 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     };
     const stopReceptionObservation = useChat.subscribe((state, previous) => {
       synchronizeDelivery();
+      const changed = durableReceptionChanged(state, previous);
+      if (receiptScope && lease.current() && changed) receiptDirty = true;
       if (
         receiptScope &&
         receiptCursor &&
         !receiptPending &&
         lease.current() &&
-        (state.ledger !== previous.ledger ||
-          state.overflowUnread !== previous.overflowUnread ||
-          state.unread !== previous.unread ||
-          state.pendingUnknownUnread !== previous.pendingUnknownUnread ||
-          state.historyFullBaselines !== previous.historyFullBaselines ||
-          state.reception !== previous.reception)
+        changed
       ) {
         try {
           saveReceptionSnapshot(receiptScope, snapshot(receiptCursor));
+          receiptDirty = false;
         } catch (error) {
           failReception(error);
         }
@@ -1220,30 +1324,38 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       void delivery?.wake();
     };
     synchronizeDelivery();
-    const expiryWallStart = Date.now();
-    const expiryMonotonicStart = performance.now();
-    const expire = () => {
-      if (!lease.current()) return;
-      const now = Math.max(
-        get().expiryNow,
-        Date.now(),
-        expiryWallStart + Math.floor(performance.now() - expiryMonotonicStart),
-      );
-      const expiredFiles = get().incomingFiles.filter(
-        (file) => file.expiresAtMs != null && file.expiresAtMs <= now,
-      );
-      set((state) => ({
-        ...expireConversationMessages(state, now),
-        ...receptionPatch(state, expireReception(state, now)),
-        incomingFiles: state.incomingFiles.filter(
-          (file) => file.expiresAtMs == null || file.expiresAtMs > now,
-        ),
-        expiryNow: now,
-      }));
-      for (const file of expiredFiles)
-        notifyIncomingFileDismissed(file.fileConv);
-    };
-    const expiry = setInterval(expire, 1000);
+    const expiry = startChatExpiry({
+      get,
+      current: lease.current,
+      expire: (now) => {
+        const expiredFiles = get().incomingFiles.filter(
+          (file) => file.expiresAtMs != null && file.expiresAtMs <= now,
+        );
+        set((state) => ({
+          ...expireConversationMessages(state, now),
+          ...receptionPatch(state, expireReception(state, now)),
+          incomingFiles: expiredFiles.length
+            ? state.incomingFiles.filter(
+                (file) => file.expiresAtMs == null || file.expiresAtMs > now,
+              )
+            : state.incomingFiles,
+          expiryNow: now,
+        }));
+        for (const file of expiredFiles)
+          notifyIncomingFileDismissed(file.fileConv);
+      },
+    });
+    const expire = expiry.refresh;
+    const stopExpiryObservation = useChat.subscribe((state, previous) => {
+      if (
+        state.messages !== previous.messages ||
+        state.intents !== previous.intents ||
+        state.ledger !== previous.ledger ||
+        state.incomingFiles !== previous.incomingFiles ||
+        state.searchTarget !== previous.searchTarget
+      )
+        expiry.schedule();
+    });
     const resumeReception = () => {
       if (
         typeof document === "undefined" ||
@@ -1280,39 +1392,70 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         rosterBusy = false;
       }
     };
-    let nextRosterFallback = 0;
-    let nextStatusFallback = 0;
-    let nextBootRecovery = 0;
-    let bootFailureObserved = false;
-    const roster = setInterval(() => {
-      if (lease.current() && get().ready) {
-        bootFailureObserved = false;
-        void refreshGroupOperationIntents(rawSet, get);
-        const now = performance.now();
-        if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
-          nextRosterFallback = now + 30000;
-          wakeReception();
-          void refreshRoster();
-        }
-        if (!supportsPushState(lease.owner) || now >= nextStatusFallback) {
-          nextStatusFallback = now + 30000;
-          void get().refreshStatuses();
-        }
-      } else if (lease.current() && !get().bootBusy) {
-        const failed = get().bootFailed;
-        const now = performance.now();
-        if (failed && !bootFailureObserved) {
-          bootFailureObserved = true;
-          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
-        }
-        if (!failed || now >= nextBootRecovery) {
-          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
-          // A failed boot remains visible while one bounded background read checks
-          // for recovery. Never let a transient identity timeout become terminal.
-          get().retryBoot(failed);
-        }
+    const stopRosterRecovery = startRecoveryRefresh(
+      () => {
+        if (!lease.current() || !get().ready) return;
+        wakeReception();
+        void refreshRoster();
+        void get().refreshStatuses();
+      },
+      {
+        intervalMs: () =>
+          supportsPushState(lease.owner) ? RECOVERY_REFRESH_MS : 2000,
+      },
+    );
+    let controlTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleControl = () => {
+      if (controlTimer !== undefined) clearTimeout(controlTimer);
+      controlTimer = undefined;
+      if (cancelled || !lease.current()) return;
+      const state = get();
+      if (state.ready && !Object.keys(state.groupOperations ?? {}).length)
+        return;
+      if (!state.ready && state.bootBusy) return;
+      controlTimer = setTimeout(
+        () => {
+          controlTimer = undefined;
+          if (cancelled || !lease.current()) return;
+          if (get().ready) void refreshGroupOperationIntents(rawSet, get);
+          else get().retryBoot(get().bootFailed);
+          scheduleControl();
+        },
+        !state.ready && state.bootFailed ? BOOT_RECOVERY_INTERVAL_MS : 2000,
+      );
+    };
+    const stopControlObservation = useChat.subscribe((state, previous) => {
+      if (
+        state.ready !== previous.ready ||
+        state.bootBusy !== previous.bootBusy ||
+        state.bootFailed !== previous.bootFailed ||
+        state.groupOperations !== previous.groupOperations
+      )
+        scheduleControl();
+    });
+    scheduleControl();
+
+    const applyInvalidation = (rawKind: unknown) => {
+      const kind = receptionKinds({ kinds: [rawKind] })[0] ?? "state";
+      if (kind === "documents" || kind === "sync_status") {
+        // Qualified producers changed no group/personal inputs. Existing auxiliary
+        // readers retain their broad compatibility wake without a chat-wide scan.
+        notifySyncInvalidation({
+          owner: lease.owner!,
+          kind: "state",
+          scope: kind,
+        });
+        return;
       }
-    }, 2000);
+      notifySyncInvalidation({ owner: lease.owner!, kind });
+      if (kind === "state") {
+        void refreshRoster(true);
+        void get().refreshChannels();
+        void get().refreshStatuses(undefined, true);
+      } else if (kind === "roster") void presenceRosterRefresh();
+      else void get().refreshStatuses(undefined, true);
+      if (kind !== "roster") void refreshGroupOperationIntents(rawSet, get);
+    };
 
     const unlisten = subscribeNodeEvents({
       onReceptionWake: (scope) => {
@@ -1335,12 +1478,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           e.device_id !== state.myId
         )
           return;
-        notifySyncInvalidation({ owner: e.owner, kind: e.kind });
-        if (["state", "roster", "delivery", "files"].includes(e.kind))
-          void refreshGroupOperationIntents(rawSet, get);
-        if (e.kind === "state" || e.kind === "roster") void refreshRoster(true);
-        if (e.kind === "delivery" || e.kind === "files")
-          void state.refreshStatuses(undefined, true);
+        applyInvalidation(e.kind);
       },
       onIntegrationMessageAccepted: (e) => {
         const state = get();
@@ -1372,6 +1510,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           e.device_id !== state.myId
         )
           return;
+        notifySyncInvalidation({ owner: e.owner, kind: "state" });
         void state.refreshChannels(e.channel_id);
         void refreshGroupOperationIntents(rawSet, get);
       },
@@ -1416,8 +1555,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         window.removeEventListener("pagehide", flushReceipts);
       if (typeof document !== "undefined")
         document.removeEventListener?.("visibilitychange", flushReceipts);
-      clearInterval(roster);
-      clearInterval(expiry);
+      stopRosterRecovery();
+      stopControlObservation();
+      if (controlTimer !== undefined) clearTimeout(controlTimer);
+      stopExpiryObservation();
+      expiry.stop();
       if (typeof window !== "undefined") {
         window.removeEventListener("focus", expire);
         window.removeEventListener("focus", resumeReception);
@@ -1955,7 +2097,41 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    const installed = stickerById(stickerId, usePacks.getState().packs);
+    const catalog = usePacks.getState().packs;
+    const packScope = usePacks.getState().scope;
+    const packId = stickerPackId(stickerId, catalog);
+    const entry = catalog.find((pack) => pack.id === packId);
+    let installed;
+    try {
+      const pack =
+        entry && packId
+          ? await usePacks
+              .getState()
+              .readPack(
+                packId,
+                () =>
+                  lease.current() &&
+                  usePacks.getState().scope === packScope &&
+                  Boolean(get().active) &&
+                  convKey(get().active!) === convKey(c),
+              )
+          : undefined;
+      if (
+        !lease.current() ||
+        usePacks.getState().scope !== packScope ||
+        usePacks.getState().packs.find((pack) => pack.id === packId) !==
+          entry ||
+        !get().active ||
+        convKey(get().active!) !== convKey(c)
+      )
+        return;
+      installed = pack ? stickerById(stickerId, [pack]) : undefined;
+      if (entry && !installed)
+        throw new Error("Installed sticker artwork is unavailable");
+    } catch (error) {
+      set({ error: `Couldn't send sticker: ${errorMessage(error)}` });
+      return;
+    }
     if (installed) {
       let stagedPath: string | undefined;
       let transferred = false;
@@ -2033,6 +2209,34 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     reportError: (message) => rawSet({ error: message }),
   }),
 }));
+
+/** UI recovery observations do not change the durable reception commit. */
+function durableReceptionChanged(state: ChatState, previous: ChatState) {
+  if (
+    state.ledger !== previous.ledger ||
+    state.overflowUnread !== previous.overflowUnread ||
+    state.unread !== previous.unread ||
+    state.pendingUnknownUnread !== previous.pendingUnknownUnread ||
+    state.historyFullBaselines !== previous.historyFullBaselines
+  )
+    return true;
+  if (state.reception === previous.reception) return false;
+  // Batch progress is recovery state, unlike phase/check-time presentation.
+  return [
+    ...new Set([
+      ...Object.keys(state.reception),
+      ...Object.keys(previous.reception),
+    ]),
+  ].some((key) => {
+    const next = state.reception[key];
+    const prior = previous.reception[key];
+    return (
+      (next?.received ?? 0) !== (prior?.received ?? 0) ||
+      next?.batchId !== prior?.batchId ||
+      (next?.processing ?? false) !== (prior?.processing ?? false)
+    );
+  });
+}
 
 function refreshChannelRecovery(set: Set, get: Get) {
   const recoveryEntries = get()

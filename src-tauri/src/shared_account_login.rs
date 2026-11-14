@@ -413,7 +413,11 @@ async fn apply_cancellable<R: tauri::Runtime>(
                         &handle, &settings, &user, &password, authorize,
                     );
                     if previous_login != user.login_name() {
-                        crate::session_store::clear(&previous_login);
+                        crate::session_store::clear_with_policy(
+                            &previous_login,
+                            settings.get().startup_verification,
+                        )
+                        .map_err(CommandError::Io)?;
                     }
                     status
                 })
@@ -447,20 +451,70 @@ pub(crate) async fn reconcile<R: tauri::Runtime>(
     authority: RuntimeAuthority,
     app: AppState,
     node: NodeState,
-    mut stopping: tokio::sync::oneshot::Receiver<()>,
+    stopping: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+    reconcile_inner(
+        handle,
+        root,
+        authority,
+        app,
+        node,
+        stopping,
+        #[cfg(test)]
+        None,
+    )
+    .await;
+}
+
+async fn reconcile_inner<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
+    root: PathBuf,
+    authority: RuntimeAuthority,
+    app: AppState,
+    node: NodeState,
+    mut stopping: tokio::sync::oneshot::Receiver<()>,
+    #[cfg(test)] completed: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+) {
+    // Subscribe before initial observation. The source owns durable revisions;
+    // this receiver only schedules fresh admission/application, never grants it.
+    let mut changes = {
+        let guard = tokio::select! {
+            _ = &mut stopping => return,
+            guard = node.0.read() => guard,
+        };
+        let Some(runtime) = guard.as_ref() else {
+            return;
+        };
+        runtime.handle().subscribe_account_access()
+    };
+    let mut deadline = tokio::time::Instant::now();
     loop {
-        tokio::select! { _ = &mut stopping => return, _ = interval.tick() => {} }
+        tokio::select! {
+            _ = &mut stopping => return,
+            _ = tokio::time::sleep_until(deadline) => {},
+            changed = changes.changed() => {
+                if changed.is_err() { return; }
+            },
+        }
+        // A source update while application waits/runs must retain one follow-up.
+        // No watch borrow or business guard survives this statement.
+        drop(changes.borrow_and_update());
         if authority.current(|_| ()).is_err() {
             return;
         }
+        // Pending/locked/error work retains its short recovery deadline even
+        // after acknowledging the event; a settled owner uses sparse repair.
+        deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let Ok(admission) = RuntimeAdmission::capture_lease(&app, &node, &authority.lease) else {
+            #[cfg(test)]
+            if let Some(completed) = &completed {
+                let _ = completed.send(());
+            }
             continue;
         };
         // Profile writes retain retirement; native credential I/O retains auth
         // ordering independently after the profile commit has finished.
-        if let Err(error) = apply_cancellable(
+        let outcome = apply_cancellable(
             handle.clone(),
             root.clone(),
             app.clone(),
@@ -468,9 +522,19 @@ pub(crate) async fn reconcile<R: tauri::Runtime>(
             admission,
             Some(&mut stopping),
         )
-        .await
-        {
-            log::warn!("Shared account login reconciliation failed: {error}");
+        .await;
+        match outcome {
+            Ok(()) => {
+                deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+            }
+            Err(error) => {
+                deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                log::warn!("Shared account login reconciliation failed: {error}");
+            }
+        }
+        #[cfg(test)]
+        if let Some(completed) = &completed {
+            let _ = completed.send(());
         }
         if !matches!(
             stopping.try_recv(),

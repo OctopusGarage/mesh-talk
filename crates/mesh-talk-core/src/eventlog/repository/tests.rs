@@ -27,6 +27,173 @@ pub(super) fn database(dir: &tempfile::TempDir) -> Arc<EncryptedDatabase> {
         EncryptedDatabase::open(&dir.path().join("profile.db"), "password", b"profile").unwrap(),
     )
 }
+
+#[test]
+fn repeated_event_point_reads_reuse_statements_and_keep_current_source_checks() {
+    use rusqlite::StatementStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let domain = EventDomainId([1; 16]);
+    let repository = EventRepository::new(db.clone(), domain).unwrap();
+    let other = EventRepository::new(db.clone(), EventDomainId([2; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let first = event(&identity, 1, vec![], 1, EventKind::Message);
+    let second = event(&identity, 2, vec![first.id], 2, EventKind::Message);
+    repository.append(&first).unwrap();
+    let sql = [
+        "SELECT EXISTS(SELECT 1 FROM retained_events WHERE domain=?1 AND id=?2)".to_owned(),
+        format!(
+            "SELECT {HEADER_COLUMNS},length(body) FROM retained_events WHERE domain=?1 AND id=?2"
+        ),
+        "SELECT body FROM retained_events WHERE domain=?1 AND id=?2".to_owned(),
+        "SELECT conversation FROM retained_events WHERE domain=?1 AND id=?2".to_owned(),
+    ];
+    db.read(|c| {
+        c.flush_prepared_statement_cache();
+        Ok(())
+    })
+    .unwrap();
+    let commits = db.successful_write_commits();
+    for _ in 0..4 {
+        assert!(repository.has(&first.id).unwrap());
+        assert_eq!(repository.get(&first.id).unwrap(), Some(first.clone()));
+        assert!(!repository.has(&second.id).unwrap());
+        assert_eq!(repository.get(&second.id).unwrap(), None);
+    }
+    let runs = db
+        .read(|c| {
+            sql.iter()
+                .map(|sql| Ok(c.prepare_cached(sql)?.get_status(StatementStatus::Run)))
+                .collect::<Result<Vec<_>, LogError>>()
+        })
+        .unwrap();
+    assert_eq!(
+        runs,
+        [8, 8, 4, 16],
+        "unchanged event reads repeatedly discarded their compiled SQL"
+    );
+    assert_eq!(
+        db.successful_write_commits(),
+        commits,
+        "queries must remain read-only"
+    );
+    assert!(!other.has(&first.id).unwrap());
+    assert_eq!(other.get(&first.id).unwrap(), None);
+    repository.append(&second).unwrap();
+    assert!(repository.has(&second.id).unwrap());
+    assert_eq!(repository.get(&second.id).unwrap(), Some(second));
+    db.transaction(|c| {
+        c.execute_batch("ALTER TABLE retained_events RENAME TO held_events")?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(repository.has(&first.id).is_err());
+    assert!(repository.get(&first.id).is_err());
+    db.transaction(|c| {
+        c.execute_batch("ALTER TABLE held_events RENAME TO retained_events")?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(repository.get(&first.id).unwrap(), Some(first));
+}
+
+#[test]
+fn repeated_authenticated_reads_reuse_only_intrinsic_signature_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let domain = EventDomainId([1; 16]);
+    let repository = EventRepository::new(db.clone(), domain).unwrap();
+    let message = event(
+        &DeviceIdentity::generate(),
+        1,
+        vec![],
+        1,
+        EventKind::Message,
+    );
+    repository.append(&message).unwrap();
+    let reads = repository.body_read_counts();
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        for _ in 0..4 {
+            assert_eq!(repository.get(&message.id).unwrap(), Some(message.clone()));
+        }
+    });
+    assert_eq!(
+        signatures, 1,
+        "one intrinsic signature proof for unchanged authenticated bytes"
+    );
+    assert_eq!(repository.body_read_counts().0 - reads.0, 4);
+
+    // A warm proof never authenticates a different signature claiming this ID.
+    let mut forged = message.clone();
+    forged.sig[0] ^= 1;
+    let replace = |event: &Event| {
+        let bytes = bincode::serialize(event).unwrap();
+        db.transaction(|c| {
+            c.execute(
+                "UPDATE retained_events SET body=?1 WHERE domain=?2 AND id=?3",
+                params![bytes, domain.0.as_slice(), message.id.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    };
+    replace(&forged);
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        assert!(repository.get(&message.id).is_err());
+        assert!(repository.get(&message.id).is_err());
+    });
+    assert_eq!(signatures, 2, "failed proofs must never enter the memo");
+    let mut corrupt = message.clone();
+    corrupt.ciphertext[0] ^= 1;
+    replace(&corrupt);
+    assert!(
+        repository.get(&message.id).is_err(),
+        "content integrity remains checked before a signature hit"
+    );
+    replace(&message);
+    assert_eq!(repository.get(&message.id).unwrap(), Some(message.clone()));
+    let other = EventRepository::new(db.clone(), EventDomainId([2; 16])).unwrap();
+    assert!(other.get(&message.id).unwrap().is_none());
+    drop(repository);
+    let repository = EventRepository::new(db, domain).unwrap();
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        assert_eq!(repository.get(&message.id).unwrap(), Some(message.clone()));
+    });
+    assert_eq!(signatures, 1, "reopen must establish its own proof");
+    repository
+        .drop_conversation(&message.conversation_id)
+        .unwrap();
+    assert!(
+        repository.get(&message.id).unwrap().is_none(),
+        "a warm signature proof must not resurrect retired data"
+    );
+}
+
+#[test]
+fn intrinsic_signature_proof_capacity_requires_verification_after_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let events = (1..=257)
+        .map(|seq| event(&identity, seq, vec![], seq, EventKind::Message))
+        .collect::<Vec<_>>();
+    for event in &events {
+        repository.append(event).unwrap();
+    }
+    for event in &events {
+        assert_eq!(repository.get(&event.id).unwrap(), Some(event.clone()));
+    }
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        assert_eq!(
+            repository.get(&events[0].id).unwrap(),
+            Some(events[0].clone())
+        );
+    });
+    assert_eq!(
+        signatures, 1,
+        "bounded positive evidence must verify an evicted proof again"
+    );
+}
 #[test]
 fn bounded_selected_body_and_kind_count_admit_before_blob_fetch() {
     let dir = tempfile::tempdir().unwrap();
@@ -1636,6 +1803,88 @@ fn runtime_metadata_received_work_retries_fairly_and_reopens_without_body_reads(
 }
 
 #[test]
+fn runtime_metadata_receive_selection_vm_work_is_independent_of_retained_history() {
+    for controls in [false, true] {
+        let mut measured = Vec::new();
+        for count in [256, 1024] {
+            let directory = tempfile::tempdir().unwrap();
+            let (profile, repository, local, account) = receive_profile(&directory);
+            // Authored retained history is not receive work. Keep one remote
+            // candidate in the same conversation and leave statistics cold.
+            for sequence in 1..=count {
+                repository
+                    .append(&event(
+                        &local,
+                        sequence,
+                        vec![],
+                        sequence,
+                        EventKind::Message,
+                    ))
+                    .unwrap();
+            }
+            let pending = event(
+                &DeviceIdentity::generate(),
+                count + 1,
+                vec![],
+                count + 1,
+                if controls {
+                    EventKind::Delete
+                } else {
+                    EventKind::Message
+                },
+            );
+            repository.append(&pending).unwrap();
+            repository
+                .initialize_receiving(
+                    Author::from_ed25519(local.public().ed25519_pub),
+                    &account.public(),
+                )
+                .unwrap();
+            let pending_rows: i64 = profile
+                .database()
+                .read(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM participant_receive_pending WHERE domain=?1",
+                        [repository.domain.0.as_slice()],
+                        |row| row.get(0),
+                    )
+                    .map_err(LogError::from)
+                })
+                .unwrap();
+            assert_eq!(pending_rows, 1);
+            let before = repository.body_read_counts();
+            let ids = if controls {
+                repository.pending_control_ids(pending.conversation_id, 128, 8 * 1024 * 1024)
+            } else {
+                repository.pending_receive_ids(pending.conversation_id, 128, 8 * 1024 * 1024)
+            }
+            .unwrap();
+            assert_eq!(ids, vec![pending.id]);
+            assert_eq!(repository.body_read_counts(), before);
+            measured.push(super::receiving::receive_selection_work());
+        }
+        // Count real bundled SQLite VM instructions, including rejected join
+        // work; a LIMIT on returned rows cannot establish this bound.
+        println!(
+            "receive selection VM steps: controls={controls}, history256={}, history1024={}",
+            measured[0].0, measured[1].0
+        );
+        assert!(
+            measured.iter().all(|(steps, _)| *steps <= 512),
+            "one pending receive must not scan the retained event domain"
+        );
+        assert!(
+            measured.iter().all(|(_, sorts)| *sorts == 0),
+            "pending receive order must come from its bounded queue index"
+        );
+        assert!(
+            measured[1].0 <= measured[0].0 + 128,
+            "retained history growth must not scale fixed pending selection work"
+        );
+    }
+}
+
+#[test]
 fn runtime_metadata_receive_bootstrap_resumes_and_keeps_control_work_separate() {
     let dir = tempfile::tempdir().unwrap();
     let (profile, repo, local, account) = receive_profile(&dir);
@@ -1758,6 +2007,83 @@ fn runtime_metadata_oversized_receive_cannot_starve_later_valid_event() {
         3
     );
     assert_eq!(repo.body_read_counts(), (0, 0));
+}
+
+#[test]
+fn unresolved_complete_receive_pages_preserve_tickets_but_partial_pages_rotate() {
+    for controls in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (profile, repo, local, account) = receive_profile(&dir);
+        let peer = DeviceIdentity::generate();
+        let kind = if controls {
+            EventKind::React
+        } else {
+            EventKind::Message
+        };
+        let mut items = Vec::new();
+        for n in 0..3 {
+            let item = Event::new(
+                &peer,
+                ConversationId::new([1; 32]),
+                n + 1,
+                vec![],
+                n + 1,
+                1,
+                kind,
+                vec![1; if n == 0 { 262_145 } else { 64 }],
+            );
+            repo.append(&item).unwrap();
+            items.push(item);
+        }
+        let conv = items[0].conversation_id;
+        repo.initialize_receiving(
+            Author::from_ed25519(local.public().ed25519_pub),
+            &account.public(),
+        )
+        .unwrap();
+        let select = |limit, bytes| {
+            if controls {
+                repo.pending_control_ids(conv, limit, bytes)
+            } else {
+                repo.pending_receive_ids(conv, limit, bytes)
+            }
+        };
+        let database = profile.database();
+        let before = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let reads = repo.body_read_counts();
+        for limit in [3, 128].into_iter().cycle().take(8) {
+            assert_eq!(
+                select(limit, 4096).unwrap(),
+                vec![items[1].id, items[2].id],
+                "oversized first row cannot exclude later affordable rows in a complete page"
+            );
+            assert_eq!(
+                select(limit, 8 * 1024 * 1024).unwrap(),
+                items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                "deferred oversized rows remain eligible with a sufficient budget"
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before,
+            "rotating every unresolved row preserves relative order and must not mutate durable tickets"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(repo.body_read_counts(), reads);
+        assert!(matches!(
+            select(1, 1),
+            Err(LogError::PageBudgetTooSmall { .. })
+        ));
+        assert_eq!(
+            select(1, 4096).unwrap(),
+            vec![items[1].id],
+            "an oversized partial turn must still rotate before the next attempt"
+        );
+        assert_eq!(select(1, 4096).unwrap(), vec![items[2].id]);
+        assert_eq!(select(1, 8 * 1024 * 1024).unwrap(), vec![items[0].id]);
+        assert_eq!(repo.body_read_counts(), reads);
+    }
 }
 
 fn downgrade_event_schema_fixture(db: &EncryptedDatabase) {
@@ -2128,4 +2454,463 @@ fn runtime_metadata_receive_control_bootstrap_qualifies_account_before_page() {
     assert_eq!(last.len(), 1);
     assert_ne!(last[0].header.id, next_control.id);
     assert_eq!(returned.body_read_counts(), (0, 0));
+}
+
+#[test]
+fn profile_publication_provenance_rolls_back_with_failed_hint_and_bounds_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let first = event(&identity, 1, vec![], 1, EventKind::Profile);
+    repo.append_profile_publication(&first, &[9; 32]).unwrap();
+    let next = event(&identity, 2, vec![], 2, EventKind::Profile);
+    let source = repo.source_revision().unwrap();
+    db.transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_profile_publication_hint BEFORE INSERT ON profile_publication_hints BEGIN SELECT RAISE(ABORT,'injected publication hint failure'); END;")?; Ok(())
+    }).unwrap();
+    assert!(repo.append_profile_publication(&next, &[8; 32]).is_err());
+    assert!(!repo.has(&next.id).unwrap());
+    assert_eq!(repo.source_revision().unwrap(), source);
+    assert!(repo.profile_publication_id(&[8; 32]).unwrap().is_none());
+    db.transaction(|c| {
+        c.execute_batch("DROP TRIGGER fail_profile_publication_hint;")?;
+        for value in 0u64..1023 {
+            let mut key = [255u8; 32]; key[..8].copy_from_slice(&value.to_be_bytes());
+            c.execute("INSERT INTO profile_publication_hints(domain,publication,event_id) VALUES(?1,?2,?3)", params![[1u8;16].as_slice(), key.as_slice(), first.id.as_bytes().as_slice()])?;
+        }
+        Ok(())
+    }).unwrap();
+    repo.append_profile_publication(&next, &[8; 32]).unwrap();
+    assert_eq!(
+        repo.profile_publication_id(&[8; 32]).unwrap(),
+        Some(next.id)
+    );
+    assert!(repo.profile_publication_id(&[9; 32]).unwrap().is_none());
+    assert!(
+        repo.has(&first.id).unwrap(),
+        "optional reference eviction never deletes canonical history"
+    );
+    assert_eq!(
+        db.read(|c| Ok(c.query_row(
+            "SELECT count(*) FROM profile_publication_hints",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?))
+        .unwrap(),
+        1024
+    );
+}
+
+#[test]
+fn authenticated_receipt_retirement_marker_preserves_ordinary_receive_work_and_owner() {
+    use crate::storage::profile::participant::{finish_adoption, prepare_adoption};
+    let dir = tempfile::tempdir().unwrap();
+    let (profile, repo, local, account) = receive_profile(&dir);
+    repo.initialize_receiving(
+        Author::from_ed25519(local.public().ed25519_pub),
+        &account.public(),
+    )
+    .unwrap();
+    let peer = DeviceIdentity::generate();
+    let receipt = event(&peer, 1, vec![], 1, EventKind::Message);
+    let ordinary = event(&peer, 2, vec![], 2, EventKind::Message);
+    repo.append(&receipt).unwrap();
+    repo.append(&ordinary).unwrap();
+    // A host-completed receipt may precede bounded discovery. The exact marker
+    // must survive delayed discovery without creating transcript evidence.
+    repo.complete_control(receipt.id).unwrap();
+    assert_eq!(
+        repo.pending_receive_ids(receipt.conversation_id, 128, 8 * 1024 * 1024)
+            .unwrap(),
+        vec![ordinary.id]
+    );
+    let evidence: i64 = profile
+        .database()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM transcript_received_evidence WHERE id=?1",
+                [receipt.id.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        evidence, 0,
+        "receipt processing cannot fabricate a received chat row"
+    );
+    let later = event(&peer, 3, vec![], 3, EventKind::Message);
+    repo.append(&later).unwrap();
+    assert!(
+        repo.pending_receive_ids(later.conversation_id, 128, 8 * 1024 * 1024)
+            .unwrap()
+            .contains(&later.id)
+    );
+    repo.complete_control(later.id).unwrap();
+    assert_eq!(
+        repo.pending_receive_ids(later.conversation_id, 128, 8 * 1024 * 1024)
+            .unwrap(),
+        vec![ordinary.id]
+    );
+    let absent = EventId::new([93; 32]);
+    assert!(repo.complete_control(absent).is_err());
+    let fk = profile.database().transaction(|c| {
+        c.execute(
+            "INSERT INTO participant_control_processed VALUES(?1,?2)",
+            rusqlite::params![repo.domain.0.as_slice(), absent.as_bytes().as_slice()],
+        )?;
+        Ok(())
+    });
+    assert!(
+        fk.is_err(),
+        "completed scheduling evidence must remain foreign-key bound to retained events"
+    );
+    let next = crate::identity::account::Account::generate().public();
+    prepare_adoption(profile.database(), &account.public(), &next).unwrap();
+    finish_adoption(profile.database(), &next).unwrap();
+    assert!(
+        matches!(
+            repo.complete_control(ordinary.id),
+            Err(LogError::StaleCursor)
+        ),
+        "stale participant owner cannot complete another account's pending work"
+    );
+}
+
+// Test-only observation of actual SQLite statement preparation. Callbacks are
+// installed outside selection-work writes and share the same guarded lifetime.
+struct RepositoryReadCompiles<'a> {
+    database: &'a EncryptedDatabase,
+    count: Option<Box<std::sync::atomic::AtomicUsize>>,
+}
+type ReadCompileObserver = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    std::ffi::c_int,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+) -> std::ffi::c_int;
+impl<'a> RepositoryReadCompiles<'a> {
+    fn install(database: &'a EncryptedDatabase) -> Self {
+        Self::install_with(database, export_membership_compile)
+    }
+    fn install_with(database: &'a EncryptedDatabase, callback: ReadCompileObserver) -> Self {
+        let count = Box::new(std::sync::atomic::AtomicUsize::new(0));
+        database
+            .read(|c| {
+                // SAFETY: the database guard owns the live handle. The boxed
+                // callback context remains stable until Drop unregisters it.
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_set_authorizer(
+                        c.handle(),
+                        Some(callback),
+                        (&*count as *const std::sync::atomic::AtomicUsize)
+                            .cast_mut()
+                            .cast(),
+                    )
+                };
+                assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                Ok(())
+            })
+            .unwrap();
+        Self {
+            database,
+            count: Some(count),
+        }
+    }
+    fn reset(&self) {
+        self.count
+            .as_ref()
+            .unwrap()
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn count(&self) -> usize {
+        self.count
+            .as_ref()
+            .unwrap()
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+impl Drop for RepositoryReadCompiles<'_> {
+    fn drop(&mut self) {
+        let result = self.database.read(|c| {
+            // SAFETY: remove the callback under its connection guard before
+            // releasing the boxed userdata, including assertion unwinding.
+            let rc = unsafe {
+                rusqlite::ffi::sqlite3_set_authorizer(c.handle(), None, std::ptr::null_mut())
+            };
+            assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+            Ok(())
+        });
+        if result.is_err() {
+            Box::leak(self.count.take().unwrap());
+        }
+    }
+}
+unsafe extern "C" fn export_membership_compile(
+    userdata: *mut std::ffi::c_void,
+    action: std::ffi::c_int,
+    table: *const std::ffi::c_char,
+    column: *const std::ffi::c_char,
+    _database: *const std::ffi::c_char,
+    _view: *const std::ffi::c_char,
+) -> std::ffi::c_int {
+    if action == rusqlite::ffi::SQLITE_READ && !table.is_null() && !column.is_null() {
+        // SAFETY: SQLite provides live C strings and install retains this exact
+        // stable atomic for the entire registered callback lifetime.
+        let (table, column, count) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(table).to_bytes(),
+                std::ffi::CStr::from_ptr(column).to_bytes(),
+                &*userdata.cast::<std::sync::atomic::AtomicUsize>(),
+            )
+        };
+        if table == b"participant_sync_rows" && column == b"outgoing" {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    rusqlite::ffi::SQLITE_OK
+}
+
+#[test]
+fn peer_known_export_ids_skip_sql_membership_and_preserve_unknown_authority() {
+    use super::selection::SelectionRow;
+    use crate::eventlog::sync::network::{ExportPageBudget, NetworkSyncStore, PreparationBudget};
+    use std::collections::HashSet;
+    let directory = tempfile::tempdir().unwrap();
+    let db = database(&directory);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    repository.initialize_selections().unwrap();
+    let signer = DeviceIdentity::generate();
+    let events: Vec<_> = (1..=64)
+        .map(|sequence| event(&signer, sequence, vec![], sequence, EventKind::Message))
+        .collect();
+    for event in &events {
+        repository.append(event).unwrap();
+    }
+    let conversation = events[0].conversation_id;
+    let view = NetworkSyncStore::open_view(&repository, &conversation).unwrap();
+    let selection = repository.begin_selection(&view, 2, 128).unwrap().unwrap();
+    let rows: Vec<_> = events
+        .iter()
+        .enumerate()
+        .map(|(rank, event)| SelectionRow {
+            header: repository.header(&event.id).unwrap().unwrap(),
+            rank: rank as i64,
+            candidate: rank != 63,
+            selected: rank != 63,
+            own: true,
+            receipt: false,
+        })
+        .collect();
+    repository
+        .save_selection_batch(&selection, &view, &rows, b"export-membership-regression")
+        .unwrap();
+    let preparation = PreparationBudget::default();
+    while !repository
+        .reset_selected_export_step(&selection, &view, preparation)
+        .unwrap()
+        .ready
+    {}
+    while !repository
+        .selected_export_step(&selection, &view, false, false, preparation)
+        .unwrap()
+        .ready
+    {}
+    let budget = ExportPageBudget {
+        examined: 16,
+        events: 16,
+        encoded_bytes: 1024 * 1024,
+        allocated_bytes: 4 * 1024 * 1024,
+    };
+    let all: HashSet<_> = events.iter().map(|event| event.id).collect();
+    let observer = RepositoryReadCompiles::install(&db);
+    let before = repository.body_read_counts();
+    let mut after = None;
+    let mut examined = 0;
+    loop {
+        let page = repository
+            .selected_export_page(&selection, &view, &all, after.as_ref(), budget)
+            .unwrap();
+        assert!(page.events.is_empty());
+        examined += page.examined;
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        examined, 64,
+        "skipped peer-known IDs must retain bounded cursor accounting"
+    );
+    assert_eq!(
+        repository.body_read_counts(),
+        before,
+        "peer-known IDs cannot hydrate payloads"
+    );
+    assert_eq!(
+        observer.count(),
+        0,
+        "peer-known raw IDs must not prepare any outgoing-membership SQL"
+    );
+    observer.reset();
+    let mut partial = all.clone();
+    partial.remove(&events[0].id);
+    partial.remove(&events[63].id);
+    let before = repository.body_read_counts();
+    let mut after = None;
+    let mut exported = Vec::new();
+    loop {
+        let page = repository
+            .selected_export_page(&selection, &view, &partial, after.as_ref(), budget)
+            .unwrap();
+        exported.extend(page.events);
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        exported,
+        vec![events[0].clone()],
+        "unknown allowed event must export; unknown denied row must remain withheld"
+    );
+    assert_eq!(
+        repository.body_read_counts().0 - before.0,
+        1,
+        "only the unknown allowed payload may be hydrated"
+    );
+    assert!(
+        observer.count() > 0,
+        "unknown IDs must still execute fresh SQL selection authorization"
+    );
+    eprintln!(
+        "known_export_sql known_membership_preparations=0 known_body_reads=0 examined={examined} unknown_membership_preparations={} unknown_body_reads={}",
+        observer.count(),
+        repository.body_read_counts().0 - before.0
+    );
+    let invalid = ExportPageBudget {
+        examined: 0,
+        ..budget
+    };
+    assert!(matches!(
+        repository.selected_export_page(&selection, &view, &all, None, invalid),
+        Err(LogError::InvalidPageBudget)
+    ));
+    drop(observer);
+    let foreign = EventRepository::new(db.clone(), repository.domain).unwrap();
+    assert!(
+        matches!(
+            foreign.selected_export_page(&selection, &view, &all, None, budget),
+            Err(LogError::StaleCursor)
+        ),
+        "even all-known input must reject a foreign selection owner"
+    );
+    repository.drop_conversation(&conversation).unwrap();
+    assert!(
+        matches!(
+            repository.selected_export_page(&selection, &view, &all, None, budget),
+            Err(LogError::StaleCursor)
+        ),
+        "even all-known input must reject a destructively stale source view"
+    );
+}
+
+unsafe extern "C" fn scalar_revision_compile(
+    userdata: *mut std::ffi::c_void,
+    action: std::ffi::c_int,
+    table: *const std::ffi::c_char,
+    _column: *const std::ffi::c_char,
+    _database: *const std::ffi::c_char,
+    _view: *const std::ffi::c_char,
+) -> std::ffi::c_int {
+    if action == rusqlite::ffi::SQLITE_READ && !table.is_null() {
+        // SAFETY: SQLite supplies a live C string. The shared observer guard
+        // retains this stable boxed atomic until unregistering the callback.
+        let (table, count) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(table).to_bytes(),
+                &*userdata.cast::<std::sync::atomic::AtomicUsize>(),
+            )
+        };
+        if matches!(
+            table,
+            b"event_domains"
+                | b"participant_kind_scan"
+                | b"participant_policy_revisions"
+                | b"participant_destructive_revisions"
+                | b"participant_semantic_compaction_revisions"
+        ) {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    rusqlite::ffi::SQLITE_OK
+}
+
+#[test]
+fn hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = database(&directory);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    repository.initialize_selections().unwrap();
+    let signer = DeviceIdentity::generate();
+    let first = event(&signer, 1, vec![], 1, EventKind::Message);
+    repository.append(&first).unwrap();
+    let observer = RepositoryReadCompiles::install_with(&db, scalar_revision_compile);
+    let read = || {
+        (
+            repository.source_revision().unwrap(),
+            repository.raw_policy_revisions().unwrap().unwrap(),
+            repository.receive_repair_revision().unwrap(),
+        )
+    };
+    let bodies = repository.body_read_counts();
+    let baseline = read();
+    let compiled = observer.count();
+    assert!(compiled > 0, "observe real first-pass SQL preparation");
+    for _ in 0..100 {
+        assert_eq!(read(), baseline);
+    }
+    eprintln!(
+        "scalar_revision_sql first_pass_read_preparations={compiled} after_100_repeat_preparations={}",
+        observer.count()
+    );
+    assert_eq!(
+        observer.count(),
+        compiled,
+        "same four scalar SELECTs must reuse their compiled statements"
+    );
+    assert_eq!(repository.body_read_counts(), bodies);
+    // Only normal profile transactions occur under this test observer. The
+    // production selection-work authorizer is never replaced during its work.
+    let second = event(&signer, 2, vec![first.id], 2, EventKind::Message);
+    repository.append(&second).unwrap();
+    let appended = read();
+    assert!(appended.0 > baseline.0);
+    assert!(appended.1[EventKind::Message as usize] > baseline.1[EventKind::Message as usize]);
+    assert_eq!(appended.2, baseline.2);
+    let control = event(&signer, 3, vec![second.id], 3, EventKind::Delete);
+    repository.append(&control).unwrap();
+    let controlled = read();
+    assert!(controlled.0 > appended.0);
+    assert!(controlled.1[EventKind::Delete as usize] > appended.1[EventKind::Delete as usize]);
+    repository
+        .drop_conversation(&first.conversation_id)
+        .unwrap();
+    let destroyed = read();
+    assert!(destroyed.0 > controlled.0);
+    assert!(
+        destroyed.2 > controlled.2,
+        "real destructive publication must remain visible through the cached VM"
+    );
+    db.transaction(|c| {
+        c.execute("INSERT INTO participant_semantic_compaction_revisions(domain,counter) VALUES(?1,?2) ON CONFLICT(domain) DO UPDATE SET counter=excluded.counter",params![repository.domain.0.as_slice(),destroyed.2+1])?;
+        Ok(())
+    }).unwrap();
+    assert!(
+        repository.receive_repair_revision().is_err(),
+        "fresh corrupt compaction classification cannot reuse an old result"
+    );
+    drop(observer);
 }

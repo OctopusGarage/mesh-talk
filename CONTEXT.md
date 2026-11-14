@@ -198,6 +198,15 @@ _Avoid_: device clone, device revocation, live synchronization.
 
 ## Networking and availability
 
+**Customization library catalog**:
+A local presentation index of installed pack IDs, labels, kinds and appearance
+choices. Private entries retain local-user/account scope; bundled metadata is
+public. The index excludes image URLs, decoded artwork and archives.
+Catalog availability does not prove that a selected asset has been hydrated or
+that a native transfer source remains available. See the
+[loading contract](docs/CUSTOMIZATION_PACKS.md#runtime-loading).
+_Avoid_: loaded artwork, retained media or source availability as synonyms.
+
 **Sticker media**:
 A single encrypted image attachment with a source identity and text fallback.
 Its exact content is bound by the attachment checksum. Receiving and retaining
@@ -225,6 +234,14 @@ when freshness expires. This tolerance counts consistently in UI online totals,
 but does not create fresh device evidence or prove delivery. Authoritative
 withdrawal ends it immediately. Offline is client-relative, not global sign-out.
 _Avoid_: global online state, guaranteed connectivity.
+
+**Sibling synchronization availability**:
+Fresh evidence that a certified same-account device is eligible for a private
+synchronization attempt. This can include authenticated private activity without
+public presence. A retained route or certificate alone is insufficient; an
+attempt can still fail. The receiving device owns its pull progress and missing
+local bytes; the source owns its retained data and its own durable delivery facts.
+_Avoid_: public online state, source-owned receiver progress, delivery confirmation.
 
 **Roster**:
 A projection of known devices and their observations. A raw roster can include

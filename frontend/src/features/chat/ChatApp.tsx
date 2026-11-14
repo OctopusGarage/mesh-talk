@@ -1,3 +1,4 @@
+import { startRecoveryRefresh } from "@/lib/recoveryRefresh";
 import { useMessageFavorites } from "@/store/messageFavorites";
 import {
   startAutomaticDownloads,
@@ -23,7 +24,7 @@ import { ease, useMotionOK } from "@/lib/motion";
 import { startLinkedContacts } from "@/lib/linkedContacts";
 import { useDrafts } from "@/store/drafts";
 import { startLinkedReadReceipts } from "@/lib/linkedReadReceipts";
-import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
+import { subscribeDocumentInvalidation } from "@/lib/syncInvalidation";
 
 import { DeliveryRecoveryProvider } from "./DeliveryRecoveryProvider";
 
@@ -47,11 +48,14 @@ export function ChatApp() {
   useEffect(() => {
     if (!owner || !ready || !accountId) return;
     void useDrafts.getState().start(owner, generation, accountId);
-    const timer = setInterval(() => {
+    const stopRecovery = startRecoveryRefresh(
+      () => {
+        void useDrafts.getState().refresh();
+      },
+      { background: false },
+    );
+    const unsubscribe = subscribeDocumentInvalidation(owner, () => {
       void useDrafts.getState().refresh();
-    }, 15000);
-    const unsubscribe = subscribeSyncInvalidation((change) => {
-      if (change.owner === owner) void useDrafts.getState().refresh();
     });
     const flush = () => {
       void useDrafts.getState().flush();
@@ -60,7 +64,7 @@ export function ChatApp() {
     document.addEventListener("visibilitychange", flush);
     window.addEventListener("pagehide", flush);
     return () => {
-      clearInterval(timer);
+      stopRecovery();
       unsubscribe();
       window.removeEventListener("blur", flush);
       document.removeEventListener("visibilitychange", flush);

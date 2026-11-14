@@ -11,6 +11,7 @@ pub(super) trait SessionBackend {
     type View;
     type HaveCursor;
     type ExportCursor;
+    fn bind_session_peer(&self, _peer: &crate::identity::device::PublicIdentity) {}
     fn remote_have_budget(&self) -> Option<&RemoteHaveBudget> {
         None
     }
@@ -18,7 +19,39 @@ pub(super) trait SessionBackend {
         &self,
         conversation: &ConversationId,
     ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError>;
+    fn quiet_comparison(
+        &self,
+        _c: &ConversationId,
+    ) -> Result<Option<crate::eventlog::sync::network::QuietComparison>, LogError> {
+        Ok(None)
+    }
+    fn validate_quiet_comparison(
+        &self,
+        _c: &ConversationId,
+        _hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    fn quiet_comparison_token(&self, _view: &Self::View) -> Result<Option<[u8; 32]>, LogError> {
+        Ok(None)
+    }
+    fn retain_quiet_comparison(
+        &self,
+        _view: &Self::View,
+        _hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<(), LogError> {
+        Ok(())
+    }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
+    fn take_custody_view(
+        &self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<Self::View>, LogError> {
+        Ok(None)
+    }
+    fn retain_custody_view(&self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        Ok(Some(view))
+    }
     fn prepare_view_step(
         &self,
         view: &Self::View,
@@ -30,6 +63,20 @@ pub(super) trait SessionBackend {
             ready: true,
             ..Default::default()
         })
+    }
+    /// Qualify an exclusively owned prepared view for another selection phase.
+    /// True requires the complete current source and authority stamp to match;
+    /// finite-cutoff validation alone may intentionally permit later appends.
+    /// Have-dependent export preparation remains a separate obligation.
+    fn reusable_view(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    fn reusable_export(
+        &self,
+        _view: &Self::View,
+        _have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        Ok(false)
     }
     fn reset_export_step(
         &self,
@@ -45,6 +92,9 @@ pub(super) trait SessionBackend {
     }
     fn stage_export_have(&self, view: &Self::View, _ids: &[EventId]) -> Result<(), LogError> {
         self.validate_view(view)
+    }
+    fn export_preparation_needs_have(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(true)
     }
     fn prepare_export_step(
         &self,
@@ -316,18 +366,68 @@ pub(super) struct PagedNetworkBackend<'a, S>(
     pub(super) Option<&'a RemoteHaveBudget>,
 );
 impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
+    fn bind_session_peer(&self, peer: &crate::identity::device::PublicIdentity) {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .bind_session_peer(peer);
+    }
     fn remote_have_budget(&self) -> Option<&RemoteHaveBudget> {
         self.1
     }
     type View = S::View;
     type HaveCursor = S::HaveCursor;
     type ExportCursor = S::ExportCursor;
+    fn quiet_comparison(
+        &self,
+        c: &ConversationId,
+    ) -> Result<Option<crate::eventlog::sync::network::QuietComparison>, LogError> {
+        self.0.lock().expect("store lock").quiet_comparison(c)
+    }
+    fn validate_quiet_comparison(
+        &self,
+        c: &ConversationId,
+        hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store lock")
+            .validate_quiet_comparison(c, hint)
+    }
+    fn quiet_comparison_token(&self, view: &Self::View) -> Result<Option<[u8; 32]>, LogError> {
+        self.0
+            .lock()
+            .expect("store lock")
+            .quiet_comparison_token(view)
+    }
+    fn retain_quiet_comparison(
+        &self,
+        view: &Self::View,
+        hint: crate::eventlog::sync::network::QuietComparison,
+    ) -> Result<(), LogError> {
+        self.0
+            .lock()
+            .expect("store lock")
+            .retain_quiet_comparison(view, hint)
+    }
+    fn export_preparation_needs_have(&self, view: &Self::View) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .export_preparation_needs_have(view)
+    }
     fn probe_metadata(
         &self,
         c: &ConversationId,
     ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError> {
-        let store = self.0.lock().expect("store mutex not poisoned");
-        let view = store.open_view(c)?;
+        let mut store = self.0.lock().expect("store mutex not poisoned");
+        if let Some(metadata) = store.probe_metadata(c)? {
+            return Ok((Some(metadata), None));
+        }
+        let view = match store.take_custody_view(c)? {
+            Some(view) => view,
+            None => store.open_view(c)?,
+        };
         Ok((None, Some(view)))
     }
     fn open_view(&self, c: &ConversationId) -> Result<S::View, LogError> {
@@ -335,6 +435,18 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .lock()
             .expect("store mutex not poisoned")
             .open_view(c)
+    }
+    fn take_custody_view(&self, c: &ConversationId) -> Result<Option<S::View>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .take_custody_view(c)
+    }
+    fn retain_custody_view(&self, view: S::View) -> Result<Option<S::View>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .retain_custody_view(view)
     }
     fn prepare_view_step(
         &self,
@@ -345,6 +457,22 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .lock()
             .expect("store mutex not poisoned")
             .prepare_view_step(v, budget)
+    }
+    fn reusable_view(&self, view: &S::View) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .reusable_view(view)
+    }
+    fn reusable_export(
+        &self,
+        view: &Self::View,
+        have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .reusable_export(view, have)
     }
     fn reset_export_step(
         &self,
@@ -519,6 +647,11 @@ pub(super) async fn open_prepared_view<B: SessionBackend>(
     backend: &B,
     conversation: &ConversationId,
 ) -> Result<B::View, SessionError> {
+    // Check out the existing exclusive connection lease before allocating a
+    // new durable selection. The backend rechecks exact source and authority.
+    if let Some(view) = backend.take_custody_view(conversation)? {
+        return Ok(view);
+    }
     let view = backend.open_view(conversation)?;
     prepare_view(backend, &view).await?;
     Ok(view)
@@ -669,35 +802,39 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
     have: &HashSet<EventId>,
     max_frames: usize,
 ) -> Result<Vec<SyncFollowup>, SessionError> {
-    loop {
-        if backend
-            .reset_export_step(view, PreparationBudget::default())?
-            .ready
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let mut have_batch = Vec::with_capacity(PreparationBudget::default().rows);
-    for id in have {
-        have_batch.push(*id);
-        if have_batch.len() == PreparationBudget::default().rows {
-            backend.stage_export_have(view, &have_batch)?;
-            have_batch.clear();
+    if !backend.reusable_export(view, have)? {
+        loop {
+            if backend
+                .reset_export_step(view, PreparationBudget::default())?
+                .ready
+            {
+                break;
+            }
             tokio::task::yield_now().await;
         }
-    }
-    if !have_batch.is_empty() {
-        backend.stage_export_have(view, &have_batch)?;
-    }
-    loop {
-        if backend
-            .prepare_export_step(view, have, PreparationBudget::default())?
-            .ready
-        {
-            break;
+        if backend.export_preparation_needs_have(view)? {
+            let mut have_batch = Vec::with_capacity(PreparationBudget::default().rows);
+            for id in have {
+                have_batch.push(*id);
+                if have_batch.len() == PreparationBudget::default().rows {
+                    backend.stage_export_have(view, &have_batch)?;
+                    have_batch.clear();
+                    tokio::task::yield_now().await;
+                }
+            }
+            if !have_batch.is_empty() {
+                backend.stage_export_have(view, &have_batch)?;
+            }
         }
-        tokio::task::yield_now().await;
+        loop {
+            if backend
+                .prepare_export_step(view, have, PreparationBudget::default())?
+                .ready
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
     }
     let frame_budget = event_frame_budget(conversation)?;
     let mut frames = Vec::new();

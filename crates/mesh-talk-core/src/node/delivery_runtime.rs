@@ -8,6 +8,8 @@ use super::session::SessionError;
 use super::*;
 use crate::eventlog::{ConversationId, Event, EventId, LogError};
 use crate::identity::device::PublicIdentity;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 // Owned by the delivery loop: cancellation drops every retained channel. Keep
 // eight scheduling slots, at most six retained sockets (one outbound permit
@@ -26,7 +28,48 @@ const FILE_RELAY_RETRY: std::time::Duration = std::time::Duration::from_secs(10)
 
 // Whole authenticated control exchanges need several routed round trips. Keep
 // them off the serial file scheduler, with independent capacity for each lane.
+// Successful absence of new work, including already-confirmed relay custody,
+// needs sparse repair rather than another short progress/retry turn.
+pub(super) const QUIET_REPAIR_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
 const CONTROL_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Transport completion is separate from accepted data and from retryable failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::node) enum Reconciliation {
+    Advanced,
+    Quiet,
+    Deferred,
+}
+impl Reconciliation {
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Advanced, _) | (_, Self::Advanced) => Self::Advanced,
+            (Self::Deferred, _) | (_, Self::Deferred) => Self::Deferred,
+            _ => Self::Quiet,
+        }
+    }
+    fn schedule<K: Eq + std::hash::Hash + Clone, R: Eq + Clone>(
+        self,
+        retries: &mut super::delivery_retry::RetrySchedule<K, R>,
+        key: K,
+        routes: R,
+        now: std::time::Instant,
+    ) {
+        match self {
+            Self::Quiet => retries.settled(key, routes, QUIET_REPAIR_INTERVAL, now),
+            other => retries.finished(key, routes, other == Self::Advanced, now),
+        }
+    }
+    fn from_progress(progress: bool) -> Self {
+        if progress {
+            Self::Advanced
+        } else {
+            Self::Deferred
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum ControlWork {
@@ -35,10 +78,44 @@ enum ControlWork {
     Pull(String),
 }
 
+// Scheduling inputs only. Actual dials keep the current preferred address and
+// authenticate the exact physical endpoint through the existing transport owner.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct RelayRouteInput {
+    ed25519: [u8; 32],
+    x25519: [u8; 32],
+    account: Option<String>,
+    post_office: bool,
+    endpoints: crate::discovery::roster::SchedulingEndpoints,
+}
+impl RelayRouteInput {
+    fn observe(peer: &crate::discovery::roster::PeerRecord) -> Self {
+        Self {
+            ed25519: peer.public.ed25519_pub,
+            x25519: peer.public.x25519_pub,
+            account: peer.account_id.clone(),
+            post_office: peer.post_office,
+            endpoints: peer.scheduling_endpoints(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ControlRouteInput {
+    endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
+    relays: std::collections::BTreeSet<RelayRouteInput>,
+    publicly_observed: bool,
+    policy_generation: u64,
+    demand_generation: u64,
+}
+
 struct ControlRoutes {
     peer: PublicIdentity,
+    relays: std::collections::BTreeSet<RelayRouteInput>,
     endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
     publicly_observed: bool,
+    policy_generation: u64,
+    demand_generation: u64,
 }
 
 /// Task IDs distinguish an aborted route owner from its same-key replacement.
@@ -90,13 +167,14 @@ impl ControlWork {
 }
 
 impl ControlRoutes {
-    fn retry_routes(
-        &self,
-    ) -> (
-        std::collections::BTreeSet<(String, std::net::SocketAddr)>,
-        bool,
-    ) {
-        (self.endpoints.clone(), self.publicly_observed)
+    fn retry_routes(&self) -> ControlRouteInput {
+        ControlRouteInput {
+            endpoints: self.endpoints.clone(),
+            relays: self.relays.clone(),
+            publicly_observed: self.publicly_observed,
+            policy_generation: self.policy_generation,
+            demand_generation: self.demand_generation,
+        }
     }
 }
 
@@ -258,8 +336,46 @@ type FileKey = (EventId, EventId);
 type FileStepResult = (
     FileKey,
     std::collections::HashMap<FileKey, FileTransfer>,
-    bool,
+    FileStepCompletion,
 );
+#[derive(Clone, Copy, Debug)]
+enum FileStepOutcome {
+    Clean(bool),
+    Failed,
+}
+
+impl FileStepOutcome {
+    fn complete(&self) -> bool {
+        matches!(self, Self::Clean(true))
+    }
+}
+
+#[derive(Debug)]
+struct FileStepCompletion {
+    token: u64,
+    routes: FileRoutes,
+    outcome: FileStepOutcome,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileRoutes {
+    relays: std::collections::BTreeSet<RelayRouteInput>,
+    policy_generation: u64,
+    endpoints: std::collections::BTreeSet<(bool, String, Option<String>, std::net::SocketAddr)>,
+    current: bool,
+    custody: bool,
+}
+
+// Only cursor/scalar state survives a failed socket. Fresh journal admission
+// supplies the FileCard (including fanout), destination and authorization.
+struct FileContinuation {
+    routes: FileRoutes,
+    candidate_cursor: usize,
+    legacy: bool,
+    sticker_proof_attempted: bool,
+    identity_offered: bool,
+}
+
 type FileWork = (
     super::delivery_store::FileCard,
     super::delivery_store::FileDestination,
@@ -275,6 +391,8 @@ struct FileDeliveryScheduler {
     transfers: std::collections::HashMap<FileKey, FileTransfer>,
     workers: tokio::task::JoinSet<FileStepResult>,
     running_sockets: std::collections::HashSet<FileKey>,
+    retries: super::delivery_retry::RetrySchedule<FileKey, FileRoutes>,
+    parked: std::collections::HashMap<FileKey, FileContinuation>,
     // Bounded scheduling hints, not custody/delivery truth. Eviction merely
     // permits an earlier retry after other destinations have had their turn.
     relay_cooldowns: std::collections::VecDeque<(FileKey, std::time::Instant, bool)>,
@@ -331,23 +449,59 @@ impl FileDeliveryScheduler {
     }
 
     fn admit(&mut self, node: &Node, files: Vec<FileWork>, cursor: Option<FileKey>) {
+        self.admit_at(node, files, cursor, std::time::Instant::now());
+    }
+
+    fn admit_at(
+        &mut self,
+        node: &Node,
+        files: Vec<FileWork>,
+        cursor: Option<FileKey>,
+        now: std::time::Instant,
+    ) {
         self.pending_cursor = cursor;
         node.prune_file_transfers(&mut self.transfers);
         for (file, destination) in files {
             let key = (file.id, destination.binding.event_id);
+            let routes = node.file_retry_routes(&file, &destination);
+            if !routes.current {
+                self.parked.remove(&key);
+                // The in-flight worker still owns its matching completion and
+                // socket marker even after authority is revoked. Forget only
+                // inactive hints; otherwise completion cannot release its owner.
+                if !self.running_sockets.contains(&key) {
+                    self.retries.forget(&key);
+                }
+                continue;
+            }
             if self.transfers.len() + self.workers.len() < MAX_FILE_TRANSFERS
                 && !self.relay_cooldowns.iter().any(|(held, _, _)| *held == key)
+                && self.retries.ready(&key, &routes, now)
                 && node.file_destination_current(&file, &destination)
                 && !self.transfers.contains_key(&key)
                 && !self.running_sockets.contains(&key)
             {
-                self.transfers
-                    .insert(key, FileTransfer::new(file, destination));
+                let mut transfer = FileTransfer::new(file, destination);
+                if let Some(continuation) = self
+                    .parked
+                    .remove(&key)
+                    .filter(|previous| previous.routes == routes)
+                {
+                    transfer.candidate_cursor = continuation.candidate_cursor;
+                    transfer.legacy = continuation.legacy;
+                    transfer.sticker_proof_attempted = continuation.sticker_proof_attempted;
+                    transfer.identity_offered = continuation.identity_offered;
+                }
+                self.transfers.insert(key, transfer);
             }
         }
     }
 
     fn advance(&mut self, node: &std::sync::Arc<Node>) {
+        self.advance_at(node, std::time::Instant::now());
+    }
+
+    fn advance_at(&mut self, node: &std::sync::Arc<Node>, now: std::time::Instant) {
         // Each exchange owns its socket until a clean protocol boundary. Slow
         // peers consume one bounded worker, never the serial delivery loop.
         let mut keys = self.transfers.keys().copied().collect::<Vec<_>>();
@@ -368,10 +522,23 @@ impl FileDeliveryScheduler {
             if dial && sockets >= MAX_FILE_SOCKETS {
                 continue;
             }
+            self.active_cursor = Some(key);
+            let Some(work) = node.runtime_work.admit() else {
+                return;
+            };
+            let routes = node.file_retry_routes(&transfer.file, &transfer.destination);
+            let Some((token, evicted)) = self.retries.reserve(key, routes.clone(), now) else {
+                // Cooled/capacity-deferred keys retain durable intent but own no
+                // transfer or socket slot. The scan cursor already passed them.
+                self.transfers.remove(&key);
+                continue;
+            };
+            if let Some(evicted) = evicted {
+                self.parked.remove(&evicted);
+            }
             if dial {
                 sockets += 1;
             }
-            self.active_cursor = Some(key);
             self.running_sockets.insert(key);
             #[cfg(test)]
             node.file_transfer_peak.fetch_max(
@@ -382,15 +549,20 @@ impl FileDeliveryScheduler {
             let file = transfer.file.clone();
             let destination = transfer.destination.clone();
             let node = node.clone();
-            let Some(work) = node.runtime_work.admit() else {
-                return;
-            };
             self.workers.spawn(work.track(async move {
                 let mut transfers = std::collections::HashMap::from([(key, transfer)]);
-                let complete = node
-                    .retry_file_step(&file, &destination, &mut transfers)
+                let outcome = node
+                    .retry_file_step_outcome(&file, &destination, &mut transfers)
                     .await;
-                (key, transfers, complete)
+                (
+                    key,
+                    transfers,
+                    FileStepCompletion {
+                        token,
+                        routes,
+                        outcome,
+                    },
+                )
             }));
         }
     }
@@ -401,16 +573,29 @@ impl FileDeliveryScheduler {
         result: Result<FileStepResult, tokio::task::JoinError>,
         diagnostic: &mut DeliveryDiagnosticThrottle,
     ) {
-        let Ok((key, mut transfers, complete)) = result else {
+        self.finish_at(node, result, diagnostic, std::time::Instant::now());
+    }
+
+    fn finish_at(
+        &mut self,
+        node: &Node,
+        result: Result<FileStepResult, tokio::task::JoinError>,
+        diagnostic: &mut DeliveryDiagnosticThrottle,
+        now: std::time::Instant,
+    ) {
+        let Ok((key, mut transfers, completion)) = result else {
             // Never retain reservations after a panicked child; drop cancels the
             // other workers and the owning accept loop retires on this failure.
             self.running_sockets.clear();
             self.workers.abort_all();
             return;
         };
+        if !self.retries.owns(&key, completion.token) {
+            return;
+        }
         self.running_sockets.remove(&key);
-        if complete {
-            node.delivery_notify.notify_one();
+        let mut failed = matches!(completion.outcome, FileStepOutcome::Failed);
+        if completion.outcome.complete() {
             if node
                 .delivery
                 .lock()
@@ -419,13 +604,34 @@ impl FileDeliveryScheduler {
                 .is_err()
             {
                 diagnostic.warn_if_due();
+                failed = true;
             } else {
+                node.delivery_notify.notify_one();
                 node.outgoing_file_acks
                     .lock()
                     .expect("outgoing file progress lock not poisoned")
                     .remove(&key);
                 node.note_file_change();
             }
+        }
+        self.retries.complete(&key, completion.token, !failed, now);
+        if failed {
+            // Preserve only scalar candidate traversal outside active capacity.
+            // Dropping the transfer closes any remaining observation-failure socket.
+            if let Some(transfer) = transfers.remove(&key) {
+                self.parked.insert(
+                    key,
+                    FileContinuation {
+                        routes: completion.routes,
+                        candidate_cursor: transfer.candidate_cursor,
+                        legacy: transfer.legacy,
+                        sticker_proof_attempted: transfer.sticker_proof_attempted,
+                        identity_offered: transfer.identity_offered,
+                    },
+                );
+            }
+            // Failure never manufactures an immediate wake.
+            return;
         }
         if let Some(transfer) = transfers.remove(&key) {
             let delay = match transfer.phase {
@@ -504,14 +710,24 @@ impl Node {
     /// Hosts populate this from an explicit safety-number verification decision;
     /// incoming pushes remain available to other authenticated peers.
     pub fn replace_verified_dm_pull_peers(&self, fingerprints: Vec<String>) {
-        *self
-            .verified_dm_pull_peers
-            .lock()
-            .expect("verified DM pull mutex not poisoned") = fingerprints
+        let next = fingerprints
             .into_iter()
             .map(|fingerprint| fingerprint.to_ascii_lowercase())
             .collect();
+        {
+            let mut current = self
+                .verified_dm_pull_peers
+                .lock()
+                .expect("verified DM pull mutex not poisoned");
+            if *current == next {
+                return;
+            }
+            *current = next;
+            self.delivery_demand_generation
+                .fetch_add(1, Ordering::Release);
+        }
         self.delivery_notify.notify_one();
+        self.post_office_receive_notify.notify_one();
     }
 
     pub(in crate::node) fn verified_dm_pull_peer(&self, fingerprint: &str) -> bool {
@@ -530,6 +746,32 @@ impl Node {
 
     /// Authorize one immutable outgoing journal entry, then attempt local replay.
     /// Once the journal accepts it, replay failure must not become a retryable send.
+    /// Call only after durable acceptance of new work, never after an unchanged
+    /// projection, successful poll or ordinary completion notification.
+    pub(in crate::node) fn note_delivery_demand(&self) {
+        self.delivery_demand_generation
+            .fetch_add(1, Ordering::Release);
+        self.delivery_notify.notify_one();
+    }
+
+    /// The delivery guard serializes this identity check with WAL acceptance.
+    /// Retrying an already accepted pending intent must not create fresh demand.
+    pub(in crate::node) fn begin_delivery_intent(
+        &self,
+        store: &mut DeliveryStore,
+        transaction: DeliveryTransaction,
+    ) -> Result<EventId, LogError> {
+        let already_pending = store
+            .pending_transactions()
+            .iter()
+            .any(|pending| pending.id() == transaction.id());
+        let id = store.begin(transaction)?;
+        if !already_pending {
+            self.note_delivery_demand();
+        }
+        Ok(id)
+    }
+
     pub(in crate::node) fn commit_outgoing_transaction(
         &self,
         store: &mut DeliveryStore,
@@ -542,7 +784,8 @@ impl Node {
             .expect("log lock")
             .sync()
             .map_err(NodeError::Log)?;
-        store.begin(transaction).map_err(NodeError::Log)?;
+        self.begin_delivery_intent(store, transaction)
+            .map_err(NodeError::Log)?;
         let recovered = match self.recover_delivery(store) {
             Ok(()) => true,
             Err(error) => {
@@ -550,7 +793,6 @@ impl Node {
                 false
             }
         };
-        self.delivery_notify.notify_one();
         Ok(recovered)
     }
 
@@ -708,15 +950,17 @@ impl Node {
                 owner_account: self.account_id(),
             },
         );
-        store.begin(DeliveryTransaction::IncomingManifest {
-            sender: peer,
-            original: Box::new(event.clone()),
-            received: Box::new(received),
-            receipt,
-            file,
-        })?;
+        self.begin_delivery_intent(
+            &mut store,
+            DeliveryTransaction::IncomingManifest {
+                sender: peer,
+                original: Box::new(event.clone()),
+                received: Box::new(received),
+                receipt,
+                file,
+            },
+        )?;
         self.recover_delivery(&mut store)?;
-        self.delivery_notify.notify_one();
         Ok(())
     }
     pub(in crate::node) fn persist_account_adoption<T>(
@@ -1041,16 +1285,18 @@ impl Node {
             self.reopen_personal_after_live(&peer_account)
                 .map_err(delivery_log_error)?;
         }
-        store.begin(DeliveryTransaction::Incoming {
-            sender: peer.clone(),
-            original: Box::new(event.clone()),
-            ratchet: prepared,
-            received: Box::new(received),
-            receipt,
-        })?;
+        self.begin_delivery_intent(
+            store,
+            DeliveryTransaction::Incoming {
+                sender: peer.clone(),
+                original: Box::new(event.clone()),
+                ratchet: prepared,
+                received: Box::new(received),
+                receipt,
+            },
+        )?;
         drop(policy);
         self.recover_delivery(store)?;
-        self.delivery_notify.notify_one();
         Ok(Some(()))
     }
     pub(in crate::node) fn recover_delivery(
@@ -1575,11 +1821,30 @@ impl Node {
         proof: &crate::discovery::Announce,
         store: &mut DeliveryStore,
     ) {
+        #[cfg(test)]
+        self.trace_account_client(&proof.public(), || "delivery_receipt_open".into());
         let Some(opened) =
             super::delivery_receipt::open_receipt(&self.identity, &self.account_id(), proof, event)
         else {
             return;
         };
+        if store
+            .completed_delivery(opened.logical_id())
+            .is_some_and(|completed| opened.irrelevant_to_completed(completed))
+        {
+            // The exact delivery guard also serializes cancel/edit. A fully
+            // opened but now irrelevant control retires only receive work.
+            if self
+                .log
+                .lock()
+                .expect("log lock not poisoned")
+                .append_durable(event.clone())
+                .is_ok()
+            {
+                self.retire_retained_delivery_control(event.id);
+            }
+            return;
+        }
         let canonical = store
             .logical_for_original(opened.original_event_id())
             .unwrap_or_else(|| opened.logical_id());
@@ -1613,11 +1878,28 @@ impl Node {
             )
             .is_ok()
         {
+            self.retire_retained_delivery_control(event.id);
             self.delivery_observations
                 .lock()
                 .expect("delivery observations lock not poisoned")
                 .retain(|logical, _| logical != authenticated.logical_id());
             self.delivery_status_notify.notify_waiters();
+        }
+    }
+
+    /// Call only after the exact signed control is durably retained and its
+    /// handling has reached a terminal result under the delivery guard.
+    fn retire_retained_delivery_control(&self, id: EventId) {
+        let result = self
+            .log
+            .lock()
+            .expect("log lock not poisoned")
+            .repository()
+            .and_then(|repository| repository.complete_control(id));
+        // Failed retirement stays pending. Completed irrelevance permits safe
+        // later recovery even after the original destination was retired.
+        if let Err(error) = result {
+            log::warn!("delivery receipt work retirement deferred: {error}");
         }
     }
 
@@ -1872,10 +2154,11 @@ impl Node {
                             }
                             let exchange = async {
                                 let uploaded = self
-                                    .opaque_relay_round(
+                                    .opaque_history_publication_round_for(
                                         &mut channel,
                                         &destination.device,
-                                        Some(destination.event.conversation_id),
+                                        destination.event.conversation_id,
+                                        Some(destination.event.id),
                                     )
                                     .await?;
                                 let Some((_, outer_id)) = uploaded
@@ -1998,6 +2281,7 @@ impl Node {
 
     fn control_routes(&self, peer: &PublicIdentity) -> ControlRoutes {
         let roster = self.roster.lock().expect("roster mutex not poisoned");
+        let mut relays = std::collections::BTreeSet::new();
         let mut endpoints = std::collections::BTreeSet::new();
         let mut publicly_observed = false;
         if let Some(record) = roster
@@ -2022,13 +2306,16 @@ impl Node {
             .load(std::sync::atomic::Ordering::SeqCst)
         {
             for relay in self.post_office_candidates_for(&roster, peer) {
-                endpoints.insert((relay.public.user_id(), relay.addr));
+                relays.insert(RelayRouteInput::observe(&relay));
             }
         }
         ControlRoutes {
             peer: peer.clone(),
             endpoints,
+            relays,
             publicly_observed,
+            policy_generation: self.privacy.generation.load(Ordering::Acquire),
+            demand_generation: self.delivery_demand_generation.load(Ordering::Acquire),
         }
     }
 
@@ -2094,7 +2381,10 @@ impl Node {
     ) {
         let changed: Vec<_> = active
             .iter()
-            .filter(|(_, routes)| self.control_routes(&routes.peer).endpoints != routes.endpoints)
+            .filter(|(_, routes)| {
+                let current = self.control_routes(&routes.peer);
+                current.endpoints != routes.endpoints || current.relays != routes.relays
+            })
             .map(|(key, _)| key.clone())
             .collect();
         for key in changed {
@@ -2131,6 +2421,9 @@ impl Node {
         let mut active: std::collections::HashMap<ControlWork, ControlRoutes> =
             std::collections::HashMap::new();
         let mut retries = super::delivery_retry::RetrySchedule::default();
+        // Custody qualifies one exact destination, whereas failures pace the
+        // peer lane. One held event must not park another queued event.
+        let mut quiet_destinations = super::delivery_retry::RetrySchedule::default();
         let mut network = self.network_changes.subscribe();
         loop {
             tokio::select! {
@@ -2150,12 +2443,15 @@ impl Node {
                     file_scheduler.running_sockets.clear();
                     file_scheduler.transfers.clear();
                     file_scheduler.relay_cooldowns.clear();
+                    file_scheduler.retries.clear();
+                    file_scheduler.parked.clear();
                     self.relay_retry_after.lock().expect("relay retry lock not poisoned").clear();
                     controls.shutdown().await;
                     self.clear_delivery_observations();
                     control_owners.clear();
                     active.clear();
                     retries.clear();
+                    quiet_destinations.clear();
                     self.channel_recovery_notify.notify_one();
                     self.account_sync_notify.notify_one();
                     self.bridge_notify.notify_one();
@@ -2166,7 +2462,27 @@ impl Node {
                         Some(Ok((task, (key, persistence_failed, progress, observation)))) => {
                             if control_owners.finished(task).as_ref() == Some(&key)
                                 && let Some(routes) = active.remove(&key) {
-                                retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
+                                if matches!(key, ControlWork::Pull(_)) {
+                                    let reason = match progress {
+                                        Reconciliation::Advanced => super::work_observation::reason::PULL_ADVANCED,
+                                        Reconciliation::Quiet => super::work_observation::reason::PULL_QUIET,
+                                        Reconciliation::Deferred => super::work_observation::reason::PULL_DEFERRED,
+                                    };
+                                    self.observe_mailbox_work(reason, None);
+                                }
+                                let now = std::time::Instant::now();
+                                let input = routes.retry_routes();
+                                if let (Reconciliation::Quiet, ControlWork::Destination(event)) = (progress, &key) {
+                                    quiet_destinations.settled(
+                                        (*event, routes.peer.ed25519_pub, routes.peer.x25519_pub),
+                                        input.clone(), QUIET_REPAIR_INTERVAL, now,
+                                    );
+                                    // Release the peer after its ordinary short
+                                    // pacing turn; only this event owns quietness.
+                                    retries.settled(key.retry_key(&routes.peer), input, Duration::from_millis(500), now);
+                                } else {
+                                    progress.schedule(&mut retries, key.retry_key(&routes.peer), input, now);
+                                }
                                 if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
                             }
                             if persistence_failed {
@@ -2219,27 +2535,10 @@ impl Node {
                     let next = destination_capacity
                         .then(|| store.next_destination(destination_cursor))
                         .flatten();
-                    let destination = if let Some((id, reference)) = next {
-                        let event = node
-                            .log
-                            .lock()
-                            .expect("log lock not poisoned")
-                            .get(&reference.event_id)?;
-                        let Some(event) = event else {
-                            return Ok::<_, crate::eventlog::LogError>(None);
-                        };
-                        Some((
-                            id,
-                            DeliveryDestination {
-                                device: reference.device,
-                                account: reference.account,
-                                event,
-                                receipt_eligible: reference.receipt_eligible,
-                            },
-                        ))
-                    } else {
-                        None
-                    };
+                    // Scheduling needs only the durable reference. Loading its
+                    // ciphertext here would hydrate every parked destination on
+                    // each scan before the owner checks its retry deadline.
+                    let destination = next;
                     let receipt = if receipt_capacity {
                         store
                             .retry_receipts_after(receipt_cursor, 1)
@@ -2250,7 +2549,7 @@ impl Node {
                         None
                     };
                     let (files, cursor) = file_scan.read(&store);
-                    Ok(Some((destination, receipt, files, cursor)))
+                    Ok::<_, crate::eventlog::LogError>(Some((destination, receipt, files, cursor)))
                 })
                 .await
                 .map(|value| value.into_inner());
@@ -2273,8 +2572,9 @@ impl Node {
             };
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
-                let key = ControlWork::Destination(destination.event.id);
+                let key = ControlWork::Destination(destination.event_id);
                 let routes = self.control_routes(&destination.device);
+                let input = routes.retry_routes();
                 if active
                     .keys()
                     .filter(|key| matches!(key, ControlWork::Destination(_)))
@@ -2287,13 +2587,67 @@ impl Node {
                     })
                     && retries.ready(
                         &key.retry_key(&destination.device),
-                        &routes.retry_routes(),
+                        &input,
+                        std::time::Instant::now(),
+                    )
+                    && quiet_destinations.ready(
+                        &(
+                            destination.event_id,
+                            destination.device.ed25519_pub,
+                            destination.device.x25519_pub,
+                        ),
+                        &input,
                         std::time::Instant::now(),
                     )
                 {
                     let Some(work) = self.runtime_work.admit() else {
                         return;
                     };
+                    let reading = self.clone();
+                    let payload = work
+                        .spawn_blocking(move || {
+                            let event = reading
+                                .log
+                                .lock()
+                                .expect("log lock not poisoned")
+                                .get(&destination.event_id)?;
+                            Ok::<_, crate::eventlog::LogError>(event.map(|event| {
+                                DeliveryDestination {
+                                    device: destination.device,
+                                    account: destination.account,
+                                    event,
+                                    receipt_eligible: destination.receipt_eligible,
+                                }
+                            }))
+                        })
+                        .await;
+                    let destination = match payload {
+                        Ok(payload) => match payload.into_inner() {
+                            Ok(Some(destination)) => destination,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                log::warn!("delivery payload read deferred: {error}");
+                                diagnostic.warn_if_due();
+                                continue;
+                            }
+                        },
+                        Err(error) => {
+                            log::warn!("delivery payload worker failed: {error}");
+                            diagnostic.warn_if_due();
+                            continue;
+                        }
+                    };
+                    let Some(work) = self.runtime_work.admit() else {
+                        return;
+                    };
+                    // This attempt supersedes any earlier quiet observation,
+                    // including when it later fails or is cancelled. Returning
+                    // to an older route input must not revive the old hint.
+                    quiet_destinations.forget(&(
+                        destination.event.id,
+                        destination.device.ed25519_pub,
+                        destination.device.x25519_pub,
+                    ));
                     let node = self.clone();
                     // Capture the exact admitted attempt before spawning. A
                     // cancelled task may never be polled; it still owns cleanup,
@@ -2318,16 +2672,35 @@ impl Node {
                         } else {
                             (false, None)
                         };
-                        let failed = if progress {
+                        let (failed, advanced) = if progress {
                             let mut store =
                                 node.delivery.lock().expect("delivery lock not poisoned");
-                            store.completed_work(id).is_some()
-                                && store.retire_destination(id, destination.event.id).is_err()
+                            let failed = store.completed_work(id).is_some()
+                                && store.retire_destination(id, destination.event.id).is_err();
+                            // An unchanged positive remote-have proof is storage
+                            // evidence, not new queue progress. Keep awaiting the
+                            // recipient's receipt with the existing bounded backoff.
+                            let advanced =
+                                !failed && !store.contains_destination(id, destination.event.id);
+                            (failed, advanced)
                         } else {
-                            false
+                            (false, false)
+                        };
+                        let reconciliation = if failed {
+                            Reconciliation::Deferred
+                        } else if advanced {
+                            Reconciliation::Advanced
+                        } else if progress {
+                            // Positive custody with an unchanged queue is an
+                            // observed success, not a failed delivery attempt.
+                            // Keep Awaiting until the recipient's real receipt;
+                            // new demand and changed routes retain their wakes.
+                            Reconciliation::Quiet
+                        } else {
+                            Reconciliation::Deferred
                         };
                         let observation = attempt.token.take().map(|token| (token, reason));
-                        (key, failed, progress, observation)
+                        (key, failed, reconciliation, observation)
                     }));
                     control_owners.insert(owner, task);
                 }
@@ -2361,7 +2734,12 @@ impl Node {
                                 .expect("delivery lock not poisoned")
                                 .finish_receipt(receipt.conversation, receipt.original_event_id)
                                 .is_err();
-                        (key, failed, progress, None)
+                        (
+                            key,
+                            failed,
+                            Reconciliation::from_progress(progress && !failed),
+                            None,
+                        )
                     }));
                     control_owners.insert(owner, task);
                 }
@@ -2422,9 +2800,12 @@ impl Node {
         }
     }
 
-    async fn reconcile_delivery_peer(&self, peer: &crate::discovery::Announce) -> bool {
+    pub(in crate::node) async fn reconcile_delivery_peer(
+        &self,
+        peer: &crate::discovery::Announce,
+    ) -> Reconciliation {
         if !self.verified_dm_pull_peer(&peer.user_id) {
-            return false;
+            return Reconciliation::Deferred;
         }
         let conv = super::delivery_receipt::delivery_conversation_id(
             &self.identity.public(),
@@ -2436,18 +2817,18 @@ impl Node {
                 async {
                     let messages = Box::pin(self.pull_delivery_scope(peer, dm, false)).await;
                     let receipts = Box::pin(self.pull_delivery_scope(peer, conv, false)).await;
-                    messages || receipts
+                    messages.combine(receipts)
                 },
                 async {
                     let messages = Box::pin(self.pull_delivery_scope(peer, dm, true)).await;
                     let receipts = Box::pin(self.pull_delivery_scope(peer, conv, true)).await;
-                    messages || receipts
+                    messages.combine(receipts)
                 }
             );
-            direct || relay
+            direct.combine(relay)
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(Reconciliation::Deferred)
     }
 
     async fn pull_delivery_scope(
@@ -2455,7 +2836,7 @@ impl Node {
         proof: &crate::discovery::Announce,
         conv: ConversationId,
         relay: bool,
-    ) -> bool {
+    ) -> Reconciliation {
         let current = || {
             self.verified_dm_pull_peer(&proof.user_id)
                 && self.historical_author(&proof.ed25519_pub).is_some_and(|p| {
@@ -2466,7 +2847,7 @@ impl Node {
                     .load(std::sync::atomic::Ordering::Acquire)
         };
         if !current() {
-            return false;
+            return Reconciliation::Deferred;
         }
         let peers = if relay {
             let roster = self.roster.lock().expect("roster lock not poisoned");
@@ -2481,23 +2862,29 @@ impl Node {
         } else {
             peers
         };
-        let mut completed = false;
+        let mut completed = if relay || !peers.is_empty() {
+            Reconciliation::Quiet
+        } else {
+            Reconciliation::Deferred
+        };
         for peer in peers {
             let started = std::time::Instant::now();
             if relay && !self.relay_receive_allowed(&peer.public) {
                 continue;
             }
             if !relay && (peer.public != proof.public() || peer.account_id != proof.account_id()) {
+                completed = completed.combine(Reconciliation::Deferred);
                 continue;
             }
             if relay && !self.relay_retry_due(&peer.public) {
+                completed = completed.combine(Reconciliation::Deferred);
                 continue;
             }
-            let success = self
+            let result = self
                 .adaptive_control_timeout(&peer.public, async {
                     let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &peer.public).await
                     else {
-                        return false;
+                        return Err(SessionError::UnexpectedMessage);
                     };
                     if !current()
                         || (relay && !self.relay_receive_allowed(&peer.public))
@@ -2505,32 +2892,50 @@ impl Node {
                             .peer_announcement()
                             .is_some_and(|p| p.account_id() != peer.account_id)
                     {
-                        return false;
+                        return Err(SessionError::UnexpectedMessage);
                     }
-                    let success = if relay {
+                    let advanced = if relay {
+                        // Upload confirmations are not incoming progress. A bounded
+                        // scalar source observation also sees accepted relay controls.
+                        let before = self
+                            .log
+                            .lock()
+                            .expect("log lock")
+                            .repository()?
+                            .source_revision()?;
                         self.opaque_relay_round(&mut channel, &proof.public(), None)
-                            .await
-                            .is_ok()
+                            .await?;
+                        let after = self
+                            .log
+                            .lock()
+                            .expect("log lock")
+                            .repository()?
+                            .source_revision()?;
+                        before != after
                     } else {
                         let store = self.pull_sync_store(channel.peer_identity());
                         super::session::request_round_paged(&mut channel, &store, conv)
-                            .await
-                            .is_ok()
+                            .await?
+                            .applied
+                            > 0
                     };
-                    if success {
-                        self.observe_control_exchange(&channel, started);
-                        self.recycle_sync_channel(channel);
-                        self.emit_new_messages(conv);
-                        self.process_file_events(conv);
-                    }
-                    success
+                    // A quiet success still retires the framed exchange and retries
+                    // local projections. It never certifies new data or custody.
+                    self.observe_control_exchange(&channel, started);
+                    self.recycle_sync_channel(channel);
+                    self.emit_new_messages(conv);
+                    self.process_file_events(conv);
+                    Ok::<_, SessionError>(advanced)
                 })
-                .await
-                .unwrap_or(false);
+                .await;
             if relay {
-                self.record_relay_attempt(&peer.public, success);
+                self.record_relay_attempt(&peer.public, matches!(result, Some(Ok(_))));
             }
-            completed |= success;
+            completed = completed.combine(match result {
+                Some(Ok(true)) => Reconciliation::Advanced,
+                Some(Ok(false)) => Reconciliation::Quiet,
+                _ => Reconciliation::Deferred,
+            });
         }
         completed
     }
@@ -2659,10 +3064,12 @@ impl Node {
                 "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={} budget_ms={}",
                 direct_elapsed.as_millis(), relay_elapsed.as_millis(), held, relay_held, budget.as_millis());
         }
-        let progress = held || relay_held;
+        // This return value is remote storage evidence. The scheduling owner
+        // separately checks whether durable destination work actually advanced.
+        let held = held || relay_held;
         (
-            progress,
-            if progress {
+            held,
+            if held {
                 None
             } else if direct_timeout || relay_timeout {
                 Some(DeliveryRecoveryReason::AttemptTimedOut)
@@ -2770,7 +3177,7 @@ impl Node {
     }
 
     async fn retry_file_destination(
-        &self,
+        self: &Arc<Self>,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
     ) -> bool {
@@ -2816,34 +3223,104 @@ impl Node {
             }
     }
 
-    pub(in crate::node) async fn retry_file_step(
+    fn file_retry_routes(
         &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+    ) -> FileRoutes {
+        let current = self.file_destination_current(file, destination);
+        let custody = self.file_relay_custody_current(file, destination);
+        let binding = &destination.binding;
+        let mut relay_inputs = std::collections::BTreeSet::new();
+        let mut endpoints = std::collections::BTreeSet::new();
+        if current
+            && let Some(peer) = self
+                .routing_peer(&binding.device.user_id())
+                .filter(|peer| peer.public == binding.device && peer.account_id == binding.account)
+        {
+            endpoints.insert((
+                false,
+                peer.public.user_id(),
+                peer.account_id.clone(),
+                peer.addr,
+            ));
+            endpoints.extend(
+                peer.routes
+                    .iter()
+                    .filter(|route| {
+                        route.source != crate::discovery::roster::RouteSource::PostOffice
+                    })
+                    .map(|route| {
+                        (
+                            false,
+                            peer.public.user_id(),
+                            peer.account_id.clone(),
+                            route.addr,
+                        )
+                    }),
+            );
+        }
+        if custody {
+            let relays = {
+                let roster = self.roster.lock().expect("roster lock not poisoned");
+                self.post_office_candidates_for(&roster, &binding.device)
+            };
+            relay_inputs.extend(
+                relays
+                    .into_iter()
+                    .filter(|peer| self.relay_send_allowed(&peer.public))
+                    .map(|peer| RelayRouteInput::observe(&peer)),
+            );
+        }
+        FileRoutes {
+            relays: relay_inputs,
+            policy_generation: self.privacy.generation.load(Ordering::Acquire),
+            endpoints,
+            current,
+            custody,
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) async fn retry_file_step(
+        self: &Arc<Self>,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
         transfers: &mut std::collections::HashMap<(EventId, EventId), FileTransfer>,
     ) -> bool {
+        self.retry_file_step_outcome(file, destination, transfers)
+            .await
+            .complete()
+    }
+
+    async fn retry_file_step_outcome(
+        self: &Arc<Self>,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+        transfers: &mut std::collections::HashMap<(EventId, EventId), FileTransfer>,
+    ) -> FileStepOutcome {
         self.prune_file_transfers(transfers);
         let key = (file.id, destination.binding.event_id);
         if !self.file_destination_current(file, destination) {
             transfers.remove(&key);
-            return false;
+            return FileStepOutcome::Clean(false);
         }
         match self.recipient_completed_file(file, destination) {
             Ok(true) => {
                 transfers.remove(&key);
-                return true;
+                return FileStepOutcome::Clean(true);
             }
             Ok(false) => {}
             Err(error) => {
                 log::warn!("file completion observation deferred: {error}");
-                return false;
+                return FileStepOutcome::Failed;
             }
         }
         if !transfers.contains_key(&key) {
             if transfers.len() == MAX_FILE_TRANSFERS {
                 // The worker admits only available slots; standalone callers
                 // leave excess work durable for the next scheduled turn.
-                return false;
+                return FileStepOutcome::Clean(false);
             }
             transfers.insert(key, FileTransfer::new(file.clone(), destination.clone()));
         }
@@ -2862,7 +3339,7 @@ impl Node {
                 .count()
                 >= MAX_FILE_SOCKETS
         {
-            return false;
+            return FileStepOutcome::Clean(false);
         }
         let transfer = transfers.get_mut(&key).unwrap();
         // Standalone callers may resume a clean consent boundary directly;
@@ -2914,9 +3391,9 @@ impl Node {
                 {
                     self.recycle_sync_channel(channel);
                 }
-                true
+                FileStepOutcome::Clean(true)
             }
-            Ok(Ok(false)) => false,
+            Ok(Ok(false)) => FileStepOutcome::Clean(false),
             _ => {
                 #[cfg(test)]
                 eprintln!(
@@ -2936,7 +3413,7 @@ impl Node {
                 if transfer.candidate_cursor >= transfer.candidate_count {
                     transfers.remove(&key);
                 }
-                false
+                FileStepOutcome::Failed
             }
         }
     }
@@ -2980,7 +3457,7 @@ impl Node {
     }
 
     async fn advance_file_transfer(
-        &self,
+        self: &Arc<Self>,
         transfer: &mut FileTransfer,
     ) -> Result<bool, SessionError> {
         let file = &transfer.file;
@@ -3054,7 +3531,13 @@ impl Node {
                     &self.identity.public(),
                     &binding.device,
                 );
-                if transfer.sync.step(channel, &store, conversation).await? {
+                let reception = self
+                    .request_reception_scope(&store, channel)
+                    .ok_or(SessionError::UnexpectedMessage)?;
+                let result = transfer.sync.step(channel, &store, conversation).await;
+                self.dispatch_received_sync_work(&store);
+                drop(reception);
+                if result? {
                     transfer.sync = super::session::SyncProgress::default();
                     transfer.phase = if transfer.legacy {
                         FilePhase::Chunks
@@ -3337,12 +3820,25 @@ impl Node {
         if complete {
             if chunks {
                 let final_chunk = file.final_chunk.ok_or(SessionError::UnexpectedMessage)?;
-                let outer = opaque
-                    .uploaded()
-                    .iter()
-                    .find(|(inner, _)| *inner == final_chunk)
-                    .map(|(_, outer)| *outer)
-                    .ok_or(SessionError::NoProgress)?;
+                let bridge = self.bridge_generation.load(Ordering::SeqCst);
+                let outer = self
+                    .resolve_opaque_confirmation(opaque, final_chunk, &|| {
+                        current()
+                            && channel.io_admitted()
+                            && (!federated
+                                || (self.bridge_directory_allowed()
+                                    && self.bridge_generation.load(Ordering::SeqCst) == bridge))
+                    })
+                    .await?;
+                if !current()
+                    || !channel.io_admitted()
+                    || (federated
+                        && (!self.bridge_directory_allowed()
+                            || self.bridge_generation.load(Ordering::SeqCst) != bridge))
+                {
+                    return Err(SessionError::UnexpectedMessage);
+                }
+                let outer = outer.ok_or(SessionError::NoProgress)?;
                 let mailbox = if federated {
                     RelayMailbox::federated(&self.identity, &binding.device)
                 } else {
@@ -3371,8 +3867,23 @@ impl Node {
         Ok(false)
     }
 
+    async fn request_file_manifest_with_reception(
+        self: &Arc<Self>,
+        channel: &mut crate::transport::SecureChannel<tokio::net::TcpStream>,
+        store: &std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'_>>,
+        conversation: ConversationId,
+    ) -> Result<(), SessionError> {
+        let reception = self
+            .request_reception_scope(store, channel)
+            .ok_or(SessionError::UnexpectedMessage)?;
+        let result = super::session::request_round_paged(channel, store, conversation).await;
+        self.dispatch_received_sync_work(store);
+        drop(reception);
+        result.map(|_| ())
+    }
+
     async fn retry_file_destination_inner(
-        &self,
+        self: &Arc<Self>,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
         direct: bool,
@@ -3452,7 +3963,8 @@ impl Node {
                 let store = self.sync_store(channel.peer_identity());
                 // Publish the manifest first so private recipients/relays can
                 // durably reconstruct chunk scope before any chunk disclosure.
-                if super::session::request_round_paged(&mut channel, &store, manifest_conv)
+                if self
+                    .request_file_manifest_with_reception(&mut channel, &store, manifest_conv)
                     .await
                     .is_err()
                 {
@@ -3528,13 +4040,14 @@ impl Node {
                                 return false;
                             };
                             channel = reconnected;
-                            if super::session::request_round_paged(
-                                &mut channel,
-                                &store,
-                                manifest_conv,
-                            )
-                            .await
-                            .is_err()
+                            if self
+                                .request_file_manifest_with_reception(
+                                    &mut channel,
+                                    &store,
+                                    manifest_conv,
+                                )
+                                .await
+                                .is_err()
                             {
                                 return false;
                             }
@@ -3576,13 +4089,14 @@ impl Node {
                             {
                                 return false;
                             }
-                            if super::session::request_round_paged(
-                                &mut channel,
-                                &store,
-                                manifest_conv,
-                            )
-                            .await
-                            .is_err()
+                            if self
+                                .request_file_manifest_with_reception(
+                                    &mut channel,
+                                    &store,
+                                    manifest_conv,
+                                )
+                                .await
+                                .is_err()
                             {
                                 return false;
                             }
@@ -3638,7 +4152,7 @@ impl Node {
         false
     }
 
-    pub(in crate::node) async fn flush_file_delivery(&self, id: EventId) {
+    pub(in crate::node) async fn flush_file_delivery(self: &Arc<Self>, id: EventId) {
         let file = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
             if let Err(error) = self.recover_delivery(&mut store) {
@@ -3679,6 +4193,329 @@ fn delivery_log_error(error: NodeError) -> LogError {
 
 #[cfg(test)]
 mod diagnostic_tests {
+    #[test]
+    fn quiet_pull_deadline_and_changed_admission_do_not_requeue_as_progress() {
+        use super::Reconciliation::{Advanced, Deferred, Quiet};
+        use std::time::{Duration, Instant};
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        let now = Instant::now();
+        Quiet.schedule(&mut retries, "peer", 1, now);
+        assert!(!retries.ready(&"peer", &1, now + Duration::from_millis(500)));
+        assert!(!retries.ready(&"peer", &1, now + Duration::from_secs(59)));
+        assert!(
+            !retries.ready(&"peer", &1, now + Duration::from_secs(299)),
+            "unchanged successful reconciliation needs only sparse five-minute repair"
+        );
+        assert!(retries.ready(&"peer", &1, now + super::QUIET_REPAIR_INTERVAL));
+        assert!(
+            retries.ready(&"peer", &2, now),
+            "new route or verified policy wakes immediately"
+        );
+        // Capture the admitted stamp: a completion must not label old work with
+        // a newer route and suppress its replacement.
+        Quiet.schedule(&mut retries, "peer", 1, now);
+        assert!(retries.ready(&"peer", &2, now));
+        Deferred.schedule(&mut retries, "failed", 1, now);
+        assert!(!retries.ready(&"failed", &1, now + Duration::from_millis(500)));
+        assert!(retries.ready(&"failed", &1, now + Duration::from_secs(2)));
+        Advanced.schedule(&mut retries, "peer", 1, now);
+        assert!(retries.ready(&"peer", &1, now + Duration::from_millis(500)));
+        assert_eq!(Quiet.combine(Deferred), Deferred);
+        assert_eq!(Advanced.combine(Deferred), Advanced);
+    }
+
+    #[test]
+    fn refreshing_same_verified_pull_set_does_not_invalidate_quiet_deadline() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let directory = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&remote, &Account::generate(), "peer", 9);
+        let (node, _, _) = node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let peer = proof.public();
+        node.replace_verified_dm_pull_peers(vec![proof.user_id.clone()]);
+        let admitted = node.control_routes(&peer).retry_routes();
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        let now = std::time::Instant::now();
+        super::Reconciliation::Quiet.schedule(&mut retries, "peer", admitted.clone(), now);
+        for _ in 0..16 {
+            node.replace_verified_dm_pull_peers(vec![proof.user_id.to_ascii_uppercase()]);
+        }
+        let refreshed = node.control_routes(&peer).retry_routes();
+        assert_eq!(admitted, refreshed);
+        assert!(!retries.ready(&"peer", &refreshed, now));
+        node.replace_verified_dm_pull_peers(Vec::new());
+        node.replace_verified_dm_pull_peers(vec![proof.user_id.clone()]);
+        assert!(
+            retries.ready(&"peer", &node.control_routes(&peer).retry_routes(), now),
+            "reverification must wake retained pull work"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_known_route_preference_renewals_preserve_owner_and_retry_deadline() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Peer",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let relay_identity = DeviceIdentity::generate();
+        let relay = Announce::new_post_office(&relay_identity, "Relay", 12345);
+        for ip in ["127.0.0.1", "127.0.0.2"] {
+            node.roster
+                .lock()
+                .unwrap()
+                .update(&relay, ip.parse().unwrap(), &node.user_id());
+        }
+        let initial = node.control_routes(&peer.public());
+        let input = initial.retry_routes();
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        let now = std::time::Instant::now();
+        retries.settled(
+            "peer",
+            input.clone(),
+            std::time::Duration::from_secs(60),
+            now,
+        );
+        let key = super::ControlWork::Pull(peer.user_id.clone());
+        let mut tasks = tokio::task::JoinSet::new();
+        let task = tasks.spawn(std::future::pending::<()>());
+        let id = task.id();
+        let mut owners = super::ControlTaskOwners::default();
+        owners.insert(key.clone(), task);
+        let mut active = std::collections::HashMap::from([(key.clone(), initial)]);
+        let baseline = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&relay.user_id)
+            .unwrap()
+            .scheduling_endpoints();
+        let mut preferred = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&relay.user_id)
+            .unwrap()
+            .addr;
+        for index in 0..8 {
+            let ip = if index % 2 == 0 {
+                "127.0.0.1"
+            } else {
+                "127.0.0.2"
+            };
+            {
+                let mut roster = node.roster.lock().unwrap();
+                roster.update(&relay, ip.parse().unwrap(), &node.user_id());
+                let record = roster.get(&relay.user_id).unwrap();
+                assert_eq!(record.scheduling_endpoints(), baseline);
+                assert_ne!(record.addr, preferred);
+                preferred = record.addr;
+            }
+            node.cancel_changed_delivery_routes(&mut active, &mut owners);
+            assert!(
+                active.contains_key(&key),
+                "known route preference must not cancel current control owner"
+            );
+            assert_eq!(owners.current[&key].id(), id);
+            assert!(!owners.current[&key].is_finished());
+            let refreshed = node.control_routes(&peer.public()).retry_routes();
+            assert_eq!(refreshed, input);
+            assert!(
+                !retries.ready(&"peer", &refreshed, now),
+                "known route preference must preserve future quiet deadline"
+            );
+        }
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&relay, "127.0.0.3".parse().unwrap(), &node.user_id());
+        assert!(retries.ready(
+            &"peer",
+            &node.control_routes(&peer.public()).retry_routes(),
+            now
+        ));
+        node.cancel_changed_delivery_routes(&mut active, &mut owners);
+        assert!(
+            !active.contains_key(&key),
+            "new eligible endpoint must retire old control owner"
+        );
+        assert!(!owners.current.contains_key(&key));
+        let before_policy = node.control_routes(&peer.public()).retry_routes();
+        node.privacy
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(
+            node.control_routes(&peer.public()).retry_routes(),
+            before_policy
+        );
+        let before_role = node.control_routes(&peer.public()).retry_routes();
+        let changed = Announce::new(&relay_identity, "Relay", relay.tcp_port);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&changed, "127.0.0.1".parse().unwrap(), &node.user_id());
+        assert_ne!(
+            node.control_routes(&peer.public()).retry_routes(),
+            before_role
+        );
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn file_known_route_preference_renewals_preserve_parked_continuation_and_retry_deadline()
+    {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let peer = Announce::new_with_account(&DeviceIdentity::generate(), &account, "Peer", 9);
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let relay_identity = DeviceIdentity::generate();
+        let relay = Announce::new_post_office(&relay_identity, "Relay", 12345);
+        for ip in ["127.0.0.1", "127.0.0.2"] {
+            node.roster
+                .lock()
+                .unwrap()
+                .update(&relay, ip.parse().unwrap(), &node.user_id());
+        }
+        let path = dir.path().join("retained-candidate.bin");
+        std::fs::write(&path, b"retained candidate traversal").unwrap();
+        let (logical, _) = node
+            .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = node
+            .delivery
+            .lock()
+            .unwrap()
+            .file_card(logical)
+            .unwrap()
+            .clone();
+        let destination = card.destinations[0].clone();
+        let key = (logical, destination.binding.event_id);
+        let routes = node.file_retry_routes(&card, &destination);
+        assert!(routes.current && routes.custody);
+        let now = std::time::Instant::now();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), now)
+            .unwrap()
+            .0;
+        let mut transfer = super::FileTransfer::new(card.clone(), destination.clone());
+        transfer.candidate_cursor = 1;
+        transfer.candidate_count = 2;
+        transfer.identity_offered = true;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                std::collections::HashMap::from([(key, transfer)]),
+                super::FileStepCompletion {
+                    token,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Failed,
+                },
+            )),
+            &mut diagnostic,
+            now,
+        );
+        let baseline = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&relay.user_id)
+            .unwrap()
+            .scheduling_endpoints();
+        let mut preferred = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&relay.user_id)
+            .unwrap()
+            .addr;
+        for index in 0..8 {
+            let ip = if index % 2 == 0 {
+                "127.0.0.1"
+            } else {
+                "127.0.0.2"
+            };
+            {
+                let mut roster = node.roster.lock().unwrap();
+                roster.update(&relay, ip.parse().unwrap(), &node.user_id());
+                let record = roster.get(&relay.user_id).unwrap();
+                assert_eq!(record.scheduling_endpoints(), baseline);
+                assert_ne!(record.addr, preferred);
+                preferred = record.addr;
+            }
+            scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, now);
+            assert!(
+                scheduler.transfers.is_empty(),
+                "known relay preference must not bypass file failure deadline"
+            );
+            assert_eq!(scheduler.parked[&key].candidate_cursor, 1);
+            assert!(scheduler.parked[&key].identity_offered);
+            assert_eq!(
+                scheduler.parked[&key].routes,
+                node.file_retry_routes(&card, &destination)
+            );
+        }
+        scheduler.admit_at(
+            &node,
+            vec![(card.clone(), destination.clone())],
+            None,
+            now + std::time::Duration::from_secs(2),
+        );
+        assert_eq!(scheduler.transfers[&key].candidate_cursor, 1);
+        assert!(scheduler.transfers[&key].identity_offered);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&relay, "127.0.0.3".parse().unwrap(), &node.user_id());
+        assert_ne!(
+            node.file_retry_routes(&card, &destination),
+            routes,
+            "new relay endpoint must invalidate old continuation input"
+        );
+        let before_policy = node.file_retry_routes(&card, &destination);
+        node.privacy
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(node.file_retry_routes(&card, &destination), before_policy);
+        let before_role = node.file_retry_routes(&card, &destination);
+        let changed = Announce::new(&relay_identity, "Relay", relay.tcp_port);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&changed, "127.0.0.1".parse().unwrap(), &node.user_id());
+        assert_ne!(node.file_retry_routes(&card, &destination), before_role);
+    }
+
     #[tokio::test]
     async fn cancelled_old_control_owner_cannot_remove_its_same_key_replacement() {
         let key = super::ControlWork::Pull("fixture".into());
@@ -4058,6 +4895,491 @@ mod diagnostic_tests {
             "completed ordered exchanges must confirm delivery"
         );
         assert_eq!(b.read_file(file).unwrap(), b"valid slow route");
+    }
+
+    #[tokio::test]
+    async fn failed_file_routes_release_capacity_and_do_not_retry_on_unrelated_wakes() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&bob, &account, "Bob", 9);
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        for index in 0..9 {
+            let path = source.path().join(format!("missing-route-{index}.bin"));
+            std::fs::write(&path, format!("distinct file {index}")).unwrap();
+            node.enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+                .await
+                .unwrap();
+        }
+        node.roster.lock().unwrap().forget(&proof.public());
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostics = super::DeliveryDiagnosticThrottle::default();
+        let now = std::time::Instant::now();
+        let mut attempted = std::collections::HashSet::new();
+        for _ in 0..4 {
+            let scan = scheduler.scan(&node);
+            let (files, cursor) = scan.read(&node.delivery.lock().unwrap());
+            scheduler.admit_at(&node, files, cursor, now);
+            for key in scheduler.transfers.keys() {
+                assert!(
+                    attempted.insert(*key),
+                    "unrelated wake retried a failed route before its deadline"
+                );
+            }
+            // Eight transfers share fewer socket slots. Drain both bounded
+            // batches before judging failed work, including first admissions.
+            for _ in 0..2 {
+                scheduler.advance(&node);
+                while let Some(result) = scheduler.workers.join_next().await {
+                    scheduler.finish_at(&node, result, &mut diagnostics, now);
+                }
+            }
+            assert!(
+                scheduler.transfers.is_empty(),
+                "failed routes must release all transfer slots"
+            );
+        }
+        assert_eq!(
+            attempted.len(),
+            9,
+            "cooling destinations must not starve the ninth durable destination"
+        );
+        assert_eq!(node.delivery.lock().unwrap().file_cards().count(), 9);
+    }
+
+    #[tokio::test]
+    async fn file_scheduler_preserves_candidates_and_clean_same_phase_boundaries() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&bob, &account, "Bob", 9);
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let path = source.path().join("candidate.bin");
+        std::fs::write(&path, b"candidate continuation").unwrap();
+        let (id, _) = node
+            .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = node.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let key = (id, destination.binding.event_id);
+        let routes = node.file_retry_routes(&card, &destination);
+        let now = std::time::Instant::now();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), now)
+            .unwrap()
+            .0;
+        let mut transfer = super::FileTransfer::new(card.clone(), destination.clone());
+        transfer.candidate_cursor = 1;
+        transfer.candidate_count = 2;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                std::collections::HashMap::from([(key, transfer)]),
+                super::FileStepCompletion {
+                    token,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Failed,
+                },
+            )),
+            &mut diagnostic,
+            now,
+        );
+        assert!(scheduler.transfers.is_empty());
+        assert_eq!(scheduler.parked[&key].candidate_cursor, 1);
+        scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, now);
+        assert!(scheduler.transfers.is_empty());
+        let due = now + std::time::Duration::from_secs(2);
+        scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, due);
+        assert_eq!(
+            scheduler.transfers[&key].candidate_cursor, 1,
+            "retry must retain the next candidate rather than dial the failed first route"
+        );
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), due)
+            .unwrap()
+            .0;
+        let mut transfer = scheduler.transfers.remove(&key).unwrap();
+        transfer.phase = super::FilePhase::Chunks;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                std::collections::HashMap::from([(key, transfer)]),
+                super::FileStepCompletion {
+                    token,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Clean(false),
+                },
+            )),
+            &mut diagnostic,
+            due,
+        );
+        assert!(matches!(
+            scheduler.transfers[&key].phase,
+            super::FilePhase::Chunks
+        ));
+        assert!(
+            scheduler.retries.ready(&key, &routes, due),
+            "clean same-phase chunks must continue immediately"
+        );
+        // A late result for an older route token cannot retire durable intent
+        // or publish its stale continuation over the replacement owner.
+        let stale = scheduler
+            .retries
+            .reserve(key, routes.clone(), due)
+            .unwrap()
+            .0;
+        let mut replacement_routes = routes.clone();
+        replacement_routes.custody = !replacement_routes.custody;
+        let replacement = scheduler
+            .retries
+            .reserve(key, replacement_routes, due)
+            .unwrap()
+            .0;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                Default::default(),
+                super::FileStepCompletion {
+                    token: stale,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Clean(true),
+                },
+            )),
+            &mut diagnostic,
+            due,
+        );
+        assert!(node.file_destination_current(&card, &destination));
+        assert!(scheduler.retries.owns(&key, replacement));
+        scheduler.retries.complete(&key, replacement, true, due);
+        // This injects the scheduler persistence boundary, not crypto acceptance.
+        scheduler.transfers.clear();
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), due)
+            .unwrap()
+            .0;
+        node.delivery
+            .lock()
+            .unwrap()
+            .fail_outbox_appends_for_test(true)
+            .unwrap();
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .retire_file_destination(key.0, key.1)
+                .is_err(),
+            "outbox hook must reject actual retirement persistence"
+        );
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                Default::default(),
+                super::FileStepCompletion {
+                    token,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Clean(true),
+                },
+            )),
+            &mut diagnostic,
+            due,
+        );
+        assert!(node.file_destination_current(&card, &destination));
+        assert!(!scheduler.retries.ready(&key, &routes, due));
+        node.delivery
+            .lock()
+            .unwrap()
+            .fail_outbox_appends_for_test(false)
+            .unwrap();
+        let recovered = due + std::time::Duration::from_secs(2);
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), recovered)
+            .unwrap()
+            .0;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                Default::default(),
+                super::FileStepCompletion {
+                    token,
+                    routes,
+                    outcome: super::FileStepOutcome::Clean(true),
+                },
+            )),
+            &mut diagnostic,
+            recovered,
+        );
+        assert!(!node.file_destination_current(&card, &destination));
+    }
+
+    #[tokio::test]
+    async fn file_scheduler_new_endpoint_bypasses_failure_but_unrelated_wake_does_not() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof = Announce::new_with_account(
+            &bob,
+            &account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let path = source.path().join("endpoint.bin");
+        std::fs::write(&path, b"new endpoint").unwrap();
+        let (id, _) = node
+            .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = node.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let key = (id, destination.binding.event_id);
+        node.roster.lock().unwrap().forget(&proof.public());
+        let now = std::time::Instant::now();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let routes = node.file_retry_routes(&card, &destination);
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), now)
+            .unwrap()
+            .0;
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                Default::default(),
+                super::FileStepCompletion {
+                    token,
+                    routes,
+                    outcome: super::FileStepOutcome::Failed,
+                },
+            )),
+            &mut diagnostic,
+            now,
+        );
+        scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, now);
+        assert!(scheduler.transfers.is_empty());
+        node.roster.lock().unwrap().update(
+            &proof,
+            "127.0.0.1".parse().unwrap(),
+            &node.identity.user_id(),
+        );
+        scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, now);
+        assert!(scheduler.transfers.contains_key(&key));
+        // Pause before polling the admitted worker, then revoke authority.
+        scheduler.advance(&node);
+        node.delivery_suspended
+            .store(true, std::sync::atomic::Ordering::Release);
+        while let Some(result) = scheduler.workers.join_next().await {
+            scheduler.finish(&node, result, &mut diagnostic);
+        }
+        assert!(scheduler.transfers.is_empty());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), listener.accept())
+                .await
+                .is_err(),
+            "authority revoked before first poll must prevent TCP admission"
+        );
+        assert!(node.delivery.lock().unwrap().contains_file_destination(
+            id,
+            key.1,
+            &destination.binding.device,
+            &destination.binding.account
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_scheduler_expired_inventory_admits_later_durable_destinations() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&bob, &account, "Bob", 9);
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let mut files = Vec::new();
+        for index in 0..=super::MAX_RELAY_CUSTODY_HINTS {
+            let path = source.path().join(format!("inventory-{index}.bin"));
+            std::fs::write(&path, format!("inventory file {index}")).unwrap();
+            let (id, _) = node
+                .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+                .await
+                .unwrap();
+            let card = node.delivery.lock().unwrap().file_card(id).unwrap().clone();
+            let destination = card.destinations[0].clone();
+            files.push((card, destination));
+        }
+        let now = std::time::Instant::now();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        for (card, destination) in files.iter().take(super::MAX_RELAY_CUSTODY_HINTS) {
+            let key = (card.id, destination.binding.event_id);
+            let routes = node.file_retry_routes(card, destination);
+            let token = scheduler
+                .retries
+                .reserve(key, routes.clone(), now)
+                .unwrap()
+                .0;
+            let transfer = super::FileTransfer::new(card.clone(), destination.clone());
+            scheduler.finish_at(
+                &node,
+                Ok((
+                    key,
+                    std::collections::HashMap::from([(key, transfer)]),
+                    super::FileStepCompletion {
+                        token,
+                        routes,
+                        outcome: super::FileStepOutcome::Failed,
+                    },
+                )),
+                &mut diagnostic,
+                now,
+            );
+        }
+        assert_eq!(scheduler.parked.len(), super::MAX_RELAY_CUSTODY_HINTS);
+        let last = files.last().unwrap().clone();
+        let key = (last.0.id, last.1.binding.event_id);
+        scheduler.admit_at(&node, vec![last.clone()], Some(key), now);
+        scheduler.advance_at(&node, now);
+        assert!(
+            scheduler.workers.is_empty(),
+            "unexpired inventory must not be displaced"
+        );
+        assert!(scheduler.transfers.is_empty());
+        let due = now + std::time::Duration::from_secs(2);
+        scheduler.admit_at(&node, vec![last], Some(key), due);
+        scheduler.advance_at(&node, due);
+        assert!(
+            scheduler.running_sockets.contains(&key),
+            "expired failed hints must allow the 257th destination to advance"
+        );
+        assert_eq!(scheduler.parked.len(), super::MAX_RELAY_CUSTODY_HINTS - 1);
+        // Cancel before the task is first polled: the admitted retry reservation
+        // remains installed while no actual socket or FileCard stays parked.
+        scheduler.workers.shutdown().await;
+        assert!(!scheduler.retries.ready(
+            &key,
+            &node.file_retry_routes(&files.last().unwrap().0, &files.last().unwrap().1),
+            due
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_scheduler_revoked_inflight_rescan_releases_matching_socket_owner() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof = Announce::new_with_account(
+            &bob,
+            &account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let path = source.path().join("revoked-inflight.bin");
+        std::fs::write(&path, b"retained durable work").unwrap();
+        let (id, _) = node
+            .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = node.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let key = (id, destination.binding.event_id);
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        scheduler.admit(&node, vec![(card.clone(), destination.clone())], Some(key));
+        scheduler.advance(&node);
+        assert!(scheduler.running_sockets.contains(&key));
+        assert_eq!(scheduler.workers.len(), 1);
+        // The task owns its reservation before its first poll. A journal scan
+        // can revisit that durable key while authority is revoked.
+        node.delivery_suspended
+            .store(true, std::sync::atomic::Ordering::Release);
+        let scan = scheduler.scan(&node);
+        let (files, cursor) = scan.read(&node.delivery.lock().unwrap());
+        assert!(
+            files
+                .iter()
+                .any(|(file, reference)| (file.id, reference.binding.event_id) == key)
+        );
+        scheduler.admit(&node, files, cursor);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(result) = scheduler.workers.join_next().await {
+                scheduler.finish(&node, result, &mut diagnostic);
+            }
+        })
+        .await
+        .expect("revoked worker must finish without networking");
+        assert!(
+            scheduler.running_sockets.is_empty(),
+            "authority rescan must preserve the active token until matching completion releases socket ownership"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
+        node.delivery_suspended
+            .store(false, std::sync::atomic::Ordering::Release);
+        scheduler.admit(&node, vec![(card, destination)], Some(key));
+        scheduler.advance(&node);
+        assert_eq!(
+            scheduler.workers.len(),
+            1,
+            "restored durable work must be admitted after revoked completion"
+        );
+        scheduler.workers.shutdown().await;
     }
 
     #[tokio::test]

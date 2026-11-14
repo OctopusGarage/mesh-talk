@@ -726,6 +726,10 @@ export const chat = {
     invoke<ArrayBuffer | number[]>("read_file", { fileConv }).then(mediaBytes),
   /** Read DURABLE media bytes (image/screenshot/video) from the chat-media store. Survives
    * chunk prune + restart, unlike readFile (transient chunks). Rejects if none is stored. */
+  readMediaPreview: (fileConv: string) =>
+    invoke<ArrayBuffer | number[]>("read_media_preview", { fileConv }).then(
+      mediaBytes,
+    ),
   readMedia: (fileConv: string) =>
     invoke<ArrayBuffer | number[]>("read_media", { fileConv }).then(mediaBytes),
   /** Write picked/pasted bytes to a temp file and return its path, to feed the file-send

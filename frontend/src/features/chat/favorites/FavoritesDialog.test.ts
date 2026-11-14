@@ -1,5 +1,10 @@
 // @vitest-environment jsdom
-import { act, createElement } from "react";
+import {
+  act,
+  createElement,
+  Profiler,
+  type ProfilerOnRenderCallback,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import "@/lib/i18n";
@@ -41,6 +46,7 @@ import { FavoritesDialog } from "./FavoritesDialog";
 import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
 import { useMessageFavorites } from "@/store/messageFavorites";
+import { notifySyncInvalidation } from "@/lib/syncInvalidation";
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -77,6 +83,7 @@ const response = {
   ],
 };
 let root: Root, host: HTMLDivElement;
+let commits: ReturnType<typeof vi.fn<ProfilerOnRenderCallback>>;
 let transport: ReturnType<typeof deferred<typeof response>>,
   delivery: ReturnType<typeof deferred<void>>;
 let open: ReturnType<typeof vi.fn<ReturnType<typeof useChat.getState>["open"]>>;
@@ -98,6 +105,8 @@ beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.useFakeTimers();
   bridge.tasks = [];
+  commits = vi.fn<ProfilerOnRenderCallback>();
+  vi.setSystemTime(new Date(2026, 0, 2, 12));
   transport = deferred();
   delivery = deferred();
   bridge.invoke.mockReset();
@@ -134,7 +143,15 @@ beforeEach(async () => {
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
-  await act(async () => root.render(createElement(FavoritesDialog)));
+  await act(async () =>
+    root.render(
+      createElement(
+        Profiler,
+        { id: "favorites", onRender: commits },
+        createElement(FavoritesDialog),
+      ),
+    ),
+  );
   await click("open-message-favorites");
   await click("favorite-item");
 });
@@ -236,4 +253,145 @@ it("retains the complete original task through real navigation before closing", 
   expect(
     document.querySelector('[data-testid="message-favorites"]'),
   ).toBeNull();
+});
+
+async function settleFavoritesList() {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  expect(useMessageFavorites.getState().loading).toBe(false);
+}
+const listReads = () =>
+  bridge.invoke.mock.calls.filter(
+    ([command]) => command === "owner_list_message_favorites",
+  ).length;
+it("does not commit one-second renders for settled non-expiring favorites contents", async () => {
+  await settleFavoritesList();
+  expect(document.body.textContent).toContain("saved");
+  commits.mockClear();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(commits).not.toHaveBeenCalled();
+});
+it("does not reload a settled favorites list before sparse repair", async () => {
+  await settleFavoritesList();
+  const before = listReads();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(listReads()).toBe(before);
+});
+it("ignores known sync-status invalidations but retains document and legacy refresh", async () => {
+  await settleFavoritesList();
+  const before = listReads();
+  await act(async () =>
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "sync_status",
+    }),
+  );
+  expect(listReads()).toBe(before);
+  await act(async () =>
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "documents",
+    }),
+  );
+  expect(listReads()).toBe(before + 1);
+  await act(async () =>
+    notifySyncInvalidation({ owner: "alice", kind: "state" }),
+  );
+  expect(listReads()).toBe(before + 2);
+});
+it("refreshes mounted favorites on foreground activation", async () => {
+  await settleFavoritesList();
+  const before = listReads();
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(listReads()).toBe(before + 1);
+});
+it("coalesces a document arrival during a held list read into one non-overlapping follow-up", async () => {
+  await settleFavoritesList();
+  const held = deferred<{ items: MessageFavorite[]; has_more: boolean }>();
+  const previous = bridge.invoke.getMockImplementation()!;
+  let reads = 0;
+  bridge.invoke.mockImplementation((command, ...args) => {
+    if (command === "owner_list_message_favorites") {
+      reads++;
+      return reads === 1
+        ? held.promise
+        : Promise.resolve({
+            items: [{ ...favorite, revision: 2 }],
+            has_more: false,
+          });
+    }
+    return previous(command, ...args);
+  });
+  await act(async () =>
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "documents",
+    }),
+  );
+  expect(reads).toBe(1);
+  await act(async () => {
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "documents",
+    });
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "documents",
+    });
+  });
+  expect(reads).toBe(1);
+  await act(async () => held.resolve({ items: [favorite], has_more: false }));
+  expect(reads).toBe(2);
+  expect(useMessageFavorites.getState().items[0]?.revision).toBe(2);
+});
+
+it("does not resurrect expired detail after wall rollback and document refresh", async () => {
+  await act(async () => root.unmount());
+  vi.setSystemTime(10_000);
+  const expiring: MessageFavorite = {
+    ...favorite,
+    messages: [
+      {
+        ...favorite.messages[0],
+        text: "short-lived saved body",
+        expires_at_ms: 10_500,
+      },
+    ],
+  };
+  bridge.invoke.mockImplementation(async (command) =>
+    command === "owner_list_message_favorites"
+      ? { items: [expiring], has_more: false }
+      : null,
+  );
+  useMessageFavorites.setState({ items: [expiring], loading: false });
+  root = createRoot(host);
+  await act(async () => root.render(createElement(FavoritesDialog)));
+  await click("open-message-favorites");
+  await click("favorite-item");
+  expect(document.body.textContent).toContain("short-lived saved body");
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(500);
+  });
+  expect(document.body.textContent).not.toContain("short-lived saved body");
+  vi.setSystemTime(8_000);
+  const before = listReads();
+  await act(async () => {
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "documents",
+    });
+  });
+  expect(listReads()).toBeGreaterThan(before);
+  expect(document.body.textContent).not.toContain("short-lived saved body");
 });

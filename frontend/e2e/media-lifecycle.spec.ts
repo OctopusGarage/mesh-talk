@@ -35,7 +35,9 @@ test("same-identity disable/re-enable never returns a revoked URL", async ({
     };
     internals.invoke = async (cmd, args) => {
       if (
-        (cmd === "read_media" || cmd === "read_file") &&
+        (cmd === "read_media" ||
+          cmd === "read_media_preview" ||
+          cmd === "read_file") &&
         args.fileConv === "hook-probe"
       ) {
         state.calls.push(cmd);
@@ -109,7 +111,9 @@ test("cleanup during an admitted durable read prevents fallback and blob creatio
     };
     internals.invoke = async (cmd, args) => {
       if (
-        (cmd === "read_media" || cmd === "read_file") &&
+        (cmd === "read_media" ||
+          cmd === "read_media_preview" ||
+          cmd === "read_file") &&
         args.fileConv === "hook-probe"
       ) {
         state.calls.push(cmd);
@@ -182,7 +186,9 @@ test("same UUID relogin revokes the old owned URL exactly once", async ({
     };
     internals.invoke = async (cmd, args) =>
       args.fileConv === "hook-probe" &&
-      (cmd === "read_media" || cmd === "read_file")
+      (cmd === "read_media" ||
+        cmd === "read_media_preview" ||
+        cmd === "read_file")
         ? new ArrayBuffer(1)
         : original(cmd, args);
     const container = document.createElement("div");

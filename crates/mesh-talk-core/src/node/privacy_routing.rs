@@ -8,10 +8,50 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Each historical probe can race two addresses. This producer alone uses at
-// most four of the seven outbound slots; other producers share the remainder.
+// Bound this producer's tasks as well as the shared historical socket budget.
 const MAX_ACTIVE_PRIVATE_PROBES: usize = 2;
 const MAX_PRIVATE_PROBES_PER_ROUND: usize = 8;
+
+type ProbeIdentity = ([u8; 32], [u8; 32]);
+pub(in crate::node) type PrivateProbeRetries =
+    super::delivery_retry::RetrySchedule<ProbeIdentity, (u64, u64, Vec<std::net::SocketAddr>)>;
+
+pub(in crate::node) fn private_probe_retries() -> PrivateProbeRetries {
+    PrivateProbeRetries::with_failure_ceiling(Duration::from_secs(300))
+}
+
+fn private_probe_repair_due(
+    current: &PeerRecord,
+    candidate: &PeerRecord,
+    now: Instant,
+) -> Option<Instant> {
+    if current.public != candidate.public
+        || current.account_id != candidate.account_id
+        || current.post_office != candidate.post_office
+    {
+        return None;
+    }
+    current
+        .direct_discovery_deadline(candidate.addr)
+        .and_then(|deadline| deadline.checked_sub(super::transport::HANDSHAKE_TIMEOUT))
+        .filter(|due| *due > now)
+}
+
+fn finish_private_probe(
+    retries: &mut PrivateProbeRetries,
+    key: ProbeIdentity,
+    token: u64,
+    result: Result<(), crate::transport::TransportError>,
+    now: Instant,
+) {
+    match result {
+        Ok(()) => retries.complete(&key, token, true, now),
+        Err(error) if super::session_pool::local_capacity_busy(&error) => {
+            retries.defer(&key, token, Duration::from_secs(5), now);
+        }
+        Err(_) => retries.complete(&key, token, false, now),
+    }
+}
 
 impl Node {
     /// Infrastructure classification from a validated full device binding.
@@ -103,6 +143,10 @@ impl Node {
     }
 
     pub(in crate::node) fn cached_routing_peers(&self) -> Vec<PeerRecord> {
+        self.cached_routing_peers_for(None)
+    }
+
+    fn cached_routing_peers_for(&self, user_id: Option<&str>) -> Vec<PeerRecord> {
         let guard = self
             .privacy
             .state
@@ -115,6 +159,9 @@ impl Node {
             .routes
             .routes()
             .into_iter()
+            // Filter before proof hydration and unrelated group policy reads;
+            // the existing route iterator retains its exact multi-IP order.
+            .filter(|(public, _)| user_id.is_none_or(|id| public.user_id() == id))
             .filter_map(|(public, ip)| {
                 let proof = state
                     .proofs
@@ -176,11 +223,24 @@ impl Node {
     }
 
     pub(in crate::node) fn routing_peer(&self, user_id: &str) -> Option<PeerRecord> {
-        self.routing_peers()
+        // get() and peers() observe the same roster map without extra expiry
+        // filtering. Preserve its existing winner before optional cached routes.
+        let live = {
+            self.roster
+                .lock()
+                .expect("roster lock not poisoned")
+                .get(user_id)
+                .cloned()
+        };
+        if live.is_some() {
+            return live;
+        }
+        self.cached_routing_peers_for(Some(user_id))
             .into_iter()
-            .find(|p| p.public.user_id() == user_id)
+            .next()
     }
 
+    #[cfg(test)]
     pub(in crate::node) async fn probe_private_routes(self: &Arc<Self>) {
         self.probe_private_routes_with_budget(super::transport::HANDSHAKE_TIMEOUT)
             .await;
@@ -189,19 +249,42 @@ impl Node {
     pub(in crate::node) async fn run_private_route_probes(self: Arc<Self>) {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut network = self.network_changes.subscribe();
+        let mut repair = None;
         loop {
             // Schedule from the start of a round. Sleeping after a slow ten-
             // second handshake used to leave a twenty-second refresh gap for
             // fifteen-second public evidence, even on a reachable path.
-            tick.tick().await;
-            self.probe_private_routes().await;
+            let forced = tokio::select! {
+                _ = tick.tick() => false,
+                _ = async {
+                    match repair {
+                        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => false,
+                _ = network.changed() => true,
+            };
+            repair = self
+                .probe_private_routes_round(super::transport::HANDSHAKE_TIMEOUT, forced)
+                .await;
         }
     }
 
+    #[cfg(test)]
     pub(in crate::node) async fn probe_private_routes_with_budget(
         self: &Arc<Self>,
         budget: Duration,
     ) {
+        self.probe_private_routes_round(budget, true).await;
+    }
+
+    async fn probe_private_routes_round(
+        self: &Arc<Self>,
+        budget: Duration,
+        forced: bool,
+    ) -> Option<Instant> {
+        let mut repair: Option<Instant> = None;
         if self.cached_peer_snapshot_async().await.is_err() {
             log::warn!("verified discovery cache update failed");
         }
@@ -212,18 +295,21 @@ impl Node {
         let mut devices = HashSet::new();
         peers.retain(|peer| devices.insert(peer.public.user_id()));
         if peers.is_empty() {
-            return;
+            return None;
         }
-        // Select a bounded batch, but advance the cursor only when a device is
-        // actually launched. A canceled round must not skip its queued suffix.
-        let start = self
+        // Advance only launched or deliberately deferred devices. Cancellation
+        // must not skip the suffix that this round never examined.
+        let cursor_base = self
             .privacy
             .route_probe_cursor
-            .load(std::sync::atomic::Ordering::Relaxed) as usize
-            % peers.len();
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let start = cursor_base as usize % peers.len();
+        let mut advanced = 0u64;
+        let mut first_deferred: Option<(u64, u64)> = None;
         peers.rotate_left(start);
         peers.truncate(MAX_PRIVATE_PROBES_PER_ROUND);
         let mut peers = peers.into_iter();
+        let mut reserved = Vec::new();
         // Admit every complete child before spawning. The JoinSet remains owned
         // by this round, including when its unchanged whole-round budget expires.
         let mut probes = tokio::task::JoinSet::new();
@@ -233,22 +319,465 @@ impl Node {
                     let Some(peer) = peers.next() else {
                         break;
                     };
+                    if !forced {
+                        let due = self
+                            .roster
+                            .lock()
+                            .expect("roster lock")
+                            .get(&peer.public.user_id())
+                            .and_then(|current| {
+                                private_probe_repair_due(current, &peer, Instant::now())
+                            });
+                        if let Some(due) = due {
+                            repair = Some(repair.map_or(due, |previous| previous.min(due)));
+                            // Fresh devices consume their fair position too; a
+                            // signed prefix must not hide later private peers.
+                            self.privacy
+                                .route_probe_cursor
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            advanced += 1;
+                            continue;
+                        }
+                    }
+                    let key = (peer.public.ed25519_pub, peer.public.x25519_pub);
+                    let announcement = self
+                        .roster
+                        .lock()
+                        .expect("roster lock")
+                        .announcement(&peer.public)
+                        .cloned();
+                    let mut routes = self.privacy_route_candidates(
+                        peer.addr,
+                        &peer.public,
+                        announcement.as_ref(),
+                    );
+                    // Affinity ordering is not a changed route set. Ordinary
+                    // heartbeats must not reset a failed historical probe.
+                    routes.sort_unstable();
+                    let all_historical = !routes.is_empty()
+                        && routes.iter().all(|address| {
+                            self.historical_route_candidate(*address, &peer.public, Instant::now())
+                        });
+                    let generation = self
+                        .privacy
+                        .generation
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let network = *self.network_changes.borrow();
+                    let reservation = self
+                        .privacy
+                        .route_probe_retries
+                        .lock()
+                        .expect("probe retry lock")
+                        .reserve(key, (generation, network, routes), Instant::now());
+                    let Some((token, _)) = reservation else {
+                        // This device retains its retry deadline, so a deferred
+                        // prefix must not hide later healthy devices each round.
+                        self.privacy
+                            .route_probe_cursor
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        advanced += 1;
+                        continue;
+                    };
+                    if all_historical && !self.sessions.historical_capacity_available() {
+                        self.privacy
+                            .route_probe_retries
+                            .lock()
+                            .expect("probe retry lock")
+                            .defer(&key, token, Duration::from_secs(5), Instant::now());
+                        let cursor = self
+                            .privacy
+                            .route_probe_cursor
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        first_deferred.get_or_insert((advanced, cursor));
+                        advanced += 1;
+                        continue;
+                    }
                     let Some(work) = self.runtime_work.admit() else {
+                        self.privacy
+                            .route_probe_retries
+                            .lock()
+                            .expect("probe retry lock")
+                            .forget(&key);
                         return;
                     };
-                    self.privacy
+                    let cursor = self
+                        .privacy
                         .route_probe_cursor
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let position = (advanced, cursor);
+                    advanced += 1;
                     let node = self.clone();
+                    reserved.push((key, token));
                     probes.spawn(work.track(async move {
-                        let _ = node.privacy_dial(peer.addr, &peer.public).await;
+                        let result = node.privacy_dial(peer.addr, &peer.public).await.map(|_| ());
+                        (key, token, position, result)
                     }));
                 }
-                if probes.join_next().await.is_none() {
-                    break;
+                match probes.join_next().await {
+                    Some(Ok((key, token, position, result))) => {
+                        if result
+                            .as_ref()
+                            .is_err_and(super::session_pool::local_capacity_busy)
+                            && first_deferred.is_none_or(|first| position.0 < first.0)
+                        {
+                            first_deferred = Some(position);
+                        }
+                        reserved.retain(|entry| *entry != (key, token));
+                        finish_private_probe(
+                            &mut self
+                                .privacy
+                                .route_probe_retries
+                                .lock()
+                                .expect("probe retry lock"),
+                            key,
+                            token,
+                            result,
+                            Instant::now(),
+                        );
+                    }
+                    Some(Err(_)) => {}
+                    None => break,
                 }
             }
         })
         .await;
+        // Retire actual socket owners before publishing hints or starting the
+        // next round, including whole-round timeout and child cancellation.
+        probes.shutdown().await;
+        if let Some((_, cursor)) = first_deferred {
+            let _ = self.privacy.route_probe_cursor.compare_exchange(
+                cursor_base.wrapping_add(advanced),
+                cursor,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        // A spent round budget is no progress too. These advisory hints never
+        // grant presence or retire durable work. Actual socket owners have
+        // retired; new/changed routes bypass the old deadline.
+        for (key, token) in reserved {
+            self.privacy
+                .route_probe_retries
+                .lock()
+                .expect("probe retry lock")
+                .complete(&key, token, false, Instant::now());
+        }
+        repair
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::TransportError;
+
+    fn routing_point_node(path: &std::path::Path) -> Arc<Node> {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&identity, &account, "owner", 1);
+        let (node, _, _) =
+            crate::node::test_support::node_with_files(path, identity, account, &proof);
+        node.configure_privacy(
+            path,
+            "pw",
+            &node.signed_announce("owner", 1),
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node
+    }
+
+    fn routing_point_under_held_guard<G>(
+        node: Arc<Node>,
+        id: String,
+        guard: G,
+    ) -> Option<PeerRecord> {
+        let (started, start) = std::sync::mpsc::sync_channel(1);
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            sent.send(node.routing_peer(&id)).unwrap();
+        });
+        let dispatched = start.recv_timeout(Duration::from_secs(1));
+        let observed = received.recv_timeout(Duration::from_millis(250));
+        // Always release and join actual work BEFORE an assertion, including
+        // the expected RED timeout. No stranded thread can outlive its profile.
+        drop(guard);
+        let retired = worker.join();
+        assert!(retired.is_ok(), "lookup worker panicked");
+        assert!(dispatched.is_ok(), "lookup worker was not admitted");
+        observed.expect("point lookup must not wait for unrelated routing/authority owners")
+    }
+
+    #[test]
+    fn periodic_probe_requires_exact_signed_endpoint_and_recovery_budget() {
+        use crate::discovery::{Announce, roster::RouteSource};
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&identity, &account, "peer", 47479);
+        let mut roster = crate::discovery::Roster::default();
+        roster.update(&proof, "127.0.0.1".parse().unwrap(), "owner");
+        let signed = roster.get(&proof.user_id).unwrap().clone();
+        let now = signed.routes[0].last_seen;
+        let due = now + Duration::from_secs(5);
+        assert_eq!(private_probe_repair_due(&signed, &signed, now), Some(due));
+        assert_eq!(private_probe_repair_due(&signed, &signed, due), None);
+        for source in [
+            RouteSource::Lan,
+            RouteSource::Discovery,
+            RouteSource::RoutedQuery,
+        ] {
+            let mut observation = signed.clone();
+            observation.routes[0].source = source;
+            assert_eq!(
+                private_probe_repair_due(&observation, &signed, now),
+                Some(due)
+            );
+        }
+        let mut adaptive = signed.clone();
+        adaptive.routes[0].source = RouteSource::RoutedQuery;
+        adaptive.routes[0].presence_expires_at = Some(now + Duration::from_secs(45));
+        assert_eq!(
+            private_probe_repair_due(&adaptive, &signed, now),
+            Some(now + Duration::from_secs(35))
+        );
+        for remaining in [Duration::ZERO, super::super::transport::HANDSHAKE_TIMEOUT] {
+            adaptive.routes[0].presence_expires_at = Some(now + remaining);
+            assert_eq!(private_probe_repair_due(&adaptive, &signed, now), None);
+        }
+        for source in [
+            RouteSource::Authenticated,
+            RouteSource::PostOffice,
+            RouteSource::Gateway,
+        ] {
+            let mut observation = signed.clone();
+            observation.routes[0].source = source;
+            observation.routes[0].presence_expires_at = Some(now + Duration::from_secs(60));
+            assert_eq!(private_probe_repair_due(&observation, &signed, now), None);
+        }
+        let mut changed = signed.clone();
+        changed.addr.set_port(47480);
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
+        changed = signed.clone();
+        let replacement = DeviceIdentity::generate().public();
+        changed.public.ed25519_pub = replacement.ed25519_pub;
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
+        changed = signed.clone();
+        changed.public.x25519_pub = replacement.x25519_pub;
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
+        changed = signed.clone();
+        changed.account_id = None;
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
+        changed = signed.clone();
+        changed.post_office = !changed.post_office;
+        assert_eq!(private_probe_repair_due(&signed, &changed, now), None);
+    }
+
+    #[test]
+    fn routing_point_live_winner_does_not_wait_for_unrelated_privacy_owner() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let node = routing_point_node(dir.path());
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "live",
+            54321,
+        );
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+        let guard = node.privacy.state.write().unwrap();
+        let result =
+            routing_point_under_held_guard(node.clone(), proof.user_id.clone(), guard).unwrap();
+        assert_eq!(result.public, proof.public());
+        assert_eq!(result.addr, "127.0.0.1:54321".parse().unwrap());
+        assert_eq!(result.name, "live");
+    }
+
+    #[test]
+    fn routing_point_cached_target_does_not_query_unrelated_group_authority() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+            node::privacy::PermissionSource,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let node = routing_point_node(dir.path());
+        let target = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "allowed target",
+            54321,
+        );
+        let unrelated = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "unrelated denied",
+            54322,
+        );
+        {
+            let mut guard = node.privacy.state.write().unwrap();
+            let state = guard.as_mut().unwrap();
+            state.policy.set_invisible(true).unwrap();
+            state
+                .policy
+                .grant(
+                    &target.account_id().unwrap(),
+                    "target",
+                    PermissionSource::Manual,
+                )
+                .unwrap();
+            for proof in [&target, &unrelated] {
+                state.proofs.record(proof).unwrap();
+                state
+                    .routes
+                    .record(&proof.public(), "127.0.0.1".parse().unwrap())
+                    .unwrap();
+            }
+        }
+        let group = node.channels.lock().unwrap();
+        let result =
+            routing_point_under_held_guard(node.clone(), target.user_id.clone(), group).unwrap();
+        assert_eq!(result.public, target.public());
+        assert_eq!(result.addr, "127.0.0.1:54321".parse().unwrap());
+        // Releasing the unrelated group owner must not turn this point lookup
+        // into cached permission. The target's next lookup checks live policy.
+        node.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .policy
+            .revoke(&target.account_id().unwrap())
+            .unwrap();
+        assert!(
+            node.routing_peer(&target.user_id).is_none(),
+            "revoked target without shared group authority must remain denied"
+        );
+        assert!(node.routing_peer(&unrelated.user_id).is_none());
+    }
+
+    #[test]
+    fn routing_point_preserves_live_precedence_cached_ip_order_and_missing_results() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let node = routing_point_node(dir.path());
+        let peer = DeviceIdentity::generate();
+        let account = Account::generate();
+        let cached = Announce::new_with_account(&peer, &account, "cached", 54321);
+        {
+            let mut guard = node.privacy.state.write().unwrap();
+            let state = guard.as_mut().unwrap();
+            state.proofs.record(&cached).unwrap();
+            for ip in ["127.0.0.2", "127.0.0.1"] {
+                state
+                    .routes
+                    .record(&cached.public(), ip.parse().unwrap())
+                    .unwrap();
+            }
+        }
+        let addresses: Vec<_> = node
+            .cached_routing_peers()
+            .into_iter()
+            .filter(|record| record.public == cached.public())
+            .map(|record| record.addr)
+            .collect();
+        assert_eq!(
+            addresses,
+            vec![
+                "127.0.0.2:54321".parse().unwrap(),
+                "127.0.0.1:54321".parse().unwrap()
+            ]
+        );
+        assert_eq!(
+            node.routing_peer(&cached.user_id).unwrap().addr,
+            addresses[0]
+        );
+        let live = Announce::new_with_account(&peer, &account, "live", 54323);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&live, "127.0.0.3".parse().unwrap(), &node.user_id());
+        let actual = node.routing_peer(&cached.user_id).unwrap();
+        assert_eq!(actual.addr, "127.0.0.3:54323".parse().unwrap());
+        assert_eq!(actual.name, "live");
+        node.roster.lock().unwrap().forget(&cached.public());
+        assert_eq!(
+            node.routing_peer(&cached.user_id).unwrap().addr,
+            addresses[0]
+        );
+        assert!(node.routing_peer("absent device").is_none());
+        // Public snapshots continue to exclude historical private dial hints.
+        assert!(node.roster.lock().unwrap().peers().is_empty());
+    }
+
+    #[test]
+    fn private_probe_capacity_defers_without_erasing_peer_failures() {
+        let mut retries = private_probe_retries();
+        let key = ([1; 32], [2; 32]);
+        let routes = (0, 0, vec!["127.0.0.1:47479".parse().unwrap()]);
+        let mut now = Instant::now();
+        for _ in 0..12 {
+            let token = retries.reserve(key, routes.clone(), now).unwrap().0;
+            finish_private_probe(
+                &mut retries,
+                key,
+                token,
+                Err(TransportError::Noise("dial timed out".into())),
+                now,
+            );
+            now += Duration::from_secs(301);
+        }
+        let token = retries.reserve(key, routes.clone(), now).unwrap().0;
+        finish_private_probe(
+            &mut retries,
+            key,
+            token,
+            Err(TransportError::Noise("TCP connection capacity busy".into())),
+            now + Duration::from_secs(2),
+        );
+        assert!(!retries.ready(&key, &routes, now + Duration::from_secs(299)));
+        assert!(retries.ready(&key, &routes, now + Duration::from_secs(301)));
+        let changed = (1, 1, routes.2.clone());
+        assert!(retries.ready(&key, &changed, now));
+        let replacement = retries.reserve(key, changed.clone(), now).unwrap().0;
+        finish_private_probe(&mut retries, key, token, Ok(()), now);
+        assert!(retries.owns(&key, replacement));
+        finish_private_probe(
+            &mut retries,
+            key,
+            replacement,
+            Err(TransportError::Noise(
+                "peer authentication capacity busy".into(),
+            )),
+            now,
+        );
+        assert!(!retries.ready(&key, &changed, now + Duration::from_secs(4)));
+        assert!(retries.ready(&key, &changed, now + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn authenticated_private_probe_clears_pacing_without_delaying_healthy_presence() {
+        let mut retries = private_probe_retries();
+        let key = ([1; 32], [2; 32]);
+        let routes = (0, 0, vec!["127.0.0.1:47479".parse().unwrap()]);
+        let now = Instant::now();
+        let token = retries.reserve(key, routes.clone(), now).unwrap().0;
+        finish_private_probe(&mut retries, key, token, Ok(()), now);
+        assert!(retries.ready(&key, &routes, now));
     }
 }

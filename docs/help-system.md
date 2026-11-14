@@ -17,7 +17,7 @@ and protocol behavior. User topics summarize those contracts and link to them.
 | `tools/help/render.mjs`       | Restricted, escaped Markdown rendering for desktop and online readers.                                    |
 | `tools/help/build.mjs`        | Static HTML, Markdown, JSON and discovery exports.                                                        |
 | `tools/help/build-site.mjs`   | Complete public site build, project-level discovery exports and landing application metadata.             |
-| `tools/help/discovery.mjs`    | Shared publication URL validation, documentation scope, aggregate Markdown and sitemap construction.       |
+| `tools/help/discovery.mjs`    | Shared publication URL validation, documentation scope, aggregate Markdown and sitemap construction.      |
 | `tools/help/server.mjs`       | Read-only stdio MCP adapter over the public manual.                                                       |
 
 The browser and app need no additional Markdown or search dependency. Only the MCP
@@ -43,7 +43,10 @@ the category panel. Opening Settings normally still starts at General. Signed-ou
 help offers reading and online links without authenticated navigation actions.
 
 The app bundles the catalog and Markdown from the checked-out source. There is no
-runtime fetch for offline help. Interface labels follow existing app localization;
+internet request for offline help. Article bodies, search and Markdown rendering
+load only when the reader opens; lightweight topic targets remain separate. A load
+failure offers Retry within the same dialog, and closing or replacing the account
+retires pending reader publication. Interface labels follow existing app localization;
 articles declare English and show an explicit fallback notice in other languages.
 Common Chinese aliases are a search aid, not translated documentation.
 

@@ -17,6 +17,8 @@ use crate::eventlog::sync::{
 use crate::transport::{MAX_PLAINTEXT, SecureChannel, TransportError};
 mod backend;
 mod have_budget;
+pub(crate) mod mailbox;
+pub(crate) mod mailbox_watch;
 use backend::*;
 use bincode::Options;
 pub use have_budget::RemoteHaveBudget;
@@ -593,12 +595,17 @@ async fn recv_have_owned<IO: AsyncRead + AsyncWrite + Unpin>(
     want_req: bool,
     conversation: ConversationId,
     budget: Option<&RemoteHaveBudget>,
+    comparison: bool,
 ) -> Result<have_budget::ReceivedHave, SessionError> {
     // Never await admission: requester/responder endpoints may already be in
     // opposite network phases while holding other resources.
     let permit = budget.map(RemoteHaveBudget::try_admit).transpose()?;
     let ids = recv_have(channel, want_req, conversation).await?;
-    have_budget::ReceivedHave::from_vec(ids, permit)
+    if comparison {
+        have_budget::ReceivedHave::from_vec_for_comparison(ids, permit, true)
+    } else {
+        have_budget::ReceivedHave::from_vec(ids, permit)
+    }
 }
 
 /// Run one reconciliation round as the REQUESTER over `channel`, for
@@ -649,6 +656,8 @@ pub(in crate::node) struct SyncProgress {
     total: ApplyReport,
     first_have: usize,
     pushed_total: usize,
+    received_wire_total: usize,
+    comparison_disabled: bool,
     /// Intersection of local advertised IDs and peer availability, never custody.
     remote_have_count: Option<usize>,
 }
@@ -719,6 +728,7 @@ impl SyncProgress {
         if max_followups == 0 || max_followups > FILE_FOLLOWUP_BURST {
             return Err(SessionError::UnexpectedMessage);
         }
+        backend.bind_session_peer(channel.peer_identity());
         // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
         // id-set; if the responder's matches, the logs are identical and we skip the O(N)
         // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
@@ -740,7 +750,15 @@ impl SyncProgress {
             self.v3 |= local_v3 || local_v4 || local_v5;
             self.v4 |= local_v4 || local_v5;
             self.v5 |= local_v5;
-            if let Some(fp) = metadata.fingerprint {
+            let comparison = if self.comparison_disabled {
+                None
+            } else {
+                backend.quiet_comparison(&conversation)?
+            };
+            if let Some(fp) = comparison
+                .map(|hint| hint.remote_fingerprint)
+                .or(metadata.fingerprint)
+            {
                 if let Some(view) = &probe_view {
                     backend.validate_view(view)?;
                 }
@@ -765,6 +783,7 @@ impl SyncProgress {
                     SyncWire::UpgradeRequired { conversation: c }
                         if c == conversation && !self.v5 =>
                     {
+                        self.comparison_disabled = true;
                         self.v5 = self.v4;
                         self.v4 = self.v3;
                         self.v3 = self.v2;
@@ -773,6 +792,23 @@ impl SyncProgress {
                         return Ok(false);
                     }
                     SyncWire::FpResponse(FpResponse { matched: true }) => {
+                        if let Some(hint) = comparison {
+                            if !backend.validate_quiet_comparison(&conversation, hint)? {
+                                self.comparison_disabled = true;
+                                self.started = false;
+                                return Ok(false);
+                            }
+                            if let Some(view) = probe_view {
+                                backend.validate_view(&view)?;
+                                drop(backend.retain_custody_view(view)?);
+                            }
+                            self.remote_have_count = Some(have_count(hint.remote_count)?);
+                            return Ok(true);
+                        }
+                        if let Some(view) = probe_view {
+                            backend.validate_view(&view)?;
+                            drop(backend.retain_custody_view(view)?);
+                        }
                         self.remote_have_count = Some(local_count);
                         log::debug!(
                             target: "mesh_talk::sync",
@@ -782,6 +818,14 @@ impl SyncProgress {
                         return Ok(true);
                     }
                     SyncWire::FpResponse(FpResponse { matched: false }) => {
+                        self.comparison_disabled |= comparison.is_some();
+                        // A differing remote digest does not invalidate our
+                        // local authorization selection. Transfer its one
+                        // existing lease to the following Have/export phase.
+                        if let Some(view) = probe_view {
+                            backend.validate_view(&view)?;
+                            drop(backend.retain_custody_view(view)?);
+                        }
                         // A complete exchange is a scheduling boundary for
                         // bounded callers, even when reconciliation must follow.
                         return Ok(false);
@@ -802,6 +846,16 @@ impl SyncProgress {
             self.first_have = local_count;
         }
         self.rounds += 1;
+        let comparison_token = if !self.comparison_disabled
+            && self.received_wire_total == 0
+            && self.pushed_total == 0
+            && self.total.applied == 0
+            && self.total.rejected.is_empty()
+        {
+            backend.quiet_comparison_token(&have_view)?
+        } else {
+            None
+        };
         // Opening Request carries an empty inline have; the real set is streamed.
         let request = SyncRequest {
             conversation,
@@ -837,6 +891,7 @@ impl SyncProgress {
                 self.v4 = self.v3;
                 self.v3 = self.v2;
                 self.v2 = true;
+                self.comparison_disabled = true;
                 self.started = false;
                 return Ok(false);
             }
@@ -850,16 +905,29 @@ impl SyncProgress {
         {
             return Err(SessionError::UnexpectedMessage);
         }
-        let remote_have =
-            recv_have_owned(channel, false, conversation, backend.remote_have_budget()).await?;
+        self.received_wire_total += response.events.len();
+        let remote_have = recv_have_owned(
+            channel,
+            false,
+            conversation,
+            backend.remote_have_budget(),
+            comparison_token.is_some() && self.received_wire_total == 0,
+        )
+        .await?;
         self.remote_have_count = Some(intersection_count(backend, &have_view, &remote_have).await?);
-        drop(have_view);
         let report = backend.apply(&response.events)?;
         if backend.admission_denied() {
             return Err(SessionError::UnexpectedMessage);
         }
-        // Ingest may add causal parents; select a fresh outgoing cutoff.
-        let outgoing_view = backend::open_prepared_view(backend, &conversation).await?;
+        // Keep only the owned selection across apply, never a store guard.
+        // Ingest or concurrent changes may add causal parents or change policy;
+        // only an exact freshly qualified source may reuse prepared decisions.
+        let outgoing_view = if backend.reusable_view(&have_view)? {
+            have_view
+        } else {
+            drop(have_view);
+            backend::open_prepared_view(backend, &conversation).await?
+        };
         let mut followups = select_export_frames(
             backend,
             &outgoing_view,
@@ -910,6 +978,7 @@ impl SyncProgress {
             self.v3 |= needs_v3;
             self.v4 |= needs_v4;
             self.v5 |= needs_v5;
+            self.comparison_disabled = true;
             self.started = false;
             self.previous_push.clear();
             return Ok(false);
@@ -921,6 +990,10 @@ impl SyncProgress {
             && !made_progress
             && !remote_have.iter().any(|id| self.previous_push.contains(id))
         {
+            // The peer did not accept our push. Preserve only qualified local
+            // preparation, never remote acceptance; cache failure cannot replace
+            // the protocol outcome. I/O failures/cancellation still drop the view.
+            drop(backend.retain_custody_view(outgoing_view));
             return Err(SessionError::NoProgress);
         }
         let more_to_push = !followups.is_empty();
@@ -963,13 +1036,37 @@ impl SyncProgress {
             self.total.rejected.extend(report.rejected);
         }
 
-        if !made_progress && !more_to_push {
-            return Ok(true);
-        }
-        if round + 1 == MAX_SYNC_ROUNDS {
+        let complete = !made_progress && !more_to_push;
+        if !complete && round + 1 == MAX_SYNC_ROUNDS {
+            // All followups completed; the bounded-round failure also leaves
+            // unchanged local preparation reusable without claiming delivery.
+            drop(backend.retain_custody_view(outgoing_view));
             return Err(SessionError::NoProgress);
         }
-        Ok(false)
+        if complete
+            && self.received_wire_total == 0
+            && self.pushed_total == 0
+            && self.total.applied == 0
+            && self.total.rejected.is_empty()
+            && remote_have.len() < local_count
+            && self.remote_have_count == Some(remote_have.len())
+            && let (Some(local_token), Some(remote_fingerprint)) =
+                (comparison_token, remote_have.comparison_fingerprint())
+        {
+            backend.retain_quiet_comparison(
+                &outgoing_view,
+                crate::eventlog::sync::network::QuietComparison {
+                    local_token,
+                    remote_fingerprint,
+                    remote_count: remote_have.len() as u64,
+                },
+            )?;
+        }
+        // Retain after every followup was sent successfully. Changed
+        // source/policy rejects retention; I/O failures/cancellation drop the lease.
+        // Repeated queries reuse preparation without retaining historical bodies.
+        drop(backend.retain_custody_view(outgoing_view)?);
+        Ok(complete)
     }
 }
 
@@ -1024,6 +1121,7 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
     backend: &B,
     bytes: &[u8],
 ) -> Result<Served, SessionError> {
+    backend.bind_session_peer(channel.peer_identity());
     match decode(bytes)? {
         SyncWire::FileMessageIdentitiesRequest { requests, offers } => {
             if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
@@ -1112,9 +1210,13 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             conversation,
             event_id,
         } => {
-            let view = backend::open_prepared_view(backend, &conversation).await?;
+            let view = match backend.take_custody_view(&conversation)? {
+                Some(view) => view,
+                None => backend::open_prepared_view(backend, &conversation).await?,
+            };
             let stored = backend.durable_have_in_view(&view, &conversation, &event_id)?;
             backend.validate_view(&view)?;
+            let uncached_view = backend.retain_custody_view(view)?;
             channel
                 .send(&encode(&SyncWire::DurableHaveResponse {
                     conversation,
@@ -1122,6 +1224,7 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
                     stored,
                 })?)
                 .await?;
+            drop(uncached_view);
             Ok(Served::Handled(conversation))
         }
         SyncWire::Request(request)
@@ -1136,9 +1239,20 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             let v2 = v3 || matches!(decode(bytes)?, SyncWire::RequestV2(_));
             // The Request's inline have is empty on the networked path; read the
             // requester's streamed have, then answer.
-            let have =
-                recv_have_owned(channel, true, conversation, backend.remote_have_budget()).await?;
-            let view = backend::open_prepared_view(backend, &conversation).await?;
+            let have = recv_have_owned(
+                channel,
+                true,
+                conversation,
+                backend.remote_have_budget(),
+                false,
+            )
+            .await?;
+            // Transfer the existing connection-owned lease before awaiting.
+            // Incomplete responses drop it; only a fully sent response is retained.
+            let view = match backend.take_custody_view(&conversation)? {
+                Some(view) => view,
+                None => backend::open_prepared_view(backend, &conversation).await?,
+            };
             let metadata = backend.metadata(&view)?;
             have_count(metadata.count)?;
             let response = if unsupported_metadata(metadata, v2, v3, v4, v5) {
@@ -1167,6 +1281,7 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
                 }))?)
                 .await?;
             send_have_pages(channel, backend, &view, conversation, SyncWire::RespHave).await?;
+            drop(backend.retain_custody_view(view)?);
             Ok(Served::Handled(conversation))
         }
         SyncWire::Followup(followup)
@@ -1221,6 +1336,12 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             channel
                 .send(&encode(&SyncWire::FpResponse(FpResponse { matched }))?)
                 .await?;
+            if let Some(view) = probe_view {
+                // The response completed this probe, not the local view's
+                // useful lifetime. A following ordinary Request may reuse it.
+                backend.validate_view(&view)?;
+                drop(backend.retain_custody_view(view)?);
+            }
             Ok(Served::Handled(conversation))
         }
         // A Response/FpResponse, or a stray have-chunk outside its stream, is out of order.

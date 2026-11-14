@@ -2395,6 +2395,17 @@ existing cancellation, sharding and comprehensive CI gates.
 
 ## Production frontend startup
 
+Theme opacity utilities must retain their alpha in the minimum native WebView.
+The frontend PostCSS configuration lowers transparent mixes of our HSL channel
+tokens to direct HSL alpha before Vite generates CSS fallbacks. The
+`frontend/scripts/theme-alpha.test.mjs` regression exercises the real Tailwind
+pipeline, variants, boundary percentages and unrelated mixes; it runs with
+`npm run check:build-syntax` and the affected production-runtime contract.
+For compatibility changes, inspect computed backgrounds and SVG strokes in light
+and dark modes using the affected native WKWebView and built CSS. An installed
+Safari version is not evidence of the embedded engine's feature support.
+
+
 React hooks and the renderer must resolve to one production runtime. The
 `react-singleton.test.mjs` diagnostic builds with the real Vite configuration
 and deliberately duplicated dependency trees; both React and React DOM must

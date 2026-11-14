@@ -16,6 +16,7 @@ vi.mock("@/lib/events", () => ({
 
 import { useChat, convKey, reactionFromMe } from "./chat";
 import { emptyReception } from "./reception";
+import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
 import type { AccountGroupOperationStatus } from "@/lib/types";
 import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
@@ -176,6 +177,661 @@ it("pulls bounded native receipts through the existing unread owner and commits 
     stop?.();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  }
+});
+
+it("keeps recovery observations and unchanged empty pages out of durable receipt writes", async () => {
+  vi.useFakeTimers();
+  const values = new Map<string, string>();
+  const commits: string[] = [];
+  let rejectCommit = false;
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      if (key.startsWith("mesh-talk-reception-commit-v1:")) {
+        if (rejectCommit) throw new Error("quota exceeded");
+        commits.push(value);
+      }
+      values.set(key, value);
+    },
+  });
+  const scope = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "installed",
+  };
+  let cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "0" };
+  let acknowledgements = 0;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({ ...scope, supports_bounded_delivery: true });
+    if (command === "owner_reception_page")
+      return Promise.resolve({
+        scope,
+        token: "page",
+        after: cursor,
+        next: cursor,
+        through: cursor,
+        complete: true,
+        receipts: [],
+      });
+    if (command === "owner_reception_ack") {
+      acknowledgements++;
+      expect(JSON.parse(commits[commits.length - 1]).cursor).toEqual(cursor);
+      return Promise.resolve(false);
+    }
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const baseline = commits.length;
+    expect(baseline).toBe(1);
+    for (let n = 0; n < 5; n++) {
+      useChat.setState({
+        reception: {
+          "channel:team": {
+            phase: n % 2 ? "waiting" : "idle",
+            received: 0,
+            checkedAt: n,
+          },
+        },
+      });
+      captured.current?.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(useChat.getState().reception["channel:team"].checkedAt).toBe(4);
+    expect(acknowledgements).toBe(6);
+    expect(commits).toHaveLength(baseline);
+
+    // Batch progress remains durable even without another message identity.
+    useChat.setState({
+      reception: {
+        "channel:team": {
+          phase: "catching_up",
+          received: 1,
+          batchId: "batch",
+          processing: true,
+        },
+      },
+    });
+    expect(commits).toHaveLength(baseline + 1);
+    rejectCommit = true;
+    useChat.setState({ unread: { "account:friend": 1 } });
+    expect(commits).toHaveLength(baseline + 1);
+    expect(useChat.getState().error).toContain("quota exceeded");
+    captured.current?.onReceptionWake(scope);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(acknowledgements).toBe(6);
+    rejectCommit = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(acknowledgements).toBe(7);
+    expect(
+      JSON.parse(commits[commits.length - 1]).unread["account:friend"],
+    ).toBe(1);
+    // A new epoch must commit even at the same sequence with no payload.
+    cursor = { ...cursor, epoch: "fedcba9876543210fedcba9876543210" };
+    const beforeEpoch = commits.length;
+    captured.current?.onReceptionWake(scope);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(commits).toHaveLength(beforeEpoch + 1);
+    expect(acknowledgements).toBe(8);
+    // A new delivery owner cannot assume the live store still equals its
+    // persisted cursor's snapshot (for example a read during unavailable IPC).
+    useChat.setState({ ready: false });
+    useChat.setState({ unread: { "account:friend": 2 } });
+    const beforeResume = commits.length;
+    useChat.setState({ ready: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(commits).toHaveLength(beforeResume + 1);
+    expect(
+      JSON.parse(commits[commits.length - 1]).unread["account:friend"],
+    ).toBe(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("retains an applied receipt across a failed atomic commit without acknowledging or double counting", async () => {
+  vi.useFakeTimers();
+  const values = new Map<string, string>();
+  let writes = 0;
+  let failing = true;
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      if (key.startsWith("mesh-talk-reception-commit-v1:")) {
+        writes++;
+        if (writes > 1 && failing) throw new Error("quota exceeded");
+      }
+      values.set(key, value);
+    },
+  });
+  const scope = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "installed",
+  };
+  const cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "1" };
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({ ...scope, supports_bounded_delivery: true });
+    if (command === "owner_reception_page")
+      return Promise.resolve({
+        scope,
+        token: "page",
+        after: { ...cursor, sequence: "0" },
+        next: cursor,
+        through: cursor,
+        complete: true,
+        receipts: [
+          {
+            kind: "dm",
+            event: {
+              message_id: "durable-message",
+              from_account: "friend",
+              from: "peer-device",
+              from_name: "Friend",
+              text: "hello",
+            },
+          },
+        ],
+      });
+    if (command === "owner_reception_ack") return Promise.resolve(false);
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  const count = (command: string) =>
+    invoke.mock.calls.filter(([name]) => name === command).length;
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().unread["account:friend"]).toBe(1);
+    expect(count("owner_reception_ack")).toBe(0);
+    expect(
+      JSON.parse(values.get("mesh-talk-reception-commit-v1:host:myacct:me")!)
+        .cursor.sequence,
+    ).toBe("0");
+    failing = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(count("owner_reception_ack")).toBe(1);
+    expect(count("owner_reception_page")).toBe(1);
+    expect(useChat.getState().unread["account:friend"]).toBe(1);
+    const saved = JSON.parse(
+      values.get("mesh-talk-reception-commit-v1:host:myacct:me")!,
+    );
+    expect(saved.cursor).toEqual(cursor);
+    expect(saved.unread["account:friend"]).toBe(1);
+  } finally {
+    stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps repeated roster pages out of document and full group refreshes", async () => {
+  vi.useFakeTimers();
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  });
+  const scope = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "installed",
+  };
+  const cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "0" };
+  let kinds: unknown = ["roster"];
+  const changes: string[] = [];
+  const unsubscribe = subscribeSyncInvalidation((change) =>
+    changes.push(change.kind),
+  );
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({ ...scope, supports_bounded_delivery: true });
+    if (command === "owner_reception_page")
+      return Promise.resolve({
+        scope,
+        token: "page",
+        after: cursor,
+        next: cursor,
+        through: cursor,
+        complete: true,
+        receipts: [{ kind: "state", event: kinds ? { kinds } : undefined }],
+      });
+    if (command === "owner_reception_ack") return Promise.resolve(false);
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    invoke.mockClear();
+    changes.length = 0;
+    for (let n = 0; n < 3; n++) {
+      captured.current?.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    const commands = invoke.mock.calls.map(([command]) => command);
+    expect(
+      commands.filter((command) => command === "owner_reception_page"),
+    ).toHaveLength(3);
+    expect(commands).not.toContain("list_channels");
+    expect(commands).not.toContain("get_account_documents");
+    expect(commands).not.toContain("owner_personal_conversation_states");
+    expect(commands).toContain("list_peers");
+    expect(commands).not.toContain("list_accounts");
+    expect(changes).toEqual(["roster", "roster", "roster"]);
+    kinds = undefined;
+    invoke.mockClear();
+    captured.current?.onReceptionWake(scope);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(invoke.mock.calls.map(([command]) => command)).toContain(
+      "list_channels",
+    );
+    expect(changes[changes.length - 1]).toBe("state");
+    for (const malformed of [
+      "roster",
+      ["unknown"],
+      { roster: true },
+      Array(7).fill("roster"),
+    ]) {
+      kinds = malformed;
+      invoke.mockClear();
+      captured.current?.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(changes[changes.length - 1]).toBe("state");
+    }
+  } finally {
+    stop();
+    unsubscribe();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("reuses account reads for unchanged heartbeat facts and retries failed changes", async () => {
+  vi.useFakeTimers();
+  let peers = [
+    {
+      user_id: "a",
+      account_id: "friend",
+      name: "Friend",
+      post_office: false,
+      addr: "old",
+    },
+    {
+      user_id: "b",
+      account_id: "friend",
+      name: "Other",
+      post_office: false,
+      addr: "other",
+    },
+  ];
+  let fail = false;
+  let names = ["Initial"];
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_peers")
+      return Promise.resolve(peers.map((peer) => ({ ...peer })));
+    if (command === "list_accounts")
+      return fail
+        ? Promise.reject(new Error("read failed"))
+        : Promise.resolve([{ account_id: "friend", names, device_count: 2 }]);
+    return Promise.resolve([]);
+  });
+  const count = () =>
+    invoke.mock.calls.filter(([command]) => command === "list_accounts").length;
+  const heartbeat = async () => {
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    let before = count();
+    peers = peers.reverse().map((peer) => ({ ...peer, addr: "new" }));
+    await heartbeat();
+    await heartbeat();
+    expect(count()).toBe(before);
+    expect(useChat.getState().peers[0].addr).toBe("new");
+    for (const patch of [
+      { name: "Renamed" },
+      { user_id: "replacement" },
+      { account_id: "rebound" },
+      { post_office: true },
+    ]) {
+      peers = peers.map((peer, index) =>
+        index === 0 ? { ...peer, ...patch } : peer,
+      );
+      await heartbeat();
+      expect(count()).toBe(++before);
+    }
+    peers = peers.slice(1);
+    fail = true;
+    await heartbeat();
+    expect(count()).toBe(++before);
+    fail = false;
+    names = ["Recovered"];
+    await heartbeat();
+    expect(count()).toBe(++before);
+    expect(useChat.getState().accounts[0].names).toEqual(names);
+    await heartbeat();
+    expect(count()).toBe(before);
+    names = ["Offline profile update"];
+    await useChat.getState().refreshRoster();
+    expect(count()).toBe(++before);
+    expect(useChat.getState().accounts[0].names).toEqual(names);
+    useChat.setState((state) => ({ identityEpoch: state.identityEpoch + 1 }));
+    await heartbeat();
+    expect(count()).toBe(++before);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("ignores held account reads after runtime replacement without qualifying the replacement baseline", async () => {
+  vi.useFakeTimers();
+  let hold = false;
+  let finish!: (rows: unknown) => void;
+  let name = "Initial";
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_peers")
+      return Promise.resolve([
+        { user_id: "peer", account_id: "friend", name, post_office: false },
+      ]);
+    if (command === "list_accounts") {
+      if (hold) {
+        hold = false;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      }
+      return Promise.resolve([
+        { account_id: "friend", names: [name], device_count: 1 },
+      ]);
+    }
+    return Promise.resolve([]);
+  });
+  const heartbeat = async () => {
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    hold = true;
+    name = "Retired";
+    await heartbeat();
+    expect(finish).toBeDefined();
+    useChat.setState((state) => ({ identityEpoch: state.identityEpoch + 1 }));
+    name = "Replacement";
+    await heartbeat();
+    expect(useChat.getState().accounts[0].names).toEqual(["Replacement"]);
+    finish([{ account_id: "friend", names: ["Retired"], device_count: 1 }]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().accounts[0].names).toEqual(["Replacement"]);
+    const reads = invoke.mock.calls.filter(
+      ([command]) => command === "list_accounts",
+    ).length;
+    await heartbeat();
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "list_accounts"),
+    ).toHaveLength(reads);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("publishes held full account metadata after a newer heartbeat reuses the account roster", async () => {
+  vi.useFakeTimers();
+  let hold = false;
+  let addr = "old-route";
+  let finish!: (rows: unknown) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_peers")
+      return Promise.resolve([
+        {
+          user_id: "peer",
+          account_id: "friend",
+          name: "Friend",
+          post_office: false,
+          addr,
+        },
+      ]);
+    if (command === "list_accounts") {
+      if (hold)
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      return Promise.resolve([
+        { account_id: "friend", names: ["Old profile"], device_count: 1 },
+      ]);
+    }
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    hold = true;
+    const full = useChat.getState().refreshRoster();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(finish).toBeDefined();
+    addr = "new-route";
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().peers[0].addr).toBe("new-route");
+    finish([{ account_id: "friend", names: ["New profile"], device_count: 1 }]);
+    await full;
+    expect(useChat.getState().accounts[0].names).toEqual(["New profile"]);
+    expect(useChat.getState().peers[0].addr).toBe("new-route");
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("preserves fresh presence while a held full refresh still applies personal and history state", async () => {
+  vi.useFakeTimers();
+  let held = false;
+  let fresh = false;
+  let resolvePersonal!: (rows: PersonalConversationState[]) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: held ? 2 : 1,
+      });
+    if (command === "list_peers")
+      return Promise.resolve([
+        { user_id: fresh ? "fresh" : "old", name: fresh ? "Fresh" : "Old" },
+      ]);
+    if (command === "list_accounts")
+      return Promise.resolve([
+        {
+          account_id: "friend",
+          device_count: fresh ? 2 : 1,
+          names: [fresh ? "Fresh" : "Old"],
+        },
+      ]);
+    if (command === "owner_personal_conversation_states" && held)
+      return new Promise((resolve) => {
+        resolvePersonal = resolve;
+      });
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    held = true;
+    const full = useChat.getState().refreshRoster();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolvePersonal).toBeDefined();
+    fresh = true;
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().peers[0].user_id).toBe("fresh");
+    resolvePersonal([
+      {
+        conversation: { kind: "account", id: "personal" },
+        hidden: true,
+        history_floor: "floor",
+        local_cleanup_complete: true,
+      },
+    ]);
+    await full;
+    expect(useChat.getState().peers[0].user_id).toBe("fresh");
+    expect(useChat.getState().accounts[0].names).toEqual(["Fresh"]);
+    expect(
+      useChat.getState().personalConversationStates["account:personal"].hidden,
+    ).toBe(true);
+    expect(useChat.getState().historyBaselines).toContain("account:myacct");
+    expect(useChat.getState().historyRevision).toBe(2);
+    const accountReads = invoke.mock.calls.filter(
+      ([command]) => command === "list_accounts",
+    ).length;
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "list_accounts"),
+    ).toHaveLength(accountReads);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("does not let a held full identity overwrite a newer presence display name", async () => {
+  vi.useFakeTimers();
+  let holdNext = false;
+  let name = "Alice";
+  let resolveOld!: (value: unknown) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity") {
+      if (holdNext) {
+        holdNext = false;
+        return new Promise((resolve) => {
+          resolveOld = resolve;
+        });
+      }
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        display_name: name,
+      });
+    }
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    holdNext = true;
+    const full = useChat.getState().refreshRoster();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolveOld).toBeDefined();
+    name = "Newer";
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useAuth.getState().user?.display_name).toBe("Newer");
+    resolveOld({
+      owner: "host",
+      device_id: "me",
+      account_id: "myacct",
+      display_name: "Older",
+      history_revision: 2,
+    });
+    await full;
+    expect(useAuth.getState().user?.display_name).toBe("Newer");
+    expect(useChat.getState().historyRevision).toBe(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("preserves auth user identity for unchanged roster display names", async () => {
+  vi.useFakeTimers();
+  let name = "Alice";
+  invoke.mockImplementation((command: string) =>
+    command === "owner_node_identity"
+      ? Promise.resolve({
+          owner: "host",
+          account_id: "myacct",
+          device_id: "me",
+          display_name: name,
+        })
+      : Promise.resolve([]),
+  );
+  const user = useAuth.getState().user;
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useAuth.getState().user).toBe(user);
+    await useChat.getState().refreshRoster();
+    expect(useAuth.getState().user).toBe(user);
+    name = "Renamed";
+    await useChat.getState().refreshRoster();
+    expect(useAuth.getState().user?.display_name).toBe("Renamed");
+    expect(useAuth.getState().user).not.toBe(user);
+  } finally {
+    stop();
+    vi.useRealTimers();
   }
 });
 
@@ -4943,24 +5599,26 @@ it("revokes an old staged identity when a full reply races a newer pending start
 it("sends installed sticker bytes as media and retries that snapshot after pack removal", async () => {
   const { usePacks } = await import("./packs");
   const { decodeStickerMedia } = await import("@/lib/stickerMedia");
+  const fullPacks: import("@/lib/pack").CustomizationPack[] = [
+    {
+      kind: "sticker",
+      id: "cats",
+      name: "Cats",
+      format: 1,
+      version: "1",
+      stickers: [
+        {
+          id: "wave",
+          label: "Wave",
+          fallback: "👋",
+          url: "data:image/png;base64,AQID",
+        },
+      ],
+    },
+  ];
   usePacks.setState({
-    packs: [
-      {
-        kind: "sticker",
-        id: "cats",
-        name: "Cats",
-        format: 1,
-        version: "1",
-        stickers: [
-          {
-            id: "wave",
-            label: "Wave",
-            fallback: "👋",
-            url: "data:image/png;base64,AQID",
-          },
-        ],
-      },
-    ],
+    packs: fullPacks,
+    readPack: async (id) => fullPacks.find((pack) => pack.id === id),
   });
   let fail = true;
   invoke.mockImplementation((cmd: string) => {
@@ -5004,24 +5662,26 @@ it("sends installed sticker bytes as media and retries that snapshot after pack 
 });
 it("reports corrupt installed artwork without sending an id-only fallback", async () => {
   const { usePacks } = await import("./packs");
+  const fullPacks: import("@/lib/pack").CustomizationPack[] = [
+    {
+      kind: "sticker",
+      id: "cats",
+      name: "Cats",
+      format: 1,
+      version: "1",
+      stickers: [
+        {
+          id: "wave",
+          label: "Wave",
+          fallback: "👋",
+          url: "data:image/png;base64,",
+        },
+      ],
+    },
+  ];
   usePacks.setState({
-    packs: [
-      {
-        kind: "sticker",
-        id: "cats",
-        name: "Cats",
-        format: 1,
-        version: "1",
-        stickers: [
-          {
-            id: "wave",
-            label: "Wave",
-            fallback: "👋",
-            url: "data:image/png;base64,",
-          },
-        ],
-      },
-    ],
+    packs: fullPacks,
+    readPack: async (id) => fullPacks.find((pack) => pack.id === id),
   });
   useChat.setState({
     active: { kind: "account", id: "target", name: "Target" },
@@ -5033,24 +5693,26 @@ it("reports corrupt installed artwork without sending an id-only fallback", asyn
 });
 it("discards staged sticker bytes after the account owner changes", async () => {
   const { usePacks } = await import("./packs");
+  const fullPacks: import("@/lib/pack").CustomizationPack[] = [
+    {
+      kind: "sticker",
+      id: "cats",
+      format: 1,
+      version: "1",
+      name: "Cats",
+      stickers: [
+        {
+          id: "wave",
+          label: "Wave",
+          fallback: "👋",
+          url: "data:image/png;base64,AQID",
+        },
+      ],
+    },
+  ];
   usePacks.setState({
-    packs: [
-      {
-        kind: "sticker",
-        id: "cats",
-        format: 1,
-        version: "1",
-        name: "Cats",
-        stickers: [
-          {
-            id: "wave",
-            label: "Wave",
-            fallback: "👋",
-            url: "data:image/png;base64,AQID",
-          },
-        ],
-      },
-    ],
+    packs: fullPacks,
+    readPack: async (id) => fullPacks.find((pack) => pack.id === id),
   });
   let finish!: (path: string) => void;
   invoke.mockImplementation((cmd: string) =>
@@ -5064,6 +5726,7 @@ it("discards staged sticker bytes after the account owner changes", async () => 
     active: { kind: "account", id: "target", name: "Target" },
   });
   const sending = useChat.getState().sendSticker("pack:cats:wave", "👋");
+  await vi.waitFor(() => expect(finish).toBeDefined());
   useAuth.setState({ generation: 1 });
   finish("/tmp/stale-sticker.png");
   await sending;
@@ -6300,3 +6963,238 @@ it("does not hold visible history behind a pending reaction projection", async (
     await opening;
   }
 });
+
+it("does not advance the presentation clock when no content expires", async () => {
+  vi.useFakeTimers();
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const now = useChat.getState().expiryNow;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(useChat.getState().expiryNow).toBe(now);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("expires content at its exact deadline between former polling ticks", async () => {
+  vi.useFakeTimers();
+  const stop = useChat.getState().start();
+  try {
+    const now = Date.now();
+    useChat.setState({
+      messages: {
+        "account:friend": [
+          {
+            id: "exact-deadline",
+            fromMe: false,
+            who: "Friend",
+            text: "temporary",
+            wallClock: now,
+            replyTo: null,
+            expiresAtMs: now + 10500,
+          },
+        ],
+      },
+    });
+    await vi.advanceTimersByTimeAsync(10499);
+    expect(useChat.getState().messages["account:friend"]).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(useChat.getState().messages["account:friend"]).toEqual([]);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("retires an already-due expiry after state publication without another timer tick", async () => {
+  vi.useFakeTimers();
+  const stop = useChat.getState().start();
+  try {
+    const now = Date.now();
+    const message = {
+      id: "due-before-publication",
+      fromMe: false,
+      who: "Friend",
+      text: "temporary",
+      wallClock: now,
+      replyTo: null,
+      expiresAtMs: now + 1000,
+    };
+    useChat.setState({ messages: { "account:friend": [message] } });
+    // Move the wall clock without dispatching the original deadline timer.
+    // Another state publication must not replace that due work with a timer
+    // that requires an additional clock tick to retire the same message.
+    vi.setSystemTime(now + 1001);
+    useChat.setState({ messages: { "account:friend": [message] } });
+    await Promise.resolve();
+    expect(useChat.getState().messages["account:friend"]).toEqual([]);
+    expect(useChat.getState().expiryNow).toBeGreaterThanOrEqual(now + 1001);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("does not apply a queued due expiry after its chat owner stops", async () => {
+  vi.useFakeTimers();
+  const stop = useChat.getState().start();
+  try {
+    const now = Date.now();
+    const message = {
+      id: "replacement-content",
+      fromMe: false,
+      who: "Friend",
+      text: "retained by replacement",
+      wallClock: now,
+      replyTo: null,
+      expiresAtMs: now - 1,
+    };
+    useChat.setState({ messages: { "account:friend": [message] } });
+    stop();
+    const expiryNow = useChat.getState().expiryNow;
+    await Promise.resolve();
+    expect(useChat.getState().messages["account:friend"]).toEqual([message]);
+    expect(useChat.getState().expiryNow).toBe(expiryNow);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("keeps roster reconciliation quiet with native push after startup", async () => {
+  vi.useFakeTimers();
+  const { setPushStateSupport } = await import("@/lib/syncInvalidation");
+  invoke.mockImplementation((command: string) =>
+    command === "owner_node_identity"
+      ? Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+          supports_push_state: true,
+        })
+      : Promise.resolve([]),
+  );
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(2100);
+    setPushStateSupport("host");
+    const reads = () =>
+      invoke.mock.calls.filter(([command]) => command === "list_peers").length;
+    const before = reads();
+    expect(before).toBeGreaterThan(0);
+    expect(useChat.getState().ready).toBe(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(reads()).toBe(before);
+  } finally {
+    stop();
+    setPushStateSupport(null);
+    vi.useRealTimers();
+  }
+});
+
+it.each(["documents", "sync_status"])(
+  "keeps qualified %s reception changes out of settled group and personal queries",
+  async (domain) => {
+    vi.useFakeTimers();
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    });
+    const scope = {
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      runtime_id: "installed",
+    };
+    const cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "0" };
+    let kinds: unknown = ["state"];
+    const changes: string[] = [];
+    const scopes: unknown[] = [];
+    const unsubscribe = subscribeSyncInvalidation((change) => {
+      changes.push(change.kind);
+      scopes.push(change.scope);
+    });
+    invoke.mockImplementation((command: string) => {
+      if (command === "owner_node_identity")
+        return Promise.resolve({
+          ...scope,
+          supports_bounded_delivery: true,
+          supports_push_state: true,
+        });
+      if (command === "list_channels")
+        return Promise.resolve(
+          ["first", "second"].map((channel_id) => ({
+            channel_id,
+            name: channel_id,
+            owner: "me",
+            member_count: 1,
+          })),
+        );
+      if (command === "channel_members")
+        return Promise.resolve({
+          owner: "me",
+          members: [{ user_id: "me", name: "Owner" }],
+          history_policy: "off",
+        });
+      if (command === "owner_reception_page")
+        return Promise.resolve({
+          scope,
+          token: "page",
+          after: cursor,
+          next: cursor,
+          through: cursor,
+          complete: true,
+          receipts: [{ kind: "state", event: { kinds } }],
+        });
+      if (command === "owner_reception_ack") return Promise.resolve(false);
+      return Promise.resolve([]);
+    });
+    const stop = useChat.getState().start();
+    const groupCalls = () => ({
+      groups: invoke.mock.calls.filter(([name]) => name === "list_channels")
+        .length,
+      members: invoke.mock.calls.filter(([name]) => name === "channel_members")
+        .length,
+      personal: invoke.mock.calls.filter(
+        ([name]) => name === "owner_personal_conversation_states",
+      ).length,
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(Object.keys(useChat.getState().channelMembersById).sort()).toEqual(
+        ["first", "second"],
+      );
+      invoke.mockClear();
+      changes.length = 0;
+      scopes.length = 0;
+      kinds = [domain];
+      captured.current!.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(groupCalls()).toEqual({ groups: 0, members: 0, personal: 0 });
+      expect(changes).toEqual(["state"]);
+      expect(scopes).toEqual([domain]);
+      // A broad arrival in the same page must still refresh current authority.
+      invoke.mockClear();
+      kinds = [domain, "state"];
+      captured.current!.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(groupCalls()).toEqual({ groups: 1, members: 2, personal: 1 });
+      // Future direct-event domains also retain conservative legacy recovery.
+      invoke.mockClear();
+      captured.current!.onStateChanged({
+        ...scope,
+        kind: "unknown-future-domain",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(groupCalls()).toEqual({ groups: 1, members: 2, personal: 1 });
+    } finally {
+      stop();
+      unsubscribe();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  },
+);

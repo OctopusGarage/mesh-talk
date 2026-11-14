@@ -194,7 +194,11 @@ test("changed pack and composer browser scenarios require their own acceptance s
   for (const name of ["packs", "packs-empty", "stickers", "theme-picker", "theme-contrast", "avatar-gallery", "avatar-gallery-loading", "ui-audit-composer"]) {
     const spec = `e2e/${name}.spec.ts`;
     const requirements = await loadRequirements([`frontend/${spec}`], fileURLToPath(new URL("../../", import.meta.url)));
-    const expected = name === "theme-picker" ? [spec, "e2e/ui-visual-regression.spec.ts"] : [spec];
+    const expected = name === "theme-picker"
+      ? [spec, "e2e/ui-visual-regression.spec.ts"]
+      : name === "packs"
+        ? ["e2e/customization-pending-storage.spec.ts", "e2e/pack-storage.spec.ts", spec]
+        : [spec];
     assert.deepEqual(requirements.browser, expected, name);
   }
 });

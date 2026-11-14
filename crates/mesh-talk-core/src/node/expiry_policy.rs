@@ -3,6 +3,39 @@
 use super::{DmEnvelope, Node, NodeError};
 use crate::eventlog::event::EventId;
 
+#[derive(PartialEq, Eq)]
+struct ReceivedExpiryInputs {
+    received: u64,
+    files: u64,
+    account: String,
+    linked_devices: usize,
+}
+
+/// Successful unchanged scans retain only their authority/repository revisions
+/// and earliest deadlines, never another per-message projection.
+pub(super) struct ReceivedExpirySchedule {
+    inputs: ReceivedExpiryInputs,
+    wall: Option<u64>,
+    monotonic: Option<std::time::Instant>,
+}
+
+impl ReceivedExpirySchedule {
+    fn quiet(&self, inputs: &ReceivedExpiryInputs, wall: u64) -> bool {
+        self.inputs == *inputs
+            && self.wall.is_none_or(|at| wall < at)
+            && self
+                .monotonic
+                .is_none_or(|at| std::time::Instant::now() < at)
+    }
+
+    fn retain(&mut self, deadline: u64, sent: u64, first_seen: std::time::Instant) {
+        self.wall = Some(self.wall.map_or(deadline, |prior| prior.min(deadline)));
+        let lifetime = deadline.saturating_sub(sent).min(30 * 24 * 60 * 60 * 1000);
+        let at = first_seen + std::time::Duration::from_millis(lifetime);
+        self.monotonic = Some(self.monotonic.map_or(at, |prior| prior.min(at)));
+    }
+}
+
 /// Deadline authenticated inside either an account envelope or direct plaintext.
 pub(in crate::node) fn plaintext_deadline(wire: &[u8]) -> Option<u64> {
     DmEnvelope::decode(wire).map_or_else(
@@ -115,8 +148,26 @@ impl Node {
             .into_iter()
             .map(|device| device.public.user_id())
             .collect();
+        let inputs = ReceivedExpiryInputs {
+            received: self.received.lock().expect("received mutex").revision(),
+            files: self.received_files.lock().expect("files mutex").revision(),
+            account: own_account.clone(),
+            linked_devices: own_devices.len(),
+        };
+        let scan = restart
+            || !self
+                .received_expiry_schedule
+                .lock()
+                .expect("expiry schedule mutex")
+                .as_ref()
+                .is_some_and(|schedule| schedule.quiet(&inputs, self.expiry_now()));
+        let mut schedule = ReceivedExpirySchedule {
+            inputs,
+            wall: None,
+            monotonic: None,
+        };
         let mut removed = 0;
-        for file in [false, true] {
+        for file in [false, true].into_iter().filter(|_| scan) {
             let mut after = None;
             loop {
                 let page = if file {
@@ -157,6 +208,19 @@ impl Node {
                             .lock()
                             .expect("expiry mutex")
                             .remove(&event_id);
+                    } else if let Some(first_seen) = self
+                        .expiry_first_seen
+                        .lock()
+                        .expect("expiry mutex")
+                        .get(&event_id)
+                        .copied()
+                    {
+                        schedule.retain(row.cursor.deadline, row.wall_clock, first_seen);
+                    } else {
+                        // Another cleanup may have retired this observation
+                        // after classification. Recheck instead of certifying
+                        // a deadline whose monotonic anchor disappeared.
+                        schedule.wall = Some(0);
                     }
                 }
             }
@@ -238,6 +302,61 @@ impl Node {
         if removed > 0 {
             self.note_account_history_change();
         }
+        if scan {
+            // Stamp the inputs read BEFORE scanning. Concurrent appends or
+            // authority changes then force another pass rather than being
+            // certified by work that may not have visited them. Errors above
+            // retain the previous schedule and remain retryable.
+            *self
+                .received_expiry_schedule
+                .lock()
+                .expect("expiry schedule mutex") = Some(schedule);
+        }
         Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn received_expiry_schedule_keeps_monotonic_and_authority_invalidations() {
+        let inputs = || ReceivedExpiryInputs {
+            received: 1,
+            files: 2,
+            account: "account".into(),
+            linked_devices: 1,
+        };
+        let mut schedule = ReceivedExpirySchedule {
+            inputs: inputs(),
+            wall: None,
+            monotonic: None,
+        };
+        let future = super::super::node::now_millis() + 3_600_000;
+        schedule.retain(
+            future,
+            future - 10,
+            std::time::Instant::now() - std::time::Duration::from_millis(20),
+        );
+        assert!(
+            !schedule.quiet(&inputs(), future - 1000),
+            "a future wall deadline cannot hide the already elapsed monotonic lifetime"
+        );
+        schedule.monotonic = None;
+        assert!(schedule.quiet(&inputs(), future - 1000));
+        assert!(!schedule.quiet(&inputs(), future));
+        let mut changed = inputs();
+        changed.linked_devices += 1;
+        assert!(!schedule.quiet(&changed, future - 1000));
+        changed = inputs();
+        changed.received += 1;
+        assert!(!schedule.quiet(&changed, future - 1000));
+        changed = inputs();
+        changed.files += 1;
+        assert!(!schedule.quiet(&changed, future - 1000));
+        changed = inputs();
+        changed.account = "replacement".into();
+        assert!(!schedule.quiet(&changed, future - 1000));
     }
 }

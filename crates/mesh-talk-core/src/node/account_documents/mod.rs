@@ -464,13 +464,16 @@ impl Node {
         self.account_document_updates.subscribe()
     }
     fn documents_changed(&self) {
-        self.documents_imported();
+        self.documents_changed_domain(None);
+    }
+    fn documents_changed_domain(&self, domain: Option<AccountDocumentDomain>) {
+        self.documents_imported_domain(domain);
         self.note_account_local_change();
     }
     /// Incoming rows dirty local readers and reconciliation without claiming a
-    /// new local publication. Relaying a sibling import as a publisher wake
-    /// would turn mandatory metadata reconciliation into a feedback loop.
-    fn documents_imported(&self) {
+    /// new local publication. Missing/authority-related domains remain broad.
+    fn documents_imported_domain(&self, domain: Option<AccountDocumentDomain>) {
+        let mut status_changed = false;
         for status in self
             .account_sync_status
             .lock()
@@ -479,12 +482,19 @@ impl Node {
         {
             if status.document_phase == super::SyncPhase::UpToDate {
                 status.document_phase = super::SyncPhase::CatchingUp;
+                status_changed = true;
             }
         }
         self.account_document_updates
             .send_modify(|r| *r = r.wrapping_add(1));
         self.account_sync_notify.notify_one();
-        self.note_ui_change();
+        let narrow = matches!(
+            domain,
+            Some(AccountDocumentDomain::Draft | AccountDocumentDomain::CustomizationPack)
+        );
+        // One legacy wake and one cumulative desktop update; an actual phase
+        // transition cannot be masked by the accompanying document invalidation.
+        self.ui_changes.documents(narrow, status_changed);
     }
     pub fn put_account_document_if(
         &self,
@@ -569,7 +579,7 @@ impl Node {
             Ok(())
         })?;
         let result = result.ok_or_else(invalid)?;
-        self.documents_changed();
+        self.documents_changed_domain(Some(key.domain()));
         Ok(result)
     }
     pub fn remove_account_document_if(
@@ -595,7 +605,7 @@ impl Node {
             Ok(())
         })?;
         let result = result.ok_or_else(invalid)?;
-        self.documents_changed();
+        self.documents_changed_domain(Some(key.domain()));
         Ok(result)
     }
     pub fn mark_account_message_seen_if(

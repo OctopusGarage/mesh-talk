@@ -1,5 +1,6 @@
 //! Unfiltered repository network selectors. These are not an expiry/participant
 //! policy facade; runtime owners must supply their own current authorization.
+use super::metadata::{METADATA_COLUMNS, read_metadata};
 use super::*;
 use crate::eventlog::sync::FileConsentStatus;
 use crate::eventlog::sync::network::{
@@ -19,6 +20,7 @@ pub(super) struct Binding {
 /// Retains the profile lease even while the owning store is unlocked/dropped.
 pub(crate) struct NetworkView {
     pub(super) binding: Binding,
+    pub(crate) history_binding: HistorySyncBinding,
     metadata: SyncMetadata,
     _lease: RepositoryOwner,
 }
@@ -37,7 +39,54 @@ pub(crate) struct ExportCursor {
 // Index shape is part of this owner: no ID-order postfilter, sorting or temp keyset.
 const SELECT_COMMIT_IDS: &str = "SELECT commit_ordinal,id FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2 AND commit_ordinal>=?3 AND commit_ordinal<?4 AND (commit_ordinal,id)>(?5,?6) ORDER BY commit_ordinal,id LIMIT ?7";
 
+/// Exact scalar source identity for a local history observation. Absence is
+/// distinct from an existing empty or retiring conversation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HistorySyncBinding {
+    store_uuid: [u8; 16],
+    domain: [u8; 16],
+    conversation: ConversationId,
+    scope: Option<(i64, i64, i64)>,
+}
+
 impl EventRepository {
+    /// Physical changes to this scope invalidate a pending dependency repair.
+    /// Ordinary appends and compaction in other conversations leave it usable.
+    pub(crate) fn conversation_destructive_epoch(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<i64, LogError> {
+        self.database
+            .read(|c| self.network_epoch_on(c, conversation))
+    }
+
+    pub(crate) fn history_sync_binding(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<HistorySyncBinding, LogError> {
+        self.database
+            .read(|c| self.history_sync_binding_on(c, conversation))
+    }
+
+    fn history_sync_binding_on(
+        &self,
+        c: &Connection,
+        conversation: &ConversationId,
+    ) -> Result<HistorySyncBinding, LogError> {
+        // Validate retirement metadata through its owning contract before
+        // exposing a binding. All reads share the same connection guard.
+        self.scope_on(c, conversation)?;
+        let scope: Option<(i64, i64, i64)> = c.prepare_cached(
+                "SELECT revision,destructive_epoch,lifecycle FROM event_conversations WHERE domain=?1 AND conversation=?2"
+            )?.query_row(params![self.domain.0.as_slice(),conversation.as_bytes().as_slice()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        Ok(HistorySyncBinding {
+            store_uuid: self.store_uuid,
+            domain: self.domain.0,
+            conversation: *conversation,
+            scope,
+        })
+    }
+
     pub(super) fn network_epoch_on(
         &self,
         c: &Connection,
@@ -67,12 +116,27 @@ impl EventRepository {
         // protocol. A newly required control invalidates an older capability
         // binding before even its cached fingerprint or Have can be handed off.
         // Read fixed metadata only; ordinary appends retain this finite view.
-        if let Some(current) = self.metadata_on(c, &view.binding.conversation)? {
+        // Scope/retirement authority was checked above under this same guard.
+        // Read metadata and the covering kind-index probe together without
+        // re-entering helpers that each repeat the two scope queries. This
+        // observation is local to this validation, never retained in the view.
+        let mut stmt = c.prepare_cached(&format!(
+            "SELECT {METADATA_COLUMNS},EXISTS(SELECT 1 FROM retained_events INDEXED BY retained_events_kind_author WHERE domain=?1 AND conversation=?2 AND kind=?3) FROM event_conversations WHERE domain=?1 AND conversation=?2"
+        ))?;
+        let mut rows = stmt.query(params![
+            self.domain.0.as_slice(),
+            view.binding.conversation.as_bytes().as_slice(),
+            EventKind::ChannelMetadata as i64
+        ])?;
+        if let Some(row) = rows.next()? {
+            // Preserve metadata corruption checks before capability admission.
+            let current = read_metadata(row)?;
+            let channel_v5: bool = row.get(9)?;
             let v5 = view.metadata.channel_v5;
             let v4 = v5 || view.metadata.channel_v4;
             let v3 = v4 || view.metadata.channel_v3;
             let v2 = v3 || view.metadata.channel_v2;
-            if (self.has_kind_on(c, &view.binding.conversation, EventKind::ChannelMetadata)? && !v5)
+            if (channel_v5 && !v5)
                 || (current.channel_v4 && !v4)
                 || (current.channel_v3 && !v3)
                 || (current.channel_v2 && !v2)
@@ -82,7 +146,11 @@ impl EventRepository {
         }
         Ok(())
     }
-    fn network_header_on(&self, c: &Connection, id: &EventId) -> Result<EventHeader, LogError> {
+    pub(super) fn network_header_on(
+        &self,
+        c: &Connection,
+        id: &EventId,
+    ) -> Result<EventHeader, LogError> {
         #[cfg(test)]
         self.network_header_fetches
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -146,6 +214,7 @@ impl EventRepository {
             };
         }
         Ok(NetworkView {
+            history_binding: self.history_sync_binding_on(c, conv)?,
             binding: Binding {
                 store_uuid: self.store_uuid,
                 domain: self.domain,
@@ -263,11 +332,13 @@ impl EventRepository {
             }
             let ordinal = nonnegative(row.get(0)?)?;
             let id = EventId::new(blob(row, 1)?);
-            let allowed = match selection {
-                Some(selection) => c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2 AND outgoing=1)", params![selection.as_slice(), id.as_bytes().as_slice()], |r| r.get::<_, bool>(0))?,
+            // Peer-known IDs cannot contribute an export. Charge/advance their
+            // cursor below without preparing per-ID authorization SQL or bodies.
+            let allowed = !have.contains(&id) && match selection {
+                Some(selection) => c.prepare_cached("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_rows WHERE view=?1 AND id=?2 AND outgoing=1)")?.query_row(params![selection.as_slice(), id.as_bytes().as_slice()], |r| r.get::<_, bool>(0))?,
                 None => true,
             };
-            if allowed && !have.contains(&id) {
+            if allowed {
                 let header = self.network_header_on(c, &id)?;
                 if header.conversation != view.binding.conversation {
                     return Err(corrupt("network header conversation differs"));

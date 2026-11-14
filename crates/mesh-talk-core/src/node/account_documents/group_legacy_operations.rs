@@ -78,6 +78,10 @@ impl Node {
             let changed = {
                 let mut store = self.account_documents.lock().expect("documents mutex");
                 let previous = store.meta(&key);
+                let fingerprint = projection.fingerprint();
+                if store.operation_publication_unchanged(previous.as_ref(), fingerprint, verified) {
+                    continue;
+                }
                 if previous.is_none()
                     && projection.requests.is_empty()
                     && projection.results.is_empty()
@@ -103,8 +107,11 @@ impl Node {
                 });
                 if old
                     .as_ref()
-                    .is_some_and(|old| old.projection.fingerprint() == projection.fingerprint())
+                    .is_some_and(|old| old.projection.fingerprint() == fingerprint)
                 {
+                    if let Some(meta) = previous {
+                        store.remember_operation_publication(meta, fingerprint);
+                    }
                     continue;
                 }
                 let Some(revision) = previous.map_or(Some(1), |meta| meta.revision.checked_add(1))
@@ -126,7 +133,11 @@ impl Node {
                     &payload,
                     false,
                 );
-                store.merge(meta, &payload)
+                let changed = store.merge(meta.clone(), &payload);
+                if changed.is_ok() {
+                    store.remember_operation_publication(meta, fingerprint);
+                }
+                changed
             };
             match changed {
                 Ok(true) => self.documents_changed(),

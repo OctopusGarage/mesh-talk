@@ -109,13 +109,58 @@ pub struct PeerRecord {
     pub last_seen: Instant,
 }
 
+/// Scheduling projection only: route provenance is retained, freshness/order are not.
+/// The fallback remains distinct instead of inventing provenance for legacy records.
+pub(crate) type SchedulingEndpoints = (Vec<(SocketAddr, u8)>, Option<SocketAddr>);
+
 impl PeerRecord {
+    pub(crate) fn scheduling_endpoints(&self) -> SchedulingEndpoints {
+        let canonical = |mut addr: SocketAddr| {
+            addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
+            addr
+        };
+        let mut routes: Vec<_> = self
+            .routes
+            .iter()
+            .map(|route| (canonical(route.addr), route.source as u8))
+            .collect();
+        routes.sort_unstable();
+        routes.dedup();
+        let preferred = canonical(self.addr);
+        let fallback = (!routes.iter().any(|(addr, _)| *addr == preferred)).then_some(preferred);
+        (routes, fallback)
+    }
+    /// Scheduling evidence from a signed direct observation of this exact endpoint.
+    /// This neither authenticates a connection nor renews the observation.
+    pub(crate) fn direct_discovery_deadline(&self, address: SocketAddr) -> Option<Instant> {
+        self.routes
+            .iter()
+            .filter(|route| {
+                route.addr == address
+                    && matches!(
+                        route.source,
+                        RouteSource::Lan | RouteSource::Discovery | RouteSource::RoutedQuery
+                    )
+            })
+            .filter_map(PeerEndpoint::public_presence_deadline)
+            .max()
+    }
+
     /// Fresh public observations, independently of preferred route or TCP success.
     /// The third value is the remaining monotonic lifetime in seconds.
     pub fn presence_evidence(&self, now: Instant) -> Vec<(RouteSource, u64, u64)> {
         self.presence_routes(now)
             .map(|(route, age, remaining)| (route.source, age, remaining))
             .collect()
+    }
+
+    /// Last current public-evidence deadline, independently of retained dial routes.
+    pub(crate) fn presence_deadline(&self, now: Instant) -> Option<Instant> {
+        self.routes
+            .iter()
+            .filter_map(PeerEndpoint::public_presence_deadline)
+            .filter(|deadline| *deadline > now)
+            .max()
     }
 
     /// Fresh observations with their exact introducing endpoint retained.
@@ -301,6 +346,16 @@ impl Roster {
         certificate: &crate::identity::account::DeviceCertificate,
     ) {
         self.authorize_linked_account(public, certificate);
+    }
+
+    /// Only successful updates insert these complete proofs. Reuse their
+    /// immutable signature fact, never their account authority or presence.
+    /// Forget/eviction already removes this bounded live evidence.
+    fn valid_announcement(&self, announce: &Announce) -> bool {
+        self.announcements
+            .get(&announce.user_id)
+            .is_some_and(|verified| verified == announce)
+            || announce.valid_presence()
     }
 
     fn linked_binding_matches(&self, announce: &Announce) -> bool {
@@ -564,7 +619,7 @@ impl Roster {
         self_user_id: &str,
     ) -> UpdateOutcome {
         if announce.user_id == self_user_id
-            || !announce.valid_presence()
+            || !self.valid_announcement(announce)
             || !self.linked_binding_matches(announce)
             || announce.post_office
             || announce.account_id().is_none()
@@ -580,6 +635,7 @@ impl Roster {
         let now = Instant::now();
         let existing = self.peers.get(&announce.user_id);
         let existed = existing.is_some();
+        let name_changed = existing.is_some_and(|peer| peer.name != announce.name);
         let mut routes = existing.map(|peer| peer.routes.clone()).unwrap_or_default();
         let route_changed = !routes
             .iter()
@@ -635,7 +691,7 @@ impl Roster {
                 last_seen: now,
             },
         );
-        if route_changed {
+        if route_changed || name_changed {
             self.notify_changes();
         }
         if existed {
@@ -759,7 +815,7 @@ impl Roster {
         if announce.user_id == self_user_id {
             return UpdateOutcome::Rejected; // self-filter
         }
-        if !announce.valid_presence() || !self.linked_binding_matches(announce) {
+        if !self.valid_announcement(announce) || !self.linked_binding_matches(announce) {
             return UpdateOutcome::Rejected;
         }
         if self.historical.get(&announce.user_id).is_some_and(|old| {
@@ -999,6 +1055,131 @@ impl Roster {
 #[cfg(test)]
 mod routed_tests {
     #[test]
+    fn identical_announcements_reuse_only_live_verified_proofs() {
+        use crate::discovery::announce::verification_observations;
+        use crate::identity::account::certificate_observations;
+        for relayed in [false, true] {
+            let device = DeviceIdentity::generate();
+            let account = Account::generate();
+            let proof = Announce::new_with_account(&device, &account, "Peer", 47475);
+            let mut roster = Roster::default();
+            let source: SocketAddr = "127.0.0.1:47479".parse().unwrap();
+            let update = |roster: &mut Roster, proof: &Announce| {
+                if relayed {
+                    roster.update_relayed(proof, source, "self")
+                } else {
+                    roster.update(proof, source.ip(), "self")
+                }
+            };
+            certificate_observations::reset();
+            verification_observations::reset();
+            assert_eq!(update(&mut roster, &proof), UpdateOutcome::New);
+            assert!(certificate_observations::count() > 0);
+            let mut observations = roster.subscribe_changes();
+            let old = Instant::now() - Duration::from_secs(60);
+            for route in &mut roster.peers.get_mut(&proof.user_id).unwrap().routes {
+                route.last_seen = old;
+            }
+            certificate_observations::reset();
+            verification_observations::reset();
+            for _ in 0..8 {
+                assert_eq!(update(&mut roster, &proof), UpdateOutcome::Refreshed);
+            }
+            assert_eq!(
+                certificate_observations::count(),
+                0,
+                "identical already-verified heartbeats repeated certificate verification"
+            );
+            assert_eq!(
+                verification_observations::count(),
+                0,
+                "live roster proofs must avoid even intrinsic verification requests"
+            );
+            assert!(
+                roster
+                    .get(&proof.user_id)
+                    .unwrap()
+                    .routes
+                    .iter()
+                    .all(|r| r.last_seen > old)
+            );
+            assert_eq!(
+                observations.has_changed().unwrap(),
+                !relayed,
+                "reuse must preserve direct presence and relay-origin freshness semantics"
+            );
+            observations.borrow_and_update();
+            roster.forget(&device.public());
+            certificate_observations::reset();
+            verification_observations::reset();
+            assert_eq!(update(&mut roster, &proof), UpdateOutcome::New);
+            assert!(
+                verification_observations::count() > 0,
+                "forgotten presence must cross the verification boundary again"
+            );
+            let peer = roster.peers.get_mut(&proof.user_id).unwrap();
+            peer.last_seen = old;
+            for route in &mut peer.routes {
+                route.last_seen = old;
+            }
+            roster.evict_stale(Duration::ZERO);
+            assert!(roster.announcement(&device.public()).is_none());
+            certificate_observations::reset();
+            verification_observations::reset();
+            assert_eq!(update(&mut roster, &proof), UpdateOutcome::New);
+            assert!(
+                verification_observations::count() > 0,
+                "evicted presence must cross the verification boundary again"
+            );
+        }
+    }
+
+    #[test]
+    fn announcement_reuse_rechecks_changes_and_current_account_binding() {
+        use crate::identity::account::certificate_observations;
+        let device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&device, &account, "Peer", 47475);
+        let source: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut roster = Roster::default();
+        assert!(roster.update(&proof, source, "self").accepted());
+        let mut forged = vec![proof.clone(); 7];
+        forged[0].name.push('!');
+        forged[1].tcp_port += 1;
+        forged[2].post_office = true;
+        forged[3].x25519_pub[0] ^= 1;
+        forged[4].sig[0] ^= 1;
+        forged[5].account_cert.as_mut().unwrap().signature[0] ^= 1;
+        forged[6].account_cert.as_mut().unwrap().account_ed25519_pub[0] ^= 1;
+        for bad in forged {
+            for _ in 0..2 {
+                assert_eq!(roster.update(&bad, source, "self"), UpdateOutcome::Rejected);
+                assert_eq!(
+                    roster.update_relayed(&bad, "127.0.0.1:47479".parse().unwrap(), "self"),
+                    UpdateOutcome::Rejected
+                );
+            }
+            assert_eq!(roster.announcement(&device.public()), Some(&proof));
+        }
+        let renamed = Announce::new_with_account(&device, &account, "Renamed", 47475);
+        certificate_observations::reset();
+        assert!(roster.update(&renamed, source, "self").accepted());
+        assert!(certificate_observations::count() > 0);
+        let adopted = Announce::new_with_account(&device, &Account::generate(), "Adopted", 47475);
+        roster.authorize_linked_account(&device.public(), adopted.account_cert.as_ref().unwrap());
+        assert_eq!(
+            roster.update(&renamed, source, "self"),
+            UpdateOutcome::Rejected
+        );
+        assert!(roster.update(&adopted, source, "self").accepted());
+        assert_eq!(
+            roster.update_relayed(&renamed, "127.0.0.1:47479".parse().unwrap(), "self"),
+            UpdateOutcome::Rejected
+        );
+        assert_eq!(roster.announcement(&device.public()), Some(&adopted));
+    }
+
+    #[test]
     fn registration_origin_is_bound_to_the_exact_directory_route_and_clears_on_omission() {
         use crate::node::discovery_origin::{OriginConsent, RegistrationOrigin};
         let device = DeviceIdentity::generate();
@@ -1077,6 +1258,28 @@ mod routed_tests {
                 .is_none(),
             "another participant cannot borrow consent"
         );
+    }
+
+    #[test]
+    fn relayed_name_change_publishes_observation_without_route_change() {
+        let device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let mut roster = Roster::default();
+        let relay = "127.0.0.1:47479".parse().unwrap();
+        let proof = Announce::new_with_account(&device, &account, "before", 1);
+        roster.update_relayed(&proof, relay, "self");
+        let mut observer = roster.subscribe_changes();
+        roster.update_relayed(&proof, relay, "self");
+        assert!(!observer.has_changed().unwrap());
+        let renamed = Announce::new_with_account(&device, &account, "after", 1);
+        roster.update_relayed(&renamed, relay, "self");
+        assert!(
+            observer.has_changed().unwrap(),
+            "name-only update must reach name-directory subscriber"
+        );
+        observer.borrow_and_update();
+        roster.update_relayed(&renamed, relay, "self");
+        assert!(!observer.has_changed().unwrap());
     }
 
     #[test]

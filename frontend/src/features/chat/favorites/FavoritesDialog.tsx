@@ -1,3 +1,5 @@
+import { useFavoriteClock } from "./useFavoriteClock";
+import { startRecoveryRefresh } from "@/lib/recoveryRefresh";
 import { FavoriteMessageText } from "./FavoriteMessageText";
 import { useEffect, useRef, useState } from "react";
 import { Star, ChevronLeft, Pencil, Search, Trash2 } from "lucide-react";
@@ -26,29 +28,29 @@ import {
 import { captureRuntimeOwner } from "@/store/ownership";
 import { useMessageFavorites } from "@/store/messageFavorites";
 import { useChat } from "@/store/chat";
-import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
+import { subscribeDocumentInvalidation } from "@/lib/syncInvalidation";
 import { errorMessage } from "@/lib/error";
 import { FavoriteEditor, type FavoriteDraft } from "./FavoriteEditor";
 import { FavoriteAttachment } from "./FavoriteAttachment";
 import { messageSummary } from "@/lib/messagePresentation";
 import { usePacks } from "@/store/packs";
 
-function expired(message: FavoriteMessage) {
-  return message.expires_at_ms != null && message.expires_at_ms <= Date.now();
+function expired(message: FavoriteMessage, now: number) {
+  return message.expires_at_ms != null && message.expires_at_ms <= now;
 }
-function itemDraft(item: MessageFavorite): FavoriteDraft {
+function itemDraft(item: MessageFavorite, now: number): FavoriteDraft {
   return {
     existing: item,
     source: item.source,
     messages: item.messages.map((message) => ({
       id: message.id,
       who: message.sender_name || message.who,
-      text: expired(message) ? "" : message.text,
+      text: expired(message, now) ? "" : message.text,
       wallClock: message.wall_clock,
       expiresAtMs: message.expires_at_ms,
       sticker: message.sticker,
       file:
-        expired(message) || !message.file
+        expired(message, now) || !message.file
           ? null
           : { ...message.file, fileConv: message.file.file_conv },
     })),
@@ -89,8 +91,19 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
-  const [clock, setClock] = useState(Date.now());
   const lease = useRef(captureRuntimeOwner()).current;
+  const messages = [
+    ...items.flatMap((item) => item.messages),
+    ...(selected?.messages ?? []),
+  ];
+  const clock = useFavoriteClock(
+    messages.map((message) => message.expires_at_ms),
+    messages.length > 0,
+    lease.current,
+  );
+  const clockRef = useRef(clock);
+  clockRef.current = clock;
+  const interactionNow = () => Math.max(clockRef.current, Date.now());
   const actions = useRef(0);
   useEffect(
     () => () => {
@@ -108,27 +121,34 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
     return () => clearTimeout(timer);
   }, [query, lease]);
   useEffect(() => {
-    const clockTimer = setInterval(() => setClock(Date.now()), 1000);
-    return () => clearInterval(clockTimer);
-  }, []);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setClock(Date.now());
-      if (lease.current() && !useMessageFavorites.getState().loading)
-        void useMessageFavorites.getState().refresh();
-    }, 15_000);
-    const stop = subscribeSyncInvalidation((change) => {
-      if (
-        lease.current() &&
-        change.owner === lease.owner &&
-        change.kind === "state" &&
-        !useMessageFavorites.getState().loading
-      )
-        void useMessageFavorites.getState().refresh();
-    });
+    let active = true;
+    let busy = false;
+    let dirty = false;
+    const refresh = async () => {
+      if (!active || !lease.current()) return;
+      if (busy) {
+        dirty = true;
+        return;
+      }
+      busy = true;
+      try {
+        do {
+          dirty = false;
+          await useMessageFavorites.getState().refresh();
+        } while (active && lease.current() && dirty);
+      } finally {
+        busy = false;
+      }
+    };
+    const stopDocuments = subscribeDocumentInvalidation(
+      lease.owner!,
+      () => void refresh(),
+    );
+    const stopRecovery = startRecoveryRefresh(() => void refresh());
     return () => {
-      clearInterval(timer);
-      stop();
+      active = false;
+      stopDocuments();
+      stopRecovery();
     };
   }, [lease]);
   const retireDetailActions = () => {
@@ -156,7 +176,8 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
     }
   };
   const original = async (item: MessageFavorite, message: FavoriteMessage) => {
-    if (opening || !lease.current()) return;
+    if (opening || !lease.current() || expired(message, interactionNow()))
+      return;
     const request = retireDetailActions();
     const current = () => lease.current() && request === actions.current;
     setOpening(true);
@@ -176,7 +197,7 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
           (row) =>
             row.id === message.id &&
             !row.recalled &&
-            (row.expires_at_ms == null || row.expires_at_ms > Date.now()),
+            (row.expires_at_ms == null || row.expires_at_ms > interactionNow()),
         )
       ) {
         setActionError(t("search.contextUnavailable"));
@@ -294,7 +315,7 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
                         {formatTime(message.wall_clock)}
                       </time>
                     </div>
-                    {expired(message) ? (
+                    {expired(message, clock) ? (
                       <p className="text-sm text-muted-foreground">
                         {t("messageFavorites.contentUnavailable")}
                       </p>
@@ -329,7 +350,7 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
                       size="sm"
                       variant="link"
                       className="h-auto px-0 text-xs"
-                      disabled={opening || expired(message)}
+                      disabled={opening || expired(message, clock)}
                       onClick={() => original(selected, message)}
                     >
                       {t("messageFavorites.viewOriginal")}
@@ -436,9 +457,9 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
                       <span className="line-clamp-2 block break-words text-xs text-muted-foreground">
                         {item.messages
                           .map((message) =>
-                            expired(message)
+                            expired(message, clock)
                               ? t("messageFavorites.contentUnavailable")
-                              : messageSummary(message, t, packs),
+                              : messageSummary(message, t, packs, clock),
                           )
                           .filter(Boolean)
                           .join(" · ")}
@@ -500,7 +521,7 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
       {editing && (
         <FavoriteEditor
           key={`${editing.id}:${editing.revision}`}
-          draft={itemDraft(editing)}
+          draft={itemDraft(editing, interactionNow())}
           onClose={() => {
             retireDetailActions();
             setEditing(null);

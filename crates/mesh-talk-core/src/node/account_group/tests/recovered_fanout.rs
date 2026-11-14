@@ -579,7 +579,7 @@ async fn remote_source_invalidation_keeps_the_original_account_fanout_pending() 
 }
 
 async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
@@ -612,7 +612,7 @@ async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
         .unwrap();
     source.prepare_account_group_fanout(group).await.unwrap();
 
-    let injected = Arc::new(AtomicBool::new(false));
+    let injected = Arc::new(AtomicUsize::new(0));
     let captured_views = Arc::new(AtomicUsize::new(0));
     let stale_rounds = Arc::new(AtomicUsize::new(0));
     let failed_rounds = Arc::new(AtomicUsize::new(0));
@@ -634,14 +634,17 @@ async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
             match phase.as_str() {
                 "network_view_captured" => {
                     captured_views.fetch_add(1, Ordering::SeqCst);
-                    if !remote && !injected.swap(true, Ordering::SeqCst) {
+                    if !remote && injected.load(Ordering::SeqCst) < 2 {
                         // Change a real public policy after its source stamp was
                         // captured, before the selected round validates it.
                         // No synthetic transport error or event import is used.
                         weak_source
                             .upgrade()
                             .unwrap()
-                            .set_device_sync_category(SyncCategory::Profile, false)
+                            .set_device_sync_category(
+                                SyncCategory::Profile,
+                                injected.fetch_add(1, Ordering::SeqCst) != 0,
+                            )
                             .unwrap();
                     }
                 }
@@ -669,7 +672,7 @@ async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
         *external.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
             if peer == expected_peer
                 && phase == "network_view_captured"
-                && !injected.swap(true, Ordering::SeqCst)
+                && injected.load(Ordering::SeqCst) < 2
             {
                 // Invalidate the responder's actual view. Its StaleCursor closes
                 // the real Noise exchange, so the requester observes transport
@@ -677,7 +680,10 @@ async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
                 weak_external
                     .upgrade()
                     .unwrap()
-                    .set_device_sync_category(SyncCategory::Profile, false)
+                    .set_device_sync_category(
+                        SyncCategory::Profile,
+                        injected.fetch_add(1, Ordering::SeqCst) != 0,
+                    )
                     .unwrap();
             }
         }));
@@ -761,12 +767,18 @@ async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
     }
     drop(source_listener);
     assert!(panics.is_empty(), "background task failed: {panics:?}");
-    assert!(injected.load(Ordering::SeqCst));
-    assert_eq!(stale_rounds.load(Ordering::SeqCst), usize::from(!remote));
-    assert_eq!(failed_rounds.load(Ordering::SeqCst), usize::from(remote));
+    assert_eq!(injected.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        stale_rounds.load(Ordering::SeqCst),
+        2 * usize::from(!remote)
+    );
+    assert_eq!(
+        failed_rounds.load(Ordering::SeqCst),
+        2 * usize::from(remote)
+    );
     assert_eq!(
         recoverable_rounds.load(Ordering::SeqCst),
-        usize::from(remote)
+        2 * usize::from(remote)
     );
     eprintln!(
         "fanout invalidation remote={remote} injected={} stale_rounds={} failed_rounds={} recoverable_rounds={} successful_rounds={}",

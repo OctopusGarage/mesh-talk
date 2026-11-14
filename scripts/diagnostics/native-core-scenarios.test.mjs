@@ -232,8 +232,9 @@ test("destroyed stdin fails immediately", async () => {
 test("each native receipt card is captured while its own expected state is visible", async () => {
   const { receiptPhase } = await import("./native-core-scenarios.mjs");
   const ids = ["a", "b", "c"], labels = ["text", "sticker", "file"];
-  let visible, recorded;
+  let visible, recorded, failureContexts = 0;
   const c = {
+    receiptFailureContext: async () => { failureContexts++; throw new Error("must not observe endpoints on pass"); },
     owner: "owner", account: "account",
     observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "awaiting" })),
     until: async (_description, poll) => { const result = await poll(); assert.ok(result); return result; },
@@ -245,6 +246,109 @@ test("each native receipt card is captured while its own expected state is visib
   await receiptPhase(c, { owner: "owner", ids, labels }, "receipt-offline-awaiting", "awaiting");
   assert.deepEqual(recorded.captures.map(capture => capture.label), [...labels].reverse());
   assert.deepEqual(recorded.observations.captures, recorded.captures);
+  assert.equal(failureContexts, 0);
+});
+
+test("native receipt timeout retains cached ordered statuses and observation failure", async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], timeout = new Error("Timed out: original IDs become delivered");
+  let observations = 0;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => {
+      if (command === "owner_account_history") return ids.map(id => ({ id, from_me: true }));
+      observations++;
+      if (observations === 1) return [{ id: "c", status: "delivered" }, { id: "a", status: "awaiting", observation: { kind: "attempting", age_ms: 123, body: "must not copy" } }, { id: "b", status: "awaiting", observation: { kind: "retry_scheduled", age_ms: 456, reason: "attempt_timed_out" } }];
+      throw new Error("owner observation unavailable");
+    },
+    until: async (...args) => {
+      assert.equal(args.length, 2, "retain the existing default deadline");
+      assert.equal(args[0], "original IDs become delivered");
+      assert.equal(await args[1](), false);
+      await assert.rejects(args[1](), /owner observation unavailable/);
+      throw timeout;
+    },
+  };
+  await assert.rejects(receiptPhase(c, { owner: "owner", ids, labels: [] }, "receipt-peer-restart-delivered", "delivered"), error => {
+    assert.equal(error.cause, timeout);
+    assert.match(error.message, /^Timed out: original IDs become delivered;/);
+    assert.match(error.message, /"statuses":\["awaiting","awaiting","delivered"\]/);
+    assert.match(error.message, /"observationError":"owner observation unavailable"/);
+    assert.deepEqual(JSON.parse(error.message.split("; receipt observation=")[1]).deliveryObservations, [{ kind: "attempting", age_ms: 123, reason: null }, { kind: "retry_scheduled", age_ms: 456, reason: "attempt_timed_out" }, { kind: "UNKNOWN", age_ms: null, reason: null }]);
+    assert.ok(!error.message.includes("must not copy"));
+    return true;
+  });
+  assert.equal(observations, 2, "failure reporting performs no further IPC");
+});
+
+test("receipt failure context runs once only after the original timeout", async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], original = new Error("Timed out: original IDs become delivered");
+  let timedOut = false, contexts = 0;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "awaiting" })),
+    until: async (...args) => { assert.equal(args.length, 2); assert.equal(await args[1](), false); timedOut = true; throw original; },
+    receiptFailureContext: async () => { assert.equal(timedOut, true); contexts++; return { currentListener: { tcpPort: 41002 }, observedPeers: [{ addr: "127.0.0.1:41001" }] }; },
+  };
+  await assert.rejects(receiptPhase(c, { owner: "owner", ids, labels: [] }, "restart", "delivered"), error => {
+    assert.equal(error.cause, original);
+    assert.match(error.message, /"tcpPort":41002/);
+    assert.match(error.message, /"addr":"127.0.0.1:41001"/);
+    return true;
+  });
+  assert.equal(contexts, 1);
+});
+
+test("receipt failure context errors cannot replace the original failure", async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], original = new Error("Timed out: original IDs become delivered");
+  let contexts = 0;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "awaiting" })),
+    until: async (_description, poll) => { assert.equal(await poll(), false); throw original; },
+    receiptFailureContext: async () => { contexts++; throw new Error("endpoint unavailable " + "x".repeat(2000)); },
+  };
+  await assert.rejects(receiptPhase(c, { owner: "owner", ids, labels: [] }, "restart", "delivered"), error => {
+    assert.equal(error.cause, original);
+    assert.match(error.message, /^Timed out: original IDs become delivered;/);
+    assert.match(error.message, /endpoint unavailable/);
+    assert.ok(error.message.length < 1000, "secondary failure remains bounded");
+    return true;
+  });
+  assert.equal(contexts, 1);
+});
+
+test("CLI listener evidence uses only the existing exact startup line", async () => {
+  const { cliListenerEndpoint } = await import("./native-core-scenarios.mjs");
+  const id = "a".repeat(32);
+  assert.equal(cliListenerEndpoint(`node ${id} listening`), null);
+  assert.equal(cliListenerEndpoint(`node ${id} listening on tcp/0`), null);
+  assert.equal(cliListenerEndpoint(`node ${id} listening on tcp/65536`), null);
+  assert.deepEqual(cliListenerEndpoint(`node ${id} listening on tcp/41001, discovery udp/47474`), { deviceId: id, tcpPort: 41001 });
+  assert.deepEqual(cliListenerEndpoint(`node ${id} listening on tcp/41002, discovery udp/47474`), { deviceId: id, tcpPort: 41002 });
+});
+
+test("receipt endpoint snapshot exposes only the exact fixture peer and preserves errors", async () => {
+  const { receiptPeerEndpointContext } = await import("./native-core-scenarios.mjs");
+  const previousPeer = { deviceId: "a".repeat(32), tcpPort: 41001, exitCode: 0 };
+  const currentPeer = { deviceId: previousPeer.deviceId, tcpPort: 41002, exitCode: null };
+  let calls = 0;
+  const result = await receiptPeerEndpointContext({ expectedAccount: "expected", previousPeer, currentPeer, observe: async command => {
+    calls++; assert.equal(command, "list_peers");
+    return [{ user_id: "unrelated", account_id: "private-account", addr: "private-address", name: "private-name" },
+      { user_id: currentPeer.deviceId, account_id: "observed", addr: "127.0.0.1:41001", name: "omitted" }];
+  } });
+  assert.equal(calls, 1);
+  assert.deepEqual(result, { expectedAccount: "expected", previousPeer, currentPeer,
+    observedPeers: [{ deviceId: currentPeer.deviceId, accountId: "observed", addr: "127.0.0.1:41001" }], observationError: null });
+  assert.ok(!JSON.stringify(result).includes("private-"));
+  const failed = await receiptPeerEndpointContext({ expectedAccount: "expected", previousPeer, currentPeer,
+    observe: async () => { throw new Error("unavailable " + "x".repeat(2000)); } });
+  assert.equal(failed.observedPeers, null);
+  assert.equal(failed.observationError.length, 512);
+  assert.deepEqual(failed.currentPeer, currentPeer);
 });
 
 test("localized wrong-password error is captured before successful sign-in recovery", async () => {
@@ -424,4 +528,41 @@ test("native historical receipts keep scrolling when a visible message has a cli
     until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("badge remains clipped"); },
   }, "receipt-text");
   assert.deepEqual(keys, ["\uE00E"], "a partially visible message cannot certify its clipped receipt");
+});
+
+for (const mode of ["cancelled", "missing-owner", "healed"]) test(`receipt observations preserve ${mode} polling outcome without extra calls`, async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], original = mode === "cancelled" ? new DOMException("cancelled", "AbortError") : new Error(mode);
+  let calls = 0, endpointCalls = 0, passed = 0;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => {
+      if (command === "owner_account_history") return ids.map(id => ({ id, from_me: true }));
+      calls++;
+      if (mode === "missing-owner") throw original;
+      return ids.map(id => ({ id, status: mode === "healed" && calls === 2 ? "delivered" : "awaiting", observation: { kind: "attempting", age_ms: 1 } }));
+    },
+    until: async (...args) => {
+      assert.equal(args.length, 2, "original default deadline unchanged");
+      if (mode === "missing-owner") await assert.rejects(args[1](), error => error === original);
+      else assert.equal(await args[1](), false);
+      if (mode === "healed") return args[1]();
+      throw original;
+    },
+    receiptFailureContext: async () => { endpointCalls++; return null; },
+    passed: async () => { passed++; },
+  };
+  const operation = receiptPhase(c, { owner: "owner", ids, labels: [] }, "restart", "delivered");
+  if (mode === "healed") {
+    await operation;
+    assert.equal(passed, 1);
+    assert.equal(endpointCalls, 0);
+  } else await assert.rejects(operation, error => {
+    assert.equal(error.cause, original);
+    const diagnostic = JSON.parse(error.message.split("; receipt observation=")[1]);
+    assert.deepEqual(diagnostic.deliveryObservations, mode === "missing-owner" ? ids.map(() => ({ kind: "UNKNOWN", age_ms: null, reason: null })) : ids.map(() => ({ kind: "attempting", age_ms: 1, reason: null })));
+    assert.equal(endpointCalls, 1);
+    return true;
+  });
+  assert.equal(calls, mode === "healed" ? 2 : 1, "no failure-only status requery");
 });

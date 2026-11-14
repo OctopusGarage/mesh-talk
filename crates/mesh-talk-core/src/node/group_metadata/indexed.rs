@@ -263,6 +263,12 @@ impl<'a> Index<'a> {
         budget.bytes -= changed * 256;
         if changed != 0 {
             node.channel_recovery_notify.notify_one();
+            // A newly installed empty index is already complete. Publish its
+            // actual initialization once, after the source-checked commit.
+            if job.is_some() && metadata < 0 {
+                checkpoints.check_source(&source)?;
+                let _ = node.channel_changes.send(channel);
+            }
         }
         Ok(match job {
             Some(job) => Progress::Ready(Self {
@@ -323,6 +329,19 @@ impl<'a> Index<'a> {
         )
     }
     pub fn advance(&self, budget: &mut Budget) -> Result<bool, LogError> {
+        let was_ready = self.read(|c| {
+            Ok(c.prepare_cached(
+                "SELECT after_rank>=?2 FROM group_metadata_index WHERE channel=?1 AND job=?3",
+            )?
+            .query_row(
+                params![
+                    self.source.channel.as_bytes().as_slice(),
+                    self.stamp.metadata,
+                    self.job.as_slice()
+                ],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })?;
         let mut cache = self
             .node
             .group_metadata_cache
@@ -330,8 +349,13 @@ impl<'a> Index<'a> {
             .expect("metadata cache lock");
         let before = *budget;
         let ready = cache.preparations.advance(self, budget)?;
+        drop(cache);
         if !ready && *budget != before {
             self.node.channel_recovery_notify.notify_one();
+        }
+        if ready && !was_ready {
+            self.check_source()?;
+            let _ = self.node.channel_changes.send(self.source.channel);
         }
         Ok(ready)
     }

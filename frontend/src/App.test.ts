@@ -76,6 +76,7 @@ import { useTheme } from "@/lib/theme";
 import { useAvatars } from "@/store/avatars";
 import { useSettings } from "@/store/settings";
 import { useAppLock } from "@/store/appLock";
+import { useCalls } from "@/store/calls";
 let mounted = false;
 let root: Root;
 let host: HTMLDivElement;
@@ -102,6 +103,17 @@ beforeEach(async () => {
   usePacks.setState({
     scope: { owner: "alice", account: "account", session: "7:3" },
     loaded: true,
+    preparedThemeId: "fixture-theme",
+    selectedTheme: {
+      format: 1,
+      id: "fixture-theme",
+      version: "1.0.0",
+      name: "Fixture",
+      kind: "theme",
+      base: "light",
+      colors: {},
+      wallpaper: "fixture:wallpaper",
+    },
     packs: [
       {
         format: 1,
@@ -111,7 +123,6 @@ beforeEach(async () => {
         kind: "theme",
         base: "light",
         colors: {},
-        wallpaper: "fixture:wallpaper",
       },
       {
         format: 1,
@@ -121,7 +132,6 @@ beforeEach(async () => {
         kind: "theme",
         base: "dark",
         colors: {},
-        wallpaper: "fixture:replacement",
       },
     ],
   });
@@ -135,7 +145,12 @@ beforeEach(async () => {
     setOwner: () => {},
     privacy: { ...useSettings.getState().privacy, auto_lock_seconds: 0 },
   });
-  useAppLock.setState({ locked: false, refresh: async () => {} });
+  useAppLock.setState({
+    locked: false,
+    refresh: async () => {},
+    lock: vi.fn(async () => {}),
+  });
+  useCalls.setState({ phase: "idle" });
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -186,7 +201,22 @@ it.each(["decode", "commit"] as const)(
 );
 it("App replacement presentation can finish before the retired decode without adopting its acknowledgement", async () => {
   const old = probes.tasks[0];
-  await act(async () => useTheme.setState({ theme: "replacement-theme" }));
+  await act(async () => {
+    usePacks.setState({
+      preparedThemeId: "replacement-theme",
+      selectedTheme: {
+        format: 1,
+        id: "replacement-theme",
+        version: "1.0.0",
+        name: "Replacement",
+        kind: "theme",
+        base: "dark",
+        colors: {},
+        wallpaper: "fixture:replacement",
+      },
+    });
+    useTheme.setState({ theme: "replacement-theme" });
+  });
   expect(probes.tasks).toHaveLength(2);
   const replacement = probes.tasks[1];
   expect(replacement.wallpaper).toBe("fixture:replacement");
@@ -229,4 +259,58 @@ it("App retires the actual effect on unmount before the held task completes", as
   });
   expect(old.settled).toBe(true);
   expect(acknowledgements()).toHaveLength(0);
+});
+
+const callsFor = (command: string) =>
+  probes.invoke.mock.calls.filter(([name]) => name === command);
+
+it("presentation-only account updates do not republish activity or call state", async () => {
+  const activity = callsFor("note_activity").length;
+  const callState = callsFor("set_call_active").length;
+  expect(activity).toBeGreaterThan(0);
+  await act(async () => {
+    useAuth.setState((state) => ({
+      user: { ...state.user!, display_name: "Alice renamed" },
+    }));
+  });
+  expect(callsFor("note_activity")).toHaveLength(activity);
+  expect(callsFor("set_call_active")).toHaveLength(callState);
+});
+
+it("account metadata refresh cannot postpone the actual inactivity deadline", async () => {
+  await act(async () => {
+    useSettings.setState((state) => ({
+      privacy: { ...state.privacy, auto_lock_seconds: 5 },
+    }));
+  });
+  await act(async () => vi.advanceTimersByTimeAsync(4000));
+  await act(async () => {
+    useAuth.setState((state) => ({ user: { ...state.user! } }));
+  });
+  await act(async () => vi.advanceTimersByTimeAsync(1000));
+  expect(useAppLock.getState().lock).toHaveBeenCalledOnce();
+});
+
+it("a real input renews the inactivity deadline", async () => {
+  await act(async () => {
+    useSettings.setState((state) => ({
+      privacy: { ...state.privacy, auto_lock_seconds: 5 },
+    }));
+  });
+  await act(async () => vi.advanceTimersByTimeAsync(4000));
+  await act(async () => window.dispatchEvent(new Event("pointerdown")));
+  await act(async () => vi.advanceTimersByTimeAsync(1000));
+  expect(useAppLock.getState().lock).not.toHaveBeenCalled();
+  await act(async () => vi.advanceTimersByTimeAsync(4000));
+  expect(useAppLock.getState().lock).toHaveBeenCalledOnce();
+});
+
+it("a replacement session of the same owner establishes fresh activity", async () => {
+  const activity = callsFor("note_activity").length;
+  const callState = callsFor("set_call_active").length;
+  await act(async () => {
+    useAuth.setState((state) => ({ generation: state.generation + 1 }));
+  });
+  expect(callsFor("note_activity")).toHaveLength(activity + 1);
+  expect(callsFor("set_call_active")).toHaveLength(callState + 1);
 });

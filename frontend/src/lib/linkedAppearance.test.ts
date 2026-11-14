@@ -1,3 +1,4 @@
+import { RECOVERY_REFRESH_MS } from "./recoveryRefresh";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuth } from "@/store/auth";
 import { useSettings } from "@/store/settings";
@@ -21,6 +22,7 @@ const mocks = vi.hoisted(() => {
     saved: new Set<string>(),
     reconcileSettings: vi.fn(),
     preparePacks: vi.fn(),
+    prepareTheme: vi.fn(),
     prepareAvatars: vi.fn(),
     getPolicy: vi.fn(),
     getPreferences: vi.fn(),
@@ -42,7 +44,10 @@ vi.mock("./linkedAvatarOverrides", () => ({
 }));
 vi.mock("@/store/packs", () => ({
   usePacks: {
-    getState: () => ({ packs: mocks.packValues }),
+    getState: () => ({
+      packs: mocks.packValues,
+      prepareTheme: mocks.prepareTheme,
+    }),
     subscribe: (listener: (state: { packs: unknown[] }) => void) => {
       mocks.packListeners.add(listener);
       return () => mocks.packListeners.delete(listener);
@@ -111,6 +116,7 @@ beforeEach(async () => {
   mocks.values.wallpaper_enabled = "on";
   mocks.values.pack_wallpaper_ids = "{}";
   mocks.preparePacks.mockReset().mockResolvedValue(undefined);
+  mocks.prepareTheme.mockReset().mockResolvedValue(true);
   mocks.prepareAvatars.mockReset().mockResolvedValue(undefined);
   mocks.reconcileSettings.mockReset().mockResolvedValue(null);
   mocks.getPolicy.mockReset().mockResolvedValue({ appearance: true });
@@ -213,7 +219,7 @@ it("retries a failed local edit on the next poll", async () => {
   mocks.values.theme = "oled";
   for (const listener of mocks.listeners) listener();
   await vi.waitFor(() => expect(mocks.setPreference).toHaveBeenCalledTimes(1));
-  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   expect(mocks.setPreference).toHaveBeenCalledTimes(2);
   stop();
 });
@@ -430,12 +436,12 @@ it("validates remote languages and resets a tombstone to canonical English", asy
     mocks.getPreferences.mockResolvedValue([
       { key: "language", value: "ja", revision: 11, device_id: "a".repeat(32) },
     ]);
-    await vi.advanceTimersByTimeAsync(10000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(i18n.language).toBe("ja");
     mocks.getPreferences.mockResolvedValue([
       { key: "language", value: null, revision: 12, device_id: "a".repeat(32) },
     ]);
-    await vi.advanceTimersByTimeAsync(10000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(i18n.language).toBe("en");
     expect(mocks.setPreference).not.toHaveBeenCalled();
   } finally {
@@ -472,4 +478,103 @@ it("revokes rendered private theme CSS when its account appearance lifecycle end
   mocks.refreshTheme.mockClear();
   stop();
   expect(mocks.refreshTheme).toHaveBeenCalledWith(true);
+});
+
+it.each(["wallpaper_enabled", "language", "theme"])(
+  "preserves local %s edits during held remote theme hydration",
+  async (key) => {
+    let finish!: (ready: boolean) => void;
+    mocks.prepareTheme.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    mocks.getPreferences.mockResolvedValue([
+      {
+        category: "appearance",
+        key: "theme",
+        value: "remote.theme",
+        revision: 10,
+        device_id: "a".repeat(32),
+      },
+    ]);
+    const stop = startLinkedAppearance("owner");
+    try {
+      await vi.waitFor(() =>
+        expect(mocks.prepareTheme).toHaveBeenCalledWith("remote.theme"),
+      );
+      const value =
+        key === "language" ? "ja" : key === "theme" ? "oled" : "off";
+      if (key === "language") setLanguage("ja");
+      else {
+        mocks.values[key] = value;
+        for (const listener of mocks.listeners) listener();
+      }
+      await vi.waitFor(() =>
+        expect(mocks.setPreference).toHaveBeenCalledWith(
+          "appearance",
+          key,
+          value,
+          "owner",
+          "source-crypto-account",
+        ),
+      );
+      finish(true);
+      for (let turn = 0; turn < 30; turn++) await Promise.resolve();
+      if (key === "theme") {
+        expect(mocks.values.theme).toBe("oled");
+        expect(mocks.apply).not.toHaveBeenCalledWith("theme", "remote.theme");
+      } else expect(mocks.apply).toHaveBeenCalledWith("theme", "remote.theme");
+    } finally {
+      finish(true);
+      stop();
+    }
+  },
+);
+
+it("applies a hydrated remote theme without publishing feedback edits", async () => {
+  mocks.getPreferences.mockResolvedValue([
+    {
+      category: "appearance",
+      key: "theme",
+      value: "remote.theme",
+      revision: 10,
+      device_id: "a".repeat(32),
+    },
+  ]);
+  const stop = startLinkedAppearance("owner");
+  try {
+    await vi.waitFor(() =>
+      expect(mocks.apply).toHaveBeenCalledWith("theme", "remote.theme"),
+    );
+    expect(mocks.setPreference).not.toHaveBeenCalled();
+  } finally {
+    stop();
+  }
+});
+
+it("does not query appearance preferences for qualified sync-status invalidations", async () => {
+  const { notifySyncInvalidation } = await import("./syncInvalidation");
+  const stop = startLinkedAppearance("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.getPreferences).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.getPreferences.mockClear();
+    notifySyncInvalidation({
+      owner: "owner",
+      kind: "state",
+      scope: "sync_status",
+    } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.getPreferences).not.toHaveBeenCalled();
+    for (const scope of ["documents", "future-unknown", undefined]) {
+      mocks.getPreferences.mockClear();
+      notifySyncInvalidation({ owner: "owner", kind: "state", scope } as never);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.getPreferences).toHaveBeenCalledOnce();
+    }
+  } finally {
+    stop();
+  }
 });

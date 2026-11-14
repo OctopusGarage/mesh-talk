@@ -267,11 +267,9 @@ impl IndexedProfileStore {
     }
 }
 fn revision_on(c: &Connection) -> Result<u64, LogError> {
-    let revision: i64 = c.query_row(
-        "SELECT revision FROM current_avatar_state WHERE singleton=1",
-        [],
-        |r| r.get(0),
-    )?;
+    let revision: i64 = c
+        .prepare_cached("SELECT revision FROM current_avatar_state WHERE singleton=1")?
+        .query_row([], |r| r.get(0))?;
     u64::try_from(revision).map_err(|_| invalid("invalid avatar revision"))
 }
 fn invalid(message: &str) -> LogError {

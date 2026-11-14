@@ -26,6 +26,11 @@ pub(super) struct MetadataCache {
     values: std::collections::VecDeque<CachedMetadata>,
     reconciled: std::collections::VecDeque<(ConversationId, indexed::Stamp)>,
     after_channel: Option<ConversationId>,
+    recovery_resweep: bool,
+    recovery_after: Option<ConversationId>,
+    recovery_upper: Option<ConversationId>,
+    recovery_active: bool,
+    recovery_complete: bool,
     preparations: indexed::PreparationCache,
 }
 struct CachedMetadata {
@@ -203,6 +208,15 @@ impl Node {
         }
         Ok(state)
     }
+    #[cfg(test)]
+    pub(super) fn clear_metadata_display_values_for_test(&self) {
+        self.group_metadata_cache
+            .lock()
+            .expect("metadata cache lock")
+            .values
+            .clear();
+    }
+
     pub fn channel_metadata(&self, channel: ConversationId) -> Result<ChannelMetadata, NodeError> {
         use indexed::Progress;
         #[cfg(test)]
@@ -463,42 +477,130 @@ impl Node {
     /// Bounded existing control worker; no additional network loop. Any accepted
     /// holder can share the current metadata keys after the owner goes offline.
     pub(super) fn retry_group_metadata(&self) -> Result<Vec<ConversationId>, NodeError> {
+        self.retry_group_metadata_inner(false)
+            .map(|(channels, _)| channels)
+    }
+
+    pub(super) fn note_group_metadata_recovery_input(&self) {
+        let mut cache = self
+            .group_metadata_cache
+            .lock()
+            .expect("metadata cache lock");
+        if cache.recovery_active {
+            cache.recovery_resweep = true;
+        } else {
+            cache.recovery_complete = false;
+        }
+    }
+
+    pub(super) fn retry_group_metadata_turn(
+        &self,
+    ) -> Result<(Vec<ConversationId>, bool), NodeError> {
+        let result = self.retry_group_metadata_inner(true);
+        let mut cache = self
+            .group_metadata_cache
+            .lock()
+            .expect("metadata cache lock");
+        match &result {
+            Ok((_, more)) => cache.recovery_complete = !more,
+            Err(_) => {
+                cache.recovery_complete = false;
+                cache.recovery_resweep = true;
+            }
+        }
+        result
+    }
+
+    fn retry_group_metadata_inner(
+        &self,
+        owned_turn: bool,
+    ) -> Result<(Vec<ConversationId>, bool), NodeError> {
         use indexed::Progress;
+        if owned_turn
+            && self
+                .group_metadata_cache
+                .lock()
+                .expect("metadata cache lock")
+                .recovery_complete
+        {
+            return Ok((Vec::new(), false));
+        }
+        #[cfg(test)]
+        if owned_turn {
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_metadata_entered".into()
+            });
+        }
         let _membership = self
             .channel_membership_commit
             .lock()
             .expect("channel membership commit lock");
-        let after = self
-            .group_metadata_cache
-            .lock()
-            .expect("metadata cache lock")
-            .after_channel;
+        let (after, upper) = {
+            let mut cache = self
+                .group_metadata_cache
+                .lock()
+                .expect("metadata cache lock");
+            if owned_turn {
+                if !cache.recovery_active {
+                    cache.recovery_upper = self.channel_checkpoints.current_upper()?;
+                    cache.recovery_after = None;
+                    cache.recovery_active = true;
+                }
+                (cache.recovery_after, cache.recovery_upper)
+            } else {
+                (cache.after_channel, None)
+            }
+        };
         let mut states = self.channel_checkpoints.current_page(after)?;
-        if states.is_empty() && after.is_some() {
+        if owned_turn {
+            states.retain(|state| {
+                upper.is_some_and(|upper| state.id().as_bytes() <= upper.as_bytes())
+            });
+        }
+        if states.is_empty() && after.is_some() && !owned_turn {
             states = self.channel_checkpoints.current_page(None)?;
         }
         if states.is_empty() {
-            self.group_metadata_cache
+            let mut cache = self
+                .group_metadata_cache
                 .lock()
-                .expect("metadata cache lock")
-                .after_channel = None;
-            return Ok(Vec::new());
+                .expect("metadata cache lock");
+            if owned_turn {
+                cache.recovery_active = false;
+                cache.recovery_after = None;
+            } else {
+                cache.after_channel = None;
+            }
+            let more = owned_turn && std::mem::take(&mut cache.recovery_resweep);
+            return Ok((Vec::new(), more));
         }
+        let page_full = states.len() == 32;
+        let mut more = false;
         let mut changed = Vec::new();
         let mut send_budget = 8;
         let mut budget = indexed::Budget::default();
         for state in states {
             if budget.exhausted() {
+                more = true;
                 break;
             }
             let channel = state.id();
-            self.group_metadata_cache
-                .lock()
-                .expect("metadata cache lock")
-                .after_channel = Some(channel);
+            {
+                let mut cache = self
+                    .group_metadata_cache
+                    .lock()
+                    .expect("metadata cache lock");
+                if owned_turn {
+                    cache.recovery_after = Some(channel);
+                } else {
+                    cache.after_channel = Some(channel);
+                }
+            }
             if state.is_dissolved() || !self.channel_replica_enabled(channel, &self.user_id()) {
                 continue;
             }
+            let before_budget = budget;
+            let continuing;
             let prepared = {
                 let log = self.log.lock().expect("log lock");
                 if !log.requires_channel_v5(&channel)? {
@@ -512,6 +614,12 @@ impl Node {
                             channel,
                             &mut budget,
                         )? {
+                            if budget != before_budget {
+                                self.group_metadata_cache
+                                    .lock()
+                                    .expect("metadata cache lock")
+                                    .recovery_resweep = true;
+                            }
                             continue;
                         }
                     }
@@ -531,7 +639,15 @@ impl Node {
                 }
                 let index =
                     match indexed::Index::open(self, log.repository()?, channel, &mut budget)? {
-                        Progress::Pending => continue,
+                        Progress::Pending => {
+                            if budget != before_budget {
+                                self.group_metadata_cache
+                                    .lock()
+                                    .expect("metadata cache lock")
+                                    .recovery_resweep = true;
+                            }
+                            continue;
+                        }
                         Progress::Ready(index) => index,
                     };
                 if self
@@ -544,6 +660,12 @@ impl Node {
                     continue;
                 }
                 if !index.advance(&mut budget)? {
+                    if budget != before_budget {
+                        self.group_metadata_cache
+                            .lock()
+                            .expect("metadata cache lock")
+                            .recovery_resweep = true;
+                    }
                     continue;
                 }
                 let mut prepared = None;
@@ -599,6 +721,7 @@ impl Node {
                     }
                 }
                 index.check_source()?;
+                continuing = pending && budget != before_budget;
                 if !pending && prepared.is_none() {
                     let mut cache = self
                         .group_metadata_cache
@@ -609,10 +732,15 @@ impl Node {
                         cache.reconciled.pop_front();
                     }
                     cache.reconciled.push_back((channel, index.stamp));
-                    let _ = self.channel_changes.send(channel);
                 }
                 prepared
             };
+            if continuing {
+                self.group_metadata_cache
+                    .lock()
+                    .expect("metadata cache lock")
+                    .recovery_resweep = true;
+            }
             if let Some((source, payload)) = prepared {
                 self.append_channel_control_from_source(
                     &source,
@@ -623,11 +751,22 @@ impl Node {
                 let _ = self.channel_changes.send(channel);
                 send_budget -= 1;
                 if send_budget == 0 {
+                    more = true;
                     break;
                 }
             }
         }
-        Ok(changed)
+        more |= page_full;
+        if owned_turn && !more {
+            let mut cache = self
+                .group_metadata_cache
+                .lock()
+                .expect("metadata cache lock");
+            cache.recovery_after = None;
+            cache.recovery_active = false;
+            more = std::mem::take(&mut cache.recovery_resweep);
+        }
+        Ok((changed, more))
     }
 }
 

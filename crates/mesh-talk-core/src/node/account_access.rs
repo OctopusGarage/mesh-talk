@@ -578,6 +578,177 @@ mod tests {
         assert_eq!(target.account_access_snapshot(), Some(expected));
     }
     #[tokio::test]
+    async fn access_known_route_preference_renewals_preserve_backoff_and_current_dial() {
+        use crate::transport::SecureChannel;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::net::TcpListener;
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let source = open_node(&dir.path().join("source"), &account);
+        let target = open_node(&dir.path().join("target"), &account);
+        certify_pair(&source, &target, &account);
+        let expected = source
+            .publish_account_access_if(b"private source credentials".to_vec(), |commit| commit())
+            .unwrap();
+        let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let proof = source.signed_announce("source", listener.local_addr().unwrap().port());
+        for ip in ["127.0.0.1", "127.0.0.2"] {
+            target
+                .roster
+                .lock()
+                .unwrap()
+                .update(&proof, ip.parse().unwrap(), &target.user_id());
+        }
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        let serving = source.clone();
+        let mut old_server = Some(tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut channel = SecureChannel::accept(socket, &serving.identity)
+                    .await
+                    .unwrap();
+                channel.recv().await.unwrap();
+                count.fetch_add(1, Ordering::SeqCst);
+                channel.send(b"old-unsupported-protocol").await.unwrap();
+            }
+        }));
+        let worker = tokio::spawn(target.clone().run_account_access_loop());
+        let result = async {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while !target
+                    .account_access_sync_status()
+                    .iter()
+                    .any(|s| s.phase == AccountAccessSyncPhase::Unsupported)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("initial unsupported result");
+            let before = target.account_access_sync_status();
+            for ip in ["127.0.0.1", "127.0.0.2", "127.0.0.1", "127.0.0.2"] {
+                target.roster.lock().unwrap().update(
+                    &proof,
+                    ip.parse().unwrap(),
+                    &target.user_id(),
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert_eq!(
+                accepted.load(Ordering::SeqCst),
+                1,
+                "known route preference renewals must not bypass unsupported cooldown"
+            );
+            let after = target.account_access_sync_status();
+            assert_eq!(
+                after, before,
+                "completed failure/attempt count/backoff remain unchanged"
+            );
+            // An authenticated old alias is a legitimate transport preference.
+            // End the unsupported endpoint before testing a replacement listener;
+            // a changed work binding does not force a particular live carrier.
+            if let Some(server) = old_server.take() {
+                server.abort();
+                let _ = server.await;
+            }
+            let fresh = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = fresh.local_addr().unwrap();
+            let serving = source.clone();
+            let server = tokio::spawn(async move {
+                let (socket, _) = fresh.accept().await.unwrap();
+                let mut channel = SecureChannel::accept(socket, &serving.identity)
+                    .await
+                    .unwrap();
+                let request = AccessRequest::decode(&channel.recv().await.unwrap()).unwrap();
+                serving.serve_account_access(&mut channel, request).await;
+            });
+            let mut updates = target.subscribe_account_access();
+            target.roster.lock().unwrap().update(
+                &source.signed_announce("source", address.port()),
+                address.ip(),
+                &target.user_id(),
+            );
+            let observed = target
+                .roster
+                .lock()
+                .unwrap()
+                .get(&proof.user_id)
+                .unwrap()
+                .clone();
+            let candidates = target.privacy_route_candidates(
+                address,
+                &source.identity.public(),
+                Some(&source.signed_announce("source", address.port())),
+            );
+            let applied =
+                tokio::time::timeout(std::time::Duration::from_secs(3), updates.changed()).await;
+            if applied.is_err() {
+                eprintln!(
+                    "access route fixture timeout old_port={} new_address={address} roster_preferred={} work_endpoints={:?} dial_candidates={candidates:?} accepted={} status={:?}",
+                    proof.tcp_port,
+                    observed.addr,
+                    observed.scheduling_endpoints(),
+                    accepted.load(Ordering::SeqCst),
+                    target.account_access_sync_status()
+                );
+            }
+            server.abort();
+            let _ = server.await;
+            assert!(
+                applied.is_ok(),
+                "new endpoint must wake cooldown and dial the current carrier"
+            );
+            assert_eq!(target.account_access_snapshot(), Some(expected));
+        };
+        // Keep actual owners joined on assertion failure as well as success.
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
+        worker.abort();
+        let _ = worker.await;
+        if let Some(server) = old_server.take() {
+            server.abort();
+            let _ = server.await;
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn access_known_route_preference_renewals_keep_authority_changes_distinct() {
+        let identity = DeviceIdentity::generate();
+        let proof = crate::discovery::Announce::new_with_account(
+            &identity,
+            &Account::generate(),
+            "sibling",
+            12345,
+        );
+        let mut roster = crate::discovery::Roster::default();
+        for ip in ["127.0.0.1", "127.0.0.2"] {
+            roster.update(&proof, ip.parse().unwrap(), "local");
+        }
+        let peer = roster.peers().remove(0);
+        let binding = AccessPeerBinding::new(&peer, 1);
+        let mut changed = peer.clone();
+        changed.account_id = Some("replacement-account".into());
+        assert!(AccessPeerBinding::new(&changed, 1) != binding);
+        changed = peer.clone();
+        changed.public = DeviceIdentity::generate().public();
+        assert!(AccessPeerBinding::new(&changed, 1) != binding);
+        changed = peer.clone();
+        changed.post_office = true;
+        assert!(
+            AccessPeerBinding::new(&changed, 1) != binding,
+            "role change must invalidate sibling work binding"
+        );
+        assert!(AccessPeerBinding::new(&peer, 2) != binding);
+    }
+
+    #[tokio::test]
     async fn direct_siblings_converge_with_optional_sync_disabled_and_unrelated_cannot_fetch() {
         use crate::transport::SecureChannel;
         use tokio::net::{TcpListener, TcpStream};
@@ -841,6 +1012,8 @@ impl Node {
                     attempts: state.failures,
                     retry_delay_ms: 0,
                 });
+                // The retry binding describes work inputs only; every new
+                // exchange still uses this turn's fresh PeerRecord dial route.
                 let result = self
                     .adaptive_control_timeout(
                         &peer.public,
@@ -907,41 +1080,22 @@ impl Node {
 struct AccessPeerBinding {
     public: crate::identity::device::PublicIdentity,
     account: Option<String>,
-    address: std::net::SocketAddr,
-    routes: Vec<(std::net::SocketAddr, u8)>,
+    post_office: bool,
+    routes: crate::discovery::roster::SchedulingEndpoints,
     generation: u64,
 }
 impl AccessPeerBinding {
     fn new(peer: &crate::discovery::PeerRecord, generation: u64) -> Self {
-        use crate::discovery::roster::RouteSource;
-        let mut routes: Vec<_> = peer
-            .routes
-            .iter()
-            .map(|route| {
-                (
-                    route.addr,
-                    match route.source {
-                        RouteSource::Lan => 0,
-                        RouteSource::Discovery => 1,
-                        RouteSource::RoutedQuery => 2,
-                        RouteSource::Gateway => 3,
-                        RouteSource::Authenticated => 4,
-                        RouteSource::PostOffice => 5,
-                    },
-                )
-            })
-            .collect();
-        routes.sort();
-        routes.dedup();
         Self {
             public: peer.public.clone(),
             account: peer.account_id.clone(),
-            address: peer.addr,
-            routes,
+            post_office: peer.post_office,
+            routes: peer.scheduling_endpoints(),
             generation,
         }
     }
 }
+
 struct AccessRetry {
     peer: AccessPeerBinding,
     next: tokio::time::Instant,

@@ -97,10 +97,13 @@
         "frontend/vite.config.ts",
         "frontend/package.json",
         "frontend/package-lock.json",
-        "scripts/diagnostics/react-singleton.test.mjs"
+        "scripts/diagnostics/react-singleton.test.mjs",
+        "frontend/postcss.config.js",
+        "frontend/scripts/theme-alpha.test.mjs"
       ],
       "node": [
-        "scripts/diagnostics/react-singleton.test.mjs"
+        "scripts/diagnostics/react-singleton.test.mjs",
+        "frontend/scripts/theme-alpha.test.mjs"
       ],
       "capability": {
         "summary": "Keep the production React renderer and hooks bound to one runtime across dependency layouts.",
@@ -109,11 +112,16 @@
           {
             "name": "Production builds deduplicate React and React DOM even when dependency caches contain duplicate package trees.",
             "reference": "docs/testing-feedback-loop.md#production-frontend-startup"
+          },
+          {
+            "name": "Theme HSL opacity utilities preserve their alpha and SVG contrast without color-mix support; unrelated color mixes retain their semantics.",
+            "reference": "docs/testing-feedback-loop.md#production-frontend-startup"
           }
         ]
       },
       "escalation": [
-        "Run the built production frontend in Chromium and WebKit, and verify the native startup screen without a display-error boundary. A development server or process-only installation check cannot certify production startup."
+        "Run the built production frontend in Chromium and WebKit, and verify the native startup screen without a display-error boundary. A development server or process-only installation check cannot certify production startup.",
+        "For CSS compatibility changes, verify built CSS in the affected native WKWebView in light and dark modes; installed Safari version and a JavaScript build target do not establish CSS feature support."
       ]
     },
     {
@@ -273,7 +281,11 @@
         "frontend/src/components/identity/AvatarEditMenu.tsx",
         "frontend/src/components/identity/AvatarEditMenu.test.ts",
         "frontend/src/store/avatars.ts",
-        "frontend/src/store/avatars.test.ts"
+        "frontend/src/store/avatars.test.ts",
+        "frontend/src/store/packs.ts",
+        "frontend/e2e/customization-pending-storage.spec.ts",
+        "frontend/e2e/pack-storage.spec.ts",
+        "docs/CUSTOMIZATION_PACKS.md"
       ],
       "frontend": [
         "src/lib/linkedAvatarOverrides.test.ts",
@@ -296,11 +308,24 @@
           {
             "name": "Avatar and receipt reads have bounded observation waits; a stalled receipt write retains mutation serialization while remote receipt polling continues independently, and retired owners cannot publish late snapshots.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Pending customization lookup selects indexed durable metadata before asset cloning; schema migration and row/index writes are atomic and failed acknowledgment cannot lose pending edits or tombstones.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          },
+          {
+            "name": "Catalog and payload updates commit atomically; quiet catalog and unchanged linked-version reads do not hydrate archives, and pending publication streams one payload without losing failure fairness or exact-sequence acknowledgment.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#runtime-loading"
+          },
+          {
+            "name": "Only the active account and public pack database retain connections; owner/session replacement, versionchange and closure retire them while admitted operations retain their own leases. Fresh equal-version compact reads skip read-write admission, atomic edits recheck scope/version, and only committed local edits trigger publication rather than selection or remote projection.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#runtime-loading"
           }
         ]
       },
       "escalation": [
-        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence."
+        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence.",
+        "Run e2e/customization-pending-storage.spec.ts for real IndexedDB upgrade, indexed quiet reads and failed-write recovery; injected storage tests do not certify transaction behavior."
       ]
     },
     {
@@ -324,7 +349,10 @@
         "frontend/src/lib/initialPresentation.ts",
         "frontend/src/lib/initialPresentation.test.ts",
         "frontend/src/lib/api/window.ts",
-        "frontend/e2e/conversation-wallpaper.spec.ts"
+        "frontend/e2e/conversation-wallpaper.spec.ts",
+        "frontend/src/lib/usePack.ts",
+        "frontend/src/lib/usePack.test.ts",
+        "frontend/src/lib/packDemand.test.ts"
       ],
       "frontend": [
         "src/store/packs.test.ts",
@@ -333,7 +361,9 @@
         "src/lib/theme-linked.test.ts",
         "src/store/chat.test.ts",
         "src/lib/initialPresentation.test.ts",
-        "src/store/auth.test.ts"
+        "src/store/auth.test.ts",
+        "src/lib/usePack.test.ts",
+        "src/lib/packDemand.test.ts"
       ],
       "capability": {
         "summary": "Restore selected private appearance from a verified account scope before unrelated gallery loading and retain it through transient runtime readiness changes.",
@@ -346,6 +376,10 @@
           {
             "name": "Authenticated appearance starts before lazy chat; initial native acknowledgement waits for the matching selected-theme preparation, decoded selected image and committed safe surface. Unrelated gallery enumeration cannot block a prepared theme; locked or retired account assets cannot paint.",
             "reference": "docs/ARCHITECTURE.md#initial-native-presentation"
+          },
+          {
+            "name": "The image-free catalog is distinct from prepared assets. Shared reads have finite admission, retiring queued observers start no work without surviving demand, and local appearance edits remain publishable while remote assets hydrate.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#runtime-loading"
           }
         ]
       },
@@ -400,12 +434,15 @@
       "frontend": [
         "src/features/chat/favorites/selection.test.ts",
         "src/features/chat/favorites/FavoriteEditor.test.ts",
+        "src/features/chat/favorites/FavoritesDialog.test.ts",
+        "src/features/chat/favorites/FavoriteAttachment.test.ts",
         "src/store/messageFavorites.test.ts",
         "src/lib/api/messageFavorites.test.ts",
         "src/lib/attachmentSave.test.ts",
         "src/features/chat/ConversationView.test.ts",
         "src/features/chat/Sidebar.test.ts",
-        "src/features/chat/favorites/MessageCollection.test.ts"
+        "src/features/chat/favorites/MessageCollection.test.ts",
+        "src/features/chat/favorites/useFavoriteMembership.test.ts"
       ],
       "capability": {
         "summary": "Collect ordered messages as independent favorites with editable searchable group descriptions and individual notes.",
@@ -422,6 +459,10 @@
           {
             "name": "Favorite list reads have bounded observation waits, including refresh after a successful mutation; an unavailable projection cannot conceal or duplicate durable collection acceptance.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Favorite membership and list observations ignore known pure sync-status invalidations, retain same-owner document and legacy broad refresh, and reject retired owner/runtime callbacks. Open views use real expiry/calendar deadlines and event/activation refresh with five-minute repair; same-query background reads remain coalesced until actual native retirement, including after the UI watchdog.",
+            "reference": "docs/favorites.md#ownership-and-acceptance"
           }
         ]
       },
@@ -439,9 +480,7 @@
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
       ],
-      "frontend": [
-        "src/features/chat/ComposerScreenshot.test.ts"
-      ],
+      "frontend": ["src/features/chat/ComposerScreenshot.test.ts"],
       "capability": {
         "summary": "Copy the confirmed edited screenshot to the clipboard, stage the same PNG, and send explicitly even after native capture loses input focus.",
         "guide": "docs/help/topics/screenshots.md",
@@ -609,6 +648,10 @@
           {
             "name": "Failed refreshes do not freeze presence or establish peer sign-out",
             "reference": "docs/network-design-reference.md#person-presence-contract"
+          },
+          {
+            "name": "Validate delta replies atomically; independent people/group ordering preserves newer tokens, group withdrawal and fresh online counts. Saturated recovery retains one forced repair.",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]
       },
@@ -634,9 +677,7 @@
         "src/store/chat.test.ts",
         "src/features/chat/MessageBubble.test.ts"
       ],
-      "consumers": [
-        "frontend-chat"
-      ],
+      "consumers": ["frontend-chat"],
       "capability": {
         "summary": "Select and reconcile owner-scoped history while coalescing automatic invalidations into bounded native read bundles.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
@@ -646,7 +687,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Selected reaction queries share one physical native read, retain a bounded summary prefix, and preserve history/read progress while projections are pending.",
+            "name": "Selected reaction queries share one physical native read, retain a bounded summary prefix, and preserve history/read progress while projections are pending. Complete summaries remain accessible through the message context menu, including read-only contexts, without inline actions for empty or loading projections.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -659,15 +700,11 @@
         "frontend/src/store/outgoingIntent.test.ts",
         "frontend/e2e/file-send-progress.spec.ts"
       ],
-      "frontend": [
-        "src/store/outgoingIntent.test.ts"
-      ],
+      "frontend": ["src/store/outgoingIntent.test.ts"],
       "escalation": [
         "File approval/progress changes require e2e/file-send-progress.spec.ts, including file-offer receipt before approval and byte completion."
       ],
-      "consumers": [
-        "frontend-chat"
-      ],
+      "consumers": ["frontend-chat"],
       "capability": {
         "summary": "Own optimistic outgoing intents and project backend acceptance within the current frontend owner lifetime.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
@@ -701,13 +738,21 @@
         "frontend/src/store/conversationState.ts",
         "frontend/src/store/conversationModel.ts"
       ],
-      "consumers": [
-        "frontend-history",
-        "frontend-outgoing"
-      ],
+      "consumers": ["frontend-history", "frontend-outgoing"],
       "frontend": [
-        "src/store/reception.test.ts"
-      ]
+        "src/store/reception.test.ts",
+        "src/store/outgoingIntent.test.ts"
+      ],
+      "capability": {
+        "summary": "Bound inactive presentation payloads while retaining active navigation and exact deletion/intent authority.",
+        "guide": "docs/module-boundaries.md#coordinated-state-owners",
+        "invariants": [
+          {
+            "name": "Inactive caches retain the existing conversation cap plus an aggregate charged-payload budget; no-op expiry preserves references and active pages retain their own lifecycle.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      }
     },
     {
       "id": "frontend-chat",
@@ -716,17 +761,20 @@
         "frontend/src/store/chat.test.ts",
         "frontend/src/store/chatRuntimeEffects.ts",
         "frontend/src/store/rosterRefresh.ts",
-        "frontend/e2e/connection-recovery.spec.ts"
+        "frontend/e2e/connection-recovery.spec.ts",
+        "frontend/src/store/chatExpiry.ts"
       ],
-      "frontend": [
-        "src/store/chat.test.ts"
-      ],
+      "frontend": ["src/store/chat.test.ts"],
       "capability": {
         "summary": "Bound identity startup waits and recover automatically after transient identity failures while retaining owner and runtime authority.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
             "name": "The thirty-second identity boot window includes native read waits; failure retains bounded background recovery without crossing owner/run lifetimes",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Empty expiry state publishes no periodic clock; actual message, ledger, file and search-context deadlines retain monotonic/resume safety, and control recovery runs only while pending.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
@@ -741,13 +789,8 @@
         "frontend/src/store/ownership.ts",
         "frontend/src/store/ownership.test.ts"
       ],
-      "frontend": [
-        "src/store/ownership.test.ts"
-      ],
-      "consumers": [
-        "frontend-history",
-        "frontend-outgoing"
-      ]
+      "frontend": ["src/store/ownership.test.ts"],
+      "consumers": ["frontend-history", "frontend-outgoing"]
     },
     {
       "id": "frontend-channel-actions",
@@ -772,9 +815,7 @@
         "src/features/chat/channelPermissions.test.ts",
         "src/features/chat/Sidebar.test.ts"
       ],
-      "consumers": [
-        "frontend-chat"
-      ],
+      "consumers": ["frontend-chat"],
       "escalation": [
         "Protocol membership and native admission remain authoritative; changing those requires their focused Rust and loopback evidence."
       ],
@@ -806,10 +847,12 @@
       "frontend": [
         "src/store/auth.test.ts",
         "src/store/appLock.test.ts",
-        "src/lib/themeContrast.test.ts"
+        "src/lib/themeContrast.test.ts",
+        "src/App.test.ts"
       ],
       "escalation": [
-        "Bootstrap, error-boundary rendering, styling and ambient types have conservative state/theme unit fallback only; these tests do not mount the application root. Required browser shell/visual scenarios and affected native startup/session evidence remain separate."
+        "Bootstrap and error-boundary changes use auth/state/theme checks plus mounted root effect regressions. Required browser shell/visual scenarios and affected native startup/session evidence remain separate.",
+        "Mounted App tests require cosmetic metadata not to renew activity or reset auto-lock; actual input and exact same-owner generation replacement retain their own activity lifetime."
       ]
     },
     {
@@ -873,12 +916,8 @@
     },
     {
       "id": "frontend-window-controls",
-      "paths": [
-        "frontend/src/components/WindowControls.tsx"
-      ],
-      "frontend": [
-        "src/lib/platform.test.ts"
-      ],
+      "paths": ["frontend/src/components/WindowControls.tsx"],
+      "frontend": ["src/lib/platform.test.ts"],
       "escalation": [
         "Platform predicate unit tests do not execute OS window actions; required browser window-control scenarios and real affected native platform evidence remain necessary."
       ]
@@ -894,10 +933,7 @@
         "frontend/e2e/avatar-gallery-loading.spec.ts",
         "frontend/e2e/theme-contrast.spec.ts"
       ],
-      "frontend": [
-        "src/lib/pack.test.ts",
-        "src/lib/stickerPacks.test.ts"
-      ],
+      "frontend": ["src/lib/pack.test.ts", "src/lib/stickerPacks.test.ts"],
       "escalation": [
         "Pack browser scenario changes require their complete browser spec; unit tests alone do not prove installation or restart persistence."
       ]
@@ -943,13 +979,8 @@
     },
     {
       "id": "frontend-browser-fixture",
-      "paths": [
-        "frontend/e2e/tauri-mock.ts"
-      ],
-      "frontend": [
-        "src/lib/events.test.ts",
-        "src/store/chat.test.ts"
-      ],
+      "paths": ["frontend/e2e/tauri-mock.ts"],
+      "frontend": ["src/lib/events.test.ts", "src/store/chat.test.ts"],
       "escalation": [
         "Shared mocked IPC changes require affected browser scenarios; mocks do not prove native transport or persistent cleanup."
       ]
@@ -983,9 +1014,7 @@
     },
     {
       "id": "frontend-dm-reception-acceptance",
-      "paths": [
-        "frontend/e2e/unread-badge.spec.ts"
-      ],
+      "paths": ["frontend/e2e/unread-badge.spec.ts"],
       "frontend": [
         "src/store/chat.test.ts",
         "src/store/reception.test.ts",
@@ -1058,9 +1087,7 @@
         "src/store/chat.test.ts",
         "src/lib/events.test.ts"
       ],
-      "consumers": [
-        "frontend-chat"
-      ],
+      "consumers": ["frontend-chat"],
       "capability": {
         "summary": "Coalesce scoped group invalidations and keep group details consistent with bounded fallback queries.",
         "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
@@ -1109,7 +1136,16 @@
         "frontend/e2e/audit-fixes.spec.ts",
         "frontend/src/lib/i18n.ts",
         "frontend/src/store/privacy.ts",
-        "frontend/src/store/privacy.test.ts"
+        "frontend/src/store/privacy.test.ts",
+        "frontend/src/lib/recoveryRefresh.ts",
+        "frontend/src/lib/recoveryRefresh.test.ts",
+        "frontend/src/lib/linkedCustomizationPacks.ts",
+        "frontend/src/lib/linkedCustomizationPacks.test.ts",
+        "frontend/src/lib/linkedAvatarOverrides.ts",
+        "frontend/src/lib/linkedAvatarOverrides.test.ts",
+        "frontend/src/lib/linkedReadReceipts.ts",
+        "frontend/src/lib/linkedReadReceipts.test.ts",
+        "frontend/src/store/drafts.test.ts"
       ],
       "frontend": [
         "src/lib/readDeadline.test.ts",
@@ -1124,7 +1160,12 @@
         "src/features/chat/PersonalDevices.test.ts",
         "src/lib/api.test.ts",
         "src/features/chat/LinkDeviceDialog.test.ts",
-        "src/store/privacy.test.ts"
+        "src/store/privacy.test.ts",
+        "src/lib/recoveryRefresh.test.ts",
+        "src/lib/linkedCustomizationPacks.test.ts",
+        "src/lib/linkedAvatarOverrides.test.ts",
+        "src/lib/linkedReadReceipts.test.ts",
+        "src/store/drafts.test.ts"
       ],
       "consumers": [
         "frontend-chat",
@@ -1155,6 +1196,22 @@
           {
             "name": "Contact and privacy policy reads release presentation loading after a bounded wait, preserve explicit error recovery and reject late snapshots from expired reads or retired sessions without timing out mutation ownership.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Semantic invalidations and coalesced activation remain prompt; modern quiet projections use sparse recovery, presentation-only hidden owners park timers, and legacy reads preserve bounded progress.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Qualified document/status notifications skip group and personal-state hydration; document-only listeners ignore known sync-status scope while absent/unknown scope keeps legacy repair and mixed domains remain independently observable.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Same-owner pure sync-status notifications refresh device status without rereading presence, watched-file availability, favorite membership or hostnames; document, file and legacy/unknown broad invalidations retain their existing recovery and ownership guards. Default serial-poll state subscribers retain status notifications unless the consumer supplies a narrower matcher.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Visible serial readers use event invalidations with a five-minute push-backed recovery deadline, retaining compatibility intervals without push support. Hidden readers suspend recovery timers and refresh on activation. UI watchdog expiry retains the actual native read lease and at most one pending invalidation through physical settlement and global admission release; closing retires timers/listeners and suppresses late publication.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },
@@ -1407,10 +1464,7 @@
         "src/features/chat/attachments/conversationIntake.test.ts",
         "src/lib/automaticDownloads.test.ts"
       ],
-      "consumers": [
-        "frontend-chat",
-        "frontend-history"
-      ],
+      "consumers": ["frontend-chat", "frontend-history"],
       "capability": {
         "summary": "Protected text and raster images use owner-scoped reveal, local temporary plaintext and revocable image URLs, fresh verification and concealed shared projections.",
         "guide": "docs/privacy-controls.md#protected-messages",
@@ -1454,9 +1508,7 @@
         "src/features/chat/AccountBindingRecovery.test.ts",
         "src/features/chat/MemberProfileDialog.test.ts"
       ],
-      "consumers": [
-        "frontend-chat"
-      ],
+      "consumers": ["frontend-chat"],
       "capability": {
         "summary": "Edit one ordinary profile and show the same About text in conversation headers and contact details with session-bound refresh.",
         "guide": "docs/peer-trust.md",
@@ -1585,7 +1637,8 @@
         "frontend/e2e/language-settings.spec.ts",
         "frontend/e2e/login-recovery.spec.ts",
         "frontend/e2e/ui-audit-shell.spec.ts",
-        "docs/help/topics/language.md"
+        "docs/help/topics/language.md",
+        "frontend/src/lib/formatPerformance.test.ts"
       ],
       "frontend": [
         "src/lib/i18n.test.ts",
@@ -1594,7 +1647,8 @@
         "src/lib/settingsTranslations.test.ts",
         "src/lib/privacyTranslations.test.ts",
         "src/lib/presenceLabels.test.ts",
-        "src/features/auth/LoginScreen.test.ts"
+        "src/features/auth/LoginScreen.test.ts",
+        "src/lib/formatPerformance.test.ts"
       ],
       "capability": {
         "summary": "Select and persist one of eight complete interface languages across desktop UI, including Portuguese and Korean.",
@@ -1607,6 +1661,10 @@
           {
             "name": "Saved desktop choice wins over supported system/browser languages; regional Portuguese maps to pt-BR and regional Korean to ko. Immediate switching updates document language even if preference storage is unavailable; conversation dates and elapsed-time labels follow the selected language. Public language preference remains separate; automatic website language detection does not persist a fixed preference, explicit choices do, native language names carry their language tags, and English-authored articles disclose their fallback.",
             "reference": "docs/help/topics/language.md"
+          },
+          {
+            "name": "Repeated date/time presentation reuses at most 256 display strings under current locale and fresh local calendar fields; live timezone, DST and today/yesterday classification remain native-equivalent without retaining message identities or starting timers.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },
@@ -1732,6 +1790,10 @@
           {
             "name": "Sent v2 semantic labels survive pack removal and retry; compact surfaces share one summary with localized legacy fallback and protected/recalled/expired content takes priority.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Ordinary static previews are bounded derived images with current consent, expiry and immutable-source rechecks; originals and protected reveals retain independent access paths.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
           }
         ]
       },
@@ -1779,13 +1841,17 @@
             "reference": "docs/privacy-controls.md#verify-sensitive-operations"
           },
           {
+            "name": "The macOS startup verification toggle is installation-local, depends on saved login, and displays only acknowledged credential-policy changes without altering app-lock settings.",
+            "reference": "docs/privacy-controls.md#startup-verification"
+          },
+          {
             "name": "Device-linking authentication precedes sync expansion and source code display waits for snapshot preparation.",
             "reference": "docs/privacy-controls.md#verify-sensitive-operations"
           }
         ]
       },
       "escalation": [
-        "Exercise nested Settings/Backup/password dialogs, Escape/focus restoration and pending-operation cancellation in browser; real macOS device-owner and Windows/Linux password verification require native evidence."
+        "Exercise nested Settings/Backup/password dialogs, Escape/focus restoration and pending-operation cancellation in browser; real macOS device-owner and Windows/Linux password verification require native evidence. Exercise startup verification enabled/disabled on macOS, including replacement with a different application build; component mocks do not prove native credential migration or absence of Keychain prompts."
       ]
     },
     {
@@ -1796,9 +1862,7 @@
         "frontend/src/lib/api/chat.ts",
         "frontend/e2e/personal-messages.spec.ts"
       ],
-      "frontend": [
-        "src/features/chat/PersonalDevices.test.ts"
-      ],
+      "frontend": ["src/features/chat/PersonalDevices.test.ts"],
       "escalation": [
         "Check hostname wrapping and local-device labeling in the device popover on native linked devices; browser mocks do not prove private transport."
       ],
@@ -1868,14 +1932,20 @@
         "frontend/e2e/settings-categories.spec.ts",
         "frontend/src/features/chat/settings/HistoryStorageSummary.tsx",
         "frontend/src/features/chat/settings/HistoryStorageSummary.test.ts",
-        "frontend/e2e/history-storage.spec.ts"
+        "frontend/e2e/history-storage.spec.ts",
+        "frontend/src/features/chat/SettingsDialog.test.ts",
+        "frontend/src/features/chat/settings/SettingsPage.tsx",
+        "frontend/src/features/chat/settings/SettingsPage.test.ts",
+        "frontend/src/features/chat/settings/loadSettingsPage.ts"
       ],
       "frontend": [
         "src/features/chat/settings/HistoryStorageSummary.test.ts",
         "src/features/chat/settings/model.test.ts",
         "src/features/chat/settings/useSettingsController.test.ts",
         "src/features/chat/settingsDialogSession.test.ts",
-        "src/lib/settingsTranslations.test.ts"
+        "src/lib/settingsTranslations.test.ts",
+        "src/features/chat/SettingsDialog.test.ts",
+        "src/features/chat/settings/SettingsPage.test.ts"
       ],
       "capability": {
         "summary": "Navigate task-based settings with one mounted category and category-owned save feedback.",
@@ -1994,11 +2064,11 @@
         "src/features/chat/MembersDialog.test.ts"
       ],
       "capability": {
-        "summary": "Remove personal chats and optional history across linked devices without changing other accounts\u2019 membership or copies.",
+        "summary": "Remove personal chats and optional history across linked devices without changing other accounts’ membership or copies.",
         "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
         "invariants": [
           {
-            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account\u2019s data.",
+            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account’s data.",
             "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
           },
           {
@@ -2124,6 +2194,7 @@
         "frontend/src/features/chat/MediaPreview.tsx",
         "frontend/src/features/chat/MessageBubble.tsx",
         "frontend/src/features/chat/mediaFile.tsx",
+        "frontend/src/features/chat/mediaFilePoster.test.ts",
         "frontend/src/features/chat/mediaObjectUrlCache.ts",
         "frontend/src/features/chat/mediaObjectUrlCache.test.ts",
         "frontend/src/features/chat/mediaFileRead.test.ts",
@@ -2147,6 +2218,7 @@
         "src/features/chat/mediaObjectUrlCache.test.ts",
         "src/features/chat/mediaFileRead.test.ts",
         "src/features/chat/mediaFile.test.ts",
+        "src/features/chat/mediaFilePoster.test.ts",
         "src/features/chat/useConversationViewport.test.ts",
         "src/features/chat/protectedImage.test.ts",
         "src/features/chat/ReceiveProgress.test.ts"
@@ -2164,7 +2236,7 @@
             "reference": "docs/module-boundaries.md#inline-media-presentation"
           },
           {
-            "name": "Ordinary media reuse shares admitted reads and URLs, bounds idle Blob bytes and entries, expires idle URLs, and revokes on owner/runtime retirement; protected reveals remain ephemeral.",
+            "name": "Ordinary media reuse shares admitted reads and URLs, bounds idle Blob bytes and entries, expires idle URLs, and revokes on owner/runtime retirement; protected reveals remain ephemeral. Failed full reads retain only three short commit-race retries, then owned file/activation events and five-minute repair, with serial coalescing and no recovery timer after success. Failed bounded previews do not fall back to originals or retry automatically.",
             "reference": "docs/module-boundaries.md#inline-media-presentation"
           },
           {
@@ -2302,7 +2374,10 @@
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520-linux.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520-win32.png",
-        "docs/help/topics/history.md"
+        "docs/help/topics/history.md",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/ReceptionStatus.tsx",
+        "frontend/src/features/chat/ConversationViewIdle.test.ts"
       ],
       "frontend": [
         "src/store/reception.test.ts",
@@ -2316,7 +2391,8 @@
         "src/features/chat/Sidebar.test.ts",
         "src/features/chat/sidebar/ConversationRow.test.ts",
         "src/features/chat/ReceptionStatus.test.ts",
-        "src/lib/localeParity.test.ts"
+        "src/lib/localeParity.test.ts",
+        "src/features/chat/ConversationViewIdle.test.ts"
       ],
       "capability": {
         "summary": "Every application unread count has a review and explicit clear path; confirmed local suppression reconciles exact unread without claiming viewed content; badge writes retry within the current owner lifetime.",
@@ -2337,6 +2413,10 @@
           {
             "name": "Receipt persistence coalesces within a fixed 100 ms window and flushes before restoration and owner retirement; unchanged conversations retain immutable projections and existing unread/alias bounds.",
             "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Peer-check recovery observations update their small status owner without rerendering unchanged message viewports; new messages, unread review and conversation/session replacement retain their independent reactive ownership.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },
@@ -2351,9 +2431,7 @@
         "frontend/src/features/chat/ReceiveProgress.tsx",
         "frontend/src/features/chat/ReceiveProgress.test.ts"
       ],
-      "frontend": [
-        "src/features/chat/ReceiveProgress.test.ts"
-      ],
+      "frontend": ["src/features/chat/ReceiveProgress.test.ts"],
       "capability": {
         "summary": "Distinguish waiting for the first file chunk from active chunk reception without changing determinate progress counts.",
         "guide": "docs/help/topics/channels.md#file-delivery",
@@ -2460,7 +2538,8 @@
         "frontend/src/lib/api/reception.ts",
         "frontend/src/store/chat.ts",
         "frontend/src/store/chat.test.ts",
-        "frontend/src/lib/events.ts"
+        "frontend/src/lib/events.ts",
+        "frontend/e2e/resource-idle.spec.ts"
       ],
       "frontend": [
         "src/store/avatars.test.ts",
@@ -2478,13 +2557,42 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Cursor and unread/mention/batch state persist atomically before ACK; quota failures retry without replaying applied effects.",
+            "name": "Cursor and unread/mention/batch state persist atomically before ACK; quota failures retry without replaying applied effects. UI-only recovery observations and clean empty pages at the committed prefix do not rewrite the snapshot.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "ACK-qualified fixed invalidation domains preserve newer pending changes; empty/progress pages do not create global state, roster-only pages avoid unrelated payload reloads and legacy receipts retain full repair.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },
       "escalation": [
         "Exercise actual Tauri IPC with a stalled renderer, renderer reload, app lock and runtime/account replacement; mocked IPC does not certify the native queue boundary."
+      ]
+    },
+    {
+      "id": "frontend-offline-help-reader",
+      "paths": [
+        "frontend/src/features/help/",
+        "frontend/e2e/help.spec.ts",
+        "docs/help-system.md"
+      ],
+      "frontend": [
+        "src/features/help/HelpDialog.test.ts",
+        "src/features/help/targets.test.ts"
+      ],
+      "capability": {
+        "summary": "Open bundled offline help on demand while preserving scoped navigation and dialog focus.",
+        "guide": "docs/help-system.md#desktop-behavior",
+        "invariants": [
+          {
+            "name": "Closed help loads no article bodies or search/render work; failed imports retry locally and retired views cannot publish a reader or navigate.",
+            "reference": "docs/help-system.md#desktop-behavior"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/help.spec.ts for keyboard, offline reading, topic-to-settings handoff and focus; verify native window restoration separately from browser mocks."
       ]
     },
     {
@@ -2526,19 +2634,16 @@
   "prScenarios": [
     {
       "id": "frontend-memory-guardrail-acceptance",
-      "paths": ["frontend/e2e/memory.spec.ts", "frontend/e2e/helpers/conversation-churn.ts"],
-      "browser": [
-        "e2e/memory.spec.ts"
-      ]
+      "paths": [
+        "frontend/e2e/memory.spec.ts",
+        "frontend/e2e/helpers/conversation-churn.ts"
+      ],
+      "browser": ["e2e/memory.spec.ts"]
     },
     {
       "id": "frontend-group-reception-acceptance",
-      "paths": [
-        "frontend/e2e/group-reception.spec.ts"
-      ],
-      "browser": [
-        "e2e/group-reception.spec.ts"
-      ]
+      "paths": ["frontend/e2e/group-reception.spec.ts"],
+      "browser": ["e2e/group-reception.spec.ts"]
     },
     {
       "id": "frontend-dialog-focus-acceptance",
@@ -2555,9 +2660,7 @@
         "e2e/privacy.spec.ts",
         "e2e/tray-navigation.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
     },
     {
       "id": "group-file-network-cost-acceptance",
@@ -2566,12 +2669,8 @@
         "frontend/src/features/chat/GroupPreferences.tsx",
         "frontend/e2e/group-network-cost.spec.ts"
       ],
-      "browser": [
-        "e2e/group-network-cost.spec.ts"
-      ],
-      "native": [
-        "host"
-      ]
+      "browser": ["e2e/group-network-cost.spec.ts"],
+      "native": ["host"]
     },
     {
       "id": "frontend-screenshot-submission-acceptance",
@@ -2583,9 +2682,7 @@
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
       ],
-      "browser": [
-        "e2e/screenshot-portable.spec.ts"
-      ]
+      "browser": ["e2e/screenshot-portable.spec.ts"]
     },
     {
       "id": "frontend-local-agent-acceptance",
@@ -2599,9 +2696,7 @@
         "e2e/local-agent-access.spec.ts",
         "e2e/settings-categories.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
     },
     {
       "id": "frontend-exact-search-acceptance",
@@ -2615,10 +2710,7 @@
         "crates/mesh-talk-core/src/node/search.rs",
         "crates/mesh-talk-core/src/node/queries.rs"
       ],
-      "browser": [
-        "e2e/chat.spec.ts",
-        "e2e/hidden-contacts.spec.ts"
-      ]
+      "browser": ["e2e/chat.spec.ts", "e2e/hidden-contacts.spec.ts"]
     },
     {
       "id": "frontend-delivery-details-acceptance",
@@ -2633,9 +2725,7 @@
         "frontend/e2e/automatic-delivery.spec.ts",
         "frontend/src/features/chat/MessageStatus.tsx"
       ],
-      "browser": [
-        "e2e/automatic-delivery.spec.ts"
-      ]
+      "browser": ["e2e/automatic-delivery.spec.ts"]
     },
     {
       "id": "frontend-presence-acceptance",
@@ -2646,9 +2736,7 @@
         "frontend/src/features/chat/ChatApp.tsx",
         "frontend/e2e/person-presence.spec.ts"
       ],
-      "browser": [
-        "e2e/person-presence.spec.ts"
-      ]
+      "browser": ["e2e/person-presence.spec.ts"]
     },
     {
       "id": "frontend-saved-devices",
@@ -2657,9 +2745,7 @@
         "frontend/src/features/chat/PersonalDevices.test.ts",
         "frontend/src/features/chat/ConversationHeaders.tsx"
       ],
-      "browser": [
-        "e2e/personal-messages.spec.ts"
-      ]
+      "browser": ["e2e/personal-messages.spec.ts"]
     },
     {
       "id": "frontend-visual",
@@ -2725,39 +2811,35 @@
     },
     {
       "id": "frontend-window-controls-acceptance",
-      "paths": [
-        "frontend/src/components/WindowControls.tsx"
-      ],
-      "browser": [
-        "e2e/window-controls.spec.ts"
-      ]
+      "paths": ["frontend/src/components/WindowControls.tsx"],
+      "browser": ["e2e/window-controls.spec.ts"]
     },
     {
       "id": "frontend-pack-acceptance",
       "paths": [
-        "frontend/e2e/packs.spec.ts"
+        "frontend/e2e/packs.spec.ts",
+        "frontend/src/store/packs.ts",
+        "frontend/e2e/customization-pending-storage.spec.ts",
+        "frontend/e2e/pack-storage.spec.ts",
+        "frontend/src/lib/usePack.ts",
+        "frontend/src/lib/packDemand.test.ts"
       ],
       "browser": [
-        "e2e/packs.spec.ts"
-      ]
+        "e2e/packs.spec.ts",
+        "e2e/customization-pending-storage.spec.ts",
+        "e2e/pack-storage.spec.ts"
+      ],
+      "native": ["host"]
     },
     {
       "id": "frontend-packs-empty-acceptance",
-      "paths": [
-        "frontend/e2e/packs-empty.spec.ts"
-      ],
-      "browser": [
-        "e2e/packs-empty.spec.ts"
-      ]
+      "paths": ["frontend/e2e/packs-empty.spec.ts"],
+      "browser": ["e2e/packs-empty.spec.ts"]
     },
     {
       "id": "frontend-stickers-acceptance",
-      "paths": [
-        "frontend/e2e/stickers.spec.ts"
-      ],
-      "browser": [
-        "e2e/stickers.spec.ts"
-      ]
+      "paths": ["frontend/e2e/stickers.spec.ts"],
+      "browser": ["e2e/stickers.spec.ts"]
     },
     {
       "id": "frontend-theme-picker-acceptance",
@@ -2766,7 +2848,9 @@
         "frontend/e2e/helpers/packs.ts",
         "frontend/e2e/helpers/session.ts",
         "frontend/src/store/packs.ts",
-        "frontend/src/lib/linkedAppearance.ts"
+        "frontend/src/lib/linkedAppearance.ts",
+        "frontend/src/lib/usePack.ts",
+        "frontend/src/lib/usePack.test.ts"
       ],
       "browser": [
         "e2e/theme-picker.spec.ts",
@@ -2775,39 +2859,23 @@
     },
     {
       "id": "frontend-avatar-gallery-acceptance",
-      "paths": [
-        "frontend/e2e/avatar-gallery.spec.ts"
-      ],
-      "browser": [
-        "e2e/avatar-gallery.spec.ts"
-      ]
+      "paths": ["frontend/e2e/avatar-gallery.spec.ts"],
+      "browser": ["e2e/avatar-gallery.spec.ts"]
     },
     {
       "id": "frontend-avatar-gallery-loading-acceptance",
-      "paths": [
-        "frontend/e2e/avatar-gallery-loading.spec.ts"
-      ],
-      "browser": [
-        "e2e/avatar-gallery-loading.spec.ts"
-      ]
+      "paths": ["frontend/e2e/avatar-gallery-loading.spec.ts"],
+      "browser": ["e2e/avatar-gallery-loading.spec.ts"]
     },
     {
       "id": "frontend-theme-contrast-acceptance",
-      "paths": [
-        "frontend/e2e/theme-contrast.spec.ts"
-      ],
-      "browser": [
-        "e2e/theme-contrast.spec.ts"
-      ]
+      "paths": ["frontend/e2e/theme-contrast.spec.ts"],
+      "browser": ["e2e/theme-contrast.spec.ts"]
     },
     {
       "id": "frontend-composer-acceptance",
-      "paths": [
-        "frontend/e2e/ui-audit-composer.spec.ts"
-      ],
-      "browser": [
-        "e2e/ui-audit-composer.spec.ts"
-      ]
+      "paths": ["frontend/e2e/ui-audit-composer.spec.ts"],
+      "browser": ["e2e/ui-audit-composer.spec.ts"]
     },
     {
       "id": "frontend-composer-input-acceptance",
@@ -2835,9 +2903,7 @@
         "frontend/e2e/message-expiry.spec.ts",
         "frontend/e2e/tauri-mock.ts"
       ],
-      "browser": [
-        "e2e/message-expiry.spec.ts"
-      ]
+      "browser": ["e2e/message-expiry.spec.ts"]
     },
     {
       "id": "frontend-text-submission-acceptance",
@@ -2845,9 +2911,7 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/automatic-delivery.spec.ts"
       ],
-      "browser": [
-        "e2e/automatic-delivery.spec.ts"
-      ]
+      "browser": ["e2e/automatic-delivery.spec.ts"]
     },
     {
       "id": "frontend-dm-unread-acceptance",
@@ -2860,9 +2924,7 @@
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs"
       ],
-      "browser": [
-        "e2e/unread-badge.spec.ts"
-      ]
+      "browser": ["e2e/unread-badge.spec.ts"]
     },
     {
       "id": "frontend-identity-recovery-acceptance",
@@ -2871,9 +2933,7 @@
         "frontend/src/store/chat.test.ts",
         "frontend/e2e/connection-recovery.spec.ts"
       ],
-      "browser": [
-        "e2e/connection-recovery.spec.ts"
-      ]
+      "browser": ["e2e/connection-recovery.spec.ts"]
     },
     {
       "id": "frontend-presence-recovery-acceptance",
@@ -2891,9 +2951,7 @@
         "e2e/person-presence.spec.ts",
         "e2e/connection-recovery.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
     },
     {
       "id": "group-sync",
@@ -2903,10 +2961,7 @@
         "frontend/src/lib/events.ts",
         "frontend/e2e/group-sync.spec.ts"
       ],
-      "browser": [
-        "e2e/group-sync.spec.ts",
-        "e2e/channel-lifecycle.spec.ts"
-      ]
+      "browser": ["e2e/group-sync.spec.ts", "e2e/channel-lifecycle.spec.ts"]
     },
     {
       "id": "frontend-state-push",
@@ -2960,9 +3015,7 @@
         "frontend/e2e/update-flow.spec.ts",
         "frontend/src/lib/types.ts"
       ],
-      "browser": [
-        "e2e/update-flow.spec.ts"
-      ]
+      "browser": ["e2e/update-flow.spec.ts"]
     },
     {
       "id": "frontend-notification-permission-acceptance",
@@ -3006,9 +3059,7 @@
         "frontend/src/lib/api/chat.ts",
         "frontend/e2e/channel-history.spec.ts"
       ],
-      "browser": [
-        "e2e/channel-history.spec.ts"
-      ]
+      "browser": ["e2e/channel-history.spec.ts"]
     },
     {
       "id": "protected-message-acceptance",
@@ -3047,9 +3098,7 @@
         "e2e/protected-messages.spec.ts",
         "e2e/ui-visual-regression.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
     },
     {
       "id": "frontend-account-profile-acceptance",
@@ -3104,12 +3153,8 @@
         "frontend/e2e/account-binding-recovery.spec.ts",
         "frontend/e2e/account-binding-recovery.spec.ts-snapshots/"
       ],
-      "browser": [
-        "e2e/account-binding-recovery.spec.ts"
-      ],
-      "native": [
-        "host"
-      ]
+      "browser": ["e2e/account-binding-recovery.spec.ts"],
+      "native": ["host"]
     },
     {
       "id": "public-site-experience",
@@ -3218,10 +3263,7 @@
         "frontend/e2e/call-media-physical.spec.ts",
         "docs/help/topics/calls.md"
       ],
-      "browser": [
-        "e2e/call-media.spec.ts",
-        "e2e/call-readiness.spec.ts"
-      ]
+      "browser": ["e2e/call-media.spec.ts", "e2e/call-readiness.spec.ts"]
     },
     {
       "id": "frontend-inline-media-acceptance",
@@ -3253,9 +3295,7 @@
         "e2e/file-receive-controls.spec.ts",
         "e2e/video-player-layout.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
     },
     {
       "id": "frontend-image-live-text-acceptance",
@@ -3271,9 +3311,7 @@
         "e2e/media-recovery.spec.ts",
         "e2e/protected-messages.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
     },
     {
       "id": "frontend-reply-preview-acceptance",
@@ -3288,10 +3326,7 @@
         "frontend/src/features/chat/replyNavigation.test.ts",
         "frontend/e2e/helpers/message-highlight.ts"
       ],
-      "browser": [
-        "e2e/reply-preview.spec.ts",
-        "e2e/chat.spec.ts"
-      ]
+      "browser": ["e2e/reply-preview.spec.ts", "e2e/chat.spec.ts"]
     },
     {
       "id": "frontend-camera-capture-acceptance",
@@ -3304,12 +3339,8 @@
         "frontend/src/features/chat/attachments/conversationIntake.test.ts",
         "frontend/e2e/camera-capture.spec.ts"
       ],
-      "browser": [
-        "e2e/camera-capture.spec.ts"
-      ],
-      "native": [
-        "host"
-      ]
+      "browser": ["e2e/camera-capture.spec.ts"],
+      "native": ["host"]
     },
     {
       "id": "frontend-message-forwarding-acceptance",
@@ -3318,12 +3349,8 @@
         "frontend/src/lib/api/messageForwarding.ts",
         "frontend/e2e/forwarding.spec.ts"
       ],
-      "browser": [
-        "e2e/forwarding.spec.ts"
-      ],
-      "native": [
-        "host"
-      ]
+      "browser": ["e2e/forwarding.spec.ts"],
+      "native": ["host"]
     },
     {
       "id": "frontend-selected-reactions-acceptance",
@@ -3341,9 +3368,44 @@
         "e2e/ui-audit-message-log.spec.ts",
         "e2e/chat.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
+    },
+    {
+      "id": "frontend-reception-domain-acceptance",
+      "paths": [
+        "frontend/src/lib/api/reception.ts",
+        "frontend/src/store/chat.ts",
+        "src-tauri/src/reception_host.rs",
+        "src-tauri/src/reception_host/",
+        "frontend/e2e/resource-idle.spec.ts",
+        "frontend/src/store/presence.ts",
+        "frontend/src/store/presence.test.ts",
+        "frontend/src/store/fileAvailability.ts",
+        "frontend/src/store/fileAvailability.test.ts",
+        "frontend/src/features/chat/favorites/useFavoriteMembership.ts",
+        "frontend/src/features/chat/favorites/useFavoriteMembership.test.ts",
+        "frontend/src/features/chat/useSerialPoll.ts",
+        "frontend/src/features/chat/useSerialPoll.test.ts",
+        "frontend/src/features/chat/PersonalDevices.tsx",
+        "frontend/src/features/chat/PersonalDevices.test.ts"
+      ],
+      "browser": ["e2e/resource-idle.spec.ts"],
+      "native": ["host"]
+    },
+    {
+      "id": "frontend-demand-loaded-pages-acceptance",
+      "paths": [
+        "frontend/src/features/help/",
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/settings/SettingsPage.tsx",
+        "frontend/src/features/chat/settings/loadSettingsPage.ts"
+      ],
+      "browser": [
+        "e2e/help.spec.ts",
+        "e2e/settings-categories.spec.ts",
+        "e2e/settings-recovery.spec.ts"
+      ],
+      "native": ["host"]
     }
   ]
 }
