@@ -392,6 +392,16 @@ additive internal observation, and keep delivery/custody proof independent. The
 same profile publisher controls exercise warm relay publication with unavailable
 direct delivery; mailbox controls retain source-change and relay-reset recovery.
 
+When replacing fast polling with sparse recovery, preserve the progress that the
+old poll accidentally supplied. A completed record is not active demand, but a
+failed read, deferred capacity, unfinished page or invalidation arriving during a
+held read is. The [group-operation coordinator](../frontend/src/store/accountGroupOperations.ts)
+retains that demand and publishes completion to the existing timer owner. Its
+[store controls](../frontend/src/store/chat.test.ts) and
+[coordinator controls](../frontend/src/store/accountGroupOperations.test.ts)
+exercise terminal quietness, activation, pagination, capacity release and lost-wake
+recovery without dropping receipts or bypassing session authority.
+
 For change-driven receive, subscribe before observing the predicate and retain
 that observation until all captured work is handled. A notification invalidates
 quietness; it must not cancel valid unrelated work or acknowledge delivery. Keep

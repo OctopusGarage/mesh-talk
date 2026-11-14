@@ -1541,6 +1541,15 @@ released; logging also occurs after the observation guard is released. Disabled
 owners retain no diagnostic collector. These logical work counts do not measure
 physical disk bytes; native filesystem tracing owns that acceptance evidence.
 
+The desktop IPC adapter uses the same opt-in flag for a separate metadata-only
+observer: at most 256 registered command names of at most 96 ASCII bytes. It
+counts handled dispatch attempts, excluding lock rejection and unhandled names,
+never arguments, results or private state. Nonblocking admission reports dropped
+counts; the next accepted invocation can emit a five-second summary after the
+observer guard is released. There is no new timer or worker. Default mode creates
+no collector, command-name allocation or diagnostic output; these counts establish
+request frequency rather than successful execution or CPU cost.
+
 Settled fixed-consumer reception retirement performs no SQL mutation when
 its durable retirement cursor has not advanced. The same bounded transaction
 still checks account/lifetime ownership and drains pending metadata: an ACK

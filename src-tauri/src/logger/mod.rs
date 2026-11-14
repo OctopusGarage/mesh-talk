@@ -14,6 +14,116 @@ use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
 const MAX_LOG_RETENTION_DAYS: u64 = 7;
 pub(crate) const GRAPHICS_LOG_TARGET: &str = "mesh_talk::graphics_configuration";
 
+// Opt-in metadata only. No background task or timer is created by this observer.
+const IPC_WORK_TARGET: &str = "mesh_talk::ipc_work";
+const IPC_WORK_NAMES: usize = 256;
+const IPC_WORK_WINDOW: Duration = Duration::from_secs(5);
+static IPC_WORK_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static IPC_WORK: std::sync::OnceLock<IpcWorkObserver> = std::sync::OnceLock::new();
+
+fn ipc_work_enabled() -> bool {
+    *IPC_WORK_ENABLED.get_or_init(|| {
+        std::env::var_os("MESH_TALK_TRACE_WORK").as_deref() == Some(std::ffi::OsStr::new("1"))
+    })
+}
+
+fn ipc_command_name(enabled: bool, command: &str) -> Option<String> {
+    (enabled
+        && !command.is_empty()
+        && command.len() <= 96
+        && command
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+    .then(|| command.to_owned())
+}
+
+/// Capture only a bounded name before Invoke is consumed. Disabled mode allocates nothing.
+pub(crate) fn capture_ipc_work_name(command: &str) -> Option<String> {
+    ipc_command_name(ipc_work_enabled(), command)
+}
+
+struct IpcWorkState {
+    started: std::time::Instant,
+    commands: std::collections::BTreeMap<String, u64>,
+}
+#[derive(serde::Serialize)]
+struct IpcWorkSnapshot {
+    window_ms: u128,
+    commands: std::collections::BTreeMap<String, u64>,
+    dropped: u64,
+}
+struct IpcWorkObserver {
+    state: std::sync::Mutex<IpcWorkState>,
+    dropped: std::sync::atomic::AtomicU64,
+}
+impl IpcWorkObserver {
+    fn new(started: std::time::Instant) -> Self {
+        Self {
+            state: std::sync::Mutex::new(IpcWorkState {
+                started,
+                commands: Default::default(),
+            }),
+            dropped: Default::default(),
+        }
+    }
+
+    fn record(
+        &self,
+        handled: bool,
+        command: &str,
+        now: std::time::Instant,
+        emit: impl FnOnce(IpcWorkSnapshot),
+    ) {
+        if !handled {
+            return;
+        }
+        let Ok(mut state) = self.state.try_lock() else {
+            self.dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        };
+        if let Some(count) = state.commands.get_mut(command) {
+            *count = count.saturating_add(1);
+        } else if state.commands.len() < IPC_WORK_NAMES {
+            state.commands.insert(command.to_owned(), 1);
+        } else {
+            self.dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let elapsed = now.saturating_duration_since(state.started);
+        if elapsed < IPC_WORK_WINDOW {
+            return;
+        }
+        let snapshot = IpcWorkSnapshot {
+            window_ms: elapsed.as_millis(),
+            commands: std::mem::take(&mut state.commands),
+            dropped: self.dropped.swap(0, std::sync::atomic::Ordering::Relaxed),
+        };
+        state.started = now;
+        drop(state);
+        emit(snapshot);
+    }
+}
+
+/// Counts registered dispatch attempts, not completion, success or side effects.
+/// Caller must supply the generated handler's result, never a generic rejection result.
+pub(crate) fn record_ipc_work(name: Option<String>, handled: bool) {
+    let Some(name) = name else {
+        return;
+    };
+    if !handled {
+        return;
+    }
+    let now = std::time::Instant::now();
+    IPC_WORK
+        .get_or_init(|| IpcWorkObserver::new(now))
+        .record(handled, &name, now, |snapshot| {
+            if let Ok(json) = serde_json::to_string(&snapshot) {
+                log::info!(target: IPC_WORK_TARGET, "ipc.work {json}");
+            }
+        });
+}
+
 fn configured_log_level(debug_build: bool) -> LogLevelFilter {
     if debug_build {
         LogLevelFilter::Debug
@@ -54,6 +164,14 @@ pub fn init_logging(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::er
         .targets(targets)
         .level(configured_log_level(cfg!(debug_assertions)))
         .level_for(GRAPHICS_LOG_TARGET, LogLevelFilter::Info)
+        .level_for(
+            IPC_WORK_TARGET,
+            if ipc_work_enabled() {
+                LogLevelFilter::Info
+            } else {
+                LogLevelFilter::Warn
+            },
+        )
         .level_for("mesh_talk_core::node::node", LogLevelFilter::Info)
         .timezone_strategy(TimezoneStrategy::UseLocal)
         .build();
@@ -178,6 +296,68 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[test]
+    fn ipc_work_observer_bounds_names_and_disabled_capture() {
+        assert!(ipc_command_name(false, "get_avatars").is_none());
+        assert!(ipc_command_name(true, "payload:secret").is_none());
+        assert!(ipc_command_name(true, &"a".repeat(97)).is_none());
+        assert_eq!(
+            ipc_command_name(true, "get_avatars").as_deref(),
+            Some("get_avatars")
+        );
+    }
+
+    #[test]
+    fn ipc_work_observer_counts_only_handled_and_emits_after_unlock() {
+        let start = std::time::Instant::now();
+        let observer = IpcWorkObserver::new(start);
+        let mut snapshots = Vec::new();
+        observer.record(false, "unknown", start, |_| panic!("unhandled"));
+        observer.record(true, "get_avatars", start, |_| panic!("early"));
+        observer.record(true, "get_avatars", start + IPC_WORK_WINDOW, |snapshot| {
+            assert!(
+                observer.state.try_lock().is_ok(),
+                "emit must not own observer lock"
+            );
+            observer.record(true, "reentrant", start + IPC_WORK_WINDOW, |_| {
+                panic!("early reentry")
+            });
+            snapshots.push(snapshot);
+        });
+        observer.record(
+            true,
+            "get_avatars",
+            start + IPC_WORK_WINDOW * 2,
+            |snapshot| {
+                assert_eq!(snapshot.commands.get("reentrant"), Some(&1));
+            },
+        );
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].commands.get("get_avatars"), Some(&2));
+        assert!(!snapshots[0].commands.contains_key("unknown"));
+        assert_eq!(snapshots[0].dropped, 0);
+    }
+
+    #[test]
+    fn ipc_work_observer_reports_capacity_and_contention_without_waiting() {
+        let start = std::time::Instant::now();
+        let observer = IpcWorkObserver::new(start);
+        for index in 0..IPC_WORK_NAMES {
+            observer.record(true, &format!("command_{index}"), start, |_| {
+                panic!("early")
+            });
+        }
+        observer.record(true, "overflow", start, |_| panic!("early"));
+        let held = observer.state.lock().unwrap();
+        observer.record(true, "get_avatars", start, |_| panic!("held"));
+        drop(held);
+        observer.record(true, "command_0", start + IPC_WORK_WINDOW, |snapshot| {
+            assert_eq!(snapshot.commands.len(), IPC_WORK_NAMES);
+            assert_eq!(snapshot.commands.get("command_0"), Some(&2));
+            assert_eq!(snapshot.dropped, 2);
+        });
+    }
 
     #[test]
     fn release_logging_keeps_only_warnings_and_errors() {

@@ -1,3 +1,4 @@
+import { groupOperationObservation } from "./outgoingIntent/groupOperations";
 import { receptionKinds } from "@/lib/api/reception";
 import {
   startRecoveryRefresh,
@@ -1360,8 +1361,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       if (
         typeof document === "undefined" ||
         document.visibilityState !== "hidden"
-      )
+      ) {
         wakeReception();
+        if (lease.current() && get().ready)
+          void refreshGroupOperationIntents(rawSet, get);
+      }
     };
     const flushReceipts = () => flushReceptionPersistence();
     if (typeof window !== "undefined") {
@@ -1404,24 +1408,28 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           supportsPushState(lease.owner) ? RECOVERY_REFRESH_MS : 2000,
       },
     );
+    const controlObservation = groupOperationObservation(rawSet, get);
     let controlTimer: ReturnType<typeof setTimeout> | undefined;
     const scheduleControl = () => {
       if (controlTimer !== undefined) clearTimeout(controlTimer);
       controlTimer = undefined;
       if (cancelled || !lease.current()) return;
       const state = get();
-      if (state.ready && !Object.keys(state.groupOperations ?? {}).length)
-        return;
       if (!state.ready && state.bootBusy) return;
       controlTimer = setTimeout(
         () => {
           controlTimer = undefined;
           if (cancelled || !lease.current()) return;
-          if (get().ready) void refreshGroupOperationIntents(rawSet, get);
+          if (get().ready)
+            void refreshGroupOperationIntents(rawSet, get, false);
           else get().retryBoot(get().bootFailed);
           scheduleControl();
         },
-        !state.ready && state.bootFailed ? BOOT_RECOVERY_INTERVAL_MS : 2000,
+        !state.ready && state.bootFailed
+          ? BOOT_RECOVERY_INTERVAL_MS
+          : state.ready && !controlObservation.pending()
+            ? RECOVERY_REFRESH_MS
+            : 2000,
       );
     };
     const stopControlObservation = useChat.subscribe((state, previous) => {
@@ -1433,6 +1441,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       )
         scheduleControl();
     });
+    const stopControlDemand = controlObservation.subscribe(scheduleControl);
     scheduleControl();
 
     const applyInvalidation = (rawKind: unknown) => {
@@ -1557,6 +1566,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         document.removeEventListener?.("visibilitychange", flushReceipts);
       stopRosterRecovery();
       stopControlObservation();
+      stopControlDemand();
       if (controlTimer !== undefined) clearTimeout(controlTimer);
       stopExpiryObservation();
       expiry.stop();

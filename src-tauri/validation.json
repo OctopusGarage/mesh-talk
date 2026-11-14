@@ -1006,7 +1006,8 @@
       "paths": [
         "src-tauri/src/diagnostics.rs",
         "src-tauri/src/perf.rs",
-        "src-tauri/src/logger/"
+        "src-tauri/src/logger/",
+        "src-tauri/src/lib.rs"
       ],
       "rust": [
         {
@@ -1014,6 +1015,16 @@
           "filters": ["diagnostics::", "updates::", "perf::", "logger::"]
         }
       ],
+      "capability": {
+        "summary": "Expose bounded opt-in diagnostic metadata while preserving normal logging and IPC authority.",
+        "guide": "docs/performance-requirements.md#evidence-and-maintenance",
+        "invariants": [
+          {
+            "name": "IPC work summaries are disabled by default, record only bounded registered command names after handled dispatch, exclude lock rejection and unhandled inputs, and emit outside nonblocking observation guards without a background timer. Counts do not establish completion, success or CPU attribution; arguments, results and private state never enter the observer.",
+            "reference": "docs/performance-requirements.md#evidence-and-maintenance"
+          }
+        ]
+      },
       "escalation": [
         "Logging/privacy and diagnostics IO changes require affected integration/native evidence."
       ]

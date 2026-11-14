@@ -583,6 +583,15 @@ The existing ticker and action/message owners must supply observation scheduling
 terminal presentation and exact public-event reconciliation. Session checks also
 cover synchronous retirement caused by reactive state and diagnostic callbacks.
 
+One existing control timer observes actionable nonterminal work and unfinished
+pending pages promptly, using the native owner's 64-row page limit. Terminal
+receipts alone do not keep that timer fast;
+quiet discovery uses five-minute recovery. Failed reads, capacity-deferred rows
+and invalidations arriving during an active scan retain demand until observed.
+Coordinator completion rearms that same timer when pagination or demand changes
+without a ticket-state publication. Activation and native events remain prompt;
+boot retry keeps its independent eligibility and session authority.
+
 `ui/store/channelActions.ts` owns channel creation, member edits, ownership
 transfer, invitation acceptance, leaving, dissolution and renaming. Its narrow
 state/context defines channel projections and explicit capture, command,

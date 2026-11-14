@@ -571,7 +571,10 @@ pub fn run_tauri_configured(
                         .reject(commands::CommandError::Authorization("app locked".into()));
                     true
                 } else {
-                    handler(invoke)
+                    let work_name = crate::logger::capture_ipc_work_name(invoke.message.command());
+                    let handled = handler(invoke);
+                    crate::logger::record_ipc_work(work_name, handled);
+                    handled
                 }
             }
         })

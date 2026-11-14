@@ -130,6 +130,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Keep one next-wake decision in the existing owner, derived from eligible work,
    actual capacity, expiry and fixed repair. A due retry behind held capacity must
    wait for completion rather than spin on its past deadline.
+   Retained terminal records do not justify fast observation. Use actionable
+   demand and unfinished cursors, retain failed or capacity-deferred work and
+   changes arriving during reads, then fall back to sparse discovery when quiet.
    Native delivery, discovery leases, calls and real expiry retain their own
    timing contracts; never slow them merely to meet an idle chart.
    Reuse independent fresh discovery before optional authentication probes, with
@@ -267,7 +270,11 @@ Compare the same device/build/runtime/profile; include whole-family resource
 measurements and a correctness witness. SQL affected-row counts do not measure
 write amplification: attribute pager flushes separately when they cannot explain
 OS-observed WAL activity. Keep such diagnostics opt-in, bounded and free of SQL
-text, parameters and message content. Heap snapshots/retaining paths distinguish
+text, parameters and message content. IPC diagnostics count registered dispatch
+attempts by bounded command name, without arguments or results; they do not prove
+command completion or CPU attribution. Keep their collector and output disabled
+by default, and emit after releasing observation guards without adding a timer.
+Heap snapshots/retaining paths distinguish
 leaks from stable bloat and allocation churn. Forced working-set trims, periodic
 GC, cache deletion or moving pressure to disk do not prove a fix.
 

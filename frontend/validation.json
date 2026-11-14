@@ -209,7 +209,7 @@
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Existing outgoing state retains bounded body-free account operation tickets, preserves original IDs across uncertain retries, protects active/message-linked records from pruning, and suppresses stale responses and reactive session retirement; pending admission is distinct from committed public effects.",
+            "name": "Existing outgoing state retains bounded body-free account operation tickets, preserves original IDs across uncertain retries, protects active/message-linked records from pruning, and suppresses stale responses and reactive session retirement; pending admission is distinct from committed public effects. Terminal receipts alone do not sustain fast observation; incomplete pages, failed reads, capacity-deferred rows and retained invalidations preserve prompt recovery. Activation/events remain immediate and quiet discovery uses the existing five-minute recovery.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {

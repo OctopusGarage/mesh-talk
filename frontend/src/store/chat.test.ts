@@ -7198,3 +7198,90 @@ it.each(["documents", "sync_status"])(
     }
   },
 );
+
+it("keeps retained terminal group tickets off the fast observation timer", async () => {
+  vi.useFakeTimers();
+  controlCommands();
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    useChat.setState({
+      groupOperations: {
+        done: {
+          id: "done",
+          account_id: "myacct",
+          group: "team",
+          kind: "text",
+          stage: "observed",
+          observation: 1,
+          status: committedGroupMessage("done", "team", "event"),
+        },
+      },
+    });
+    await useChat.getState().refreshGroupOperations();
+    const calls = () =>
+      invoke.mock.calls.filter(
+        ([cmd]) => cmd === "owner_list_account_group_operations",
+      ).length;
+    const baseline = calls();
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(calls()).toBe(baseline);
+    captured.current!.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "state",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls()).toBeGreaterThan(baseline);
+    const afterEvent = calls();
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(calls()).toBe(afterEvent);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(calls()).toBeGreaterThan(afterEvent);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("keeps unknown group admission on fast observation and activation prompt", async () => {
+  vi.useFakeTimers();
+  const target = new EventTarget();
+  vi.stubGlobal("window", target);
+  controlCommands();
+  const stop = useChat.getState().start();
+  const calls = () =>
+    invoke.mock.calls.filter(
+      ([cmd]) => cmd === "owner_list_account_group_operations",
+    ).length;
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    useChat.setState({
+      groupOperations: {
+        waiting: {
+          id: "waiting",
+          account_id: "myacct",
+          group: "team",
+          kind: "text",
+          stage: "unconfirmed",
+          observation: 1,
+        },
+      },
+    });
+    const before = calls();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(calls()).toBeGreaterThan(before);
+    useChat.setState({ groupOperations: {} });
+    const quiet = calls();
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(calls()).toBe(quiet);
+    target.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls()).toBeGreaterThan(quiet);
+  } finally {
+    stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
