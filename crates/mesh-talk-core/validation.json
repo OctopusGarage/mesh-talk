@@ -1297,7 +1297,7 @@
         "guide": "docs/network-design-reference.md#person-presence-contract",
         "invariants": [
           {
-            "name": "Exact complete successful announcement proofs, including both signatures, may reuse intrinsic verification in a process-local 128-entry, 256-KiB metadata owner. Invalid results are not retained; changed fields reverify. Oversized inputs, contention, poison and eviction preserve original verification semantics without waiting or crypto under a guard. Current presence, account binding, revocation, visibility, discovery challenges and Noise authorization remain fresh; wire, SDK and storage formats are unchanged.",
+            "name": "Exact complete successful announcement proofs, including both signatures, may reuse intrinsic verification in a process-local 128-entry, 256-KiB metadata owner. Invalid results are not retained; changed fields reverify. Oversized inputs, contention, poison and eviction preserve original verification semantics without waiting or crypto under a guard. Current presence, account binding, revocation, visibility, discovery challenges and Noise authorization remain fresh; wire, SDK and storage formats are unchanged. Relayed name-only updates publish the existing roster observation while same-name route renewals remain quiet; descriptive-name invalidation grants no presence or account authority.",
             "reference": "docs/ai-coding-reliability.md#r08-durable-state-and-failure-semantics"
           }
         ]
@@ -1775,6 +1775,10 @@
         "crates/mesh-talk-core/src/node/account_profile_io_tests.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/runtime_routed_tests.rs",
+        "crates/mesh-talk-core/src/node/relay_policy.rs",
+        "crates/mesh-talk-core/src/node/bridge_client.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/postbox.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
         "crates/mesh-talk-core/src/node/profile_receive_work.rs",
         "crates/mesh-talk-core/src/storage/profile/profile_receive.rs",
@@ -1791,7 +1795,7 @@
             "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
             "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
             "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
-            "node::runtime::tests::profile_republish_",
+            "node::runtime::tests::profile_",
             "node::opaque_relay::",
             "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
             "node::trust_card::tests::",
@@ -1828,7 +1832,7 @@
             "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
             "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
             "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
-            "node::runtime::tests::profile_republish_",
+            "node::runtime::tests::profile_",
             "node::opaque_relay::",
             "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
             "node::trust_card::tests::",
@@ -1878,7 +1882,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Failed public profile publication and avatar clears retry without duplicate events, reconnects or blocking behind one unresponsive peer; unchanged reconnect/reopen reuses exact retained event IDs through bounded sender provenance committed atomically with the canonical event",
+            "name": "Failed public profile publication and avatar clears retry without duplicate events, reconnects or blocking behind one unresponsive peer; unchanged reconnect/reopen reuses exact retained event IDs through bounded sender provenance committed atomically with the canonical event. The single publisher subscribes before initial work, gates broad observations semantically, preserves actual two-future capacity and exact stale-owner fencing, and uses eligible retry/presence deadlines plus nonrenewing five-minute repair. Missing configuration and relayed-name changes publish existing observations; held capacity and unavailable source cannot spin on expired retries. Only freshly qualified unchanged history publication across all required recipients/scopes earns a five-minute quiet retry; empty, denied, unfinished and unknown results remain retryable. Direct completion takes precedence; quiet scheduling proves neither delivery nor current relay custody",
             "reference": "docs/peer-trust.md"
           },
           {

@@ -300,9 +300,11 @@ impl Node {
         Err(SessionError::UnexpectedMessage)
     }
 
-    /// Replicate `conv` to the elected post office, if one is known. Returns
-    /// `Ok(true)` if a post office accepted a round, `Ok(false)` if no post office
-    /// is known.
+    /// Replicate `conv` to eligible post offices. `Ok(true)` means a required
+    /// round returned nonempty selected inner/wrapper pairs; those pairs may be
+    /// retained or reused and do not imply newly uploaded bytes. `Ok(false)`
+    /// includes qualified unchanged history and missing or unfinished rounds.
+    /// Neither result proves durable custody.
     pub(in crate::node) async fn replicate_to_post_office(
         &self,
         conv: ConversationId,
@@ -319,6 +321,31 @@ impl Node {
             })
             .collect();
         self.replicate_to_post_office_targets(conv, targets).await
+    }
+
+    pub(in crate::node) async fn observe_profile_relay(
+        &self,
+        conv: ConversationId,
+    ) -> Result<
+        (
+            super::opaque_relay::PublicationObservation,
+            Vec<super::opaque_relay::PublicationProof>,
+        ),
+        SessionError,
+    > {
+        let me = self.identity.public();
+        let targets = self
+            .historical_dm_peers()
+            .into_iter()
+            .map(|proof| proof.public())
+            .filter(|recipient| {
+                conv == crate::node::conversation::dm_conversation_id(&me, recipient)
+            })
+            .collect();
+        let (_, observation, proofs) = self
+            .replicate_profile_observing(conv, targets, None, None, true)
+            .await?;
+        Ok((observation, proofs))
     }
 
     pub(in crate::node) async fn replicate_to_post_office_targets(
@@ -347,10 +374,37 @@ impl Node {
         confirm: Option<EventId>,
         failure: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<bool, SessionError> {
+        Ok(self
+            .replicate_profile_observing(conv, targets, confirm, failure, false)
+            .await?
+            .0)
+    }
+
+    pub(in crate::node) async fn replicate_profile_observing(
+        &self,
+        conv: ConversationId,
+        targets: Vec<crate::identity::device::PublicIdentity>,
+        confirm: Option<EventId>,
+        failure: Option<&std::sync::atomic::AtomicBool>,
+        observe: bool,
+    ) -> Result<
+        (
+            bool,
+            super::opaque_relay::PublicationObservation,
+            Vec<super::opaque_relay::PublicationProof>,
+        ),
+        SessionError,
+    > {
         if targets.is_empty() {
-            return Ok(false);
+            return Ok((
+                false,
+                super::opaque_relay::PublicationObservation::Deferred,
+                Vec::new(),
+            ));
         }
         let mut uploaded = false;
+        let mut quiet = true;
+        let mut proofs = Vec::new();
         for recipient in &targets {
             let candidates = {
                 let roster = self.roster.lock().expect("roster mutex not poisoned");
@@ -361,6 +415,7 @@ impl Node {
             let mut capacity_error = None;
             for po in candidates {
                 if !self.relay_send_allowed(&po.public) {
+                    quiet = false;
                     continue;
                 }
                 let mut channel = match self.privacy_sync_dial(po.addr, &po.public).await {
@@ -369,6 +424,7 @@ impl Node {
                         channel
                     }
                     Err(error) => {
+                        quiet = false;
                         attempted |=
                             !matches!(error, crate::transport::TransportError::AdmissionDenied);
                         if super::session_pool::local_capacity_busy(&error) {
@@ -378,14 +434,35 @@ impl Node {
                     }
                 };
                 if !self.relay_send_allowed(&po.public) {
+                    quiet = false;
                     continue;
                 }
-                let Ok(events) = self
-                    .opaque_history_publication_round_for(&mut channel, recipient, conv, confirm)
+                let result = if observe {
+                    self.observe_history_publication(&mut channel, recipient, conv)
+                        .await
+                } else {
+                    self.opaque_history_publication_round_for(
+                        &mut channel,
+                        recipient,
+                        conv,
+                        confirm,
+                    )
                     .await
-                else {
+                    .map(|events| {
+                        (
+                            events,
+                            super::opaque_relay::PublicationObservation::Deferred,
+                            Vec::new(),
+                        )
+                    })
+                };
+                let Ok((events, observation, round_proofs)) = result else {
+                    quiet = false;
                     continue;
                 };
+                proofs.extend(round_proofs);
+                quiet &=
+                    observation == super::opaque_relay::PublicationObservation::QualifiedUnchanged;
                 // Sync completion is not durable custody. Probe the exact
                 // recipient-encrypted wrapper before publishing a relay copy.
                 if let Some(id) = confirm {
@@ -453,10 +530,24 @@ impl Node {
                 if let Some(error) = capacity_error {
                     return Err(SessionError::Transport(error));
                 }
-                return Ok(false);
+                return Ok((
+                    false,
+                    super::opaque_relay::PublicationObservation::Deferred,
+                    Vec::new(),
+                ));
             }
         }
-        Ok(uploaded)
+        Ok((
+            uploaded,
+            if uploaded {
+                super::opaque_relay::PublicationObservation::SelectedResults
+            } else if quiet && self.publication_proofs_current(&proofs)? {
+                super::opaque_relay::PublicationObservation::QualifiedUnchanged
+            } else {
+                super::opaque_relay::PublicationObservation::Deferred
+            },
+            proofs,
+        ))
     }
 
     /// Accept inbound connections and maintain deferred profile compactions.

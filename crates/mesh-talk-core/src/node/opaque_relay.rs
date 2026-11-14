@@ -183,6 +183,27 @@ impl SyncStore for OpaqueRoundStore<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) enum PublicationObservation {
+    SelectedResults,
+    QualifiedUnchanged,
+    Deferred,
+}
+pub(in crate::node) struct PublicationProof {
+    recipient: PublicIdentity,
+    relay: PublicIdentity,
+    conversation: ConversationId,
+    controls: incremental::QuietControlProof,
+    local: super::privacy_sync::HistorySyncStamp,
+    privacy: u64,
+    bridge: u64,
+    federated: bool,
+}
+struct PublicationRound {
+    selected: Vec<(EventId, EventId)>,
+    quiet: bool,
+    proofs: Vec<PublicationProof>,
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MailboxIntent {
     Duplex,
@@ -380,6 +401,69 @@ impl Node {
         .await
     }
 
+    pub(in crate::node) fn publication_proofs_current(
+        &self,
+        proofs: &[PublicationProof],
+    ) -> Result<bool, super::session::SessionError> {
+        for proof in proofs {
+            if !self.relay_send_allowed(&proof.relay)
+                || self.privacy.generation.load(Ordering::SeqCst) != proof.privacy
+                || self.bridge_generation.load(Ordering::SeqCst) != proof.bridge
+                || (proof.federated && !self.bridge_directory_allowed())
+            {
+                return Ok(false);
+            }
+            if !self.quiet_control_proof_current(&proof.controls, &proof.recipient)? {
+                return Ok(false);
+            }
+            let current = self
+                .sync_store(&proof.recipient)
+                .lock()
+                .expect("projection")
+                .history_sync_stamp(&proof.conversation)?;
+            if current.as_ref() != Some(&proof.local) {
+                return Ok(false);
+            }
+        }
+        Ok(!proofs.is_empty())
+    }
+
+    pub(in crate::node) async fn observe_history_publication<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+    ) -> Result<
+        (
+            Vec<(EventId, EventId)>,
+            PublicationObservation,
+            Vec<PublicationProof>,
+        ),
+        super::session::SessionError,
+    >
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        let result = self
+            .opaque_relay_round_with_intent_observing(
+                channel,
+                recipient,
+                Some(conversation),
+                None,
+                MailboxIntent::HistoryPublication,
+                true,
+            )
+            .await?;
+        let observation = if !result.selected.is_empty() {
+            PublicationObservation::SelectedResults
+        } else if result.quiet {
+            PublicationObservation::QualifiedUnchanged
+        } else {
+            PublicationObservation::Deferred
+        };
+        Ok((result.selected, observation, result.proofs))
+    }
+
     async fn opaque_relay_round_with_intent<IO>(
         &self,
         channel: &mut crate::transport::SecureChannel<IO>,
@@ -391,37 +475,70 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        Ok(self
+            .opaque_relay_round_with_intent_observing(
+                channel,
+                recipient,
+                conversation,
+                confirm,
+                intent,
+                false,
+            )
+            .await?
+            .selected)
+    }
+
+    async fn opaque_relay_round_with_intent_observing<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        confirm: Option<EventId>,
+        intent: MailboxIntent,
+        observe: bool,
+    ) -> Result<PublicationRound, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         if !self.relay_send_allowed(channel.peer_identity())
             && !self.relay_receive_allowed(channel.peer_identity())
         {
-            return Ok(Vec::new());
+            return Ok(PublicationRound {
+                selected: Vec::new(),
+                quiet: false,
+                proofs: Vec::new(),
+            });
         }
         let legacy = RelayMailbox::new(&self.identity, recipient, channel.peer_identity())
             .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
         let mut uploaded = self
-            .opaque_mailbox_round_confirmed(
+            .opaque_mailbox_round_confirmed_observing(
                 channel,
                 recipient,
                 conversation,
                 legacy,
                 confirm,
                 intent,
+                observe,
             )
             .await?;
         if self.bridge_directory_allowed() {
             let federated = RelayMailbox::federated(&self.identity, recipient)
                 .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
-            uploaded.extend(
-                self.opaque_mailbox_round_confirmed(
+            let next = self
+                .opaque_mailbox_round_confirmed_observing(
                     channel,
                     recipient,
                     conversation,
                     federated,
                     confirm,
                     intent,
+                    observe,
                 )
-                .await?,
-            );
+                .await?;
+            uploaded.quiet &= next.quiet;
+            uploaded.selected.extend(next.selected);
+            uploaded.proofs.extend(next.proofs);
         }
         Ok(uploaded)
     }
@@ -448,6 +565,7 @@ impl Node {
         .await
     }
 
+    #[cfg(test)]
     async fn opaque_mailbox_round_confirmed<IO>(
         &self,
         channel: &mut crate::transport::SecureChannel<IO>,
@@ -460,6 +578,35 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        Ok(self
+            .opaque_mailbox_round_confirmed_observing(
+                channel,
+                recipient,
+                conversation,
+                mailbox,
+                confirm,
+                intent,
+                false,
+            )
+            .await?
+            .selected)
+    }
+
+    async fn opaque_mailbox_round_confirmed_observing<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        mailbox: RelayMailbox,
+        confirm: Option<EventId>,
+        intent: MailboxIntent,
+        observe: bool,
+    ) -> Result<PublicationRound, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        let privacy = self.privacy.generation.load(Ordering::SeqCst);
+        let bridge = self.bridge_generation.load(Ordering::SeqCst);
         let mut progress = match intent {
             MailboxIntent::Duplex => OpaqueMailboxProgress::new(
                 channel.peer_identity(),
@@ -545,7 +692,34 @@ impl Node {
                 progress.uploaded.push((inner, outer));
             }
         }
-        Ok(progress.uploaded)
+        let local = if observe
+            && confirm.is_none()
+            && channel.io_admitted()
+            && channel.peer_identity() == &progress.relay
+        {
+            self.qualified_unchanged_publication(&progress)?
+        } else {
+            None
+        };
+        let proofs = local
+            .into_iter()
+            .map(|(local, controls)| PublicationProof {
+                recipient: progress.recipient.clone(),
+                relay: progress.relay.clone(),
+                conversation: progress.conversation.expect("qualified history"),
+                local,
+                controls,
+                privacy,
+                bridge,
+                federated: RelayMailbox::is_federated_id(&progress.mailbox.id()),
+            })
+            .collect::<Vec<_>>();
+        let quiet = !proofs.is_empty() && self.publication_proofs_current(&proofs)?;
+        Ok(PublicationRound {
+            selected: progress.uploaded,
+            quiet,
+            proofs,
+        })
     }
 
     pub(in crate::node) async fn advance_opaque_mailbox<IO>(

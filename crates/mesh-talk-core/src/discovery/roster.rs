@@ -635,6 +635,7 @@ impl Roster {
         let now = Instant::now();
         let existing = self.peers.get(&announce.user_id);
         let existed = existing.is_some();
+        let name_changed = existing.is_some_and(|peer| peer.name != announce.name);
         let mut routes = existing.map(|peer| peer.routes.clone()).unwrap_or_default();
         let route_changed = !routes
             .iter()
@@ -690,7 +691,7 @@ impl Roster {
                 last_seen: now,
             },
         );
-        if route_changed {
+        if route_changed || name_changed {
             self.notify_changes();
         }
         if existed {
@@ -1257,6 +1258,28 @@ mod routed_tests {
                 .is_none(),
             "another participant cannot borrow consent"
         );
+    }
+
+    #[test]
+    fn relayed_name_change_publishes_observation_without_route_change() {
+        let device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let mut roster = Roster::default();
+        let relay = "127.0.0.1:47479".parse().unwrap();
+        let proof = Announce::new_with_account(&device, &account, "before", 1);
+        roster.update_relayed(&proof, relay, "self");
+        let mut observer = roster.subscribe_changes();
+        roster.update_relayed(&proof, relay, "self");
+        assert!(!observer.has_changed().unwrap());
+        let renamed = Announce::new_with_account(&device, &account, "after", 1);
+        roster.update_relayed(&renamed, relay, "self");
+        assert!(
+            observer.has_changed().unwrap(),
+            "name-only update must reach name-directory subscriber"
+        );
+        observer.borrow_and_update();
+        roster.update_relayed(&renamed, relay, "self");
+        assert!(!observer.has_changed().unwrap());
     }
 
     #[test]

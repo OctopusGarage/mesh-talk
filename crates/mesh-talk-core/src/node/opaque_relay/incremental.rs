@@ -370,6 +370,7 @@ pub(super) enum Mode {
     Legacy,
     Active(Box<State>),
 }
+pub(super) struct QuietControlProof(controls::ControlScope);
 pub(super) struct State {
     key: Vec<u8>,
     lease: Lease,
@@ -381,6 +382,8 @@ pub(super) struct State {
     retry: Option<VecDeque<EventId>>,
     history_checked: bool,
     history_done: bool,
+    history_skipped: bool,
+    controls_initially_empty: bool,
     history_ids: VecDeque<EventId>,
     history_after: i64,
     history_complete: bool,
@@ -618,6 +621,53 @@ impl Node {
             .lock()
             .expect("opaque cache")
             .remember(p.mailbox.id(), &[(outer, inner)]);
+    }
+    pub(super) fn qualified_unchanged_publication(
+        &self,
+        p: &OpaqueMailboxProgress,
+    ) -> Result<Option<(HistorySyncStamp, QuietControlProof)>, session::SessionError> {
+        let Mode::Active(state) = &p.incremental else {
+            return Ok(None);
+        };
+        if p.intent != MailboxIntent::HistoryPublication
+            || !state.history_skipped
+            || state.wrote
+            || !state.controls_initially_empty
+            || !state.history_done
+            || !state.history_ids.is_empty()
+            || !state.remote_done
+            || !state.retry.as_ref().is_some_and(VecDeque::is_empty)
+            || !state.controls.as_ref().is_some_and(VecDeque::is_empty)
+            || !p.uploaded.is_empty()
+            || !self.upload_permitted(p, &|| true)
+        {
+            return Ok(None);
+        }
+        let Some(before) = state.control_scope.as_ref() else {
+            return Ok(None);
+        };
+        let Some(after) = self.consent_control_scope(p)? else {
+            return Ok(None);
+        };
+        if !before.permits_reuse(&after) {
+            return Ok(None);
+        }
+        let Some(completed) = state.receipt.completed.as_ref() else {
+            return Ok(None);
+        };
+        let Some(conv) = p.conversation else {
+            return Ok(None);
+        };
+        let local = completed.local.clone();
+        let current = self
+            .sync_store(&p.recipient)
+            .lock()
+            .expect("projection")
+            .history_sync_stamp(&conv)?;
+        Ok(
+            (current == Some(local.clone()) && self.upload_permitted(p, &|| true))
+                .then_some((local, QuietControlProof(after))),
+        )
     }
     fn upload_permitted<F: Fn() -> bool + Sync>(
         &self,
@@ -1518,6 +1568,8 @@ impl Node {
                 retry: None,
                 history_checked: false,
                 history_done: false,
+                history_skipped: false,
+                controls_initially_empty: false,
                 history_ids: VecDeque::new(),
                 history_after: -1,
                 history_complete: false,
@@ -1646,6 +1698,7 @@ impl Node {
         if state(p).controls.is_none() {
             state_mut(p).control_scope = self.consent_control_scope(p)?;
             let controls = self.opaque_controls(p, current)?;
+            state_mut(p).controls_initially_empty = controls.is_empty();
             state_mut(p).controls = Some(
                 controls
                     .values()
@@ -1772,6 +1825,7 @@ impl Node {
                                 || state(p).remote.as_ref() == Some(&completed.remote))
                     })
             }) {
+                state_mut(p).history_skipped = p.intent == MailboxIntent::HistoryPublication;
                 self.observe_mailbox_work(reason::VIEW_SKIP, None);
                 state_mut(p).history_checked = true;
                 state_mut(p).history_done = true;

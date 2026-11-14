@@ -27,7 +27,7 @@ impl ControlScope {
             && self.floor.1 == current.floor.1
     }
 
-    fn permits_reuse(&self, current: &Self) -> bool {
+    pub(super) fn permits_reuse(&self, current: &Self) -> bool {
         self.key == current.key
             && self.source == current.source
             && self.work_stamp.unchanged_since(&current.work_stamp)
@@ -168,16 +168,32 @@ impl Node {
         &self,
         p: &OpaqueMailboxProgress,
     ) -> Result<Option<ControlScope>, LogError> {
+        let Some((work_stamp, source)) = self.consent_control_source(&p.recipient)? else {
+            return Ok(None);
+        };
+        let (Some(remote), Some(floor)) = (state(p).remote.clone(), state(p).remote_floor) else {
+            return Ok(None);
+        };
+        Ok(Some(ControlScope {
+            key: state(p).key.clone(),
+            source,
+            work_stamp,
+            remote,
+            floor,
+        }))
+    }
+
+    fn consent_control_source(
+        &self,
+        recipient: &PublicIdentity,
+    ) -> Result<Option<(crate::storage::database::WorkStamp, [u8; 32])>, LogError> {
         let Some(database) = self.storage.participant_database() else {
             return Ok(None);
         };
         let Some(proof) = self
-            .historical_author(&p.recipient.ed25519_pub)
-            .filter(|proof| proof.public() == p.recipient)
+            .historical_author(&recipient.ed25519_pub)
+            .filter(|proof| proof.public() == *recipient)
         else {
-            return Ok(None);
-        };
-        let (Some(remote), Some(floor)) = (state(p).remote.clone(), state(p).remote_floor) else {
             return Ok(None);
         };
         // Runtime-only owner evidence excludes guarded disposable selection work.
@@ -204,13 +220,19 @@ impl Node {
         {
             return Ok(None);
         }
-        Ok(Some(ControlScope {
-            key: state(p).key.clone(),
-            source: Sha256::digest(bytes).into(),
-            work_stamp,
-            remote,
-            floor,
-        }))
+        Ok(Some((work_stamp, Sha256::digest(bytes).into())))
+    }
+
+    pub(in crate::node::opaque_relay) fn quiet_control_proof_current(
+        &self,
+        proof: &QuietControlProof,
+        recipient: &PublicIdentity,
+    ) -> Result<bool, LogError> {
+        Ok(self
+            .consent_control_source(recipient)?
+            .is_some_and(|(work_stamp, source)| {
+                proof.0.source == source && proof.0.work_stamp.unchanged_since(&work_stamp)
+            }))
     }
 
     pub(in crate::node::opaque_relay) fn unsettled_consent_offers(

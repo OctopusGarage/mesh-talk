@@ -2826,3 +2826,73 @@ async fn history_publication_relay_eviction_reuses_the_exact_ready_selection() {
         "a fresh relay must reuse the retired exact-principal SQL identities instead of rebuilding them"
     );
 }
+
+#[tokio::test]
+async fn history_publication_legacy_round_never_qualifies_quiet() {
+    let root = tempfile::tempdir().unwrap();
+    let relay_root = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let proof = crate::discovery::Announce::new_with_account(
+        &recipient,
+        &Account::generate(),
+        "Recipient",
+        9,
+    );
+    let (node, _, _) = super::super::test_support::node_with_files(
+        root.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.set_profile_display_name("Publisher").unwrap();
+    let peer = node
+        .profile_fanout_targets()
+        .into_iter()
+        .find(|p| p.public == recipient.public())
+        .unwrap();
+    let conversation = node
+        .prepare_current_profile_delivery(&peer)
+        .unwrap()
+        .unwrap();
+    let relay = DeviceIdentity::generate();
+    let office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_root.path()).unwrap(),
+        &relay_root.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let keys = relay.secret_bytes();
+        let server_store = office.clone();
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let owner = tokio::spawn(async move {
+            let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+            let mut channel = crate::transport::SecureChannel::accept(server, &identity)
+                .await
+                .unwrap();
+            let store = Mutex::new(server_store);
+            let budget = crate::node::session::RemoteHaveBudget::default();
+            while matches!(
+                crate::node::session::serve_one_budgeted(&mut channel, &store, &budget).await,
+                Ok(crate::node::session::Served::Handled(_))
+            ) {}
+        });
+        let mut channel =
+            crate::transport::SecureChannel::connect(client, &node.identity, Some(&relay.public()))
+                .await
+                .unwrap();
+        let (_, observation, proofs) = node
+            .observe_history_publication(&mut channel, &recipient.public(), conversation)
+            .await
+            .unwrap();
+        drop(channel);
+        owner.await.unwrap();
+        assert_ne!(
+            observation,
+            PublicationObservation::QualifiedUnchanged,
+            "legacy completion carries no qualified local source proof"
+        );
+        assert!(proofs.is_empty());
+    }
+}

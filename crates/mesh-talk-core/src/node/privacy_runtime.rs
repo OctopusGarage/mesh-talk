@@ -18,7 +18,7 @@ use tokio::net::TcpStream;
 
 /// Captured before operation guards, so even a later error/cancellation retires
 /// those guards before publishing an actual policy-generation dependency change.
-struct ProfilePolicyWake<'a> {
+pub(super) struct ProfilePolicyWake<'a> {
     generation: &'a AtomicU64,
     before: u64,
     wake: crate::storage::database::MaintenanceWake,
@@ -111,7 +111,7 @@ fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "privacy operation denied")
 }
 impl Node {
-    fn profile_policy_wake(&self) -> ProfilePolicyWake<'_> {
+    pub(super) fn profile_policy_wake(&self) -> ProfilePolicyWake<'_> {
         ProfilePolicyWake {
             generation: &self.privacy.generation,
             before: self.privacy.generation.load(Ordering::Acquire),

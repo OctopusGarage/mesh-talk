@@ -127,6 +127,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    probes; cached endpoint hints grant neither presence nor admission. Events
    refresh the inventory promptly; providers without topology events need an
    explicit sparse-repair discovery limit.
+   Keep one next-wake decision in the existing owner, derived from eligible work,
+   actual capacity, expiry and fixed repair. A due retry behind held capacity must
+   wait for completion rather than spin on its past deadline.
    Native delivery, discovery leases, calls and real expiry retain their own
    timing contracts; never slow them merely to meet an idle chart.
    Reuse independent fresh discovery before optional authentication probes, with
@@ -175,6 +178,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    rehydrating group history or rereading account rosters. Qualify reuse only after
    successful current publication within the runtime owner; failures remain retryable.
    Validate a complete reply before caching its token.
+   Distinguish failed work from a qualified unchanged round. Empty output alone
+   proves neither. Recheck exact source and permission evidence after awaited
+   stages; incomplete, denied or unknown work retains recovery. A quiet scheduling
+   result is not delivery, durable custody or permanent completion.
    Unequal inventories are not necessarily unfinished work. A receiver-only
    comparison may reuse a completed zero-transfer result only with proof that
    every remote advertised ID is already local, exact current local authority,

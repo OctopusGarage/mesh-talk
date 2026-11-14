@@ -24,6 +24,7 @@ impl Node {
         }
         if changed {
             self.post_office_receive_notify.notify_one();
+            self.storage.database().maintenance_waker().notify();
         }
         self.bridge_notify.notify_one();
         self.delivery_notify.notify_one();
@@ -44,6 +45,7 @@ impl Node {
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             self.sessions.clear();
             self.post_office_receive_notify.notify_one();
+            self.storage.database().maintenance_waker().notify();
         }
         if !receive {
             self.opaque_upload_cache

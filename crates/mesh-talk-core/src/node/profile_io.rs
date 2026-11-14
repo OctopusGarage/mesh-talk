@@ -49,6 +49,41 @@ pub(super) struct LocalProfilePublication<'a> {
     pub payload: Option<(&'a PublicIdentity, &'a [u8])>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) enum ProfilePublicationOutcome {
+    Complete,
+    QualifiedQuiet,
+    Retry,
+}
+impl From<bool> for ProfilePublicationOutcome {
+    fn from(value: bool) -> Self {
+        if value { Self::Complete } else { Self::Retry }
+    }
+}
+
+fn profile_relay_outcome(
+    node: &Node,
+    (observation, proofs): (
+        super::opaque_relay::PublicationObservation,
+        Vec<super::opaque_relay::PublicationProof>,
+    ),
+) -> ProfilePublicationOutcome {
+    match observation {
+        super::opaque_relay::PublicationObservation::SelectedResults => {
+            ProfilePublicationOutcome::Complete
+        }
+        super::opaque_relay::PublicationObservation::QualifiedUnchanged
+            if node.publication_proofs_current(&proofs).unwrap_or(false) =>
+        {
+            ProfilePublicationOutcome::QualifiedQuiet
+        }
+        super::opaque_relay::PublicationObservation::QualifiedUnchanged => {
+            ProfilePublicationOutcome::Retry
+        }
+        super::opaque_relay::PublicationObservation::Deferred => ProfilePublicationOutcome::Retry,
+    }
+}
+
 impl Node {
     pub(super) fn profile_publication_key(
         &self,
@@ -189,11 +224,21 @@ impl Node {
 
     /// Report whether direct reconciliation or relay publication completed, so
     /// a transient failure remains eligible for a later runtime poll.
+    #[cfg(test)]
     pub(in crate::node) async fn deliver_profile_to(
         &self,
         peer: &PeerRecord,
         conv: ConversationId,
     ) -> bool {
+        Box::pin(self.deliver_profile_observing(peer, conv)).await
+            == ProfilePublicationOutcome::Complete
+    }
+
+    pub(in crate::node) async fn deliver_profile_observing(
+        &self,
+        peer: &PeerRecord,
+        conv: ConversationId,
+    ) -> ProfilePublicationOutcome {
         let direct = async {
             let delivered = self
                 .adaptive_control_timeout(&peer.public, self.deliver_direct(peer, conv))
@@ -209,19 +254,28 @@ impl Node {
         let relay = async {
             tokio::time::timeout(
                 super::route_timing::MAX_CONTROL_DEADLINE,
-                self.replicate_to_post_office(conv),
+                self.observe_profile_relay(conv),
             )
             .await
             .ok()
             .and_then(Result::ok)
-            .unwrap_or(false)
+            .unwrap_or((
+                super::opaque_relay::PublicationObservation::Deferred,
+                Vec::new(),
+            ))
         };
         tokio::pin!(direct, relay);
         // Either successful path completes this publication. Dropping the other
         // future closes its channel; retries reconstruct any round-local state.
         tokio::select! {
-            delivered = &mut direct => delivered || relay.await,
-            published = &mut relay => published || direct.await,
+            delivered = &mut direct => {
+                if delivered { ProfilePublicationOutcome::Complete } else { profile_relay_outcome(self, relay.await) }
+            },
+            published = &mut relay => {
+                if published.0 == super::opaque_relay::PublicationObservation::SelectedResults || direct.await {
+                    ProfilePublicationOutcome::Complete
+                } else { profile_relay_outcome(self, published) }
+            },
         }
     }
 

@@ -375,6 +375,23 @@ and [group invitation tests](../crates/mesh-talk-core/src/node/account_group/tes
 
 ## R05: Bounded work must also make progress
 
+An expired retry deadline is not runnable work while all actual slots are occupied
+or its required source is unavailable. Wait for capacity release, a relevant
+change or a future deadline; repeatedly selecting a past timer can otherwise spin
+without admitting work. Anchor failure cooldown to actual read/attempt completion,
+including after a held operation. The [profile publisher owner](../crates/mesh-talk-core/src/node/runtime.rs)
+and [runtime controls](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs)
+retain real held connections, pending retries, storage recovery and a fixed repair
+that continuous irrelevant observations cannot postpone.
+
+Do not encode failed, unchanged and completed work as one empty-result boolean
+when their retry policies differ. A qualified unchanged result needs fresh exact
+source and authority evidence after all awaited stages; a denied or incomplete
+round cannot earn it. Preserve existing callers' result meaning through an
+additive internal observation, and keep delivery/custody proof independent. The
+same profile publisher controls exercise warm relay publication with unavailable
+direct delivery; mailbox controls retain source-change and relay-reset recovery.
+
 For change-driven receive, subscribe before observing the predicate and retain
 that observation until all captured work is handled. A notification invalidates
 quietness; it must not cancel valid unrelated work or acknowledge delivery. Keep

@@ -21,8 +21,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// How often the node checks for new peers and retries pending public profiles.
-const PROFILE_REPUBLISH_INTERVAL_SECS: u64 = 3;
+/// Nonrenewing repair for legacy mutation paths without an observation.
+const PROFILE_PUBLICATION_REPAIR_SECS: u64 = 300;
 /// Keep background profile traffic within the shared connection budget.
 const MAX_PROFILE_PUBLICATIONS: usize = 2;
 
@@ -150,6 +150,48 @@ fn profile_publication_scope(
     }
 }
 
+/// In-memory input equality keeps broad roster/UI observations away from SQL.
+/// Always retain fresh leases, even when they do not change work identity.
+#[derive(Default)]
+struct ProfilePublisherInput {
+    peers:
+        std::collections::HashMap<String, (ProfilePublicationTarget, Option<std::time::Instant>)>,
+    scope: Option<ProfilePublicationScope>,
+}
+impl ProfilePublisherInput {
+    fn observe(
+        &mut self,
+        peers: &[PeerRecord],
+        scope: ProfilePublicationScope,
+        now: std::time::Instant,
+    ) -> bool {
+        let current: std::collections::HashMap<_, _> = peers
+            .iter()
+            .filter(|p| !p.post_office)
+            .map(|p| {
+                (
+                    p.public.user_id(),
+                    (
+                        ProfilePublicationTarget::observe(p),
+                        p.presence_deadline(now),
+                    ),
+                )
+            })
+            .collect();
+        let changed = self.scope != Some(scope)
+            || current.len() != self.peers.len()
+            || current.iter().any(|(id, (target, deadline))| {
+                self.peers.get(id).is_none_or(|(old, prior)| {
+                    old != target
+                        || (prior.is_none_or(|at| at <= now) && deadline.is_some_and(|at| at > now))
+                })
+            });
+        self.peers = current;
+        self.scope = Some(scope);
+        changed
+    }
+}
+
 /// Keep publication state only for currently present peers. Missing or
 /// changed inputs are prompt; unchanged failures wait from actual completion.
 fn profile_republish_targets(
@@ -217,7 +259,7 @@ fn finish_profile_publication(
     published: &mut std::collections::HashMap<String, ProfilePublication>,
     uid: &str,
     owner: &Arc<()>,
-    complete: bool,
+    complete: impl Into<super::profile_io::ProfilePublicationOutcome>,
     now: std::time::Instant,
 ) {
     let Some(publication) = published
@@ -226,8 +268,11 @@ fn finish_profile_publication(
     else {
         return;
     };
-    publication.complete = complete;
-    if complete {
+    let outcome = complete.into();
+    publication.complete = outcome == super::profile_io::ProfilePublicationOutcome::Complete;
+    if outcome == super::profile_io::ProfilePublicationOutcome::QualifiedQuiet {
+        publication.retry_at = Some(now + Duration::from_secs(PROFILE_PUBLICATION_REPAIR_SECS));
+    } else if publication.complete {
         publication.failures = 0;
         publication.retry_at = None;
     } else {
@@ -249,6 +294,212 @@ fn prepare_profile_publication(
     let conversation = prepare()?;
     publication.conversation = conversation;
     Ok(conversation)
+}
+
+fn pending_profile_retry_deadline(
+    published: &std::collections::HashMap<String, ProfilePublication>,
+    in_flight: &std::collections::HashSet<String>,
+    revision: Option<u64>,
+    dirty: bool,
+    active: usize,
+) -> Option<std::time::Instant> {
+    // A due retry is runnable only when admission can actually make progress.
+    // Completion/source observations retain wakeups while capacity or data is unavailable.
+    if dirty || revision.is_none() || active >= MAX_PROFILE_PUBLICATIONS {
+        return None;
+    }
+    published
+        .iter()
+        .filter(|(id, p)| !p.complete && !in_flight.contains(*id))
+        .filter_map(|(_, p)| p.retry_at)
+        .min()
+}
+
+async fn run_profile_publisher(
+    node: Arc<Node>,
+    roster: Arc<Mutex<Roster>>,
+    names: Arc<Mutex<NameDirectory>>,
+    repair_interval: Duration,
+) {
+    // Futures stay owned by this task, so retirement drops their
+    // channels together with the rest of the runtime's work.
+    let mut published: std::collections::HashMap<String, ProfilePublication> =
+        std::collections::HashMap::new();
+    let mut in_flight = std::collections::HashSet::new();
+    let mut relay_observation = ProfileRelayObservation::default();
+    let mut attempts: FuturesUnordered<
+        BoxFuture<
+            'static,
+            (
+                String,
+                Arc<()>,
+                super::profile_io::ProfilePublicationOutcome,
+            ),
+        >,
+    > = FuturesUnordered::new();
+    // Subscribe before the initial reconciliation; watch generations retain races.
+    let mut roster_changes = node.subscribe_roster_changes();
+    let mut network = node.network_changes.subscribe();
+    let mut ui = node.subscribe_ui_changes();
+    let mut source = node.storage.database().subscribe_source_changes();
+    let mut maintenance = node.storage.database().subscribe_maintenance_changes();
+    let mut input = ProfilePublisherInput::default();
+    let mut revision = None;
+    let mut dirty = true;
+    let mut read_retry = None;
+    let mut read_failures = 0u8;
+    let mut repair = std::time::Instant::now() + repair_interval;
+    let mut initial = true;
+    loop {
+        let mut reconcile = initial;
+        if !initial {
+            let now = std::time::Instant::now();
+            let mut deadline = repair;
+            if let Some(at) = read_retry {
+                deadline = deadline.min(at);
+            }
+            if let Some(at) = pending_profile_retry_deadline(
+                &published,
+                &in_flight,
+                revision,
+                dirty,
+                attempts.len(),
+            ) {
+                deadline = deadline.min(at);
+            }
+            for (_, presence) in input.peers.values() {
+                if let Some(at) = presence.filter(|at| *at > now) {
+                    deadline = deadline.min(at);
+                }
+            }
+            tokio::select! {
+                Some((uid, owner, complete)) = attempts.next(), if !attempts.is_empty() => {
+                    reconcile = true;
+                    in_flight.remove(&uid);
+                    finish_profile_publication(&mut published, &uid, &owner, complete, std::time::Instant::now());
+                }
+                changed = roster_changes.changed() => { if changed.is_err() { return; } }
+                changed = network.changed() => { if changed.is_err() { return; } }
+                changed = ui.changed() => { if changed.is_err() { return; } }
+                changed = maintenance.changed() => { if changed.is_err() { return; } }
+                changed = source.changed() => { if changed.is_err() { return; } dirty = true; }
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => { reconcile = true; }
+            }
+        }
+        initial = false;
+        let now = std::time::Instant::now();
+        if now >= repair {
+            dirty = true;
+            repair = now + repair_interval;
+        }
+        let mut peers: Vec<PeerRecord> = {
+            let r = roster.lock().expect("roster mutex not poisoned");
+            r.peers()
+        };
+        // Remember names independently of slow network exchanges.
+        {
+            let mut dir = names.lock().expect("names mutex not poisoned");
+            peers.sort_by_key(|peer| peer.last_seen);
+            for p in &peers {
+                let _ = dir.record_peer_name(
+                    &p.public.user_id(),
+                    if p.post_office {
+                        None
+                    } else {
+                        p.account_id.as_deref()
+                    },
+                    &p.name,
+                );
+            }
+        }
+        let scope = profile_publication_scope(&node, &mut relay_observation, now);
+        dirty |= input.observe(&peers, scope, now);
+        // Refresh leases without granting new retries or replacing owners.
+        for peer in &peers {
+            if let Some(p) = published.get_mut(&peer.public.user_id())
+                && p.presence_until.is_some_and(|at| at > now)
+            {
+                p.presence_until = peer.presence_deadline(now);
+            }
+        }
+        if !dirty && !reconcile {
+            continue;
+        }
+        if dirty && read_retry.is_none_or(|at| at <= now) {
+            let _ = *source.borrow_and_update();
+            #[cfg(test)]
+            node.trace_account_client(&node.identity.public(), || "profile_publisher_read".into());
+            match node.public_profile_revision() {
+                Ok(current) => {
+                    #[cfg(test)]
+                    node.trace_account_client(&node.identity.public(), || {
+                        format!("profile_publisher_revision:{current:?}")
+                    });
+                    revision = current;
+                    dirty = false;
+                    read_retry = None;
+                    read_failures = 0;
+                }
+                Err(error) => {
+                    eprintln!("[profile] revision read failed: {error}");
+                    read_retry = Some(
+                        std::time::Instant::now()
+                            + Duration::from_secs((5u64 << read_failures.min(6)).min(300)),
+                    );
+                    read_failures = read_failures.saturating_add(1);
+                }
+            }
+        }
+        if dirty {
+            continue;
+        }
+        let Some(revision) = revision else {
+            continue;
+        };
+        for peer in profile_republish_targets(
+            &mut published,
+            &peers,
+            revision,
+            scope,
+            std::time::Instant::now(),
+        ) {
+            if attempts.len() >= MAX_PROFILE_PUBLICATIONS {
+                break;
+            }
+            let uid = peer.public.user_id();
+            if in_flight.contains(&uid) {
+                continue;
+            }
+            let publication = published.get_mut(&uid).expect("observed publication");
+            let owner = publication.owner.clone();
+            let prepared =
+                prepare_profile_publication(publication, std::time::Instant::now(), || {
+                    node.prepare_current_profile_delivery(&peer)
+                });
+            let conversation = match prepared {
+                Ok(Some(conversation)) => conversation,
+                result => {
+                    if let Err(error) = result {
+                        eprintln!("[profile] publication read failed: {error}");
+                    }
+                    finish_profile_publication(
+                        &mut published,
+                        &uid,
+                        &owner,
+                        false,
+                        std::time::Instant::now(),
+                    );
+                    continue;
+                }
+            };
+            in_flight.insert(uid.clone());
+            let node = Arc::clone(&node);
+            attempts.push(Box::pin(async move {
+                let complete = Box::pin(node.deliver_profile_observing(&peer, conversation)).await;
+                (uid, owner, complete)
+            }));
+        }
+    }
 }
 
 fn channel_invitee_identity(peer: PeerRecord) -> Option<PublicIdentity> {
@@ -902,70 +1153,12 @@ impl NodeRuntime {
                 let node = Arc::clone(&node);
                 let roster = Arc::clone(&roster);
                 let names = Arc::clone(&names);
-                tasks.push(tokio::spawn(async move {
-                    // Futures stay owned by this task, so retirement drops their
-                    // channels together with the rest of the runtime's work.
-                    let mut published: std::collections::HashMap<String, ProfilePublication> =
-                        std::collections::HashMap::new();
-                    let mut in_flight = std::collections::HashSet::new();
-                    let mut relay_observation = ProfileRelayObservation::default();
-                    let mut attempts: FuturesUnordered<BoxFuture<'static, (String, Arc<()>, bool)>> =
-                        FuturesUnordered::new();
-                    let mut poll = tokio::time::interval(Duration::from_secs(PROFILE_REPUBLISH_INTERVAL_SECS));
-                    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    loop {
-                        tokio::select! {
-                            Some((uid, owner, complete)) = attempts.next(), if !attempts.is_empty() => {
-                                in_flight.remove(&uid);
-                                finish_profile_publication(&mut published, &uid, &owner, complete, std::time::Instant::now());
-                            }
-                            _ = poll.tick() => {
-                                let mut peers: Vec<PeerRecord> = {
-                                    let r = roster.lock().expect("roster mutex not poisoned");
-                                    r.peers()
-                                };
-                                // Remember names independently of slow network exchanges.
-                                {
-                                    let mut dir = names.lock().expect("names mutex not poisoned");
-                                    peers.sort_by_key(|peer| peer.last_seen);
-                                    for p in &peers {
-                                        let _ = dir.record_peer_name(
-                                            &p.public.user_id(),
-                                            if p.post_office { None } else { p.account_id.as_deref() },
-                                            &p.name,
-                                        );
-                                    }
-                                }
-                                let revision = match node.public_profile_revision() { Ok(Some(revision)) => revision, Ok(None) => continue, Err(error) => { eprintln!("[profile] revision read failed: {error}"); continue; } };
-                                let scope = profile_publication_scope(&node, &mut relay_observation, std::time::Instant::now());
-                                for peer in profile_republish_targets(&mut published, &peers, revision, scope, std::time::Instant::now()) {
-                                    if attempts.len() >= MAX_PROFILE_PUBLICATIONS { break; }
-                                    let uid = peer.public.user_id();
-                                    if in_flight.contains(&uid) { continue; }
-                                    let publication = published.get_mut(&uid).expect("observed publication");
-                                    let owner = publication.owner.clone();
-                                    let prepared = prepare_profile_publication(publication, std::time::Instant::now(), || node.prepare_current_profile_delivery(&peer));
-                                    let conversation = match prepared {
-                                        Ok(Some(conversation)) => conversation,
-                                        result => {
-                                            if let Err(error) = result { eprintln!("[profile] publication read failed: {error}"); }
-                                            finish_profile_publication(&mut published, &uid, &owner, false, std::time::Instant::now());
-                                            continue;
-                                        },
-                                    };
-                                    in_flight.insert(uid.clone());
-                                    let node = Arc::clone(&node);
-                                    attempts.push(Box::pin(async move {
-                                        let complete =
-                                            Box::pin(node.deliver_profile_to(&peer, conversation))
-                                                .await;
-                                        (uid, owner, complete)
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                }));
+                tasks.push(tokio::spawn(run_profile_publisher(
+                    node,
+                    roster,
+                    names,
+                    Duration::from_secs(PROFILE_PUBLICATION_REPAIR_SECS),
+                )));
             }
 
             for task in tasks {
