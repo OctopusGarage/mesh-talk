@@ -1208,6 +1208,10 @@
           {
             "name": "Same-owner pure sync-status notifications refresh device status without rereading presence, watched-file availability, favorite membership or hostnames; document, file and legacy/unknown broad invalidations retain their existing recovery and ownership guards. Default serial-poll state subscribers retain status notifications unless the consumer supplies a narrower matcher.",
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Visible serial readers use event invalidations with a five-minute push-backed recovery deadline, retaining compatibility intervals without push support. Hidden readers suspend recovery timers and refresh on activation. UI watchdog expiry retains the actual native read lease and at most one pending invalidation through physical settlement and global admission release; closing retires timers/listeners and suppresses late publication.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },
@@ -2060,11 +2064,11 @@
         "src/features/chat/MembersDialog.test.ts"
       ],
       "capability": {
-        "summary": "Remove personal chats and optional history across linked devices without changing other accounts\u2019 membership or copies.",
+        "summary": "Remove personal chats and optional history across linked devices without changing other accounts’ membership or copies.",
         "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
         "invariants": [
           {
-            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account\u2019s data.",
+            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account’s data.",
             "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
           },
           {
@@ -2370,7 +2374,10 @@
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520-linux.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520-win32.png",
-        "docs/help/topics/history.md"
+        "docs/help/topics/history.md",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/ReceptionStatus.tsx",
+        "frontend/src/features/chat/ConversationViewIdle.test.ts"
       ],
       "frontend": [
         "src/store/reception.test.ts",
@@ -2384,7 +2391,8 @@
         "src/features/chat/Sidebar.test.ts",
         "src/features/chat/sidebar/ConversationRow.test.ts",
         "src/features/chat/ReceptionStatus.test.ts",
-        "src/lib/localeParity.test.ts"
+        "src/lib/localeParity.test.ts",
+        "src/features/chat/ConversationViewIdle.test.ts"
       ],
       "capability": {
         "summary": "Every application unread count has a review and explicit clear path; confirmed local suppression reconciles exact unread without claiming viewed content; badge writes retry within the current owner lifetime.",
@@ -2405,6 +2413,10 @@
           {
             "name": "Receipt persistence coalesces within a fixed 100 ms window and flushes before restoration and owner retirement; unchanged conversations retain immutable projections and existing unread/alias bounds.",
             "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Peer-check recovery observations update their small status owner without rerendering unchanged message viewports; new messages, unread review and conversation/session replacement retain their independent reactive ownership.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },

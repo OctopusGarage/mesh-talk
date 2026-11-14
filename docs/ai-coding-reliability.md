@@ -140,6 +140,12 @@ Identify the executing thread and scheduling owner, not just the function's
 signature. Move blocking work through the existing admitted worker boundary.
 Inspect React render/effect/subscriber feedback loops and large synchronous data
 transforms too; moving I/O off the UI thread does not bound those CPU costs.
+Subscribe to status-only observations at the smallest presentation owner. A
+parent chat subscription can rerender its virtualized message viewport for every
+peer-check timestamp even when the rows are unchanged. The mounted
+[conversation idle regression](../frontend/src/features/chat/ConversationViewIdle.test.ts)
+requires live status updates without viewport renders, while new messages and
+conversation replacement remain live.
 Prepare bulk data outside shared commit guards, then reacquire the required
 guards and revalidate before atomic publication. Keep critical sections small
 without splitting a transaction or permitting stale side effects. Replacing a
@@ -245,6 +251,9 @@ same-owner/query refresh against the original promise until settlement, retainin
 one valid follow-up; reset or query replacement must not let stale work publish
 or block a new intent. The [Favorites store tests](../frontend/src/store/messageFavorites.test.ts)
 hold the actual list promise beyond its UI deadline before requesting refresh.
+The [serial view reader tests](../frontend/src/features/chat/useSerialPoll.test.ts)
+apply the same lifetime rule to recovery timers and event coalescing, including
+hidden views and a follow-up admitted after all 64 read slots were occupied.
 
 Consume the canonical process owner's result contract rather than deriving a new
 verdict from a diagnostic flag. Windows atomically terminates its owned job even
@@ -396,6 +405,12 @@ returns only its explicit pending/no-published-control outcome; the
 and [bounded hint pressure tests](../crates/mesh-talk-core/src/node/opaque_relay/incremental/controls.rs)
 retain decision changes, direct Pending reads, failures, scope changes and the
 positive cache's existing capacity.
+An incomplete retry flag is not evidence that another immediate scan can
+progress. Retain per-target deadlines for unchanged unsuccessful exchanges;
+continue ready targets and local pages, and invalidate waits on meaningful
+changes without claiming completion. The custody owner in
+[channel recovery](../crates/mesh-talk-core/src/node/channels.rs) exercises failed
+peer backoff, independent group pagination and prompt new-generation recovery.
 A domain-wide paging upper is not a mailbox revision. Unrelated mailbox appends
 must not invalidate settled work when its exact mailbox binding/revision and
 local source remain unchanged; retain rollback rejection and the original

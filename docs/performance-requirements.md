@@ -77,6 +77,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Emit presentation invalidations only for changed facts; successful idempotent
    confirmation must not restart UI reads or persistence. Capture change evidence
    inside the committing owner and notify after releasing its guard.
+   Subscribe to high-frequency observations in their small status surface rather
+   than the message viewport's parent. A changed peer-check timestamp must update
+   its own label without rebuilding unchanged virtualized rows; message, expiry
+   and conversation/session changes retain their independent subscriptions.
    Replacing an identical binding map is not invalidation; actual removal and
    later restoration must each invalidate their preceding observation.
    Subscribe before the initial read, retain one follow-up for changes during

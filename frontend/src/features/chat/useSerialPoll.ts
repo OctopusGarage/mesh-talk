@@ -6,7 +6,7 @@ import {
 import { readWithDeadline } from "@/lib/readDeadline";
 import { useEffect, useRef } from "react";
 
-/** Poll while visible, without overlapping requests or applying results after close. */
+/** Event-owned refresh with one visible recovery deadline and one actual read. */
 export function useSerialPoll<T>(
   enabled: boolean,
   intervalMs: number,
@@ -26,16 +26,31 @@ export function useSerialPoll<T>(
     let active = true;
     let busy = false;
     let dirty = false;
-    let nextFallback = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      clearTimeout(timer);
+      if (!active || busy || document.hidden) return;
+      const delay = wakeOn && supportsPushState() ? 300_000 : intervalMs;
+      timer = setTimeout(() => poll(), delay);
+    };
     const poll = (invalidate = false) => {
-      if (busy) {
+      if (!active) return;
+      if (busy || document.hidden) {
         dirty ||= invalidate;
         return;
       }
       busy = true;
-      nextFallback = performance.now() + 30000;
-      void Promise.resolve()
-        .then(() => readWithDeadline(() => handlers.current.request()))
+      dirty = false;
+      clearTimeout(timer);
+      let physical: Promise<void> | undefined;
+      void readWithDeadline(() => {
+        const operation = Promise.resolve(handlers.current.request());
+        physical = operation.then(
+          () => {},
+          () => {},
+        );
+        return operation;
+      })
         .then(
           (result) => {
             if (active) handlers.current.onResult(result);
@@ -45,14 +60,18 @@ export function useSerialPoll<T>(
           },
         )
         .finally(() => {
-          busy = false;
-          if (active && dirty) {
-            dirty = false;
-            poll();
-          }
+          const release = () => {
+            busy = false;
+            if (!active) return;
+            if (dirty && !document.hidden) poll();
+            else schedule();
+          };
+          // A UI timeout cannot cancel native work. Drain after actual settlement
+          // and after the global read admission has released its original slot.
+          if (physical) void physical.then(() => queueMicrotask(release));
+          else release();
         });
     };
-    poll();
     const unlisten = subscribeSyncInvalidation((change) => {
       if (
         change.kind === wakeOn &&
@@ -60,13 +79,18 @@ export function useSerialPoll<T>(
       )
         poll(true);
     });
-    const timer = setInterval(() => {
-      if (!wakeOn || !supportsPushState() || performance.now() >= nextFallback)
-        poll();
-    }, intervalMs);
+    const foreground = () => {
+      if (!document.hidden) poll(true);
+      else clearTimeout(timer);
+    };
+    window.addEventListener("focus", foreground);
+    document.addEventListener("visibilitychange", foreground);
+    poll();
     return () => {
       active = false;
-      clearInterval(timer);
+      clearTimeout(timer);
+      window.removeEventListener("focus", foreground);
+      document.removeEventListener("visibilitychange", foreground);
       unlisten();
     };
   }, [enabled, intervalMs, wakeOn]);

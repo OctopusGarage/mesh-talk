@@ -1244,6 +1244,13 @@ across its count and missing-principal decisions. The turn retains the same
 256-key cap and fresh per-row authority checks; no verification memo survives
 the turn or substitutes for reading the current witness.
 
+An unchanged unsuccessful custody exchange or missing-report attempt retains a
+per-group runtime retry deadline with capped three-to-300-second backoff. Ready
+groups and unfinished local pages bypass deferred groups; once all remaining
+work is deferred, the owner sleeps until the earliest deadline. Meaningful input
+generations invalidate old waits without resetting fair history positions.
+Waiting never establishes a completed sweep, custody, delivery or permission.
+
 Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A five-minute modern-host metadata fallback and foreground activation repair missed events; older hosts retain compatibility polling; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
 ```mermaid

@@ -401,7 +401,10 @@
             "account_wake_requires_exact_linked_noise_identity_and_deduplicates_revisions",
             "account_preference_local_edit_wakes_sibling_before_periodic_retry",
             "legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_repairs",
-            "channel_custody_noop_"
+            "channel_custody_noop_",
+            "node::channels::fanout_tests::channel_custody_failed_remote_work_backs_off_without_losing_event_recovery",
+            "node::channels::fanout_tests::channel_custody_blocked_group_does_not_delay_other_groups_or_keep_rescanning",
+            "node::channels::fanout_tests::custody_retry_backoff_is_bounded_without_changing_other_recovery_limits"
           ]
         }
       ],
@@ -428,6 +431,10 @@
           {
             "name": "Successful unchanged member or relay custody confirmation does not publish a presentation invalidation. Actual durable journal changes and independently changed shared witnesses still notify; negative rechecks, failed writes and current authorization retain their owning contracts.",
             "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
+          {
+            "name": "Unchanged failed custody exchanges and missing-report attempts back off per group from three to at most 300 seconds; ready groups and local pages retain prompt continuation, parked work is not confirmed completion, and meaningful input generations bypass old waits without losing fair cursor positions. Other recovery owners retain their existing sixty-second cap.",
+            "reference": "docs/network-design-reference.md"
           }
         ]
       },
@@ -1551,7 +1558,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
