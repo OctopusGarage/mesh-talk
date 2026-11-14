@@ -2222,6 +2222,14 @@ can return absence after the physical ID has been removed. Active conversation
 listing uses a partial index that excludes retiring scopes, avoiding a scan of
 hidden rows before applying a page limit.
 
+Network-view validation checks its database/domain/destructive-generation binding
+before interpreting retirement state. Within that synchronous connection-owned
+operation it validates scope and retirement-job consistency once, then reads
+current capability metadata and indexed control existence together. Each new
+operation repeats these checks; ordinary appends preserve finite membership,
+while newly required channel capabilities still invalidate an older binding.
+This local read reuse never replaces the session owner's final live/deadline check.
+
 Retirement tokens retain the profile lease and bind the database, domain,
 conversation, generation and logical revision. Transaction helpers verify the
 actual connection identity. Completion is idempotent for the unchanged empty

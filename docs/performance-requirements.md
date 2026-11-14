@@ -147,6 +147,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Use the existing bounded SQLite statement cache for fixed hot queries. Rebind
    parameters and read current rows each time; compiled statements are not cached
    authority values or permission decisions.
+   Within one synchronous connection-owned validation, read shared scope and
+   retirement state once and combine compatible indexed scalar observations.
+   Repeat validation at the next operation and final live-authority boundary;
+   transaction-local reuse must not become a cross-request permission cache.
    Place the cheap revision gate before routing filters, list hydration and
    authority projections. Mark a cycle settled only when every selected item
    has matching successful evidence; preserve continuation and retry deadlines.

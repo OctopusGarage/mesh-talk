@@ -945,6 +945,13 @@ Capture the owner's exact session/runtime installation and relevant revision at
 entry. Revalidate through the existing atomic commit seam before side effects
 and before publishing private results. Treat frontend generation guards as UI
 ownership, not host authorization. Read commands can expose stale private data too.
+When consolidating repeated database reads, keep reuse inside the current
+synchronous connection owner. Preserve identity/generation error precedence and
+retirement-job integrity before reading capability metadata, and repeat live
+session/deadline validation at its final owner. The repository network validator's
+[regressions](../crates/mesh-talk-core/src/eventlog/repository/network/tests.rs)
+count executed scope reads and retain stale-view, corruption and capability-change
+controls; a prepared-statement compilation count does not measure executed reads.
 Bind session effects to exact owner/generation rather than a replaceable display
 object. Cosmetic profile refreshes must not restart inactivity timers, republish
 call state or count as user input. The mounted [App regressions](../frontend/src/App.test.ts)

@@ -3198,6 +3198,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "eventlog::repository::network::tests::",
             "peer_known_export_ids_skip_sql_membership_and_preserve_unknown_authority",
             "hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh",
             "guarded_default_fingerprint_quiet_path_survives_unrelated_source_append",
@@ -3269,7 +3270,7 @@
             "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"
           },
           {
-            "name": "Peer-known IDs skip export membership SQL and body hydration while preserving current view/owner validation, examined-row accounting and cursor progression; unknown IDs retain fresh outgoing authorization. Fixed hot revision SQL queries reuse bounded compiled statements without caching values, preserving fresh source/control/destructive revisions and corruption errors. Real Guarded default-progress quiet rounds use fingerprint-only exchange despite unrelated appends, and a shared append requires reconciliation.",
+            "name": "Peer-known IDs skip export membership SQL and body hydration while preserving current view/owner validation, examined-row accounting and cursor progression; unknown IDs retain fresh outgoing authorization. Fixed hot revision SQL queries reuse bounded compiled statements without caching values, preserving fresh source/control/destructive revisions and corruption errors. One synchronous network-view validation executes scope/retirement checks once and combines current capability metadata with indexed control existence; it preserves owner/epoch precedence, retiring/corrupt rejection and capability escalation, and never reuses authority across operations or replaces final live session checks. Real Guarded default-progress quiet rounds use fingerprint-only exchange despite unrelated appends, and a shared append requires reconciliation.",
             "reference": "docs/performance-requirements.md#design-and-review-rules"
           },
           {

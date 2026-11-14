@@ -94,6 +94,8 @@ pub(crate) struct EventRepository {
     #[cfg(test)]
     network_header_fetches: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
+    scope_queries: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     body_fetches: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     ancestry_vertices: std::sync::atomic::AtomicUsize,
@@ -191,6 +193,8 @@ impl EventRepository {
             fingerprint_ids: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             network_header_fetches: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            scope_queries: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             body_fetches: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]

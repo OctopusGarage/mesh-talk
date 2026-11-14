@@ -1,5 +1,6 @@
 //! Unfiltered repository network selectors. These are not an expiry/participant
 //! policy facade; runtime owners must supply their own current authorization.
+use super::metadata::{METADATA_COLUMNS, read_metadata};
 use super::*;
 use crate::eventlog::sync::FileConsentStatus;
 use crate::eventlog::sync::network::{
@@ -115,12 +116,27 @@ impl EventRepository {
         // protocol. A newly required control invalidates an older capability
         // binding before even its cached fingerprint or Have can be handed off.
         // Read fixed metadata only; ordinary appends retain this finite view.
-        if let Some(current) = self.metadata_on(c, &view.binding.conversation)? {
+        // Scope/retirement authority was checked above under this same guard.
+        // Read metadata and the covering kind-index probe together without
+        // re-entering helpers that each repeat the two scope queries. This
+        // observation is local to this validation, never retained in the view.
+        let mut stmt = c.prepare_cached(&format!(
+            "SELECT {METADATA_COLUMNS},EXISTS(SELECT 1 FROM retained_events INDEXED BY retained_events_kind_author WHERE domain=?1 AND conversation=?2 AND kind=?3) FROM event_conversations WHERE domain=?1 AND conversation=?2"
+        ))?;
+        let mut rows = stmt.query(params![
+            self.domain.0.as_slice(),
+            view.binding.conversation.as_bytes().as_slice(),
+            EventKind::ChannelMetadata as i64
+        ])?;
+        if let Some(row) = rows.next()? {
+            // Preserve metadata corruption checks before capability admission.
+            let current = read_metadata(row)?;
+            let channel_v5: bool = row.get(9)?;
             let v5 = view.metadata.channel_v5;
             let v4 = v5 || view.metadata.channel_v4;
             let v3 = v4 || view.metadata.channel_v3;
             let v2 = v3 || view.metadata.channel_v2;
-            if (self.has_kind_on(c, &view.binding.conversation, EventKind::ChannelMetadata)? && !v5)
+            if (channel_v5 && !v5)
                 || (current.channel_v4 && !v4)
                 || (current.channel_v3 && !v3)
                 || (current.channel_v2 && !v2)
