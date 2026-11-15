@@ -2180,7 +2180,7 @@ impl Node {
 
     /// Immediate best-effort transfer of an already accepted immutable intent.
     /// A transport success is never a delivery confirmation.
-    pub async fn flush_delivery(&self, id: EventId) {
+    pub async fn flush_delivery(self: &Arc<Self>, id: EventId) {
         let message = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
             if let Err(error) = self.recover_delivery(&mut store) {
@@ -2230,7 +2230,7 @@ impl Node {
 
     /// Bounded direct receipt transfer hook. The shared worker separately
     /// qualifies exact durable custody and retires queued work.
-    pub async fn flush_delivery_receipts(&self, limit: usize) {
+    pub async fn flush_delivery_receipts(self: &Arc<Self>, limit: usize) {
         let receipts = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
             if let Err(error) = self.recover_delivery(&mut store) {
@@ -2264,7 +2264,7 @@ impl Node {
     }
 
     pub(in crate::node) async fn transfer_delivery_destination(
-        &self,
+        self: &Arc<Self>,
         peer: &crate::discovery::PeerRecord,
         destination: &DeliveryDestination,
         conversation: ConversationId,
@@ -2296,7 +2296,16 @@ impl Node {
             }
             let exchange = async {
                 let store = self.sync_store(channel.peer_identity());
-                super::session::request_round_paged(&mut channel, &store, conversation).await?;
+                // A response can accept a reverse-direction DM before this
+                // outgoing attempt is cancelled or its durable-have probe ends.
+                // Its actual reception owner must outlive the awaiting caller.
+                let _reception = self
+                    .request_reception_scope(&store, &channel)
+                    .ok_or(SessionError::UnexpectedMessage)?;
+                let result =
+                    super::session::request_round_paged(&mut channel, &store, conversation).await;
+                self.dispatch_received_sync_work(&store);
+                result?;
                 if conversation != destination.event.conversation_id {
                     return Ok(false);
                 }
@@ -3041,7 +3050,7 @@ impl Node {
     }
 
     pub(in crate::node) async fn reconcile_delivery_peer(
-        &self,
+        self: &std::sync::Arc<Self>,
         peer: &crate::discovery::Announce,
     ) -> Reconciliation {
         if !self.verified_dm_pull_peer(&peer.user_id) {
@@ -3072,7 +3081,7 @@ impl Node {
     }
 
     async fn pull_delivery_scope(
-        &self,
+        self: &std::sync::Arc<Self>,
         proof: &crate::discovery::Announce,
         conv: ConversationId,
         relay: bool,
@@ -3134,7 +3143,7 @@ impl Node {
                     {
                         return Err(SessionError::UnexpectedMessage);
                     }
-                    let advanced = if relay {
+                    let (advanced, dispatched) = if relay {
                         // Upload confirmations are not incoming progress. A bounded
                         // scalar source observation also sees accepted relay controls.
                         let before = self
@@ -3151,20 +3160,25 @@ impl Node {
                             .expect("log lock")
                             .repository()?
                             .source_revision()?;
-                        before != after
+                        (before != after, false)
                     } else {
                         let store = self.pull_sync_store(channel.peer_identity());
-                        super::session::request_round_paged(&mut channel, &store, conv)
-                            .await?
-                            .applied
-                            > 0
+                        let _reception = self
+                            .request_reception_scope(&store, &channel)
+                            .ok_or(SessionError::UnexpectedMessage)?;
+                        let result =
+                            super::session::request_round_paged(&mut channel, &store, conv).await;
+                        let dispatched = self.dispatch_received_sync_work(&store);
+                        (result?.applied > 0, dispatched)
                     };
                     // A quiet success still retires the framed exchange and retries
                     // local projections. It never certifies new data or custody.
                     self.observe_control_exchange(&channel, started);
                     self.recycle_sync_channel(channel);
-                    self.emit_new_messages(conv);
-                    self.process_file_events(conv);
+                    if !dispatched {
+                        self.emit_new_messages(conv);
+                        self.process_file_events(conv);
+                    }
                     Ok::<_, SessionError>(advanced)
                 })
                 .await;
@@ -3180,12 +3194,12 @@ impl Node {
         completed
     }
 
-    async fn retry_one_destination(&self, destination: &DeliveryDestination) -> bool {
+    async fn retry_one_destination(self: &Arc<Self>, destination: &DeliveryDestination) -> bool {
         self.retry_one_destination_with_reason(destination).await.0
     }
 
     async fn retry_one_destination_with_reason(
-        &self,
+        self: &Arc<Self>,
         destination: &DeliveryDestination,
     ) -> (bool, Option<DeliveryRecoveryReason>) {
         if !self.delivery_destination_allowed(destination) {
@@ -6019,5 +6033,203 @@ mod lock_order_tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, accepted);
         assert_eq!(history[0].text, b"recover this accepted message");
+    }
+}
+
+#[cfg(test)]
+mod requester_reception_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_requester_rounds_dispatch_reverse_dm_already_received_in_response() {
+        struct Release(Option<std::sync::mpsc::Sender<()>>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        for mode in 0..3 {
+            let source_dir = tempfile::tempdir().unwrap();
+            let target_dir = tempfile::tempdir().unwrap();
+            let source_identity = crate::identity::device::DeviceIdentity::generate();
+            let target_identity = crate::identity::device::DeviceIdentity::generate();
+            let source_account = crate::identity::account::Account::generate();
+            let target_account = crate::identity::account::Account::generate();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let source_proof = crate::discovery::Announce::new_with_account(
+                &source_identity,
+                &source_account,
+                "Source",
+                listener.local_addr().unwrap().port(),
+            );
+            let target_proof = crate::discovery::Announce::new_with_account(
+                &target_identity,
+                &target_account,
+                "Target",
+                9,
+            );
+            let (source, mut bootstrap_incoming, _) = super::super::test_support::node_with_files(
+                source_dir.path(),
+                source_identity,
+                source_account,
+                &target_proof,
+            );
+            let (target, mut incoming, _) = super::super::test_support::node_with_files(
+                target_dir.path(),
+                target_identity,
+                target_account,
+                &source_proof,
+            );
+            let serving = source.clone();
+            let server = tokio::spawn(serving.run_accept_loop(listener));
+            // Establish the ratchet over the real protocol before exercising reverse
+            // reception. Simultaneous first initiations are a separate crypto case.
+            let bootstrap = target
+                .enqueue_to_account(&source.account_id(), b"establish ratchet", None)
+                .await
+                .unwrap();
+            target.flush_delivery(bootstrap).await;
+            let bootstrap =
+                tokio::time::timeout(std::time::Duration::from_secs(5), bootstrap_incoming.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(bootstrap.text, b"establish ratchet");
+            let response = source
+                .enqueue_to_account(&target.account_id(), b"reverse reply from response", None)
+                .await
+                .unwrap();
+            let response_event = source
+                .delivery
+                .lock()
+                .unwrap()
+                .message(response)
+                .unwrap()
+                .destinations[0]
+                .event
+                .id;
+            let outgoing = target
+                .enqueue_to_account(&source.account_id(), b"original outgoing delivery", None)
+                .await
+                .unwrap();
+            let destination = target
+                .delivery
+                .lock()
+                .unwrap()
+                .message(outgoing)
+                .unwrap()
+                .destinations[0]
+                .clone();
+            let conversation = destination.event.conversation_id;
+            let response_cipher = source
+                .log
+                .lock()
+                .unwrap()
+                .get(&response_event)
+                .unwrap()
+                .unwrap()
+                .ciphertext;
+            assert!(
+                target
+                    .dm_ratchet
+                    .lock()
+                    .unwrap()
+                    .prepare_decrypt(
+                        &target.identity,
+                        &source.identity.public(),
+                        &response_cipher
+                    )
+                    .is_ok(),
+                "the established reverse packet must already be decryptable without advancing receive state"
+            );
+            let peer = target.routing_peer(&source.user_id()).unwrap();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let entered = std::sync::Mutex::new(Some(entered));
+            let (release, released) = std::sync::mpsc::channel();
+            let release = Release(Some(release));
+            let released = std::sync::Mutex::new(released);
+            let received_phase = format!("event={}", response_event.to_hex());
+            *target.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+                if !phase.starts_with("gossip_diag_ciphertext_applied ")
+                    || !phase.ends_with(&received_phase)
+                {
+                    return;
+                }
+                if let Some(entered) = entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                    let _ = released.lock().unwrap().recv();
+                }
+            }));
+            let receiving = target.clone();
+            target.replace_verified_dm_pull_peers(vec![source_proof.user_id.clone()]);
+            let request = tokio::spawn(async move {
+                match mode {
+                    0 => {
+                        receiving
+                            .transfer_delivery_destination(&peer, &destination, conversation)
+                            .await
+                    }
+                    1 => receiving.deliver_direct(&peer, conversation).await.is_ok(),
+                    _ => {
+                        receiving
+                            .pull_delivery_scope(&source_proof, conversation, false)
+                            .await
+                            != Reconciliation::Deferred
+                    }
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                target
+                    .log
+                    .lock()
+                    .unwrap()
+                    .get(&response_event)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                !target
+                    .received
+                    .lock()
+                    .unwrap()
+                    .processed(response_event)
+                    .unwrap()
+            );
+            request.abort();
+            drop(release);
+            assert!(request.await.unwrap_err().is_cancelled());
+            let received =
+                tokio::time::timeout(std::time::Duration::from_secs(3), incoming.recv()).await;
+            server.abort();
+            let _ = server.await;
+            target.runtime_work.close();
+            source.runtime_work.close();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                target.runtime_work.drain().await;
+                source.runtime_work.drain().await;
+            })
+            .await
+            .expect("actual reception cleanup must retire before fixture storage drops");
+            let received = received
+            .expect(
+                "cancellation must dispatch a reverse DM already durably accepted by the requester",
+            )
+            .unwrap();
+            assert_eq!(received.text, b"reverse reply from response");
+            assert!(
+                target
+                    .received
+                    .lock()
+                    .unwrap()
+                    .processed(response_event)
+                    .unwrap()
+            );
+        }
     }
 }

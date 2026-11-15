@@ -319,8 +319,10 @@ impl EventRepository {
     pub(crate) fn source_revision(&self) -> Result<i64, LogError> {
         self.database.read(|c| {
             nonnegative(
-                c.prepare_cached("SELECT source_revision FROM event_domains WHERE domain=?1")?
-                    .query_row([self.domain.0.as_slice()], |r| r.get(0))?,
+                c.prepare_cached(
+                    "SELECT source_revision FROM event_domains WHERE domain=CAST(?1 AS BLOB)",
+                )?
+                .query_row([self.domain.0.as_slice()], |r| r.get(0))?,
             )
         })
     }

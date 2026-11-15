@@ -146,12 +146,15 @@ impl Node {
     /// to every known peer device + our own other devices (the account fan-out set), so
     /// contacts actually see the photo. Best-effort delivery per device (the event is
     /// durably logged and syncs later if a peer is offline).
-    pub async fn set_avatar(&self, avatar: Option<Vec<u8>>) -> Result<(), NodeError> {
+    pub async fn set_avatar(
+        self: &std::sync::Arc<Self>,
+        avatar: Option<Vec<u8>>,
+    ) -> Result<(), NodeError> {
         self.set_avatar_if(avatar, |commit| commit()).await
     }
 
     pub async fn set_avatar_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         avatar: Option<Vec<u8>>,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
@@ -226,7 +229,7 @@ impl Node {
     /// a transient failure remains eligible for a later runtime poll.
     #[cfg(test)]
     pub(in crate::node) async fn deliver_profile_to(
-        &self,
+        self: &std::sync::Arc<Self>,
         peer: &PeerRecord,
         conv: ConversationId,
     ) -> bool {
@@ -235,7 +238,7 @@ impl Node {
     }
 
     pub(in crate::node) async fn deliver_profile_observing(
-        &self,
+        self: &std::sync::Arc<Self>,
         peer: &PeerRecord,
         conv: ConversationId,
     ) -> ProfilePublicationOutcome {

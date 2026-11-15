@@ -16,7 +16,7 @@ use crate::{
 use std::{
     collections::{BTreeMap, VecDeque},
     net::SocketAddr,
-    sync::atomic::Ordering,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 
@@ -388,7 +388,7 @@ impl Node {
     }
     /// One peer turn and one local channel turn; the existing recovery task owns all state.
     pub(super) async fn maintain_account_channels_after_wake(
-        &self,
+        self: &Arc<Self>,
         work: &mut ChannelAccountMaintenance,
         timed_recovery: bool,
     ) {
@@ -405,7 +405,10 @@ impl Node {
         self.maintain_account_channels(work).await;
     }
 
-    pub(super) async fn maintain_account_channels(&self, work: &mut ChannelAccountMaintenance) {
+    pub(super) async fn maintain_account_channels(
+        self: &Arc<Self>,
+        work: &mut ChannelAccountMaintenance,
+    ) {
         let selected_input = work.input(self).ok();
         if selected_input.is_some()
             && work.input == selected_input
@@ -521,11 +524,19 @@ impl Node {
                             let mut connection =
                                 self.privacy_sync_dial(peer.addr, &peer.public).await.ok()?;
                             let store = self.pull_sync_store(connection.peer_identity());
-                            super::session::request_round_paged(&mut connection, &store, channel)
-                                .await
-                                .ok()?;
+                            let _reception = self.request_reception_scope(&store, &connection)?;
+                            let round = super::session::request_round_paged(
+                                &mut connection,
+                                &store,
+                                channel,
+                            )
+                            .await;
+                            let received = self.dispatch_received_sync_work(&store);
+                            round.ok()?;
                             self.recycle_sync_channel(connection);
-                            self.process_channel(channel);
+                            if !received {
+                                self.process_channel(channel);
+                            }
                             Some(())
                         })
                         .await;
@@ -668,7 +679,7 @@ impl Node {
         Ok(true)
     }
     async fn maintain_one_account_channel(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         work: &mut ChannelAccountMaintenance,
     ) -> bool {

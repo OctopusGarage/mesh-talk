@@ -1118,7 +1118,11 @@ impl Node {
     }
 
     /// Fan out an already accepted channel offer and its automatically permitted bytes.
-    pub async fn flush_channel_file(&self, channel: ConversationId, file: ConversationId) {
+    pub async fn flush_channel_file(
+        self: &std::sync::Arc<Self>,
+        channel: ConversationId,
+        file: ConversationId,
+    ) {
         let members = self
             .channels
             .lock()

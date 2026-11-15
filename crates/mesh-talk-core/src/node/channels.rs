@@ -773,7 +773,9 @@ impl Node {
 
     /// Persist an owner-signed invitation for one sibling per pass. The ordinary
     /// channel distribution and recovery paths deliver it to the new device.
-    pub(in crate::node) async fn auto_enroll_one_channel_sibling(&self) -> Result<bool, NodeError> {
+    pub(in crate::node) async fn auto_enroll_one_channel_sibling(
+        self: &Arc<Self>,
+    ) -> Result<bool, NodeError> {
         let Some((channel, device)) = self.auto_enrollment_candidate()? else {
             return Ok(false);
         };
@@ -814,7 +816,9 @@ impl Node {
         })
     }
 
-    pub(in crate::node) async fn auto_accept_one_linked_invite(&self) -> Result<bool, NodeError> {
+    pub(in crate::node) async fn auto_accept_one_linked_invite(
+        self: &Arc<Self>,
+    ) -> Result<bool, NodeError> {
         let Some(channel) = self.linked_invite_candidate() else {
             return Ok(false);
         };
@@ -1179,7 +1183,7 @@ impl Node {
         (Sha256::digest(bytes).into(), renewed)
     }
 
-    async fn replay_channel_controls_turn(&self, replay: &mut ChannelControlReplay) {
+    async fn replay_channel_controls_turn(self: &Arc<Self>, replay: &mut ChannelControlReplay) {
         if !replay.active {
             replay.upper = if replay.retrying {
                 replay.failed.last().copied()
@@ -1666,7 +1670,7 @@ impl Node {
     /// messages continues normally; when disabled, inbound peers cannot fetch
     /// this device's channel log or file chunks as a recovery source.
     pub async fn set_channel_replica_enabled(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         enabled: bool,
     ) -> Result<(), NodeError> {
@@ -1675,7 +1679,7 @@ impl Node {
     }
 
     pub async fn set_channel_replica_enabled_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         enabled: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
@@ -1710,12 +1714,15 @@ impl Node {
     }
 
     /// Close a channel for every member while retaining each device's local history.
-    pub async fn dissolve_channel(&self, channel: ConversationId) -> Result<(), NodeError> {
+    pub async fn dissolve_channel(
+        self: &Arc<Self>,
+        channel: ConversationId,
+    ) -> Result<(), NodeError> {
         self.dissolve_channel_if(channel, |commit| commit()).await
     }
 
     pub async fn dissolve_channel_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
@@ -1818,7 +1825,7 @@ impl Node {
     /// channel state, then distributes our epoch-0 sender-key distribution to the
     /// members via a `KeyRotation` event so they can follow our chain.
     pub async fn create_channel(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         members: Vec<PublicIdentity>,
     ) -> Result<ConversationId, NodeError> {
@@ -1829,7 +1836,7 @@ impl Node {
     /// Legacy device-only invitations for compatibility consumers. Desktop
     /// creation uses `create_account_channel_invited_if` and account acceptance.
     pub async fn create_channel_invited(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         members: Vec<PublicIdentity>,
     ) -> Result<ConversationId, NodeError> {
@@ -1838,7 +1845,7 @@ impl Node {
     }
 
     pub async fn create_channel_invited_if(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         members: Vec<PublicIdentity>,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
@@ -1849,7 +1856,7 @@ impl Node {
 
     /// Create an account-owned group using verified account invitations.
     pub async fn create_account_channel_invited_if(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         member_account_ids: Vec<String>,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
@@ -1928,7 +1935,7 @@ impl Node {
     }
 
     async fn create_channel_with_consent(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         mut members: Vec<PublicIdentity>,
         invite: bool,
@@ -2124,7 +2131,7 @@ impl Node {
     /// `has_my_sender(new_epoch)` guard in the send path), so the joiner can read
     /// post-join messages but not pre-join ones.
     pub async fn add_channel_member(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         new_member: PublicIdentity,
     ) -> Result<(), NodeError> {
@@ -2133,7 +2140,7 @@ impl Node {
     }
 
     pub async fn add_channel_member_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         new_member: PublicIdentity,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
@@ -2146,7 +2153,7 @@ impl Node {
     /// Auto-enrollment must revalidate its accepted-account evidence inside the
     /// same commit boundary as account removal, before signing an invitation.
     pub(in crate::node) async fn add_channel_member_checked_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         new_member: PublicIdentity,
         require_account_sibling: bool,
@@ -2309,7 +2316,7 @@ impl Node {
     /// member never receives the new epoch's events or sender keys, so it cannot read
     /// post-removal messages.
     pub async fn remove_channel_member(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         member_user_id: &str,
     ) -> Result<(), NodeError> {
@@ -2318,7 +2325,7 @@ impl Node {
     }
 
     pub async fn remove_channel_member_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         member_user_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
@@ -2422,7 +2429,7 @@ impl Node {
     /// Remove a person and all of its currently certified channel devices in
     /// one owner-signed epoch. Never infer an account from a display name.
     pub async fn remove_channel_account_members_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         account_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
@@ -2529,7 +2536,7 @@ impl Node {
     /// only: a non-owner's event is dropped by every node's `process`, so it's refused here
     /// too. The new name converges on every member via the usual distribution.
     pub async fn rename_channel(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         new_name: &str,
     ) -> Result<(), NodeError> {
@@ -2538,7 +2545,7 @@ impl Node {
     }
 
     pub async fn rename_channel_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         new_name: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
@@ -2588,7 +2595,7 @@ impl Node {
     /// Hand channel administration to an existing member. The owner-signed event
     /// changes authority without changing membership or rotating message keys.
     pub async fn transfer_channel_owner(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         new_owner: &str,
     ) -> Result<(), NodeError> {
@@ -2597,7 +2604,7 @@ impl Node {
     }
 
     pub async fn transfer_channel_owner_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         new_owner: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
@@ -2687,12 +2694,12 @@ impl Node {
 
     /// Publish a self-signed departure, then stop participating locally. The event is
     /// first offered to the old member set while our old group route is still active.
-    pub async fn leave_channel(&self, channel: ConversationId) -> Result<(), NodeError> {
+    pub async fn leave_channel(self: &Arc<Self>, channel: ConversationId) -> Result<(), NodeError> {
         self.leave_channel_if(channel, |commit| commit()).await
     }
 
     pub async fn leave_channel_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
@@ -2739,13 +2746,16 @@ impl Node {
 
     /// Accept a pending invitation. The signed event makes the decision survive
     /// restart and sync to other copies of this device's log.
-    pub async fn accept_channel_invite(&self, channel: ConversationId) -> Result<(), NodeError> {
+    pub async fn accept_channel_invite(
+        self: &Arc<Self>,
+        channel: ConversationId,
+    ) -> Result<(), NodeError> {
         self.accept_channel_invite_if(channel, |commit| commit())
             .await
     }
 
     pub async fn accept_channel_invite_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
@@ -2806,11 +2816,11 @@ impl Node {
     /// Retry signed departures after a peer was offline during the initial push.
     /// The channel book keeps only departures that were valid when replayed, so a
     /// forged leave event cannot open an outbound route to an unrelated peer.
-    pub async fn retry_channel_departures(&self) {
+    pub async fn retry_channel_departures(self: &Arc<Self>) {
         self.retry_channel_controls().await;
     }
 
-    pub async fn retry_channel_controls(&self) {
+    pub async fn retry_channel_controls(self: &Arc<Self>) {
         let mut released = self.retry_join_history().unwrap_or_else(|error| {
             log::warn!("channel join history retry failed: {error}");
             Vec::new()
@@ -2862,7 +2872,7 @@ impl Node {
     /// and fail-soft: returns `Ok(())` once the event is appended locally, regardless
     /// of how many members were reachable (an offline member catches up via sync).
     pub async fn send_channel_message(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         text: &[u8],
     ) -> Result<(), NodeError> {
@@ -2871,7 +2881,7 @@ impl Node {
 
     /// Send a channel message that replies to `reply_to` (or `None` for a normal message).
     pub async fn send_channel_message_reply(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         text: &[u8],
         reply_to: Option<EventId>,
@@ -2881,7 +2891,7 @@ impl Node {
     }
 
     pub async fn send_channel_message_reply_expiring(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         text: &[u8],
         reply_to: Option<EventId>,
@@ -2898,7 +2908,7 @@ impl Node {
     }
 
     pub async fn send_channel_message_reply_expiring_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         text: &[u8],
         reply_to: Option<EventId>,
@@ -2914,8 +2924,7 @@ impl Node {
             expires_at_ms,
             &mut authorize,
         )?;
-        self.flush_accepted_message(&MessageDestination::Channel(channel), id)
-            .await;
+        self.flush_accepted_channel_message(channel, id).await;
         if let Err(error) = self.await_channel_metadata(channel).await {
             log::debug!("accepted channel metadata preparation deferred: {error}");
         }
@@ -2925,7 +2934,7 @@ impl Node {
     /// Send an animated sticker to a channel: `sticker_id` is the bundled sticker's
     /// codepoint id, `fallback` the emoji char shown if a member lacks it.
     pub async fn send_sticker_channel(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         sticker_id: &str,
         fallback: &[u8],
@@ -2935,7 +2944,7 @@ impl Node {
     }
 
     pub async fn send_sticker_channel_expiring(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         sticker_id: &str,
         fallback: &[u8],
@@ -2952,7 +2961,7 @@ impl Node {
     }
 
     pub async fn send_sticker_channel_expiring_if(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         sticker_id: &str,
         fallback: &[u8],
@@ -2968,8 +2977,7 @@ impl Node {
             expires_at_ms,
             &mut authorize,
         )?;
-        self.flush_accepted_message(&MessageDestination::Channel(channel), id)
-            .await;
+        self.flush_accepted_channel_message(channel, id).await;
         if let Err(error) = self.await_channel_metadata(channel).await {
             log::debug!("accepted channel metadata preparation deferred: {error}");
         }
@@ -3043,7 +3051,7 @@ impl Node {
     /// Membership changes and key rotations must not depend on gossip convergence.
     #[track_caller]
     pub(in crate::node) fn distribute_channel<'a>(
-        &'a self,
+        self: &'a Arc<Self>,
         channel: ConversationId,
         members: &'a [PublicIdentity],
     ) -> impl std::future::Future<Output = ()> + Send + 'a {
@@ -3063,7 +3071,7 @@ impl Node {
     /// existing sync exchange. Account operations retain all-member fanout.
     #[track_caller]
     pub(in crate::node) fn distribute_channel_confirming<'a>(
-        &'a self,
+        self: &'a Arc<Self>,
         channel: ConversationId,
         members: &'a [PublicIdentity],
         event: Option<EventId>,
@@ -3084,7 +3092,7 @@ impl Node {
     /// for a relay after the offer but before the chunks strands live receivers
     /// at "receiving" despite an available direct application route.
     pub(in crate::node) async fn distribute_channel_file(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         file: ConversationId,
         members: &[PublicIdentity],
@@ -3114,7 +3122,7 @@ impl Node {
     /// For a large channel, seed a few replicas and let member gossip plus
     /// anti-entropy complete the distribution. Small channels retain direct fanout.
     pub(in crate::node) async fn distribute_channel_message(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         members: &[PublicIdentity],
         event_id: EventId,
@@ -3487,7 +3495,7 @@ impl Node {
     }
 
     async fn sync_and_confirm_custody(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         event_id: EventId,
         peer: &PeerRecord,
@@ -3498,7 +3506,7 @@ impl Node {
     }
 
     async fn sync_and_confirm_custody_admitted(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         event_id: EventId,
         peer: &PeerRecord,
@@ -3506,7 +3514,12 @@ impl Node {
         let mut conn = self.privacy_sync_dial(peer.addr, &peer.public).await?;
         let before = conn.sent_frame_bytes();
         let store = self.sync_store(conn.peer_identity());
-        let reusable = if request_round(&mut conn, &store, channel).await.is_ok() {
+        let _reception = self
+            .request_reception_scope(&store, &conn)
+            .ok_or(crate::transport::TransportError::AdmissionDenied)?;
+        let round = request_round(&mut conn, &store, channel).await;
+        self.dispatch_received_sync_work(&store);
+        let reusable = if round.is_ok() {
             match request_durable_have(&mut conn, channel, event_id).await {
                 Ok(held) => {
                     if held {
@@ -3661,7 +3674,7 @@ impl Node {
     /// exchange, preserving the existing recovery slot and peer rotation.
     #[cfg(test)]
     pub(in crate::node) async fn retry_one_channel_custody(
-        &self,
+        self: &Arc<Self>,
         cursor: usize,
         after: &mut HashMap<ConversationId, (u64, EventId)>,
         cycles: &mut HashMap<ConversationId, usize>,
@@ -3707,7 +3720,7 @@ impl Node {
     }
 
     async fn retry_channel_custody_turn(
-        &self,
+        self: &Arc<Self>,
         cursor: usize,
         cursors: &mut HashMap<ConversationId, CustodyRetryCursor>,
         generation: u64,
@@ -3922,7 +3935,7 @@ impl Node {
     }
 
     async fn distribute_channel_targets(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         members: &[PublicIdentity],
         fanout: Option<usize>,
@@ -3941,7 +3954,7 @@ impl Node {
     }
 
     async fn distribute_channel_targets_outcome(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         members: &[PublicIdentity],
         fanout: Option<usize>,
@@ -3989,7 +4002,11 @@ impl Node {
                                 let mut ch =
                                     self.privacy_sync_dial(peer.addr, &peer.public).await?;
                                 let store = self.sync_store(ch.peer_identity());
+                                let _reception = self
+                                    .request_reception_scope(&store, &ch)
+                                    .ok_or(crate::transport::TransportError::AdmissionDenied)?;
                                 let round = request_round(&mut ch, &store, channel).await;
+                                self.dispatch_received_sync_work(&store);
                                 #[cfg(test)]
                                 self.trace_account_client(&peer.public, || {
                                     match &round {
@@ -4237,7 +4254,13 @@ impl Node {
                     node.trace_account_client(&peer.public, || {
                         format!("channel_recovery_sync_begin channel={channel:?}")
                     });
+                    let reception = node.request_reception_scope_with_arrival(
+                        &store,
+                        &conn,
+                        super::reception_effects::ArrivalKind::CatchUp,
+                    )?;
                     let round = request_round(&mut conn, &store, channel).await;
+                    let received = reception.dispatch();
                     let reason = match &round {
                         Ok(report) if report.applied > 0 => {
                             super::work_observation::reason::CHANNEL_SYNC_OK_APPLIED
@@ -4279,7 +4302,7 @@ impl Node {
                         )
                     });
                     node.recycle_sync_channel(conn);
-                    Some((report.applied, report.rejected.is_empty()))
+                    Some((report.applied, report.rejected.is_empty(), received))
                 })
                 .await;
                 if result.is_err() {
@@ -4297,17 +4320,21 @@ impl Node {
                     };
                     format!("channel_recovery_peer_end channel={channel:?} outcome={outcome}")
                 });
-                if let Ok(Some((applied, clean))) = result {
+                if let Ok(Some((applied, clean, received))) = result {
                     #[cfg(test)]
                     node.trace_account_client(&peer.public, || {
                         "channel_recovery_reception_begin".into()
                     });
-                    node.process_channel_reception(channel, "catch_up");
+                    if !received {
+                        node.process_channel_reception(channel, "catch_up");
+                    }
                     #[cfg(test)]
                     node.trace_account_client(&peer.public, || {
                         "channel_recovery_channel_reception_end".into()
                     });
-                    node.process_file_events_reception(channel, "catch_up");
+                    if !received {
+                        node.process_file_events_reception(channel, "catch_up");
+                    }
                     #[cfg(test)]
                     node.trace_account_client(&peer.public, || {
                         "channel_recovery_reception_end".into()
@@ -4877,7 +4904,16 @@ mod fanout_tests {
                 for node in &nodes {
                     settle_group_metadata(node, group);
                     assert!(node.channels.lock().unwrap().pending_control_state(group, &node.user_id()).is_some(), "retained signed controls remain permanent replay facts after successful sync");
-                    let metadata = node.channel_metadata(group).unwrap();
+                    // Canonical presentation and the selected field index own
+                    // separate bounded continuations. Finish actual field-query
+                    // readiness during warmup, inside the original outer budget.
+                    let metadata = loop {
+                        let metadata = node.channel_metadata(group).unwrap();
+                        if !metadata.query_pending {
+                            break metadata;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    };
                     assert!(!metadata.query_pending);
                     assert_eq!(metadata.announcement.unwrap().content.as_deref(), Some("signed metadata before observation"));
                 }

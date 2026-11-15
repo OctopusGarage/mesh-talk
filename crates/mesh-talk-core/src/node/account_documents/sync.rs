@@ -265,14 +265,22 @@ impl DocumentSyncCursor {
     #[cfg(test)]
     fn client_trace_state(&self) -> String {
         format!(
-            "domain={:?} pending={} after={} deferred={} retry_ms={}",
+            "domain={:?} pending={} after={} deferred={} retry_ms={} scope={:?} completed={} up_to_date={} visited={:x} settled={:x} remote_disabled={:x} group_retry={} group_upgrade={}",
             DOMAINS[self.domain],
             self.pending,
             self.after.is_some(),
             self.admission_deferred,
             self.retry_at.map_or(0, |retry| retry
                 .saturating_duration_since(Instant::now())
-                .as_millis())
+                .as_millis()),
+            self.scope,
+            self.page_completed,
+            self.up_to_date,
+            self.visited,
+            self.settled,
+            self.remotely_disabled,
+            self.group_retry_at.is_some(),
+            self.group_upgrade,
         )
     }
 

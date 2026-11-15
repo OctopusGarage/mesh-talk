@@ -622,59 +622,62 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
             };
             // Two distinct user submissions each own functional acceptance. The
             // second operation does not inherit time spent delivering the first.
-            crate::node::account_group::functional_account_convergence(async {
-                phase = "individual-admission";
-                phase_entries.push((phase, started.elapsed().as_millis()));
-                let accepted = sender
-                    .forward_messages_if(request.clone(), |commit| commit())
-                    .await
-                    .unwrap();
-                individual_states = admission_states(&accepted.items);
-                assert_eq!(
-                    accepted.items.len(),
-                    2,
-                    "individual admission item count: {individual_states:?}"
-                );
-                assert!(
-                    accepted
-                        .items
-                        .iter()
-                        .all(|item| item.status == "pending" || item.status == "accepted"),
-                    "individual admission: {individual_states:?}"
-                );
-                phase = "individual-acceptance";
-                phase_entries.push((phase, started.elapsed().as_millis()));
-                let accepted = wait_forward_receipts(&sender, &request).await;
-                for item in &accepted.items {
-                    let id = crate::eventlog::EventId::new(
-                        hex::decode(item.message_id.as_ref().unwrap())
-                            .unwrap()
-                            .try_into()
-                            .unwrap(),
+            Box::pin(crate::node::account_group::functional_account_convergence(
+                async {
+                    phase = "individual-admission";
+                    phase_entries.push((phase, started.elapsed().as_millis()));
+                    let accepted = sender
+                        .forward_messages_if(request.clone(), |commit| commit())
+                        .await
+                        .unwrap();
+                    individual_states = admission_states(&accepted.items);
+                    assert_eq!(
+                        accepted.items.len(),
+                        2,
+                        "individual admission item count: {individual_states:?}"
                     );
-                    sender
-                        .flush_accepted_message(&MessageDestination::Channel(group), id)
-                        .await;
-                }
-                phase = "individual-history";
-                phase_entries.push((phase, started.elapsed().as_millis()));
-                loop {
-                    match recipient.channel_history(group, 10) {
-                        Ok(history) if history.len() >= 2 => break,
-                        Ok(_) | Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
-                        Err(error) => panic!("recipient history failed: {error}"),
+                    assert!(
+                        accepted
+                            .items
+                            .iter()
+                            .all(|item| item.status == "pending" || item.status == "accepted"),
+                        "individual admission: {individual_states:?}"
+                    );
+                    phase = "individual-acceptance";
+                    phase_entries.push((phase, started.elapsed().as_millis()));
+                    let accepted = wait_forward_receipts(&sender, &request).await;
+                    for item in &accepted.items {
+                        let id = crate::eventlog::EventId::new(
+                            hex::decode(item.message_id.as_ref().unwrap())
+                                .unwrap()
+                                .try_into()
+                                .unwrap(),
+                        );
+                        sender
+                            .flush_accepted_message(&MessageDestination::Channel(group), id)
+                            .await;
                     }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-                let history = recipient.channel_history(group, 10).unwrap();
-                assert_eq!(
-                    history
-                        .iter()
-                        .map(|row| row.text.clone())
-                        .collect::<Vec<_>>(),
-                    vec![b"first".to_vec(), b"second".to_vec()]
-                );
-            })
+                    phase = "individual-history";
+                    phase_entries.push((phase, started.elapsed().as_millis()));
+                    loop {
+                        match recipient.channel_history(group, 10) {
+                            Ok(history) if history.len() >= 2 => break,
+                            Ok(_) | Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                            }
+                            Err(error) => panic!("recipient history failed: {error}"),
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    let history = recipient.channel_history(group, 10).unwrap();
+                    assert_eq!(
+                        history
+                            .iter()
+                            .map(|row| row.text.clone())
+                            .collect::<Vec<_>>(),
+                        vec![b"first".to_vec(), b"second".to_vec()]
+                    );
+                },
+            ))
             .await?;
             request.operation_id = format!("{}-group-merged", super::super::node::now_millis());
             request.mode = "merged".into();

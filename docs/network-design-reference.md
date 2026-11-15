@@ -2770,6 +2770,14 @@ a separate contract. A sync view captures a finite exclusive commit cutoff plus
 store, domain, conversation and destructive-generation binding; later appends
 belong to a later exchange. Destructive or authorization changes invalidate the
 view. No database transaction or mutex spans network I/O.
+Ordinary active participant views acquire the existing count-only Profile
+compaction lease before capturing their cutoff. Physical Profile reclamation
+waits until the view is dropped or parked; a parked custody/prepared cache entry
+holds no lease, and checkout reacquires before validating the current binding.
+This preserves the finite cut through preparation yields and response export
+without weakening privacy, erasure or authority invalidation. History uploads
+retain their existing binding/refresh lifecycle, including dormant upload caches;
+they do not inherit this ordinary exchange lease.
 
 Direct participant fingerprint probes consult the existing bounded projection
 metadata cache before constructing a historical selection. Paged summaries are
@@ -3392,7 +3400,15 @@ requests follow the same rule: a requester can receive a chat message while
 publishing a file. Both immediate sends and retained transfer steps drain accepted
 conversation scopes before consent/custody progression, including failed rounds.
 Cancellation retains the actual transport admission until that drain completes;
-a pending download approval does not defer chat reception.
+a pending download approval does not defer chat reception. Ordinary outgoing
+delivery, profile reconciliation, verified pulls and channel synchronization use
+that same reception owner before accepting any response. Recipient confirmation
+can cancel an outgoing attempt after its response has imported a reverse-direction
+message; accepted incoming work survives that cancellation. Drain accepted scopes
+outside the adapter guard before returning a channel to the pool, including error
+paths, while preserving existing quiet-recovery checks when no scope was accepted.
+The operation captures its existing live or catch-up arrival classification in
+that same owner; cancellation cannot turn channel recovery into live UI traffic.
 
 Pool lookup preserves explicit listener isolation. Up to 256 bounded route
 affinities remember an actually authenticated fallback for the same requested

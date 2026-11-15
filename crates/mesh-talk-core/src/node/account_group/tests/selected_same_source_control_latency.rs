@@ -222,8 +222,11 @@ impl ColdControlScope {
             self.paired = false;
         }
     }
+    pub(super) fn pair_retired(&self) -> bool {
+        !self.paired
+    }
     pub(super) fn ready(&self) -> bool {
-        self.settled && !self.paired
+        self.settled && self.pair_retired()
     }
     fn observe_corpus(&mut self, event: &str, corpus: Option<ColdControlCorpus>) {
         self.observe(event, corpus.is_some());

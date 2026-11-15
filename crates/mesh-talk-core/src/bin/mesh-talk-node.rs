@@ -139,7 +139,7 @@ fn parse_account_message(input: &str) -> Result<(&str, &str), String> {
     Ok((account, text))
 }
 
-async fn send_account_command(node: &Node, input: &str) -> Result<(), String> {
+async fn send_account_command(node: &Arc<Node>, input: &str) -> Result<(), String> {
     let (account, text) = parse_account_message(input)?;
     node.send_to_account(account, text.as_bytes(), None)
         .await

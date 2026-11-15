@@ -317,12 +317,69 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
         .send_to_account(&new, b"explicit contact after rekey", None)
         .await
         .unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(3), brx.recv()).await;
+    if received.is_err() {
+        let accepted = alice.account_history(&new, 100).ok().and_then(|rows| {
+            rows.into_iter()
+                .find(|row| row.from_me && row.text == b"explicit contact after rekey")
+        });
+        let outgoing = accepted.as_ref().and_then(|row| {
+            let delivery = alice.node.delivery.lock().unwrap();
+            delivery.message(row.id).map(|message| {
+                (
+                    delivery.status(row.id),
+                    message
+                        .destinations
+                        .iter()
+                        .map(|destination| destination.event.id)
+                        .collect::<Vec<_>>(),
+                )
+            })
+        });
+        let custody = outgoing.as_ref().map(|(_, ids)| {
+            ids.iter()
+                .map(|id| {
+                    let held = bob
+                        .node
+                        .log
+                        .lock()
+                        .unwrap()
+                        .get(id)
+                        .map(|row| row.is_some());
+                    let processed = bob.node.received.lock().unwrap().processed(*id);
+                    (held, processed)
+                })
+                .collect::<Vec<_>>()
+        });
+        let route_current = alice.node.routing_peer(bob.user_id()).is_some_and(|peer| {
+            peer.account_id.as_deref() == Some(new.as_str())
+                && peer.addr.port() == bob.listen_tcp_port()
+        });
+        let binding_current = alice
+            .node
+            .privacy
+            .state
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|state| {
+                state.proofs.account_for(&public).as_deref() == Some(new.as_str())
+            });
+        let receiver_proof_current = bob
+            .node
+            .historical_author(&alice.node.identity.public().ed25519_pub)
+            .is_some_and(|proof| proof.account_id().as_deref() == Some(alice.account_id()));
+        let receiver_author_allowed = bob
+            .node
+            .known_account_allowed(&alice.node.identity.public());
+        eprintln!(
+            "explicit rekey receive failure: accepted={} delivery={:?} custody={custody:?} route_current={route_current} binding_current={binding_current} receiver_proof_current={receiver_proof_current} receiver_author_allowed={receiver_author_allowed}",
+            accepted.is_some(),
+            outgoing.as_ref().map(|row| row.0)
+        );
+    }
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(3), brx.recv())
-            .await
-            .unwrap()
-            .unwrap()
-            .text,
+        received.unwrap().unwrap().text,
         b"explicit contact after rekey"
     );
     assert!(
@@ -1174,6 +1231,16 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
         let reply_accepted = b.account_history(a.account_id(), 20).is_ok_and(|rows| rows.iter().any(|row| row.from_me && row.text == private_reply));
         let reply_received = a.account_history(b.account_id(), 20).is_ok_and(|rows| rows.iter().any(|row| !row.from_me && row.text == private_reply));
         assert_eq!(b.node.privacy.generation.load(std::sync::atomic::Ordering::SeqCst), public_generation);
+        if private_recovered.is_err() {
+            let history = b.account_history(a.account_id(), 20).unwrap();
+            let id = history.iter().find(|row| row.from_me && row.text == private_reply).unwrap().id;
+            let event_id = b.node.delivery.lock().unwrap().message(id).unwrap().destinations[0].event.id;
+            let held = a.node.log.lock().unwrap().get(&event_id).unwrap().is_some();
+            let processed = a.node.received.lock().unwrap().processed(event_id).unwrap();
+            let proof_current = a.node.historical_author(&b.node.identity.public().ed25519_pub).is_some_and(|proof| proof.account_id().as_deref() == Some(b.account_id()));
+            let author_allowed = a.node.known_account_allowed(&b.node.identity.public());
+            eprintln!("private-reply boundary ciphertext_held={held} processed={processed} author_proof_current={proof_current} author_allowed={author_allowed} delivery_status={:?}", b.node.delivery_status(id));
+        }
         assert!(private_recovered.is_ok(), "authorized private reply did not recover: return_route_current={return_route_current} locally_accepted={reply_accepted} receiver_plaintext={reply_received}");
         drop(old_listener);
     }).catch_unwind().await;

@@ -36,6 +36,14 @@ pub(in crate::node) struct SyncReceptionScope<'a, 'node> {
     capacity: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     transport_capacity: Vec<Arc<tokio::sync::OwnedSemaphorePermit>>,
     runtime: tokio::runtime::Handle,
+    arrival: super::reception_effects::ArrivalKind,
+}
+
+impl SyncReceptionScope<'_, '_> {
+    pub(in crate::node) fn dispatch(&self) -> bool {
+        self.node
+            .dispatch_received_sync_work_with_arrival(self.store, self.arrival)
+    }
 }
 
 impl Drop for SyncReceptionScope<'_, '_> {
@@ -53,6 +61,7 @@ impl Drop for SyncReceptionScope<'_, '_> {
         let node = self.node.clone();
         let capacity = self.capacity.take();
         let transport_capacity = std::mem::take(&mut self.transport_capacity);
+        let arrival = self.arrival;
         // WorkPermit keeps the captured Node and SQL work inside retirement's
         // drain even though cancellation has destroyed the awaiting connection.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -61,7 +70,7 @@ impl Drop for SyncReceptionScope<'_, '_> {
                 // Releasing the socket does not release SQL cleanup capacity.
                 let _capacity = capacity;
                 let _transport_capacity = transport_capacity;
-                node.dispatch_received_conversations(conversations);
+                node.dispatch_received_conversations(conversations, arrival);
             }));
         }));
     }
@@ -247,7 +256,7 @@ impl Node {
     /// Dial `peer` directly and run one sync round for `conv`. Best-effort: the
     /// peer may be offline, in which case the dial fails.
     pub(in crate::node) async fn deliver_direct(
-        &self,
+        self: &std::sync::Arc<Self>,
         peer: &PeerRecord,
         conv: ConversationId,
     ) -> Result<(), SessionError> {
@@ -265,7 +274,12 @@ impl Node {
             }
             .map_err(SessionError::Transport)?;
             let store = self.sync_store(channel.peer_identity());
-            match request_round(&mut channel, &store, conv).await {
+            let _reception = self
+                .request_reception_scope(&store, &channel)
+                .ok_or(SessionError::UnexpectedMessage)?;
+            let result = request_round(&mut channel, &store, conv).await;
+            self.dispatch_received_sync_work(&store);
+            match result {
                 Ok(_) => {
                     if conv
                         == super::conversation::dm_conversation_id(
@@ -832,6 +846,7 @@ impl Node {
             capacity,
             transport_capacity: Vec::new(),
             runtime: tokio::runtime::Handle::current(),
+            arrival: super::reception_effects::ArrivalKind::Live,
         };
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
         // timeout on every recv + a per-connection round ceiling (mirrors the relay).
@@ -1047,6 +1062,19 @@ impl Node {
         store: &'a std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'node>>,
         channel: &SecureChannel<TcpStream>,
     ) -> Option<SyncReceptionScope<'a, 'node>> {
+        self.request_reception_scope_with_arrival(
+            store,
+            channel,
+            super::reception_effects::ArrivalKind::Live,
+        )
+    }
+
+    pub(in crate::node) fn request_reception_scope_with_arrival<'a, 'node>(
+        self: &Arc<Self>,
+        store: &'a std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'node>>,
+        channel: &SecureChannel<TcpStream>,
+        arrival: super::reception_effects::ArrivalKind,
+    ) -> Option<SyncReceptionScope<'a, 'node>> {
         let node = self.clone();
         let permit = self.runtime_work.admit()?;
         store.lock().expect("sync store lock").track_reception();
@@ -1057,29 +1085,49 @@ impl Node {
             capacity: None,
             transport_capacity: channel.reception_capacity(),
             runtime: tokio::runtime::Handle::current(),
+            arrival,
         })
     }
 
     pub(in crate::node) fn dispatch_received_sync_work(
         &self,
         store: &std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'_>>,
-    ) {
+    ) -> bool {
+        self.dispatch_received_sync_work_with_arrival(
+            store,
+            super::reception_effects::ArrivalKind::Live,
+        )
+    }
+
+    fn dispatch_received_sync_work_with_arrival(
+        &self,
+        store: &std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'_>>,
+        arrival: super::reception_effects::ArrivalKind,
+    ) -> bool {
         let conversations = store
             .lock()
             .expect("sync store lock")
             .take_received_conversations();
         // Release the adapter guard before reception acquires log/book owners.
-        self.dispatch_received_conversations(conversations);
+        let received = !conversations.is_empty();
+        self.dispatch_received_conversations(conversations, arrival);
+        received
     }
 
     fn dispatch_received_conversations(
         &self,
         conversations: std::collections::HashSet<ConversationId>,
+        arrival: super::reception_effects::ArrivalKind,
     ) {
+        let context = match arrival {
+            super::reception_effects::ArrivalKind::Live => "live",
+            super::reception_effects::ArrivalKind::CatchUp => "catch_up",
+            super::reception_effects::ArrivalKind::HistorySync => "history_sync",
+        };
         for conversation in conversations {
             self.emit_new_messages(conversation);
-            self.process_channel(conversation);
-            self.process_file_events(conversation);
+            self.process_channel_reception(conversation, context);
+            self.process_file_events_reception(conversation, context);
             self.process_profile_events(conversation);
         }
     }
@@ -3549,6 +3597,7 @@ mod inbound_idle_capacity_tests {
                             capacity,
                             transport_capacity: Vec::new(),
                             runtime: tokio::runtime::Handle::current(),
+                            arrival: super::reception_effects::ArrivalKind::Live,
                         }
                     };
                     NetworkSyncStore::ingest(&mut *store.lock().unwrap(), event).unwrap();

@@ -98,7 +98,7 @@ impl EventRepository {
         // One SQLite snapshot observes both sides of the partition, including
         // concurrent publication. Legacy databases start with no classified row.
         let (destructive, classified): (i64, i64) = c.prepare_cached(
-            "SELECT coalesce((SELECT revision FROM participant_destructive_revisions WHERE domain=?1),0),coalesce((SELECT counter FROM participant_semantic_compaction_revisions WHERE domain=?1),0)",
+            "SELECT coalesce((SELECT revision FROM participant_destructive_revisions WHERE domain=CAST(?1 AS BLOB)),0),coalesce((SELECT counter FROM participant_semantic_compaction_revisions WHERE domain=CAST(?1 AS BLOB)),0)",
         )?.query_row([self.domain.0.as_slice()], |row| Ok((row.get(0)?, row.get(1)?)))?;
         nonnegative(destructive)?;
         nonnegative(classified)?;
@@ -154,11 +154,13 @@ impl EventRepository {
             Ok(Some(revisions))
         })
     }
+    // Explicit BLOB expressions keep STAT4 from recompiling these fixed lookups
+    // when the statement cache clears and rebinds the same typed domain.
     pub(crate) fn raw_policy_revisions(&self) -> Result<Option<[i64; 32]>, LogError> {
         self.database.read(|c| {
-            let ready:bool=c.prepare_cached("SELECT s.ordinal>=d.next_commit-1 FROM participant_kind_scan s JOIN event_domains d ON d.domain=s.domain WHERE s.domain=?1")?.query_row([self.domain.0.as_slice()],|r|r.get(0))?;
+            let ready:bool=c.prepare_cached("SELECT s.ordinal>=d.next_commit-1 FROM participant_kind_scan s JOIN event_domains d ON d.domain=s.domain WHERE s.domain=CAST(?1 AS BLOB)")?.query_row([self.domain.0.as_slice()],|r|r.get(0))?;
             if !ready{return Ok(None);}
-            let mut revisions=[-1;32];let mut stmt=c.prepare_cached("SELECT kind,ordinal FROM participant_policy_revisions WHERE domain=?1 ORDER BY kind")?;let mut rows=stmt.query([self.domain.0.as_slice()])?;
+            let mut revisions=[-1;32];let mut stmt=c.prepare_cached("SELECT kind,ordinal FROM participant_policy_revisions WHERE domain=CAST(?1 AS BLOB) ORDER BY kind")?;let mut rows=stmt.query([self.domain.0.as_slice()])?;
             while let Some(row)=rows.next()?{let kind=usize::try_from(row.get::<_,i64>(0)?).map_err(|_|corrupt("invalid policy kind revision"))?;*revisions.get_mut(kind).ok_or_else(||corrupt("unsupported policy kind revision"))?=nonnegative(row.get(1)?)?;}
             Ok(Some(revisions))
         })

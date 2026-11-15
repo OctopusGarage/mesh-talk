@@ -141,7 +141,11 @@ fn reopen_action_node(path: &Path, account: &Account, secrets: ([u8; 32], [u8; 3
     .unwrap()
 }
 
-async fn recall_original(source: &Node, group: ConversationId, deadline: Option<u64>) -> Event {
+async fn recall_original(
+    source: &std::sync::Arc<Node>,
+    group: ConversationId,
+    deadline: Option<u64>,
+) -> Event {
     source
         .send_channel_message_reply_expiring(group, b"recall lifecycle original", None, deadline)
         .await

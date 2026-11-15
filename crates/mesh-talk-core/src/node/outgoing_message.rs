@@ -232,37 +232,46 @@ impl Node {
     }
 
     pub async fn flush_accepted_message(
-        &self,
+        self: &std::sync::Arc<Self>,
         destination: &MessageDestination,
         message_id: EventId,
     ) {
         match destination {
             MessageDestination::Account(_) => self.flush_delivery(message_id).await,
             MessageDestination::Channel(channel) => {
-                let ready = {
-                    let mut store = self.delivery.lock().expect("delivery lock");
-                    match self.recover_delivery(&mut store) {
-                        Ok(()) => true,
-                        Err(error) => {
-                            log::warn!("accepted channel delivery recovery deferred: {error}");
-                            false
-                        }
-                    }
-                };
-                if !ready {
-                    return;
-                }
-                let members = self
-                    .channels
-                    .lock()
-                    .expect("channels lock")
-                    .state(channel)
-                    .map(|s| s.members().to_vec());
-                if let Some(members) = members {
-                    self.distribute_channel_message(*channel, &members, message_id)
-                        .await;
+                self.flush_accepted_channel_message(*channel, message_id)
+                    .await
+            }
+        }
+    }
+
+    pub(in crate::node) async fn flush_accepted_channel_message(
+        self: &std::sync::Arc<Self>,
+        channel: ConversationId,
+        message_id: EventId,
+    ) {
+        let ready = {
+            let mut store = self.delivery.lock().expect("delivery lock");
+            match self.recover_delivery(&mut store) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("accepted channel delivery recovery deferred: {error}");
+                    false
                 }
             }
+        };
+        if !ready {
+            return;
+        }
+        let members = self
+            .channels
+            .lock()
+            .expect("channels lock")
+            .state(&channel)
+            .map(|s| s.members().to_vec());
+        if let Some(members) = members {
+            self.distribute_channel_message(channel, &members, message_id)
+                .await;
         }
     }
 

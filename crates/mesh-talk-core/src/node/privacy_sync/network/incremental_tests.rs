@@ -1762,3 +1762,130 @@ async fn ready_history_retention_incomplete_pending_unknown_read_failure_and_clo
         }
     }
 }
+
+#[test]
+fn active_views_defer_profile_compaction_and_idle_plans_release_it() {
+    for (history, node_cache) in [(false, false), (false, true), (true, true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&peer, &account, "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation =
+            crate::node::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+        for revision in 1..=12 {
+            let payload = crate::node::profile::ProfilePayload::new(&account, None, revision);
+            let event = Event::new(
+                &peer,
+                conversation,
+                revision,
+                vec![],
+                revision,
+                0,
+                EventKind::Profile,
+                crate::dm::seal(&peer, &node.identity.public().x25519_pub, &payload.encode())
+                    .unwrap(),
+            );
+            node.log.lock().unwrap().append(event).unwrap();
+        }
+        node.log
+            .lock()
+            .unwrap()
+            .request_profile_compaction(conversation)
+            .unwrap();
+        let owner = node.sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        if node_cache {
+            NetworkSyncStore::bind_session_peer(&mut *store, &peer.public());
+        }
+        if history {
+            let upload = store.open_history_upload(&conversation).unwrap();
+            prepare_upload(&store, &upload);
+            assert_eq!(*node.profile_compaction_leases.lock().unwrap(), 0);
+            let mut dropped = 0;
+            for _ in 0..100 {
+                if let Some(count) = node.drain_profile_compaction().unwrap() {
+                    dropped += count;
+                }
+                if dropped == 10 {
+                    break;
+                }
+            }
+            assert_eq!(
+                dropped, 10,
+                "dormant history uploads use their existing binding refresh owner, not a physical compaction lease"
+            );
+            drop(upload);
+            let fresh = store.open_history_upload(&conversation).unwrap();
+            prepare_upload(&store, &fresh);
+            assert_eq!(
+                NetworkSyncStore::metadata(&*store, &fresh.view)
+                    .unwrap()
+                    .count,
+                2
+            );
+            store.retain_history_upload(fresh).unwrap();
+            assert_eq!(*node.profile_compaction_leases.lock().unwrap(), 0);
+            continue;
+        } else {
+            let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+            assert_eq!(node.drain_profile_compaction().unwrap(), None);
+            for _ in 0..1000 {
+                if NetworkSyncStore::prepare_view_step(&*store, &view, PreparationBudget::default())
+                    .unwrap()
+                    .ready
+                {
+                    break;
+                }
+            }
+            assert_eq!(
+                NetworkSyncStore::metadata(&*store, &view).unwrap().count,
+                12
+            );
+            assert_eq!(node.drain_profile_compaction().unwrap(), None);
+            assert!(
+                NetworkSyncStore::retain_custody_view(&mut *store, view)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            node.prepared_sync_views.lock().unwrap().len(),
+            usize::from(node_cache)
+        );
+        assert_eq!(
+            *node.profile_compaction_leases.lock().unwrap(),
+            0,
+            "idle plans must not pin physical Profile reclamation"
+        );
+        let mut dropped = 0;
+        for _ in 0..100 {
+            if let Some(count) = node.drain_profile_compaction().unwrap() {
+                dropped += count;
+            }
+            if dropped == 10 {
+                break;
+            }
+        }
+        assert_eq!(dropped, 10);
+        // A cache hit cannot revive the invalidated old finite cut.
+        assert!(
+            NetworkSyncStore::take_custody_view(&mut *store, &conversation)
+                .unwrap()
+                .is_none()
+        );
+        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        assert_eq!(*node.profile_compaction_leases.lock().unwrap(), 1);
+        drop(view);
+        assert_eq!(
+            *node.profile_compaction_leases.lock().unwrap(),
+            0,
+            "abandoned active views release their actual lease"
+        );
+    }
+}

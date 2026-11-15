@@ -870,7 +870,19 @@ through cancellation, timeout and dropping outside the runtime context. Apply th
 to both transport roles: a file-manifest requester can durably import a chat reply
 before checking download consent. The [delivery regression](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
 requires automatic plaintext and the exact recipient receipt after that real
-bidirectional exchange, without a history read or another payload healing it. Reuse
+bidirectional exchange, without a history read or another payload healing it.
+Ordinary delivery/profile, verified-pull and channel requester paths need that
+same reception owner before their first response. An outgoing receipt can retire
+the awaiting attempt after it has imported a reverse-direction message; post-success
+callbacks cannot own this accepted work. The delivery-runtime
+`cancelled_requester_rounds_dispatch_reverse_dm_already_received_in_response`
+regression establishes real persisted ratchets, cancels after the exact response
+ingest, checks incoming plaintext and joins actual retirement before dropping
+storage. Capture the operation's existing arrival classification in the same
+owner so Drop cannot promote catch-up channel messages to live notifications;
+`requester_reception_scope_preserves_channel_arrival_on_dispatch_and_drop` checks
+real accepted channel content through both paths. Drain before pooled reuse;
+preserve separate quiet-recovery decisions when no new accepted scope was dispatched. Reuse
 completed export preparation under its current source stamp. Require exact Have
 when ancestor closure depends on it; an independent plan may instead rebind its
 cursor digest and apply the fresh Have as a read filter, without persisting query
@@ -1176,6 +1188,17 @@ erasure or unknown/corrupt classification. The
 check unchanged dependent file exports and retained manifest/proof/ancestor facts,
 own-view rejection, classifier rollback/retry, corrupt or missing metadata, and
 logical parent retirement before physical deletion.
+An ordinary active participant view must exclude physical Profile compaction
+before capturing its finite cut, including preparation turns that yield before
+the response is sent. Reuse the existing count-only compaction lease; release it
+when parking an idle custody/prepared plan and reacquire before checkout
+validation. Keep SQL/cache guards outside lease destruction. Dormant history
+uploads retain their separate binding/refresh owner and cannot pin reclamation.
+The unchanged `accept_loop_compacts_received_profiles_without_desktop_runtime`
+loopback regression covers the real serving path; the participant incremental
+`active_views_defer_profile_compaction_and_idle_plans_release_it` control checks
+active preparation, idle release, stale checkout and abandoned-view cleanup.
+Privacy and destructive authority changes must still reject an active view.
 
 Version the private hash domain when a persisted derived fingerprint changes
 meaning, even if its serialized fields and wire layout remain identical. Changing
@@ -1353,7 +1376,13 @@ and rows. The [repository regressions](../crates/mesh-talk-core/src/eventlog/rep
 `peer_known_export_ids_skip_sql_membership_and_preserve_unknown_authority` and
 `hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh` count
 actual SQLite preparation work while preserving unknown-item authorization,
-fresh revisions and corruption failures.
+fresh revisions and corruption failures. A cached statement can still recompile
+when SQLite STAT4 considers a changed indexed parameter during planning. At fixed
+identity/cursor lookups, typed parameter expressions must preserve the owning
+BLOB/INTEGER comparisons and indexed query plan while avoiding that repeated
+work. Validate actual reprepare counts and `EXPLAIN QUERY PLAN`, alongside the
+existing revision, corruption and federation mismatch controls; retaining a VM
+alone does not prove compilation reuse.
 
 An idempotent update can still allocate an entire collection before returning
 unchanged. Perform borrowed no-op, identity and capacity checks before copying;
@@ -1918,6 +1947,19 @@ Historical scope completion does not prove an existing child or pair has retired
 When a fixture requires a natural unpaired read, establish it through receiver-owned
 demand before publishing the Wake that deliberately creates its replacement; observe
 the exact setup task, page completion and pair retirement before arming the next hold.
+Keep bootstrap input evidence scoped to the named corpus. The queued-source B
+padding check requires exact current metadata, consumed operation input, a real
+successful terminal Control page, its exact child lifetime retirement and no
+outstanding pair debt. Other owners can change the global Control digest after
+that padding input is ready; whole-domain digest convergence is a separate
+contract. Retain strict A setup and the later measured A-to-B result/checkpoint
+ordering. Partial, pending, failed, cancelled, wrong-task, stale/unconsumed input
+and live-child/pair controls must still reject bootstrap readiness.
+Canonical channel presentation and selected metadata fields have separate bounded
+continuations. The two-full-parent control fixture in
+[channel tests](../crates/mesh-talk-core/src/node/channels.rs) completes field-query
+readiness before measuring quiet replay; one presentation turn cannot certify a
+ready field index. Preserve the measured source and control-work equality checks.
 
 Concurrent actual-tool fixtures must own output directories, not only source
 and temporary data. A second Playwright invocation can otherwise clean a running

@@ -61,7 +61,7 @@ fn announce(sender: &NodeRuntime, receiver_port: u16) {
         .unwrap();
 }
 
-fn send(sender: &mesh_talk_core::node::Node, account: &str, text: &[u8]) {
+fn send(sender: &std::sync::Arc<mesh_talk_core::node::Node>, account: &str, text: &[u8]) {
     tauri::async_runtime::block_on(async {
         tokio::time::timeout(
             Duration::from_secs(15),

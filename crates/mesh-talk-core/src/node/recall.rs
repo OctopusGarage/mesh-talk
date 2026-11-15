@@ -235,7 +235,7 @@ impl Node {
     /// Fans a `RecallEnvelope` (a `Delete` event) out to every device of `target_account_id`
     /// and our own, then records our own recall durably.
     pub async fn recall_account(
-        &self,
+        self: &std::sync::Arc<Self>,
         target_account_id: &str,
         target: EventId,
     ) -> Result<(), NodeError> {
@@ -245,7 +245,7 @@ impl Node {
 
     /// Enclose signed events and local recall projection in host commit authority.
     pub async fn recall_account_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         target_account_id: &str,
         target: EventId,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
@@ -322,7 +322,7 @@ impl Node {
     /// isn't ours / isn't a message / the window has passed. Seals a `DeletePayload`
     /// per-member (like a channel reaction) as a `Delete` event and distributes it.
     pub async fn recall_channel(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: ConversationId,
         target: EventId,
     ) -> Result<(), NodeError> {
@@ -332,7 +332,7 @@ impl Node {
 
     /// Enclose signed events and local recall projection in host commit authority.
     pub async fn recall_channel_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: ConversationId,
         target: EventId,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>

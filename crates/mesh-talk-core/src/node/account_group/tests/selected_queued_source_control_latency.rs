@@ -16,6 +16,8 @@ struct QueuedSetupComparison {
     scope: ColdControlScope,
     task: Option<tokio::task::Id>,
     page_finished: bool,
+    terminal_control_page: bool,
+    cancelled: bool,
 }
 
 impl QueuedSetupComparison {
@@ -23,8 +25,12 @@ impl QueuedSetupComparison {
         if phase.starts_with("control_task ") {
             self.task = task;
             self.page_finished = false;
+            self.terminal_control_page = false;
+            self.cancelled = false;
         } else if phase.starts_with("control_cancel ") {
             self.page_finished = false;
+            self.terminal_control_page = false;
+            self.cancelled = true;
         }
         if phase != "document_scope_settled scope=Control" || (task.is_some() && task == self.task)
         {
@@ -34,14 +40,56 @@ impl QueuedSetupComparison {
             && task == self.task
             && phase.starts_with("page_end ")
             && phase.contains("outcome=ok")
+            && !self.cancelled
         {
             self.page_finished = true;
+            self.terminal_control_page = [
+                "scope=Control",
+                "completed=true",
+                "pending=false",
+                "after=false",
+                "deferred=false",
+            ]
+            .iter()
+            .all(|field| phase.split_ascii_whitespace().any(|part| part == *field));
         }
     }
 
     fn ready(&self) -> bool {
         self.scope.ready() && self.page_finished
     }
+
+    fn ready_for_inputs(
+        &self,
+        current_consumed: bool,
+        lifetime: Option<&std::sync::Weak<()>>,
+    ) -> bool {
+        current_consumed
+            && self.terminal_control_page
+            && self.scope.pair_retired()
+            && lifetime.is_some_and(|lifetime| lifetime.strong_count() == 0)
+    }
+}
+
+// B contributes one named padding operation to the later short partial page.
+// Other owners may continue changing the global Control digest after this input
+// is verified. Bootstrap requires this input and a retired real comparison.
+fn queued_input_ready(
+    source: &Node,
+    requester: &Node,
+    key: &crate::node::AccountDocumentKey,
+    comparison: &Mutex<QueuedSetupComparison>,
+    pages: &Mutex<ControlTestPages>,
+) -> bool {
+    let current_consumed = source.account_document_meta(key).is_some_and(|meta| {
+        requester.account_document_meta(key).as_ref() == Some(&meta)
+            && requester.operation_input_consumed_for_test(&meta)
+    });
+    let comparison = comparison.lock().unwrap();
+    let lifetime = comparison
+        .task
+        .and_then(|task| pages.lock().unwrap().lifetime(task));
+    comparison.ready_for_inputs(current_consumed, lifetime.as_ref())
 }
 
 #[tokio::test]
@@ -72,6 +120,43 @@ async fn queued_setup_retires_wake_replacement_before_arming_the_natural_hold() 
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn queued_padding_requires_current_consumed_input_and_retired_terminal_comparison() {
+    tokio::spawn(async {
+        let task = Some(tokio::task::id());
+        let foreign = Some(tokio::spawn(async { tokio::task::id() }).await.unwrap());
+        let terminal = "page_end outcome=ok scope=Control completed=true pending=false after=false deferred=false up_to_date=false";
+        let owner = Arc::new(());
+        let retired = Arc::downgrade(&owner);
+        let mut comparison = QueuedSetupComparison::default();
+        comparison.observe("control_task paired=false protected=false", task);
+        comparison.observe(terminal, foreign);
+        drop(owner);
+        assert!(!comparison.ready_for_inputs(true, Some(&retired)), "another task cannot finish the named comparison");
+        comparison.observe("page_end outcome=ok scope=Control completed=false pending=false after=false deferred=false", task);
+        assert!(!comparison.ready_for_inputs(true, Some(&retired)), "generic success does not prove a real page");
+        comparison.observe("page_end outcome=ok scope=Control completed=true pending=true after=true deferred=false", task);
+        assert!(!comparison.ready_for_inputs(true, Some(&retired)), "a partial page still owes its continuation");
+        comparison.observe("page_end outcome=error scope=Control completed=true pending=false after=false deferred=false", task);
+        assert!(!comparison.ready_for_inputs(true, Some(&retired)), "failed exchange cannot finish the comparison");
+        comparison.observe(terminal, task);
+        assert!(!comparison.ready(), "global digest convergence remains a separate strict oracle");
+        assert!(comparison.ready_for_inputs(true, Some(&retired)), "a retired terminal comparison qualifies its verified named input without global convergence");
+        assert!(!comparison.ready_for_inputs(false, Some(&retired)), "changed or unconsumed metadata cannot qualify");
+        assert!(!comparison.ready_for_inputs(true, None), "missing lifetime evidence cannot prove retirement");
+        let live = Arc::new(());
+        assert!(!comparison.ready_for_inputs(true, Some(&Arc::downgrade(&live))), "the real child must retire first");
+        comparison.observe("control_task paired=true protected=false", task);
+        comparison.observe(terminal, task);
+        assert!(!comparison.ready_for_inputs(true, Some(&retired)), "a terminal page cannot pay outstanding pair debt");
+        comparison.observe("control_pair_retired", None);
+        assert!(comparison.ready_for_inputs(true, Some(&retired)));
+        comparison.observe("control_cancel task=old reason=wake", None);
+        comparison.observe(terminal, task);
+        assert!(!comparison.ready_for_inputs(true, Some(&retired)), "a late page cannot revive a cancelled owner");
+    }).await.unwrap();
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -713,6 +798,10 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     // Use the normal provider's operation-prefix/legacy boundary rather than
     // importing a full 64-row padding page just to obtain a real continuation.
     b.publish_account_group_operations_for(padding_group);
+    let padding_key = crate::node::AccountDocumentKey::GroupOperation {
+        channel: hex::encode(padding_group.as_bytes()),
+        source_device: b.user_id(),
+    };
     for left in [&a, &b, &reference] {
         for right in [&a, &b, &reference] {
             if left.user_id() != right.user_id() {
@@ -1228,6 +1317,9 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         }
     }));
     *a.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let input_source = Arc::downgrade(&b);
+        let input_requester = Arc::downgrade(&reference);
+        let padding_key = padding_key.clone();
         let paid_a_dispatch = paid_a_dispatch.clone();
         let expected = reference.identity.public();
         let setup_wake_ready = setup_wake_ready.clone();
@@ -1246,6 +1338,9 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let first_held_task = first_held_task.clone();
         let preparation_read = preparation_read.clone();
         move |peer, frame| {
+            let input_source = input_source.clone();
+            let input_requester = input_requester.clone();
+            let padding_key = padding_key.clone();
             let paid_a_dispatch = paid_a_dispatch.clone();
             let expected = expected.clone();
             let setup_wake_ready = setup_wake_ready.clone();
@@ -1292,7 +1387,19 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                 if first_pending {
                     let rejected = if !first_hold_armed.load(std::sync::atomic::Ordering::Acquire) {
                         Some(0)
-                    } else if !b_readiness.lock().unwrap().ready() {
+                    } else if !input_source
+                        .upgrade()
+                        .zip(input_requester.upgrade())
+                        .is_some_and(|(source, requester)| {
+                            queued_input_ready(
+                                &source,
+                                &requester,
+                                &padding_key,
+                                &b_readiness,
+                                &pages,
+                            )
+                        })
+                    {
                         Some(1)
                     } else if !pages.lock().unwrap().request(&request).is_some_and(|page| {
                         page.dispatch()
@@ -1626,18 +1733,10 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         send_boundary_wake(&a, &reference).await;
         reference.request_sibling_pull_for_test(&b.identity.public());
         reference.request_sibling_pull_for_test(&a.identity.public());
-        let padding_key = crate::node::AccountDocumentKey::GroupOperation {
-            channel: hex::encode(padding_group.as_bytes()),
-            source_device: b.user_id(),
-        };
         loop {
             let a_ready = a_setup_comparison.lock().unwrap().ready();
-            let b_ready = b_readiness.lock().unwrap().ready();
-            let b_inputs_current = b.account_document_meta(&padding_key).is_some_and(|meta| {
-                reference.account_document_meta(&padding_key).as_ref() == Some(&meta)
-                    && reference.operation_input_consumed_for_test(&meta)
-            });
-            if a_ready && b_ready && b_inputs_current && reference.account_document_meta(&key) == a.account_document_meta(&key) {
+            let b_ready = queued_input_ready(&b, &reference, &padding_key, &b_readiness, &pages);
+            if a_ready && b_ready && reference.account_document_meta(&key) == a.account_document_meta(&key) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1650,6 +1749,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         .await
         .unwrap_or_else(|error| {
             let ready = b_readiness.lock().unwrap().ready();
+            let named_ready = queued_input_ready(&b, &reference, &padding_key, &b_readiness, &pages);
             let observed = pages.lock().unwrap().summary();
             let setup = setup_trace.lock().unwrap().clone();
             let wake = *setup_wake_observed.lock().unwrap();
@@ -1657,7 +1757,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                 let comparison = a_setup_comparison.lock().unwrap();
                 (comparison.task, comparison.page_finished, comparison.ready())
             };
-            panic!("natural A read must precede real B publication: {error:?}; A_wake={wake:?} A_task={a_task:?} A_page_finished={a_page_finished}; B_unpaired_settled={ready} B_partial={}; A_setup_ready={}; armed={}; rejected_unarmed_B_unready_ineligible_not_live_pre_wake_missing_dispatch={:?}; pages={observed:?}; setup={setup:?}", b_partial.load(std::sync::atomic::Ordering::Acquire), a_ready, first_hold_armed.load(std::sync::atomic::Ordering::Acquire), *first_rejections.lock().unwrap());
+            panic!("natural A read must precede real B publication: {error:?}; A_wake={wake:?} A_task={a_task:?} A_page_finished={a_page_finished}; B_named_input_ready={named_ready} B_global_scope_settled={ready} B_partial={}; A_setup_ready={}; armed={}; rejected_unarmed_B_unready_ineligible_not_live_pre_wake_missing_dispatch={:?}; pages={observed:?}; setup={setup:?}", b_partial.load(std::sync::atomic::Ordering::Acquire), a_ready, first_hold_armed.load(std::sync::atomic::Ordering::Acquire), *first_rejections.lock().unwrap());
         })
         .unwrap();
     let first_active = pages.lock().unwrap().is_active(first_task);
@@ -1707,6 +1807,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         .await
         .unwrap_or_else(|error| {
             let ready = b_readiness.lock().unwrap().ready();
+            let named_ready = queued_input_ready(&b, &reference, &padding_key, &b_readiness, &pages);
             let roles = origins.lock().unwrap().clone();
             let observed = pages.lock().unwrap().summary();
             let setup = setup_trace.lock().unwrap().clone();
@@ -1715,7 +1816,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                 let progress = b_page_progress.lock().unwrap();
                 (progress.headers_attempted, progress.complete_attempted, progress.last_elapsed_ms, progress.lifetime.strong_count() > 0)
             };
-            panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={ready} B_partial={}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
+            panic!("B protected partial page must be queued before A resumes: {error:?}; B_named_input_ready={named_ready} B_global_scope_settled={ready} B_partial={}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
         })
         .unwrap();
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));

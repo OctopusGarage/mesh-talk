@@ -334,7 +334,7 @@ impl Node {
         Ok(value)
     }
     pub async fn set_channel_cover_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: ConversationId,
         content: Option<&str>,
         expected_revision: Option<EventId>,
@@ -344,7 +344,7 @@ impl Node {
             .await
     }
     pub async fn set_channel_announcement_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: ConversationId,
         content: Option<&str>,
         expected_revision: Option<EventId>,
@@ -360,7 +360,7 @@ impl Node {
         .await
     }
     async fn set_channel_metadata_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: ConversationId,
         field: Field,
         content: Option<&str>,

@@ -123,6 +123,9 @@ pub(in crate::node) struct ParticipantView {
     export_have: Mutex<Option<[u8; 32]>>,
     sibling_closure: bool,
     metadata_stamp: Option<HistorySyncStamp>,
+    // Keep only active finite cuts stable against physical Profile reclamation.
+    // Parked derived indexes must release this count-only maintenance lease.
+    compaction_lease: Option<super::super::node::ProfileCompactionLease>,
 }
 #[derive(Clone)]
 pub(in crate::node) enum ParticipantHaveCursor {
@@ -154,7 +157,12 @@ impl GuardedSyncStore<'_> {
         conversation: &ConversationId,
     ) -> Result<Option<RetainedSelection>, LogError> {
         if !self.use_node_preparation {
-            return Ok(self.custody_view.take());
+            let mut value = self.custody_view.take();
+            if let Some(retained) = &mut value {
+                retained.view.compaction_lease =
+                    Some(self.node.acquire_profile_compaction_lease()?);
+            }
+            return Ok(value);
         }
         self.take_node_prepared_selection(conversation, Purpose::Ordinary)
     }
@@ -166,6 +174,10 @@ impl GuardedSyncStore<'_> {
         if self.node.runtime_work.is_closed() {
             return Ok(None);
         }
+        // Reacquire before observing the current cut or checking out an idle plan.
+        let compaction_lease = (purpose == Purpose::Ordinary)
+            .then(|| self.node.acquire_profile_compaction_lease())
+            .transpose()?;
         let Some(stamp) = self.history_sync_stamp(conversation)? else {
             return Ok(None);
         };
@@ -182,6 +194,7 @@ impl GuardedSyncStore<'_> {
         };
         drop(retired);
         if let Some(mut value) = value {
+            value.view.compaction_lease = compaction_lease;
             if self.node.runtime_work.is_closed() {
                 return Ok(None);
             }
@@ -253,7 +266,7 @@ impl GuardedSyncStore<'_> {
         }
         let scope = self.prepared_scope(view.conversation, purpose);
         let stamp = view.metadata_stamp.clone().ok_or(LogError::StaleCursor)?;
-        let retired = {
+        let (retired, compaction_lease) = {
             let mut cache = self
                 .node
                 .prepared_sync_views
@@ -271,7 +284,8 @@ impl GuardedSyncStore<'_> {
                 .as_mut()
                 .ok_or(LogError::StaleCursor)?
                 .park();
-            cache.insert(
+            let compaction_lease = view.compaction_lease.take();
+            let retired = cache.insert(
                 scope,
                 stamp,
                 bytes,
@@ -283,9 +297,11 @@ impl GuardedSyncStore<'_> {
                     view,
                 },
                 std::time::Instant::now(),
-            )
+            );
+            (retired, compaction_lease)
         };
         drop(retired);
+        drop(compaction_lease);
         Ok(None)
     }
     pub(in crate::node) fn history_upload_id_page(
@@ -445,7 +461,11 @@ impl GuardedSyncStore<'_> {
                 return Ok(upload);
             }
         }
-        let view = NetworkSyncStore::open_view(self, conversation)?;
+        let mut view = NetworkSyncStore::open_view(self, conversation)?;
+        // HistoryUpload can remain dormant in its upload cache between jobs.
+        // Its existing binding/refresh owner handles physical compaction; it
+        // must not inherit the ordinary active exchange's maintenance lease.
+        drop(view.compaction_lease.take());
         // Connection-staged invitation ancestry belongs to that connection's
         // bounded exchange, not a reusable retained-history upload.
         if !view.pending.is_empty() {
@@ -1049,6 +1069,9 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError> {
         self.node
             .observe_mailbox_work(query_reason::QUERY_VIEW_NEW, None);
+        // Serialize capture with physical Profile reclamation without retaining
+        // a mutex/SQL guard across preparation yields or network I/O.
+        let compaction_lease = self.node.acquire_profile_compaction_lease()?;
         // Capture BEFORE the finite repository cutoff. A later append must
         // never label this older view with its newer exact history stamp.
         let metadata_stamp = self.history_sync_stamp(conversation)?;
@@ -1075,6 +1098,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             export_have: Mutex::new(None),
             sibling_closure,
             metadata_stamp,
+            compaction_lease: Some(compaction_lease),
         };
         #[cfg(test)]
         self.node
@@ -1152,7 +1176,10 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             Err(error) => Err(error),
         }
     }
-    fn retain_custody_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+    fn retain_custody_view(
+        &mut self,
+        mut view: Self::View,
+    ) -> Result<Option<Self::View>, LogError> {
         // Evict before admitting another selection. The existing SQL owner
         // bounds both live selections and incremental retirement work.
         drop(self.custody_view.take());
@@ -1179,6 +1206,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
                 }
                 return Ok(result);
             }
+            let compaction_lease = view.compaction_lease.take();
             self.custody_view = Some(RetainedSelection {
                 purpose: Purpose::Ordinary,
                 denied: self.denied,
@@ -1186,6 +1214,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
                 pull_only: self.pull_only,
                 view,
             });
+            drop(compaction_lease);
             self.node
                 .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
             Ok(None)
@@ -2878,10 +2907,14 @@ mod tests {
             received_profile_compaction_inputs(&node, &peer, &peer_account);
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
-        let own_view = open_prepared(&store, &unrelated);
-        let file_view = open_prepared(&store, &file);
+        let own_view_upload = store.open_history_upload(&unrelated).unwrap();
+        prepare_upload(&store, &own_view_upload);
+        let own_view = &own_view_upload.view;
+        let file_view_upload = store.open_history_upload(&file).unwrap();
+        prepare_upload(&store, &file_view_upload);
+        let file_view = &file_view_upload.view;
         let have = HashSet::new();
-        let selected = collect(&store, &file_view, &have);
+        let selected = collect(&store, file_view, &have);
         assert!(
             !selected.is_empty(),
             "the real parent manifest must grant actual file export"
@@ -2935,7 +2968,7 @@ mod tests {
         );
         assert!(
             matches!(
-                NetworkSyncStore::validate_view(&*store, &own_view),
+                NetworkSyncStore::validate_view(&*store, own_view),
                 Err(LogError::StaleCursor)
             ),
             "the compacted conversation's own physical epoch must still reject its view"
@@ -2947,9 +2980,9 @@ mod tests {
             Some(stamp),
             "unrelated classified leaf compaction must preserve exact FILES reuse evidence"
         );
-        NetworkSyncStore::validate_view(&*store, &file_view).unwrap();
+        NetworkSyncStore::validate_view(&*store, file_view).unwrap();
         assert_eq!(
-            collect(&store, &file_view, &have),
+            collect(&store, file_view, &have),
             selected,
             "the same retained parent manifest must authorize the exact same file events"
         );
@@ -2963,8 +2996,12 @@ mod tests {
             received_profile_compaction_inputs(&node, &peer, &peer_account);
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
-        let own_view = open_prepared(&store, &unrelated);
-        let file_view = open_prepared(&store, &file);
+        let own_view_upload = store.open_history_upload(&unrelated).unwrap();
+        prepare_upload(&store, &own_view_upload);
+        let own_view = &own_view_upload.view;
+        let file_view_upload = store.open_history_upload(&file).unwrap();
+        prepare_upload(&store, &file_view_upload);
+        let file_view = &file_view_upload.view;
         let stamp = store.history_sync_stamp(&file).unwrap();
         let revisions = || {
             let log = node.log.lock().unwrap();
@@ -3002,8 +3039,8 @@ mod tests {
                 .all(|event| node.log.lock().unwrap().get(&event.id).unwrap().is_some())
         );
         assert_eq!(store.history_sync_stamp(&file).unwrap(), stamp);
-        NetworkSyncStore::validate_view(&*store, &file_view).unwrap();
-        NetworkSyncStore::validate_view(&*store, &own_view).unwrap();
+        NetworkSyncStore::validate_view(&*store, file_view).unwrap();
+        NetworkSyncStore::validate_view(&*store, own_view).unwrap();
         node.storage
             .database()
             .transaction(|c| {
@@ -3019,7 +3056,7 @@ mod tests {
             "only the validated semantic class is subtracted"
         );
         assert!(matches!(
-            NetworkSyncStore::validate_view(&*store, &own_view),
+            NetworkSyncStore::validate_view(&*store, own_view),
             Err(LogError::StaleCursor)
         ));
     }
@@ -3060,10 +3097,14 @@ mod tests {
         node.process_profile_events(parent);
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
-        let parent_view = open_prepared(&store, &parent);
-        let view = open_prepared(&store, &file);
+        let parent_view_upload = store.open_history_upload(&parent).unwrap();
+        prepare_upload(&store, &parent_view_upload);
+        let parent_view = &parent_view_upload.view;
+        let view_upload = store.open_history_upload(&file).unwrap();
+        prepare_upload(&store, &view_upload);
+        let view = &view_upload.view;
         let have = HashSet::new();
-        let selected = collect(&store, &view, &have);
+        let selected = collect(&store, view, &have);
         assert!(!selected.is_empty());
         let stamp = store.history_sync_stamp(&file).unwrap().unwrap();
         let binding = node
@@ -3126,7 +3167,7 @@ mod tests {
             proof
         );
         assert!(matches!(
-            NetworkSyncStore::validate_view(&*store, &parent_view),
+            NetworkSyncStore::validate_view(&*store, parent_view),
             Err(LogError::StaleCursor)
         ));
         assert_eq!(
@@ -3134,9 +3175,9 @@ mod tests {
             Some(stamp),
             "classified parent leaf removal preserves the exact retained file authority"
         );
-        NetworkSyncStore::validate_view(&*store, &view).unwrap();
+        NetworkSyncStore::validate_view(&*store, view).unwrap();
         assert_eq!(
-            collect(&store, &view, &have),
+            collect(&store, view, &have),
             selected,
             "retiring only the parent's derived order cannot fabricate or revoke the retained manifest proof"
         );
@@ -3154,7 +3195,7 @@ mod tests {
         assert_ne!(store.history_sync_stamp(&file).unwrap(), before_retirement);
         assert!(
             matches!(
-                NetworkSyncStore::validate_view(&*store, &view),
+                NetworkSyncStore::validate_view(&*store, view),
                 Err(LogError::StaleCursor)
             ),
             "real retirement of that same parent must revoke the cached file authority"
@@ -3181,8 +3222,10 @@ mod tests {
         let (unrelated, _, _) = received_profile_compaction_inputs(&node, &peer, &peer_account);
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
-        let view = open_prepared(&store, &file);
-        assert!(!collect(&store, &view, &HashSet::new()).is_empty());
+        let view_upload = store.open_history_upload(&file).unwrap();
+        prepare_upload(&store, &view_upload);
+        let view = &view_upload.view;
+        assert!(!collect(&store, view, &HashSet::new()).is_empty());
         assert_eq!(finish_natural_profile_compaction(&node, unrelated), 8);
         let binding = node
             .log
@@ -3261,10 +3304,10 @@ mod tests {
         );
         assert!(
             matches!(
-                NetworkSyncStore::validate_view(&*store, &view),
+                NetworkSyncStore::validate_view(&*store, view),
                 Err(LogError::StaleCursor)
             ),
-            "the actual parent retirement independently invalidates the old active view"
+            "the actual parent retirement independently invalidates the dormant historical view"
         );
     }
 

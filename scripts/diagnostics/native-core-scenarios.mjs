@@ -34,6 +34,28 @@ export async function prepareNativeDownloadFixture({ fixture, owner, invoke }) {
   return directory;
 }
 
+/** Failure-only observations; requests retain the native driver's existing bounds. */
+export async function attachmentFailureContext(c, { senderDevice, fileName, outputOffset }) {
+  const metadata = rows => rows.slice(-50).map(({ id, from_me, file }) => ({
+    id, from_me, file: file ? { file_conv: file.file_conv, name: file.name?.slice(0, 256), size: file.size, media: file.media } : undefined,
+  }));
+  const reads = [
+    ["my_id", {}], ["account_id", {}], ["diag_get_peers", {}],
+    ["history", { peer: senderDevice, limit: 50 }],
+    ["account_history", { account: c.account, limit: 50 }],
+  ];
+  const snapshot = Object.fromEntries(await Promise.all(reads.map(async ([name, args]) => {
+    try {
+      const value = await c.observe(name, args);
+      return [name, name.endsWith("history") ? metadata(value)
+        : name === "diag_get_peers" ? value.slice(0, 32).map(({ user_id, account_id, ip, tcp_port, last_seen_secs }) => ({ user_id, account_id, ip, tcp_port, last_seen_secs })) : value];
+    } catch { return [name, { observationFailed: true }]; }
+  })));
+  const output = c.peer.output.slice(Math.max(outputOffset, c.peer.output.length - 8192));
+  return { ...snapshot, expected: { senderDevice, recipientDevice: c.userId, senderAccount: c.account, fileName },
+    send: { accepted: output.split(/\r?\n/u).includes(`file sent to ${c.userId}`), failed: /(?:^|\n)file send failed:/u.test(output) } };
+}
+
 /** A successful automatic export is durable evidence even after transient chunks retire. */
 export async function verifyNativeAttachmentDownload(c, path, expected) {
   return c.until("incoming attachment exact decrypted download bytes available", async () => {
@@ -471,8 +493,12 @@ export async function coreScenarios(c) {
   const bytes = Buffer.from(`fixture attachment 你好 ${c.nonce}\n`);
   const filePath = join(fixture, fileName);
   await writeFile(filePath, bytes);
+  const attachmentOutputOffset = peer.output.length;
   await writeChildCommand(peer, `/sendfile ${userId} ${filePath}\n`);
-  const attachment = await until("real incoming attachment manifest durable", async () => (await history()).find(h => h.file?.name === fileName));
+  const attachment = await until("real incoming attachment manifest durable", async () => (await history()).find(h => h.file?.name === fileName)).catch(async error => {
+    const snapshot = await attachmentFailureContext(c, { senderDevice: rawPeer.user_id, fileName, outputOffset: attachmentOutputOffset }).catch(() => ({ observationFailed: true }));
+    throw new Error(`${error.message}; attachment failure snapshot ${JSON.stringify(snapshot)}`, { cause: error });
+  });
   assert.equal(attachment.file.media, false);
   assert.equal(attachment.file.size, bytes.length);
   await revealLatestNativeMessage(c, fileName);

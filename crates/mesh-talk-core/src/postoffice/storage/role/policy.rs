@@ -1,7 +1,7 @@
 //! Durable monotonic expiry policy; no history walk or idle mutation.
 use super::*;
 pub(super) const SELECT_NEXT_AFTER: &str = "SELECT first_seen FROM relay_mailboxes WHERE domain=?1 AND pending=0 AND first_seen>?2 ORDER BY first_seen,conversation LIMIT 1";
-pub(super) const SELECT_NEXT_FIRST: &str = "SELECT first_seen FROM relay_mailboxes WHERE domain=?1 AND pending=0 ORDER BY first_seen,conversation LIMIT 1";
+pub(super) const SELECT_NEXT_FIRST: &str = "SELECT first_seen FROM relay_mailboxes WHERE domain=CAST(?1 AS BLOB) AND pending=0 ORDER BY first_seen,conversation LIMIT 1";
 impl IndexedRelayState {
     pub(super) fn cutoff_on(&self, c: &Connection) -> Result<Option<u64>, LogError> {
         let value: Option<Vec<u8>> = c

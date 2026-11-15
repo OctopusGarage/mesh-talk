@@ -566,3 +566,25 @@ for (const mode of ["cancelled", "missing-owner", "healed"]) test(`receipt obser
   });
   assert.equal(calls, mode === "healed" ? 2 : 1, "no failure-only status requery");
 });
+
+
+test("attachment failure snapshot uses read-only IPC and excludes message bodies", async () => {
+  const { attachmentFailureContext } = await import("./native-core-scenarios.mjs");
+  const calls = [];
+  const c = { userId: "recipient", account: "sender-account", peer: { output: "private message body\nfile sent to recipient\n" }, observe: async (name, args) => {
+    calls.push([name, args]);
+    if (name === "history") return [{ id: "raw", text: "secret text", from_me: false, file: { name: "attachment.txt", file_conv: "file", size: 12, secret: "secret payload" } }];
+    if (name === "account_history") throw new Error("private error text");
+    if (name === "diag_get_peers") return [{ user_id: "sender", account_id: "sender-account", ip: "127.0.0.1", tcp_port: 123, name: "private display name" }];
+    return name === "my_id" ? "recipient" : "recipient-account";
+  } };
+  const result = await attachmentFailureContext(c, { senderDevice: "sender", fileName: "attachment.txt", outputOffset: 0 });
+  assert.deepEqual(calls.map(([name]) => name), ["my_id", "account_id", "diag_get_peers", "history", "account_history"]);
+  assert.deepEqual(calls[3][1], { peer: "sender", limit: 50 });
+  assert.equal(result.send.accepted, true);
+  assert.equal(result.history[0].file.file_conv, "file");
+  assert.deepEqual(result.account_history, { observationFailed: true });
+  assert.doesNotMatch(JSON.stringify(result), /secret|private/);
+  const pending = await attachmentFailureContext({ ...c, peer: { output: "file sent to recipient\n" } }, { senderDevice: "sender", fileName: "attachment.txt", outputOffset: 23 });
+  assert.equal(pending.send.accepted, false, "stale CLI output cannot qualify this send");
+});

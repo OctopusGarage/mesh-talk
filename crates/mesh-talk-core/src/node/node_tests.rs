@@ -14812,32 +14812,38 @@ fn participant_network_pages_do_not_rescan_unchanged_history() {
     }
 }
 
+fn channel_checkpoint_fixture_node(
+    directory: &std::path::Path,
+) -> (
+    Arc<Node>,
+    mpsc::UnboundedReceiver<crate::node::ReceivedChannelMessage>,
+) {
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, incoming) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    (
+        Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &directory.join("events"),
+            &directory.join("sent"),
+            "pw",
+        )
+        .unwrap(),
+        incoming,
+    )
+}
+
 #[tokio::test]
 async fn channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance() {
     for second_message in [false, true] {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        let open = |directory: &std::path::Path| {
-            let (dm, _) = mpsc::unbounded_channel();
-            let (channel, incoming) = mpsc::unbounded_channel();
-            let (file, _) = mpsc::unbounded_channel();
-            (
-                Node::open(
-                    DeviceIdentity::generate(),
-                    Arc::new(Mutex::new(Roster::default())),
-                    dm,
-                    channel,
-                    file,
-                    &directory.join("events"),
-                    &directory.join("sent"),
-                    "pw",
-                )
-                .unwrap(),
-                incoming,
-            )
-        };
-        let (alice, _) = open(a.path());
-        let (bob, mut incoming) = open(b.path());
+        let (alice, _) = channel_checkpoint_fixture_node(a.path());
+        let (bob, mut incoming) = channel_checkpoint_fixture_node(b.path());
         let channel = alice
             .create_channel("budget", vec![bob.identity.public()])
             .await
@@ -14966,6 +14972,117 @@ async fn channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance(
             "retry duplicated a receipt or terminal"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requester_reception_scope_preserves_channel_arrival_on_dispatch_and_drop() {
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    use crate::node::reception_effects::ArrivalKind;
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let (alice, _) = channel_checkpoint_fixture_node(a.path());
+    let (bob, mut incoming) = channel_checkpoint_fixture_node(b.path());
+    let group = alice
+        .create_channel("scope arrival", vec![bob.identity.public()])
+        .await
+        .unwrap();
+    for event in alice.log.lock().unwrap().events(&group).unwrap() {
+        bob.log.lock().unwrap().append(event).unwrap();
+    }
+    settle_injected_channel(&bob, group);
+    while incoming.try_recv().is_ok() {}
+    for (arrival, context) in [
+        (ArrivalKind::Live, "live"),
+        (ArrivalKind::CatchUp, "catch_up"),
+    ] {
+        for cancelled in [false, true] {
+            let id = alice
+                .enqueue_channel_message_reply_expiring_if(
+                    group,
+                    b"scoped channel reception",
+                    None,
+                    None,
+                    |commit| commit(),
+                )
+                .unwrap();
+            let event = alice.log.lock().unwrap().get(&id).unwrap().unwrap();
+            assert!(
+                !bob.channel_plaintext_pending_for_test(group),
+                "fixture baseline must have no previous arrival continuation"
+            );
+            assert!(!bob.received.lock().unwrap().contains(id).unwrap());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let public = alice.identity.public();
+            let (channel, remote) = tokio::join!(bob.privacy_dial(address, &public), async {
+                let (stream, _) = listener.accept().await.unwrap();
+                alice.privacy_accept(stream).await
+            });
+            let channel = channel.unwrap();
+            let remote = remote.unwrap();
+            let store = bob.sync_store(&public);
+            let scope = if arrival == ArrivalKind::Live {
+                bob.request_reception_scope(&store, &channel)
+            } else {
+                bob.request_reception_scope_with_arrival(&store, &channel, arrival)
+            }
+            .unwrap();
+            NetworkSyncStore::ingest(&mut *store.lock().unwrap(), event).unwrap();
+            assert!(bob.log.lock().unwrap().get(&id).unwrap().is_some());
+            if !cancelled {
+                assert!(scope.dispatch());
+            }
+            drop(scope);
+            drop(channel);
+            drop(remote);
+            tokio::time::timeout(Duration::from_secs(5), bob.runtime_work.drain())
+                .await
+                .unwrap();
+            assert!(
+                bob.channel_plaintext_pending_for_test(group)
+                    || bob.received.lock().unwrap().contains(id).unwrap(),
+                "the actual scope must establish reception before bounded continuation"
+            );
+            // Bare fixtures have no channel-recovery scheduler. Finish the
+            // existing bounded continuation after the scope's actual owner
+            // retires; its captured arrival must survive these ordinary turns.
+            settle_injected_channel(&bob, group);
+            let first = tokio::time::timeout(Duration::from_secs(3), incoming.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut received = vec![first];
+            while let Ok(row) = incoming.try_recv() {
+                received.push(row);
+            }
+            let content = received
+                .iter()
+                .filter(|row| !row.reception_only)
+                .collect::<Vec<_>>();
+            assert_eq!(content.len(), 1, "one accepted message must publish once");
+            assert_eq!(content[0].event_id, id);
+            assert_eq!(content[0].text, b"scoped channel reception");
+            assert!(
+                received.iter().all(|row| row.arrival_kind == context),
+                "cancelled={cancelled}: successful and dropped scopes must preserve their captured arrival"
+            );
+            let qualifies_as_catch_up = received.iter().all(|row| row.arrival_kind == "catch_up");
+            assert_eq!(
+                qualifies_as_catch_up,
+                arrival == ArrivalKind::CatchUp,
+                "the real default-Live scope is a negative control: normal continuation cannot repair a missing catch-up classification"
+            );
+            bob.retry_channel_plaintext();
+            assert!(
+                incoming.try_recv().is_err(),
+                "retired reception cannot duplicate a callback"
+            );
+        }
+    }
+    alice.runtime_work.close();
+    bob.runtime_work.close();
+    alice.runtime_work.drain().await;
+    bob.runtime_work.drain().await;
 }
 
 fn append_pending_profile(

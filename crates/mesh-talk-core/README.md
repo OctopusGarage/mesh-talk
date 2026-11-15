@@ -80,6 +80,13 @@ let node = Node::open_with_account(
 The crate is async and built on Tokio. `NodeRuntime` starts discovery, the accept
 loop, and delivery tasks when a host runs the node.
 
+Keep the `Arc<Node>` returned by node constructors. Network send and reconciliation
+methods that can receive peer data require an `&Arc<Node>` receiver: accepted
+payloads retain an owned reception task even if the awaiting caller is cancelled.
+When migrating a helper that calls these methods, accept `&Arc<Node>` rather than
+`&Node`. `NodeRuntime` continues to own that shared handle behind its `&self`
+facade. Return types and message serialization retain their existing contracts.
+
 Custom `eventlog::SyncStore` implementations return `Result<_, LogError>` from
 storage reads, including capability, fingerprint, consent, custody and event export
 queries. Reconciliation constructors and handlers also return `Result`; propagate
