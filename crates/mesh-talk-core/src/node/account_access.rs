@@ -688,12 +688,11 @@ mod tests {
                 tokio::time::timeout(std::time::Duration::from_secs(3), updates.changed()).await;
             if applied.is_err() {
                 eprintln!(
-                    "access route fixture timeout old_port={} new_address={address} roster_preferred={} work_endpoints={:?} dial_candidates={candidates:?} accepted={} status={:?}",
+                    "access route fixture timeout old_port={} new_address={address} roster_preferred={} work_endpoints={:?} dial_candidates={candidates:?} accepted={}",
                     proof.tcp_port,
                     observed.addr,
                     observed.scheduling_endpoints(),
-                    accepted.load(Ordering::SeqCst),
-                    target.account_access_sync_status()
+                    accepted.load(Ordering::SeqCst)
                 );
             }
             server.abort();

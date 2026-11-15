@@ -748,6 +748,13 @@ or invent LCOV for uninstrumented tests.
 Archive qualification must remove producer build outputs and inspect actual
 application stack frame file:line evidence separately from panic-header source
 locations. Successful binary execution alone does not prove diagnostics survived.
+Accept only bounded Cargo debug layouts under the recorded target directory.
+For the v2 layout, include the selected binaries' real sibling `fingerprint`
+directories through official archive extras: coverage object discovery needs
+them even after executable extraction succeeds. Never synthesize build markers
+or accept an empty report. The pinned-tool CLI fixtures qualify actual counters
+after producer outputs are removed; retain v1 compatibility and rejection of
+other profiles and separate build directories.
 Darwin unpacked line tables depend on compiler objects that official archives do
 not retain. The macOS profile generates only metadata-selected executable dSYM
 bundles with Apple `dsymutil` and includes them through official Nextest archive

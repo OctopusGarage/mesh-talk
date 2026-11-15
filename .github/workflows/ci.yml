@@ -126,7 +126,7 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         uses: taiki-e/install-action@v2.90.2
         with:
-          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.150
           fallback: none
 
       - name: Verify coverage accumulation with the actual tool
@@ -382,7 +382,7 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         uses: taiki-e/install-action@v2.90.2
         with:
-          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.150
           fallback: none
 
       - name: Verify coverage accumulation with the actual tool

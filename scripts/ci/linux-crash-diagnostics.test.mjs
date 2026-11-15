@@ -72,6 +72,25 @@ test(
       (await validateExecutable(name(executable), root)).executable,
       await realpath(executable),
     );
+    const v2 = join(root, "target/llvm-cov-target/debug/build/host_pkg/0123456789abcdef/out/host-bin");
+    await mkdir(join(v2, ".."), { recursive: true });
+    await writeFile(v2, "v2 fixture");
+    await chmod(v2, 0o700);
+    assert.equal((await validateExecutable(name(v2), root)).executable, await realpath(v2));
+    for (const relative of [
+      "debug/build/host_pkg/not-a-hash/out/host-bin",
+      "debug/build/host_pkg/0123456789abcdef/host-bin",
+      "debug/build/host_pkg/0123456789abcdef/out/nested/host-bin",
+      "debug/build/host.pkg/0123456789abcdef/out/host-bin",
+      "debug/deps/nested/host-bin",
+      "release/deps/host-bin",
+    ]) {
+      const malformed = join(root, "target/llvm-cov-target", relative);
+      await mkdir(join(malformed, ".."), { recursive: true });
+      await writeFile(malformed, "malformed fixture");
+      await chmod(malformed, 0o700);
+      await assert.rejects(validateExecutable(name(malformed), root), /outside/u);
+    }
     const outside = join(root, "outside");
     await writeFile(outside, "outside");
     await chmod(outside, 0o700);
@@ -79,6 +98,14 @@ test(
     const link = join(owner, "link");
     await symlink(outside, link);
     await assert.rejects(validateExecutable(name(link), root), /outside/u);
+    const v2Link = join(v2, "..", "escaped-link");
+    await symlink(outside, v2Link);
+    await assert.rejects(validateExecutable(name(v2Link), root), /outside/u);
+    const escaped = `${v2}/../../../../../../../../outside`;
+    assert.equal(await realpath(escaped), await realpath(outside));
+    await assert.rejects(validateExecutable(name(escaped), root), /outside/u);
+    await chmod(v2, 0o600);
+    await assert.rejects(validateExecutable(name(v2), root), /outside/u);
     await chmod(executable, 0o600);
     await assert.rejects(
       validateExecutable(name(executable), root),

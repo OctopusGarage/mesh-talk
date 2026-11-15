@@ -663,7 +663,9 @@ test("macOS archives start independently and retain the complete native Host own
   const fixture = step(native, "Verify coverage accumulation with the actual tool");
   for (const file of ["backend-coverage", "native-host-coverage", "rust-profile", "linux-crash-diagnostics", "macos-remaining-cli"]) assert.ok(fixture.includes(`scripts/ci/${file}.test.mjs`), file);
   assert.match(fixture, /--test-concurrency=1/u);
-  assert.ok(native.indexOf("tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150") < native.indexOf("scripts/ci/macos-remaining-cli.test.mjs"));
+  const toolInstall = native.indexOf(`tool: cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`);
+  assert.ok(toolInstall >= 0, "native coverage fixture requires the canonical pinned tools");
+  assert.ok(toolInstall < native.indexOf("scripts/ci/macos-remaining-cli.test.mjs"));
   assert.equal((ci.match(/scripts\/ci\/macos-remaining-cli.test.mjs/gu) ?? []).length, 1);
   assert.match(consumers, /^    needs: \[scope, macos-remaining-build\]$/mu);
   assert.match(consumers, /fail-fast: false[\s\S]*shard: \[1, 2\]/u);

@@ -262,6 +262,19 @@ test('archived ignored plan resolves original executables, complete bridge inven
   for(const item of plan){assert.equal(item.cwd,fixture.cwd);assert.equal(item.env.CARGO_MANIFEST_DIR,fixture.cwd);assert.equal(item.env.CARGO_PKG_VERSION,'1.2.3');assert.equal(item.env['CARGO_BIN_EXE_mesh-talk-node'],fixture.helper);assert.equal(item.env.RUST_TEST_THREADS,'4');assert.equal(item.env.LLVM_PROFILE_FILE,fixture.env.LLVM_PROFILE_FILE);}
 });
 
+test('archived ignored plan preserves v2 harness paths under the same target', async t=>{
+  const {archivedBackendPlan}=await import('../evals/backend-runner.mjs');
+  const {mkdirSync,renameSync}=await import('node:fs');
+  const path=await import('node:path');
+  const fixture=await archivedFixture(t);
+  const binary=Object.values(fixture.prepared.binaries['rust-binaries'])[0];
+  const directory=path.join(fixture.target,'debug/build/mesh-talk-core/0123456789abcdef/out');
+  mkdirSync(directory,{recursive:true});
+  const moved=path.join(directory,path.basename(binary['binary-path']));
+  renameSync(binary['binary-path'],moved);binary['binary-path']=moved;
+  assert.equal(archivedBackendPlan(fixture.prepared,fixture)[0].binary,moved);
+});
+
 test('archived ignored plan fails closed for missing, foreign, duplicate and changed ignored inventories',async t=>{
   const {archivedBackendPlan}=await import('../evals/backend-runner.mjs');
   assert.equal(typeof archivedBackendPlan,'function');

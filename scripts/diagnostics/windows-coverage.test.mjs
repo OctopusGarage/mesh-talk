@@ -448,7 +448,7 @@ test("instrumented listing cannot emit profiles into source package directories"
     );
 });
 
-test("archive layout is anchored exactly to the metadata v1 debug/deps directory", () => {
+test("archive layout bounds v1 binaries and v2 Cargo object metadata", () => {
   const target = path.join(process.cwd(), "target");
   const metadata = (binary) => ({
     "rust-build-meta": {
@@ -461,10 +461,17 @@ test("archive layout is anchored exactly to the metadata v1 debug/deps directory
   const example = metadata(path.join(target, "debug", "examples", "example"));
   example["rust-binaries"].lib.kind = "example";
   verifyLayout(example);
+  const v2 = path.join(target, "debug", "build", "archive-fixture", "0123456789abcdef");
+  assert.deepEqual(verifyLayout(metadata(path.join(v2, "out", "unit"))), [
+    path.join("debug", "build", "archive-fixture", "0123456789abcdef", "fingerprint"),
+  ]);
   for (const binary of [
     path.join(target, "custom-build", "debug", "deps", "unit"),
     path.join(target, "release", "deps", "unit"),
     "relative/debug/deps/unit",
+    path.join(target, "debug", "build", "archive-fixture", "short", "out", "unit"),
+    path.join(v2, "other", "unit"),
+    path.join(target, "release", "build", "archive-fixture", "0123456789abcdef", "out", "unit"),
   ])
     assert.throws(() => verifyLayout(metadata(binary)), /layout/);
   const separate = metadata(path.join(target, "debug", "deps", "unit"));
