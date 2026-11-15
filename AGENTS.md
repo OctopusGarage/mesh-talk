@@ -6,7 +6,9 @@
   [performance requirements](docs/performance-requirements.md). Identify the work
   trigger, resource budget, accumulation/reclamation policy and applicable
   performance regression before editing; record measured limits and remaining
-  gaps. Extend its general rules when a confirmed defect reveals a new pattern.
+  gaps. Apply its [startup, idle and active-business checklist](docs/performance-requirements.md#apply-to-every-feature)
+  to every affected phase, including return to idle after use. Extend its general
+  rules when a confirmed defect reveals a new pattern.
 
 - Before implementing, refactoring, fixing or reviewing code, read the
   [AI coding reliability guide](docs/ai-coding-reliability.md), select the rules

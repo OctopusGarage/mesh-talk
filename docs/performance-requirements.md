@@ -43,6 +43,33 @@ not permission to worsen the path or silently raise its budget. A target change
 requires comparable evidence and review. Migrations, catch-up and active media have
 separate bounded work budgets and progress evidence, not an unlimited exception.
 
+## Apply to every feature
+
+Before implementation, identify the owning producer, its meaningful trigger,
+bounded work unit, retained resources and stop condition. Review all three phases,
+including costs introduced in another process or on another device:
+
+| Phase           | Required design and evidence                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Startup         | Load indexed summaries and the active conversation's bounded page first. Defer inactive history, attachment bytes and optional features until demanded. Avoid decrypting all history, rebuilding unchanged indexes or republishing unchanged state at each login. Measure time to usable UI, peak memory, bytes read and writes separately from catch-up; migrations need resumable bounded progress.                    |
+| Idle            | With unchanged inputs, settle business producers and avoid business-data writes. Use scoped events and exact next deadlines; coalesce noncritical repair into the existing serial queue, normally at least five minutes apart. A heartbeat, read, empty reply or offline device must not restart historical work. Verify visible and hidden states, including renderer/helpers and remote work triggered by this client. |
+| Active business | Bound each query, decrypt, decode, transfer and rendering turn by items and bytes. Drain real available work promptly with backpressure and cancellation; user interaction and reception must remain responsive. Measure latency, peak CPU/memory and I/O for send/receive, catch-up, search, media and navigation as applicable, then prove resources settle when work finishes.                                        |
+
+Do not classify a permanently retrying historical queue as an unlimited active
+workload. Distinguish actionable progress from blocked work, record its outcome
+and retain a bounded retry deadline. Successful reads, metadata comparisons and
+already-held custody are not new user data. Serializing unnecessary work or
+lengthening a timer alone does not establish that its cost is justified.
+
+For every affected phase, the PR must state the trigger and stop condition,
+resource bound, selected regression and measured result or explicit evidence gap.
+Exercise unchanged inputs, growing history, unavailable dependencies and owner
+replacement where applicable. Compare the same workload before and after; verify
+return to idle and memory reclamation after repeated use. Do not infer low power
+from a quiet disk, fast startup from a blank window, or bounded memory from one
+snapshot. Existing misses remain explicit follow-ups with an owning module and
+reproduction; never describe a passing correctness test as performance acceptance.
+
 ## Design and review rules
 
 1. **Trigger work from meaning.** Prefer committed changes, scoped invalidations,
