@@ -235,6 +235,7 @@
     {
       "id": "desktop-discovery-origin",
       "paths": [
+        "src-tauri/src/chat_commands/account.rs",
         "src-tauri/src/chat_commands/presence.rs",
         "src-tauri/src/settings.rs"
       ],
@@ -242,6 +243,7 @@
         {
           "package": "mesh-talk",
           "filters": [
+            "chat_commands::account::peer_query_tests::",
             "chat_commands::presence::tests::",
             "settings::tests::",
             "chat_commands::diagnostics::tests::diagnostics_expose_a_live_runtime_and_reject_invalid_manual_targets"
@@ -261,7 +263,7 @@
             "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
           },
           {
-            "name": "Incremental presence refreshes people without group body reads for equal revisions; forced repair and changed inputs hydrate groups, while missing tokens preserve legacy maps.",
+            "name": "Incremental presence refreshes people without group body reads for equal revisions; forced repair and changed inputs hydrate groups, while missing tokens preserve legacy maps. Peer queries release the runtime slot during owned asynchronous persistence, preserve failures and reject retired or replaced runtime results.",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]

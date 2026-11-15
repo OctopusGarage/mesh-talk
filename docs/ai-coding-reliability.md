@@ -234,6 +234,11 @@ Async discovery observers must use the existing owned asynchronous peer-cache
 snapshot and preserve persistence errors. The synchronous desktop convenience
 snapshot writes storage and converts errors to an empty roster; polling it can
 block the observer's reactor or misreport failed persistence as discovery latency.
+Native queries release the runtime slot before awaiting that owned work and
+recheck the exact installed Node before publishing; a replaced or removed runtime
+cannot supply the new session's peers. The [peer-query controls](../src-tauri/src/chat_commands/account.rs)
+exercise real cache failure/recovery through the managed command and separately
+hold its observer boundary to verify slot progress and stale-result rejection.
 The [account-login fixture](../src-tauri/src/shared_account_login/tests.rs) retains
 its single signed loopback probe and original deadline, and a real cache-path
 failure must preserve the cache API's error chain rather than time out. This

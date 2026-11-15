@@ -231,6 +231,12 @@ people and groups independently, and recomputes group online counts from current
 person evidence. A failed, malformed, late or retired-owner reply cannot poison
 or roll back the acknowledged projection.
 
+Peer-list queries await the existing owned asynchronous certified snapshot without
+retaining the desktop runtime slot. Persistence failure is an unavailable query,
+not a successful empty roster. Publication rechecks the exact installed runtime;
+retirement or replacement rejects the captured result. This does not change
+discovery proof persistence, current account binding or presence expiry.
+
 Initial discovery displays Online immediately. After a loss, fresh observations
 must remain successful for five seconds and include a renewed origin before
 clearing recovery confirmation. Authoritative withdrawal or revoked account
