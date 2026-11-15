@@ -122,6 +122,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    A stale dependency is not preparation progress: retain its backoff instead
    of repeatedly making the item immediately runnable. Wake only matching
    waiters when the owning dependency publishes readiness; hints grant no access.
+   Apply an existing retry hold before resolving routes or reading consent for
+   work which cannot be admitted yet. Keep expiry and meaningful release at the
+   scheduling owner; due admission and sends still require fresh authority.
    Failed preparation must not monopolize the oldest unfinished scope. Retain a
    bounded error hold at the existing work owner, include its deadline in the
    scheduler, and let healthy scopes advance. Serialize hold installation with

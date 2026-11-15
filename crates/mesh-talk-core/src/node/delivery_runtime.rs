@@ -14,6 +14,11 @@ use std::sync::atomic::Ordering;
 // Owned by the delivery loop: cancellation drops every retained channel. Keep
 // eight scheduling slots, at most six retained sockets (one outbound permit
 // reserved for controls), and discard idle or unauthorized state.
+#[cfg(test)]
+thread_local! {
+    static FILE_RETRY_ROUTE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const MAX_FILE_TRANSFERS: usize = 8;
 const MAX_FILE_SOCKETS: usize = super::session_pool::MAX_DIRECTION_CONNECTIONS - 1;
 const MAX_RELAY_CUSTODY_HINTS: usize = 256;
@@ -463,6 +468,11 @@ impl FileDeliveryScheduler {
         node.prune_file_transfers(&mut self.transfers);
         for (file, destination) in files {
             let key = (file.id, destination.binding.event_id);
+            // Scan owns expiry and consent wakeups. A retained hold cannot
+            // admit work, so avoid preparing routes and reading consent for it.
+            if self.relay_cooldowns.iter().any(|(held, _, _)| *held == key) {
+                continue;
+            }
             let routes = node.file_retry_routes(&file, &destination);
             if !routes.current {
                 self.parked.remove(&key);
@@ -475,7 +485,6 @@ impl FileDeliveryScheduler {
                 continue;
             }
             if self.transfers.len() + self.workers.len() < MAX_FILE_TRANSFERS
-                && !self.relay_cooldowns.iter().any(|(held, _, _)| *held == key)
                 && self.retries.ready(&key, &routes, now)
                 && node.file_destination_current(&file, &destination)
                 && !self.transfers.contains_key(&key)
@@ -3228,6 +3237,8 @@ impl Node {
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
     ) -> FileRoutes {
+        #[cfg(test)]
+        FILE_RETRY_ROUTE_READS.with(|reads| reads.set(reads.get() + 1));
         let current = self.file_destination_current(file, destination);
         let custody = self.file_relay_custody_current(file, destination);
         let binding = &destination.binding;
@@ -4953,6 +4964,120 @@ mod diagnostic_tests {
             "cooling destinations must not starve the ninth durable destination"
         );
         assert_eq!(node.delivery.lock().unwrap().file_cards().count(), 9);
+    }
+
+    #[tokio::test]
+    async fn file_scheduler_cooldown_skips_route_work_until_scan_releases_hold() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&bob, &account, "Bob", 9);
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let path = source.path().join("cooldown.bin");
+        std::fs::write(&path, b"durable held destination").unwrap();
+        let (id, _) = node
+            .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = node.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let key = (id, destination.binding.event_id);
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let now = std::time::Instant::now();
+        let until = now + super::FILE_RELAY_RETRY;
+        scheduler.relay_cooldowns.push_back((key, until, false));
+        super::FILE_RETRY_ROUTE_READS.with(|reads| reads.set(0));
+        for _ in 0..4 {
+            scheduler.admit_at(
+                &node,
+                vec![(card.clone(), destination.clone())],
+                Some(key),
+                now,
+            );
+        }
+        assert!(scheduler.transfers.is_empty());
+        assert_eq!(
+            scheduler.relay_cooldowns.front(),
+            Some(&(key, until, false))
+        );
+        assert_eq!(
+            super::FILE_RETRY_ROUTE_READS.with(std::cell::Cell::get),
+            0,
+            "held selections must not run real routing/consent preparation"
+        );
+        // Admission never bypasses a retained hold, even with a later clock.
+        scheduler.admit_at(
+            &node,
+            vec![(card.clone(), destination.clone())],
+            None,
+            until,
+        );
+        assert!(scheduler.transfers.is_empty());
+        assert_eq!(super::FILE_RETRY_ROUTE_READS.with(std::cell::Cell::get), 0);
+        scheduler.relay_cooldowns.front_mut().unwrap().1 = now;
+        scheduler.scan(&node);
+        assert!(scheduler.relay_cooldowns.is_empty());
+        scheduler.admit(&node, vec![(card.clone(), destination.clone())], None);
+        assert_eq!(super::FILE_RETRY_ROUTE_READS.with(std::cell::Cell::get), 1);
+        assert!(scheduler.transfers.remove(&key).is_some());
+
+        // An actual signed, durable Accepted decision releases ConsentWait in scan.
+        scheduler.relay_cooldowns.push_back((key, until, true));
+        let accepted = super::super::file_consent::Decision {
+            file: card.file_conversation,
+            manifest: destination.binding.event_id,
+            sender: node.identity.public(),
+            recipient: bob.public(),
+            sender_account: Some(node.account_id()),
+            recipient_account: account.account_id(),
+            decision: super::super::ReceiveDecision::Accepted,
+            completion: None,
+        }
+        .event(&bob, 1)
+        .unwrap();
+        node.accept_file_consent_event(&accepted, &bob.public())
+            .unwrap();
+        assert_eq!(
+            node.outgoing_file_consent_status(key.0, key.1).unwrap(),
+            Some(crate::eventlog::sync::FileConsentStatus::Accepted)
+        );
+        scheduler.scan(&node);
+        assert!(scheduler.relay_cooldowns.is_empty());
+        scheduler.admit(&node, vec![(card.clone(), destination.clone())], None);
+        assert!(scheduler.transfers.remove(&key).is_some());
+
+        // A held hint cannot authorize stale work after revocation or deletion.
+        for deleted in [false, true] {
+            scheduler.relay_cooldowns.push_back((key, until, false));
+            if deleted {
+                node.delivery
+                    .lock()
+                    .unwrap()
+                    .retire_file_destination(key.0, key.1)
+                    .unwrap();
+                node.delivery_suspended
+                    .store(false, std::sync::atomic::Ordering::Release);
+            } else {
+                node.delivery_suspended
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            scheduler.admit(&node, vec![(card.clone(), destination.clone())], None);
+            assert!(scheduler.transfers.is_empty());
+            scheduler.relay_cooldowns.front_mut().unwrap().1 = now;
+            scheduler.scan(&node);
+            super::FILE_RETRY_ROUTE_READS.with(|reads| reads.set(0));
+            scheduler.admit(&node, vec![(card.clone(), destination.clone())], None);
+            assert_eq!(super::FILE_RETRY_ROUTE_READS.with(std::cell::Cell::get), 1);
+            assert!(scheduler.transfers.is_empty());
+        }
     }
 
     #[tokio::test]

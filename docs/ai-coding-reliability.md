@@ -460,7 +460,13 @@ A failed or incomplete cycle must not erase its scheduling observation merely
 because it cannot acknowledge success. Ordinary unchanged notifications still
 respect its retained retry deadline, before routing or eligibility preparation;
 fresh semantic inputs and failed observations remain live. Explicit drivers and
-event-only owners cannot park behind a timer that does not exist. The deferred
+event-only owners cannot park behind a timer that does not exist. File scheduler
+admission likewise checks retained relay/consent holds before route and consent
+preparation; its owning scan handles expiry and accepted-consent release. The
+`file_scheduler_cooldown_skips_route_work_until_scan_releases_hold` regression in
+[delivery runtime](../crates/mesh-talk-core/src/node/delivery_runtime.rs) counts
+actual route preparation while preserving fresh checks after release.
+The deferred
 channel regression in [account maintenance](../crates/mesh-talk-core/src/node/channel_account_maintenance.rs)
 counts entry into actual eligibility work, with due, changed-input and timer-disabled controls.
 A domain-wide paging upper is not a mailbox revision. Unrelated mailbox appends

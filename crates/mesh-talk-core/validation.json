@@ -2739,7 +2739,7 @@
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
-            "name": "Private file failure reservations bind exact attempts and eligible routes, survive cancelled awaits, start bounded backoff at completion and cannot be evicted while active or cooling. Quiet wakes preserve durable destinations; clean steps and route replacements retain progress, while failed retirement remains cooled.",
+            "name": "Private file failure reservations bind exact attempts and eligible routes, survive cancelled awaits, start bounded backoff at completion and cannot be evicted while active or cooling. Retained relay/consent holds gate admission before route preparation; expiry and actual accepted consent release them, while due work revalidates authority. Quiet wakes preserve durable destinations; clean steps and route replacements retain progress, while failed retirement remains cooled.",
             "reference": "docs/ARCHITECTURE.md"
           },
           {
