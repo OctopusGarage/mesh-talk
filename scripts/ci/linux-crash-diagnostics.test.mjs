@@ -101,7 +101,7 @@ test(
     const v2Link = join(v2, "..", "escaped-link");
     await symlink(outside, v2Link);
     await assert.rejects(validateExecutable(name(v2Link), root), /outside/u);
-    const escaped = `${v2}/../../../../../../../../outside`;
+    const escaped = `${join(v2, "..")}/../../../../../../../outside`;
     assert.equal(await realpath(escaped), await realpath(outside));
     await assert.rejects(validateExecutable(name(escaped), root), /outside/u);
     await chmod(v2, 0o600);
