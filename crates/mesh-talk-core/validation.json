@@ -611,6 +611,8 @@
             "periodic_private_probes_reuse_fresh_signed_discovery_but_network_change_forces_noise",
             "node::privacy_routes::tests::",
             "node::privacy_runtime::tests::discovery_snapshot_",
+            "node::privacy_runtime::tests::joined_group_member_can_sync_group_but_not_dm_or_call",
+            "node::privacy_runtime::tests::joined_group_protocol_snapshot_is_stable_before_single_shot_sync",
             "node::privacy_runtime::tests::failed_presence_cache_write_is_not_a_successful_empty_snapshot",
             "node::privacy_runtime::tests::cached_peer_snapshot_excludes_arrivals_after_its_capture"
           ]

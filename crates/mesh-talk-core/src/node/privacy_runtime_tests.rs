@@ -3219,6 +3219,15 @@ async fn revoking_an_open_connection_rejects_late_event_without_append() {
 
 #[tokio::test]
 async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
+    joined_group_permission_scenario(false).await;
+}
+
+#[tokio::test]
+async fn joined_group_protocol_snapshot_is_stable_before_single_shot_sync() {
+    joined_group_permission_scenario(true).await;
+}
+
+async fn joined_group_permission_scenario(snapshot_at_capture: bool) {
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = node(&dir.path().join("alice"));
     let (bob, _) = node(&dir.path().join("bob"));
@@ -3241,7 +3250,44 @@ async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         &bob.user_id(),
     );
-    let server = tokio::spawn(bob.clone().run_accept_loop(listener));
+    // The full host may cache roster proofs on its first delivery turn. Finish
+    // that real authority input before the single-shot permission assertion.
+    bob.cached_peer_snapshot_async().await.unwrap();
+    let captured_revisions = Arc::new(Mutex::new(None));
+    if snapshot_at_capture {
+        let node = Arc::downgrade(&bob);
+        let captured = captured_revisions.clone();
+        let claimed = std::sync::atomic::AtomicBool::new(false);
+        *bob.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase != "network_view_captured"
+                || claimed.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            let node = node.upgrade().unwrap();
+            let revision = || {
+                node.privacy
+                    .state
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .proofs
+                    .revision()
+            };
+            let before = revision();
+            node.cache_discovered_peers().unwrap();
+            *captured.lock().unwrap() = Some((before, revision()));
+        }));
+    }
+    // The controlled case supplies the same real snapshot work at the exact
+    // finite-view boundary. Its inbound provider leaves that actor to the hook;
+    // the original permission scenario retains every full-host background owner.
+    let server = if snapshot_at_capture {
+        tokio::spawn(bob.clone().run_inbound_connections_for_test(listener))
+    } else {
+        tokio::spawn(bob.clone().run_accept_loop(listener))
+    };
     let mut log = crate::eventlog::EventLog::default();
     for event in bob.log.lock().unwrap().events(&group).unwrap() {
         log.append(event.clone()).unwrap();
@@ -3269,7 +3315,22 @@ async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap_or_else(|error| {
+        panic!(
+            "joined group sync failed: {error:?}; captured proof revisions={:?}",
+            captured_revisions.lock().unwrap()
+        );
+    });
+    if snapshot_at_capture {
+        let (before, after) = captured_revisions
+            .lock()
+            .unwrap()
+            .expect("the real group request must capture its authorization view");
+        assert_eq!(
+            before, after,
+            "warm discovery caching must preserve the captured proof revision"
+        );
+    }
     assert!(
         bob.log
             .lock()
@@ -3312,7 +3373,11 @@ async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
             .is_err()
     );
     assert!(bob.privacy_snapshot().allowed_accounts.is_empty());
+    drop(channel);
     server.abort();
+    let _ = server.await;
+    bob.sessions.clear();
+    bob.runtime_work.drain().await;
 }
 
 #[tokio::test]

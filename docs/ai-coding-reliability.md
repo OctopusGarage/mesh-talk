@@ -2185,6 +2185,13 @@ accepted conversation before pooled reuse; a DM-only callback cannot project
 channel controls. The [reference message-action fixture](../crates/mesh-talk-core/src/node/account_group/tests/message_action_reference.rs)
 retains authenticated public recall and reaction projection even when its
 explicit pull receives the signed effect before competing peer fanout.
+For a single-shot permission assertion, complete the real signed-discovery cache
+before starting the listener. Adding a peer to the live roster alone does not
+stabilize the persisted proof revision observed by finite sync views. The
+`joined_group_protocol_snapshot_is_stable_before_single_shot_sync` control runs
+the actual cache owner at view capture and requires an unchanged revision;
+the original full-host scenario retains group access and DM/call rejection.
+Keep genuine authority-change invalidation intact rather than retrying over it.
 
 Keep fixture validation at the narrow boundary it owns. A full-host scenario
 whose only assertion concerns another test helper adds unrelated synchronization
