@@ -799,8 +799,8 @@ fn main() {
                 )
             # The actual build-script output is a cache artifact in both
             # Cargo layouts; a successful v2 build need not create debug/deps.
-            cache_artifact = Path(ready.read_text())
-            self.assertTrue(cache_artifact.is_relative_to(profile))
+            cache_artifact = Path(ready.read_text()).resolve(strict=True)
+            self.assertTrue(cache_artifact.is_relative_to(profile.resolve(strict=True)))
             self.assertEqual(
                 cache_artifact.read_text(), "rebuildable Cargo build output"
             )
