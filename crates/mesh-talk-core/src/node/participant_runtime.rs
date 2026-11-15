@@ -20,6 +20,7 @@ const FILE_REPAIR_INTERVAL_SECS: u64 = 300;
 
 // Scheduling evidence only. Actual file admission keeps current consent and
 // transport authority checks; ordinary lease renewals do not represent new work.
+#[derive(Clone)]
 pub(super) struct FilePullPeer {
     public: crate::identity::device::PublicIdentity,
     account: Option<String>,
@@ -28,7 +29,19 @@ pub(super) struct FilePullPeer {
     fresh_until: Option<std::time::Instant>,
 }
 impl FilePullPeer {
-    fn changes_work(&self, next: &Self, now: std::time::Instant) -> bool {
+    pub(super) fn observe(
+        peer: &crate::discovery::roster::PeerRecord,
+        now: std::time::Instant,
+    ) -> Self {
+        Self {
+            public: peer.public.clone(),
+            account: peer.account_id.clone(),
+            post_office: peer.post_office,
+            routes: peer.scheduling_endpoints(),
+            fresh_until: peer.presence_deadline(now),
+        }
+    }
+    pub(super) fn changes_work(&self, next: &Self, now: std::time::Instant) -> bool {
         self.public != next.public
             || self.account != next.account
             || self.post_office != next.post_office
@@ -44,17 +57,7 @@ impl Node {
         let peers = self.roster.lock().expect("roster lock").peers();
         let mut snapshot: Vec<_> = peers
             .into_iter()
-            .map(|peer| {
-                let fresh_until = peer.presence_deadline(now);
-                let routes = peer.scheduling_endpoints();
-                FilePullPeer {
-                    public: peer.public,
-                    account: peer.account_id,
-                    post_office: peer.post_office,
-                    routes,
-                    fresh_until,
-                }
-            })
+            .map(|peer| FilePullPeer::observe(&peer, now))
             .collect();
         snapshot.sort_unstable_by_key(|peer| peer.public.user_id());
         snapshot

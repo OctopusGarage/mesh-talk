@@ -125,6 +125,11 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Apply an existing retry hold before resolving routes or reading consent for
    work which cannot be admitted yet. Keep expiry and meaningful release at the
    scheduling owner; due admission and sends still require fresh authority.
+   Completion of one subgoal need not complete a durable intent. After exact
+   relay custody, retain recipient demand but park repeated reconciliation behind
+   relevant availability changes and sparse repair. Capture event baselines
+   before work and compare at completion; a change during work must not be
+   absorbed into a fresh quiet baseline. Heartbeats cannot renew the deadline.
    Failed preparation must not monopolize the oldest unfinished scope. Retain a
    bounded error hold at the existing work owner, include its deadline in the
    scheduler, and let healthy scopes advance. Serialize hold installation with

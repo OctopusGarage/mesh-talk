@@ -2699,6 +2699,7 @@
             "node::delivery_store::tests::",
             "node::delivery_retry::tests::",
             "node::delivery_runtime::diagnostic_tests::",
+            "node::delivery_runtime_tests::relay_held_",
             "private_file_restart_advances_twenty_four_pending_scopes_fairly",
             "queued_private_file_work_stops_on_permission_revoke_and_exact_account_rebind",
             "node::delivery_runtime_tests::account_file_own_copy_first_stays_canonical_and_never_confirms_target",
@@ -2739,7 +2740,7 @@
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
-            "name": "Private file failure reservations bind exact attempts and eligible routes, survive cancelled awaits, start bounded backoff at completion and cannot be evicted while active or cooling. Retained relay/consent holds gate admission before route preparation; expiry and actual accepted consent release them, while due work revalidates authority. Quiet wakes preserve durable destinations; clean steps and route replacements retain progress, while failed retirement remains cooled.",
+            "name": "Private file failure reservations bind exact attempts and eligible routes, survive cancelled awaits, start bounded backoff at completion and cannot be evicted while active or cooling. Retained relay/consent holds gate admission before route preparation. Relay-held work uses fixed five-minute repair plus exact recipient/relay availability, policy and network changes; ordinary heartbeats never renew holds. Pre-work observations survive completion races, same-endpoint receiver recovery stays prompt and silent relay loss repairs without confirming recipient delivery. Consent expiry/Accepted release remains separate and due work revalidates authority. Quiet wakes preserve durable destinations; clean steps and route replacements retain progress, while failed retirement remains cooled.",
             "reference": "docs/ARCHITECTURE.md"
           },
           {

@@ -29,7 +29,7 @@ pub(in crate::node) const FILE_EXCHANGE_TIMEOUT: std::time::Duration =
 pub(in crate::node) const RELAY_EXCHANGE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
 const RELAY_FAILURE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
-const FILE_RELAY_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+const FILE_RELAY_RETRY: std::time::Duration = std::time::Duration::from_secs(300);
 
 // Whole authenticated control exchanges need several routed round trips. Keep
 // them off the serial file scheduler, with independent capacity for each lane.
@@ -311,6 +311,8 @@ pub(in crate::node) struct FileTransfer {
     route: Option<(bool, crate::discovery::roster::PeerRecord)>,
     opaque: Option<super::opaque_relay::OpaqueMailboxProgress>,
     relay_custody: Option<(ConversationId, EventId)>,
+    held_observation: Option<RelayHeldObservation>,
+    recipient_observation: Option<HeldPeer>,
 }
 
 impl FileTransfer {
@@ -333,6 +335,8 @@ impl FileTransfer {
             route: None,
             opaque: None,
             relay_custody: None,
+            held_observation: None,
+            recipient_observation: None,
         }
     }
 }
@@ -375,6 +379,7 @@ struct FileRoutes {
 // supplies the FileCard (including fanout), destination and authorization.
 struct FileContinuation {
     routes: FileRoutes,
+    recipient_observation: Option<HeldPeer>,
     candidate_cursor: usize,
     legacy: bool,
     sticker_proof_attempted: bool,
@@ -389,6 +394,74 @@ type FileWork = (
 /// The worker owns file scheduling state across wakeups. A scan takes only a
 /// cursor and a capacity snapshot, so no socket or mutable cache crosses the
 /// blocking journal read.
+#[derive(Clone)]
+struct HeldPeer {
+    public: crate::identity::device::PublicIdentity,
+    account: Option<String>,
+    observation: Option<super::participant_runtime::FilePullPeer>,
+}
+struct RelayHeldObservation {
+    peers: [HeldPeer; 2],
+    policy_generation: u64,
+}
+impl RelayHeldObservation {
+    fn capture(
+        node: &Node,
+        destination: &super::delivery_store::FileDestination,
+        relay: &crate::discovery::roster::PeerRecord,
+        now: std::time::Instant,
+    ) -> Self {
+        let mut value = Self {
+            peers: [
+                HeldPeer {
+                    public: destination.binding.device.clone(),
+                    account: destination.binding.account.clone(),
+                    observation: None,
+                },
+                HeldPeer {
+                    public: relay.public.clone(),
+                    account: relay.account_id.clone(),
+                    observation: None,
+                },
+            ],
+            policy_generation: node.privacy.generation.load(Ordering::Acquire),
+        };
+        let roster = node.roster.lock().expect("roster lock not poisoned");
+        value.refresh(&roster, now);
+        value
+    }
+    // Roster only: callers must release this guard before policy or storage work.
+    fn refresh(
+        &mut self,
+        roster: &crate::discovery::roster::Roster,
+        now: std::time::Instant,
+    ) -> bool {
+        let mut changed = false;
+        for peer in &mut self.peers {
+            let next = roster
+                .get(&peer.public.user_id())
+                .filter(|record| record.public == peer.public && record.account_id == peer.account)
+                .map(|record| super::participant_runtime::FilePullPeer::observe(record, now));
+            changed |= match (&peer.observation, &next) {
+                (Some(old), Some(next)) => old.changes_work(next, now),
+                (None, None) => false,
+                _ => true,
+            };
+            peer.observation = next;
+        }
+        changed
+    }
+}
+enum FileHoldKind {
+    ConsentWait,
+    RelayHeld(Box<RelayHeldObservation>),
+}
+struct FileHold {
+    key: FileKey,
+    until: std::time::Instant,
+    kind: FileHoldKind,
+}
+
 #[derive(Default)]
 struct FileDeliveryScheduler {
     pending_cursor: Option<FileKey>,
@@ -400,7 +473,7 @@ struct FileDeliveryScheduler {
     parked: std::collections::HashMap<FileKey, FileContinuation>,
     // Bounded scheduling hints, not custody/delivery truth. Eviction merely
     // permits an earlier retry after other destinations have had their turn.
-    relay_cooldowns: std::collections::VecDeque<(FileKey, std::time::Instant, bool)>,
+    relay_cooldowns: std::collections::VecDeque<FileHold>,
 }
 
 #[derive(Clone, Copy)]
@@ -432,10 +505,33 @@ impl FileScan {
 
 impl FileDeliveryScheduler {
     fn scan(&mut self, node: &Node) -> FileScan {
+        self.scan_at(node, std::time::Instant::now())
+    }
+
+    fn refresh_held(&mut self, node: &Node, now: std::time::Instant) -> bool {
+        let before = self.relay_cooldowns.len();
+        let roster = node.roster.lock().expect("roster lock not poisoned");
+        self.relay_cooldowns
+            .retain_mut(|hold| match &mut hold.kind {
+                FileHoldKind::ConsentWait => true,
+                FileHoldKind::RelayHeld(observation) => !observation.refresh(&roster, now),
+            });
+        self.relay_cooldowns.len() < before
+    }
+
+    fn scan_at(&mut self, node: &Node, now: std::time::Instant) -> FileScan {
         node.prune_file_transfers(&mut self.transfers);
-        self.relay_cooldowns.retain(|(key, until, consent)| {
-            *until > std::time::Instant::now()
-                && (!*consent
+        let generation = node.privacy.generation.load(Ordering::Acquire);
+        self.relay_cooldowns.retain(|hold| {
+            let key = hold.key;
+            hold.until > now
+                && match &hold.kind {
+                    FileHoldKind::RelayHeld(observation) => {
+                        observation.policy_generation == generation
+                    }
+                    FileHoldKind::ConsentWait => true,
+                }
+                && (!matches!(hold.kind, FileHoldKind::ConsentWait)
                     || match node.outgoing_file_consent_status(key.0, key.1) {
                         Ok(status) => {
                             status != Some(crate::eventlog::sync::FileConsentStatus::Accepted)
@@ -470,7 +566,7 @@ impl FileDeliveryScheduler {
             let key = (file.id, destination.binding.event_id);
             // Scan owns expiry and consent wakeups. A retained hold cannot
             // admit work, so avoid preparing routes and reading consent for it.
-            if self.relay_cooldowns.iter().any(|(held, _, _)| *held == key) {
+            if self.relay_cooldowns.iter().any(|hold| hold.key == key) {
                 continue;
             }
             let routes = node.file_retry_routes(&file, &destination);
@@ -496,6 +592,7 @@ impl FileDeliveryScheduler {
                     .remove(&key)
                     .filter(|previous| previous.routes == routes)
                 {
+                    transfer.recipient_observation = continuation.recipient_observation;
                     transfer.candidate_cursor = continuation.candidate_cursor;
                     transfer.legacy = continuation.legacy;
                     transfer.sticker_proof_attempted = continuation.sticker_proof_attempted;
@@ -631,6 +728,7 @@ impl FileDeliveryScheduler {
                 self.parked.insert(
                     key,
                     FileContinuation {
+                        recipient_observation: transfer.recipient_observation,
                         routes: completion.routes,
                         candidate_cursor: transfer.candidate_cursor,
                         legacy: transfer.legacy,
@@ -643,27 +741,149 @@ impl FileDeliveryScheduler {
             return;
         }
         if let Some(transfer) = transfers.remove(&key) {
-            let delay = match transfer.phase {
-                FilePhase::RelayHeld => Some(FILE_RELAY_RETRY),
-                FilePhase::ConsentWait => Some(FILE_CONSENT_RETRY),
-                _ => None,
+            let kind = match transfer.phase {
+                FilePhase::RelayHeld => transfer.held_observation.and_then(|mut observation| {
+                    let generation = node.privacy.generation.load(Ordering::Acquire);
+                    let changed = {
+                        let roster = node.roster.lock().expect("roster lock not poisoned");
+                        observation.refresh(&roster, now)
+                    };
+                    (!changed && observation.policy_generation == generation)
+                        .then_some(FileHoldKind::RelayHeld(Box::new(observation)))
+                }),
+                FilePhase::ConsentWait => Some(FileHoldKind::ConsentWait),
+                _ => {
+                    self.transfers.insert(key, transfer);
+                    node.delivery_notify.notify_one();
+                    return;
+                }
             };
-            if let Some(delay) = delay {
+            if let Some(kind) = kind {
+                let delay = if matches!(kind, FileHoldKind::ConsentWait) {
+                    FILE_CONSENT_RETRY
+                } else {
+                    FILE_RELAY_RETRY
+                };
                 if self.relay_cooldowns.len() == MAX_RELAY_CUSTODY_HINTS {
                     self.relay_cooldowns.pop_front();
                 }
-                self.relay_cooldowns.push_back((
+                self.relay_cooldowns.push_back(FileHold {
                     key,
-                    std::time::Instant::now() + delay,
-                    matches!(transfer.phase, FilePhase::ConsentWait),
-                ));
-                node.delivery_notify.notify_one();
-            } else {
-                self.transfers.insert(key, transfer);
+                    until: now + delay,
+                    kind,
+                });
+                #[cfg(test)]
+                if matches!(
+                    self.relay_cooldowns.back().unwrap().kind,
+                    FileHoldKind::RelayHeld(_)
+                ) {
+                    node.trace_account_client(&node.identity.public(), || {
+                        "file_relay_held_installed".into()
+                    });
+                }
                 node.delivery_notify.notify_one();
             }
         }
     }
+}
+
+// Drives real protocol completions using the scheduler's monotonic clock seam.
+#[cfg(test)]
+pub(super) async fn assert_relay_held_repair(
+    node: &Arc<Node>,
+    lose_custody: impl FnOnce(),
+    mut change_role: impl FnMut(bool),
+) {
+    let mut scheduler = FileDeliveryScheduler::default();
+    let mut diagnostic = DeliveryDiagnosticThrottle::default();
+    let mut roster_changes = node.subscribe_roster_changes();
+    let mut raced = false;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while scheduler.relay_cooldowns.is_empty() {
+            let scan = scheduler.scan(node);
+            let (files, cursor) = scan.read(&node.delivery.lock().unwrap());
+            scheduler.admit(node, files, cursor);
+            scheduler.advance(node);
+            if let Some(result) = scheduler.workers.join_next().await {
+                let held = result.as_ref().is_ok_and(|(key, transfers, _)| {
+                    transfers
+                        .get(key)
+                        .is_some_and(|transfer| matches!(transfer.phase, FilePhase::RelayHeld))
+                });
+                if held && !raced {
+                    // Actual custody worker finished, but its result has not yet
+                    // installed a hold. Consume the event with no hold present.
+                    change_role(true);
+                    roster_changes.changed().await.unwrap();
+                    scheduler.refresh_held(node, std::time::Instant::now());
+                    scheduler.finish(node, result, &mut diagnostic);
+                    assert!(
+                        scheduler.relay_cooldowns.is_empty(),
+                        "worker baseline must retain a role event consumed before hold insertion"
+                    );
+                    change_role(false);
+                    raced = true;
+                } else {
+                    scheduler.finish(node, result, &mut diagnostic);
+                }
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    })
+    .await
+    .expect("actual durable relay custody must finish");
+    let key = scheduler.relay_cooldowns[0].key;
+    let deadline = scheduler.relay_cooldowns[0].until;
+    assert!(matches!(
+        scheduler.relay_cooldowns[0].kind,
+        FileHoldKind::RelayHeld(_)
+    ));
+    let before = deadline - FILE_RELAY_RETRY;
+    for seconds in [0, 10, 60, 120, 299] {
+        let now = before + std::time::Duration::from_secs(seconds);
+        scheduler.refresh_held(node, now);
+        let scan = scheduler.scan_at(node, now);
+        let (files, cursor) = scan.read(&node.delivery.lock().unwrap());
+        scheduler.admit_at(node, files, cursor, now);
+        scheduler.advance_at(node, now);
+        assert!(
+            scheduler.workers.is_empty(),
+            "quiet held key cannot own a worker"
+        );
+        assert!(scheduler.transfers.is_empty());
+        assert_eq!(scheduler.relay_cooldowns[0].until, deadline);
+    }
+    lose_custody();
+    let scan = scheduler.scan_at(node, deadline);
+    assert!(scheduler.relay_cooldowns.is_empty());
+    let (files, cursor) = scan.read(&node.delivery.lock().unwrap());
+    scheduler.admit_at(node, files.clone(), cursor, deadline);
+    scheduler.admit_at(node, files, cursor, deadline);
+    scheduler.advance_at(node, deadline);
+    assert_eq!(scheduler.workers.len(), 1, "one repair owner per exact key");
+    let mut repair_now = deadline;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while scheduler.relay_cooldowns.is_empty() {
+            if let Some(result) = scheduler.workers.join_next().await {
+                scheduler.finish_at(node, result, &mut diagnostic, repair_now);
+            }
+            repair_now += std::time::Duration::from_secs(2);
+            let scan = scheduler.scan_at(node, repair_now);
+            let (files, cursor) = scan.read(&node.delivery.lock().unwrap());
+            // A failed direct route retains ordinary failure pacing.
+            let retry_now = repair_now;
+            scheduler.admit_at(node, files, cursor, retry_now);
+            scheduler.advance_at(node, retry_now);
+            if scheduler.workers.is_empty() && scheduler.relay_cooldowns.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    })
+    .await
+    .expect("silent relay loss must repair through actual protocol work");
+    assert_eq!(scheduler.relay_cooldowns[0].key, key);
+    assert!(!node.outgoing_file_progress(key.0).unwrap().delivered);
 }
 
 #[derive(Default)]
@@ -2434,6 +2654,8 @@ impl Node {
         // peer lane. One held event must not park another queued event.
         let mut quiet_destinations = super::delivery_retry::RetrySchedule::default();
         let mut network = self.network_changes.subscribe();
+        let mut roster_changes = self.subscribe_roster_changes();
+        let mut roster_open = true;
         loop {
             tokio::select! {
                 result = file_scheduler.workers.join_next(), if !file_scheduler.workers.is_empty() => {
@@ -2442,6 +2664,11 @@ impl Node {
                         file_scheduler.finish(&self, result, &mut diagnostic);
                     }
                     continue;
+                },
+                changed = roster_changes.changed(), if roster_open => {
+                    if changed.is_ok() {
+                        if !file_scheduler.refresh_held(&self, std::time::Instant::now()) { continue; }
+                    } else { roster_open = false; continue; }
                 },
                 _ = interval.tick() => {},
                 _ = self.delivery_notify.notified() => {},
@@ -2533,6 +2760,10 @@ impl Node {
             let Some(work) = self.runtime_work.admit() else {
                 return;
             };
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "file_delivery_snapshot_started".into()
+            });
             let snapshot = work
                 .spawn_blocking(move || {
                     #[cfg(test)]
@@ -3478,6 +3709,21 @@ impl Node {
             return Err(SessionError::UnexpectedMessage);
         }
         if matches!(transfer.phase, FilePhase::Dial) {
+            if transfer.recipient_observation.is_none() {
+                let now = std::time::Instant::now();
+                let roster = self.roster.lock().expect("roster lock not poisoned");
+                let observation = roster
+                    .get(&binding.device.user_id())
+                    .filter(|peer| {
+                        peer.public == binding.device && peer.account_id == binding.account
+                    })
+                    .map(|peer| super::participant_runtime::FilePullPeer::observe(peer, now));
+                transfer.recipient_observation = Some(HeldPeer {
+                    public: binding.device.clone(),
+                    account: binding.account.clone(),
+                    observation,
+                });
+            }
             let mut candidates = Vec::new();
             if let Some(peer) = self
                 .routing_peer(&binding.device.user_id())
@@ -3506,6 +3752,20 @@ impl Node {
                 return Err(SessionError::NoProgress);
             }
             let (relay, peer) = candidates.swap_remove(index);
+            transfer.held_observation = relay.then(|| {
+                let mut observation = RelayHeldObservation::capture(
+                    self,
+                    destination,
+                    &peer,
+                    std::time::Instant::now(),
+                );
+                observation.peers[0] = transfer
+                    .recipient_observation
+                    .as_ref()
+                    .expect("dial observation captured")
+                    .clone();
+                observation
+            });
             let channel = self.privacy_sync_dial(peer.addr, &peer.public).await?;
             if !self.file_destination_current(file, destination)
                 || channel.peer_identity() != &peer.public
@@ -4993,7 +5253,16 @@ mod diagnostic_tests {
         let mut scheduler = super::FileDeliveryScheduler::default();
         let now = std::time::Instant::now();
         let until = now + super::FILE_RELAY_RETRY;
-        scheduler.relay_cooldowns.push_back((key, until, false));
+        scheduler.relay_cooldowns.push_back(super::FileHold {
+            key,
+            until,
+            kind: super::FileHoldKind::RelayHeld(Box::new(super::RelayHeldObservation::capture(
+                &node,
+                &destination,
+                &node.routing_peer(&bob.public().user_id()).unwrap(),
+                now,
+            ))),
+        });
         super::FILE_RETRY_ROUTE_READS.with(|reads| reads.set(0));
         for _ in 0..4 {
             scheduler.admit_at(
@@ -5004,10 +5273,7 @@ mod diagnostic_tests {
             );
         }
         assert!(scheduler.transfers.is_empty());
-        assert_eq!(
-            scheduler.relay_cooldowns.front(),
-            Some(&(key, until, false))
-        );
+        assert_eq!(scheduler.relay_cooldowns.front().unwrap().until, until);
         assert_eq!(
             super::FILE_RETRY_ROUTE_READS.with(std::cell::Cell::get),
             0,
@@ -5022,15 +5288,62 @@ mod diagnostic_tests {
         );
         assert!(scheduler.transfers.is_empty());
         assert_eq!(super::FILE_RETRY_ROUTE_READS.with(std::cell::Cell::get), 0);
-        scheduler.relay_cooldowns.front_mut().unwrap().1 = now;
+        scheduler.relay_cooldowns.front_mut().unwrap().until = now;
         scheduler.scan(&node);
         assert!(scheduler.relay_cooldowns.is_empty());
         scheduler.admit(&node, vec![(card.clone(), destination.clone())], None);
         assert_eq!(super::FILE_RETRY_ROUTE_READS.with(std::cell::Cell::get), 1);
         assert!(scheduler.transfers.remove(&key).is_some());
 
+        // Independent roster watch: same-endpoint heartbeats refresh the
+        // baseline without rearming a held file; unrelated peers do not rearm it.
+        let mut roster_changes = node.subscribe_roster_changes();
+        let peer = node.routing_peer(&bob.public().user_id()).unwrap();
+        let observation = super::RelayHeldObservation::capture(&node, &destination, &peer, now);
+        scheduler.relay_cooldowns.push_back(super::FileHold {
+            key,
+            until,
+            kind: super::FileHoldKind::RelayHeld(Box::new(observation)),
+        });
+        node.roster.lock().unwrap().update(
+            &proof,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+        roster_changes.changed().await.unwrap();
+        scheduler.refresh_held(&node, now);
+        assert_eq!(scheduler.relay_cooldowns.len(), 1);
+        let stranger = Announce::new(&DeviceIdentity::generate(), "Unrelated", 17);
+        node.roster.lock().unwrap().update(
+            &stranger,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+        roster_changes.changed().await.unwrap();
+        scheduler.refresh_held(&node, now);
+        assert_eq!(scheduler.relay_cooldowns.len(), 1);
+        // Exact same binding and endpoint, but the previously observed public
+        // lease was stale: current fresh evidence must promptly release it.
+        let mut stale = peer.clone();
+        for route in &mut stale.routes {
+            route.last_seen = now - std::time::Duration::from_secs(3600);
+            route.presence_expires_at = None;
+        }
+        if let super::FileHoldKind::RelayHeld(observation) = &mut scheduler.relay_cooldowns[0].kind
+        {
+            observation.peers[0].observation = Some(
+                super::super::participant_runtime::FilePullPeer::observe(&stale, now),
+            );
+        }
+        scheduler.refresh_held(&node, now);
+        assert!(scheduler.relay_cooldowns.is_empty());
+
         // An actual signed, durable Accepted decision releases ConsentWait in scan.
-        scheduler.relay_cooldowns.push_back((key, until, true));
+        scheduler.relay_cooldowns.push_back(super::FileHold {
+            key,
+            until,
+            kind: super::FileHoldKind::ConsentWait,
+        });
         let accepted = super::super::file_consent::Decision {
             file: card.file_conversation,
             manifest: destination.binding.event_id,
@@ -5056,7 +5369,18 @@ mod diagnostic_tests {
 
         // A held hint cannot authorize stale work after revocation or deletion.
         for deleted in [false, true] {
-            scheduler.relay_cooldowns.push_back((key, until, false));
+            scheduler.relay_cooldowns.push_back(super::FileHold {
+                key,
+                until,
+                kind: super::FileHoldKind::RelayHeld(Box::new(
+                    super::RelayHeldObservation::capture(
+                        &node,
+                        &destination,
+                        &node.routing_peer(&bob.public().user_id()).unwrap(),
+                        now,
+                    ),
+                )),
+            });
             if deleted {
                 node.delivery
                     .lock()
@@ -5071,7 +5395,7 @@ mod diagnostic_tests {
             }
             scheduler.admit(&node, vec![(card.clone(), destination.clone())], None);
             assert!(scheduler.transfers.is_empty());
-            scheduler.relay_cooldowns.front_mut().unwrap().1 = now;
+            scheduler.relay_cooldowns.front_mut().unwrap().until = now;
             scheduler.scan(&node);
             super::FILE_RETRY_ROUTE_READS.with(|reads| reads.set(0));
             scheduler.admit(&node, vec![(card.clone(), destination.clone())], None);

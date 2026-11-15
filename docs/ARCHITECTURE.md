@@ -1189,9 +1189,18 @@ bounded retained memory. Do not combine these exchanges into one whole-file
 deadline: repeated cancellation before the first chunk can starve delivery.
 
 Relay custody releases the connection and active slot but never retires the
-recipient's file destination or confirms delivery. At most 256 volatile,
-ten-second scheduling hints defer redundant relay uploads; eviction permits an
-earlier retry and carries no custody guarantee. The SDK's immediate best-effort
+recipient's file destination or confirms delivery. At most 256 volatile
+scheduling hints park unchanged held files until a meaningful recipient/relay
+availability, route, role, policy or network change, with a fixed five-minute
+repair deadline. Ordinary presence renewals update the observation baseline
+without renewing the repair deadline. The worker captures recipient availability
+before dialing and relay availability at selection; completion rechecks them so
+an event arriving during custody work cannot disappear into a new hold.
+Consent waits retain their separate short cadence and signed Accepted release.
+Eviction permits an earlier guarded retry and carries no custody guarantee.
+Silent relay data loss has no local notification and is detected by the
+five-minute repair; actual send and recipient completion checks remain current.
+The SDK's immediate best-effort
 flush remains a disposable, bounded attempt rather than retaining worker-owned
 state. SDK hosts run the accept loop's delivery worker for eventual retries.
 

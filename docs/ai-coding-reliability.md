@@ -466,6 +466,12 @@ preparation; its owning scan handles expiry and accepted-consent release. The
 `file_scheduler_cooldown_skips_route_work_until_scan_releases_hold` regression in
 [delivery runtime](../crates/mesh-talk-core/src/node/delivery_runtime.rs) counts
 actual route preparation while preserving fresh checks after release.
+When a completed subgoal installs a wait, retain its pre-work event baseline and
+compare current inputs before parking. An event already consumed while work was
+active must still cause follow-up, rather than become the new quiet baseline.
+Subscribe before observing, mark a watch generation seen before its snapshot,
+and retain later changes. Refresh ignored lease renewals without extending the
+original repair deadline; exact peer observations are scheduling hints, not grants.
 The deferred
 channel regression in [account maintenance](../crates/mesh-talk-core/src/node/channel_account_maintenance.rs)
 counts entry into actual eligibility work, with due, changed-input and timer-disabled controls.

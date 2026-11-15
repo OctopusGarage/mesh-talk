@@ -8433,15 +8433,25 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
 
 #[tokio::test]
 async fn relay_file_worker_preserves_progress_across_slow_mailbox_exchanges() {
-    retained_relay_file_worker(true, 1).await;
+    retained_relay_file_worker(true, 1, 0).await;
 }
 
 #[tokio::test]
 async fn relay_custody_releases_slots_for_more_than_eight_pending_files() {
-    retained_relay_file_worker(false, 10).await;
+    retained_relay_file_worker(false, 10, 0).await;
 }
 
-async fn retained_relay_file_worker(slow: bool, count: u8) {
+#[tokio::test]
+async fn relay_held_quiet_deadline_repairs_actual_silent_custody_loss() {
+    retained_relay_file_worker(false, 1, 1).await;
+}
+
+#[tokio::test]
+async fn relay_held_same_endpoint_receiver_event_delivers_before_repair() {
+    retained_relay_file_worker(false, 1, 2).await;
+}
+
+async fn retained_relay_file_worker(slow: bool, count: u8, repair: u8) {
     use crate::eventlog::sync::SyncStore;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let ad = tempfile::tempdir().unwrap();
@@ -8458,9 +8468,24 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     let rejecting_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let rejecting_listener_port = rejecting_listener.local_addr().unwrap().port();
     let bp = Announce::new_with_account(&bob, &bob_account, "Bob", rejecting_listener_port);
-    let rejecting = tokio::spawn(async move {
-        while let Ok((stream, _)) = rejecting_listener.accept().await {
-            drop(stream);
+    let direct_receiver: Arc<Mutex<Option<Arc<Node>>>> = Arc::new(Mutex::new(None));
+    let rejecting = tokio::spawn({
+        let direct_receiver = direct_receiver.clone();
+        async move {
+            let mut connections = tokio::task::JoinSet::new();
+            while let Ok((stream, _)) = rejecting_listener.accept().await {
+                let receiver = direct_receiver.lock().unwrap().clone();
+                if let Some(receiver) = receiver {
+                    connections.spawn(async move {
+                        if let Ok(channel) = receiver.privacy_accept(stream).await {
+                            receiver.serve_connection(channel).await;
+                        }
+                    });
+                } else {
+                    drop(stream);
+                }
+                while connections.try_join_next().is_some() {}
+            }
         }
     });
     let (a, _) = node(ad.path(), alice, aa, &bp);
@@ -8677,6 +8702,137 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     // connections here, without unrelated proactive history-recovery pulls.
     a.replace_verified_dm_pull_peers(Vec::new());
     delayed.store(slow, Ordering::SeqCst);
+    if repair == 2 {
+        a.roster
+            .lock()
+            .unwrap()
+            .forget(&recipients[0].0.identity.public());
+        let held = Arc::new(tokio::sync::Notify::new());
+        let snapshots = Arc::new(AtomicUsize::new(0));
+        *a.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let held = held.clone();
+            let snapshots = snapshots.clone();
+            move |_, phase| {
+                if phase == "file_delivery_snapshot_started" {
+                    snapshots.fetch_add(1, Ordering::SeqCst);
+                }
+                if phase == "file_relay_held_installed" {
+                    held.notify_one();
+                }
+            }
+        }));
+        let worker = tokio::spawn(a.clone().run_delivery_loop());
+        tokio::time::timeout(std::time::Duration::from_secs(10), held.notified())
+            .await
+            .expect("production owner must install actual custody hold");
+        let before = confirmations.load(Ordering::SeqCst);
+        assert!(before > 0);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let snapshot_before = snapshots.load(Ordering::SeqCst);
+        let unrelated = Announce::new(&DeviceIdentity::generate(), "Unrelated", 19);
+        for index in 0..8 {
+            let announce = if index % 2 == 0 { &proof } else { &unrelated };
+            a.roster.lock().unwrap().update(
+                announce,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &a.user_id(),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            snapshots.load(Ordering::SeqCst) - snapshot_before <= 1,
+            "irrelevant roster events cannot start full producer snapshots; only anchored500ms tick may run"
+        );
+        for _ in 0..4 {
+            a.delivery_notify.notify_one();
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+        assert_eq!(
+            confirmations.load(Ordering::SeqCst),
+            before,
+            "ordinary notifications cannot release held custody"
+        );
+        let started = std::time::Instant::now();
+        *direct_receiver.lock().unwrap() = Some(recipients[0].0.clone());
+        a.roster.lock().unwrap().update(
+            &recipients[0].2,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &a.user_id(),
+        );
+        let key = files[0].0;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let retired = a
+                    .delivery
+                    .lock()
+                    .unwrap()
+                    .file_card(key)
+                    .is_none_or(|card| {
+                        card.destinations
+                            .iter()
+                            .all(|destination| !destination.active)
+                    });
+                if retired {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("production roster subscription must deliver same-endpoint receiver before repair");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(recipients[0].0.read_file(files[0].1).unwrap(), files[0].2);
+        *a.account_client_test_hook.lock().unwrap() = None;
+        worker.abort();
+        server.abort();
+        rejecting.abort();
+        let _ = worker.await;
+        let _ = server.await;
+        let _ = rejecting.await;
+        return;
+    }
+    if repair == 1 {
+        let prior = confirmations.load(Ordering::SeqCst);
+        super::delivery_runtime::assert_relay_held_repair(
+            &a,
+            || {
+                assert!(confirmations.load(Ordering::SeqCst) > prior);
+                // Replace the actual storage owner with empty durable storage under
+                // the same relay identity, endpoint and role: there is no roster event.
+                let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                let mut empty = crate::postoffice::PostOffice::open(
+                    &pd.path().join("lost-custody"),
+                    "pw",
+                    identity,
+                )
+                .unwrap();
+                empty.require_opaque_envelopes();
+                relay.lock().unwrap().inner = empty;
+            },
+            |revoke| {
+                let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                let changed = if revoke {
+                    Announce::new(&identity, "Relay", proof.tcp_port)
+                } else {
+                    proof.clone()
+                };
+                a.roster.lock().unwrap().update(
+                    &changed,
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    &a.user_id(),
+                );
+            },
+        )
+        .await;
+        let file = files[0].1;
+        assert!(confirmations.load(Ordering::SeqCst) >= prior + 2);
+        assert!(!recipients[0].0.file_ready_to_save(file).unwrap());
+        server.abort();
+        rejecting.abort();
+        let _ = server.await;
+        let _ = rejecting.await;
+        return;
+    }
     let worker = tokio::spawn(a.clone().run_delivery_loop());
     let mut recipient_drains = 0;
     let custody_started = std::time::Instant::now();

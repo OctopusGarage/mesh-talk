@@ -1098,6 +1098,17 @@ permits a fresh attempt; successful preparation, current authorization and stale
 source retirement keep their existing checks. No failure hold grants custody or
 acknowledges delivery.
 
+Private-file relay custody likewise parks its exact file/destination scheduling
+hint for at most five minutes. Relevant recipient or chosen-relay availability,
+identity/route/role changes and policy/network changes wake fresh admission;
+ordinary heartbeats and unrelated peers do not. The observation is captured
+before work and rechecked at completion, retaining changes received before a
+waiter exists. A receiver becoming available at the same endpoint must progress
+without waiting for repair. Silent relay data loss is discovered by the fixed
+five-minute fallback, rather than a ten-second full reconciliation cycle.
+Consent waiting remains independent. No hold retains a socket, payload or
+permission grant, renews itself on observation, or confirms recipient delivery.
+
 Private and group file sends can deposit recipient-encrypted chunk wrappers in
 eligible post offices before a recipient comes online or approves the offer.
 This is custody of ciphertext, not recipient delivery or permission to install
