@@ -2879,7 +2879,7 @@ fn hot_scalar_revision_statements_reuse_compilation_and_keep_values_fresh() {
     assert_eq!(
         observer.count(),
         compiled,
-        "same four scalar SELECTs must reuse their compiled statements"
+        "same four scalar queries must reuse their compiled statements"
     );
     assert_eq!(repository.body_read_counts(), bodies);
     // Only normal profile transactions occur under this test observer. The
