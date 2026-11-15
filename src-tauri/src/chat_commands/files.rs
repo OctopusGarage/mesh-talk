@@ -38,6 +38,73 @@ pub async fn register_sticker_source(
         .await
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct PendingStickerSource {
+    file_conv: String,
+    name: String,
+    mime: String,
+    size: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PendingStickerSourcesPage {
+    items: Vec<PendingStickerSource>,
+    next_cursor: Option<String>,
+}
+
+/// Read existing download demand without claiming or scheduling any work.
+#[tauri::command]
+pub async fn pending_sticker_sources(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    owner: String,
+    account: String,
+    after_file: Option<String>,
+    limit: Option<usize>,
+) -> Result<PendingStickerSourcesPage, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &state, &owner)?;
+    let limit = limit.unwrap_or(32);
+    if limit == 0 || limit > mesh_talk_core::node::Node::MAX_STICKER_DEMAND_ROWS {
+        return Err(CommandError::Validation(
+            "invalid sticker demand limit".into(),
+        ));
+    }
+    let after = after_file
+        .as_deref()
+        .map(|value| {
+            if value.len() != 64 {
+                return Err(CommandError::Validation(
+                    "invalid sticker demand cursor".into(),
+                ));
+            }
+            parse_channel_id(value)
+        })
+        .transpose()?;
+    admission
+        .blocking(move |runtime, _| {
+            let node = runtime.handle();
+            if node.account_id() != account {
+                return Err(CommandError::Authorization(
+                    "runtime account mismatch".into(),
+                ));
+            }
+            let (items, next) = node.pending_sticker_sources(after, limit)?;
+            Ok(PendingStickerSourcesPage {
+                items: items
+                    .into_iter()
+                    .map(|media| PendingStickerSource {
+                        file_conv: hex::encode(media.v2.file_conv.as_bytes()),
+                        name: media.v2.name,
+                        mime: media.v2.mime,
+                        size: media.v2.size,
+                    })
+                    .collect(),
+                next_cursor: next.map(|file| hex::encode(file.as_bytes())),
+            })
+        })
+        .await
+}
+
 #[derive(serde::Serialize)]
 pub struct FileStatus {
     file_conv: String,
@@ -958,6 +1025,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_sticker_sources_rejects_wrong_owner_without_runtime_wait() {
+        let (_root, app) = sticker_app();
+        let state = app.state::<NodeState>();
+        let _held = state.0.write().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            pending_sticker_sources(
+                app.state(),
+                app.state(),
+                "bob".into(),
+                "account".into(),
+                None,
+                Some(32),
+            ),
+        )
+        .await
+        .expect("wrong owner cannot wait for runtime");
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("session owner mismatch")
+        );
+    }
+
+    #[tokio::test]
     async fn registered_sticker_source_rejects_wrong_owner_before_waiting_for_runtime() {
         let (_root, app) = sticker_app();
         let state = app.state::<NodeState>();
@@ -1018,6 +1112,51 @@ mod tests {
                 .contains("runtime account mismatch"),
             "sticker registration must reject a different runtime account"
         );
+        let wrong_demand = pending_sticker_sources(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            "another-account".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            wrong_demand
+                .to_string()
+                .contains("runtime account mismatch")
+        );
+        let empty = pending_sticker_sources(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            account.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(empty.items.is_empty());
+        assert!(empty.next_cursor.is_none());
+        for (cursor, limit) in [
+            (None, Some(0)),
+            (None, Some(65)),
+            (Some("bad".into()), None),
+        ] {
+            assert!(
+                pending_sticker_sources(
+                    app.state(),
+                    app.state(),
+                    "alice".into(),
+                    account.clone(),
+                    cursor,
+                    limit,
+                )
+                .await
+                .is_err()
+            );
+        }
         let name = "mt-sticker-v1-cGFjazpleGFtcGxlOndhdmUK8J-Riw.png";
         let bytes = hex::decode("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44ae426082").unwrap();
         let valid = register_sticker_source(

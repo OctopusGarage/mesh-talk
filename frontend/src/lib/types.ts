@@ -638,3 +638,16 @@ export interface PresenceDelta {
   groups?: PresenceMap;
   groups_revision: string;
 }
+
+/** Existing pending download metadata; candidates confer no delivery authority. */
+export interface PendingStickerSource {
+  file_conv: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+export interface PendingStickerSourcesPage {
+  items: PendingStickerSource[];
+  /** Continue even when items is empty. Null ends this traversal. */
+  next_cursor: string | null;
+}

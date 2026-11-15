@@ -1768,6 +1768,7 @@ export const test = base.extend<{ mockCallsEnabled: boolean }>({
           safety_number: () => safetyNumber(),
 
           // files
+          pending_sticker_sources: () => ({ items: [], next_cursor: null }),
           file_statuses: (a) =>
             (a.fileConvs as string[]).map((file_conv) => ({
               file_conv,

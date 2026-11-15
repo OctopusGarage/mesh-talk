@@ -428,6 +428,33 @@ impl IndexedFileBook {
             manifest_on(c, &self.account, file)
         })
     }
+    /// Pure keyset projection of existing pending work. Bound file rows before
+    /// reading any manifest body; never rotate tickets or acknowledge work.
+    pub(crate) fn download_demand_page(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<(Vec<AnyManifest>, Option<ConversationId>), LogError> {
+        if limit == 0 || limit > crate::node::Node::MAX_STICKER_DEMAND_ROWS {
+            return Err(LogError::InvalidPageBudget);
+        }
+        self.profile.database().read(|c| {
+            self.check(c)?;
+            let mut statement = c.prepare_cached("SELECT file FROM file_download_pending WHERE account=?1 AND file>coalesce(?2,x'') ORDER BY file LIMIT ?3")?;
+            let mut rows = statement.query(params![self.account.as_slice(), after.as_ref().map(|id|id.as_bytes().as_slice()), limit as i64])?;
+            let mut files = Vec::with_capacity(limit);
+            while let Some(row) = rows.next()? { files.push(ConversationId::new(blob(row,0)?)); }
+            drop(rows);
+            drop(statement);
+            let next = (files.len() == limit).then(|| *files.last().expect("nonempty bounded page"));
+            let mut manifests = Vec::new();
+            for file in files {
+                if let Some(manifest) = manifest_on(c, &self.account, file)? { manifests.push(manifest); }
+            }
+            Ok((manifests,next))
+        })
+    }
+
     pub(crate) fn processed(&self, event: EventId) -> Result<bool, LogError> {
         self.profile.database().read(|c| {
             self.check(c)?;
@@ -1801,6 +1828,51 @@ mod tests {
         write(&mut fresh).unwrap();
         assert!(fresh.entry(entry.event_id).unwrap().is_some());
         assert_ne!(effects.head().unwrap(), before);
+    }
+
+    #[test]
+    fn download_demand_page_is_bounded_advances_and_never_writes() {
+        let f = Fixture::new();
+        for n in 1..=3 {
+            let (row, event, _) = f.fixture(n);
+            f.book
+                .profile
+                .database()
+                .transaction(|c| Fixture::install(c, &row, &event))
+                .unwrap();
+        }
+        let db = f.book.profile.database();
+        let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = db.successful_write_commits();
+        let revision = f.book.revision().unwrap();
+        let (rows, next) = f.book.download_demand_page(None, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(next, Some(ConversationId::new([2; 32])));
+        let (rows, next) = f.book.download_demand_page(next, 2).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].file_conv(), ConversationId::new([3; 32]));
+        assert_eq!(next, None);
+        assert!(f.book.download_demand_page(None, 0).is_err());
+        assert!(f.book.download_demand_page(None, 65).is_err());
+        assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(db.successful_write_commits(), commits);
+        assert_eq!(f.book.revision().unwrap(), revision);
+        // A completed row vanishes from this projection without a separate queue.
+        let work = f
+            .book
+            .claim_downloads()
+            .unwrap()
+            .into_iter()
+            .find(|work| work.file == ConversationId::new([2; 32]))
+            .unwrap();
+        f.book.finish_download(work).unwrap();
+        let (rows, next) = f.book.download_demand_page(None, 2).unwrap();
+        assert_eq!(
+            rows.iter().map(AnyManifest::file_conv).collect::<Vec<_>>(),
+            vec![ConversationId::new([1; 32]), ConversationId::new([3; 32])]
+        );
+        assert_eq!(next, Some(ConversationId::new([3; 32])));
+        assert!(f.book.download_demand_page(next, 2).unwrap().0.is_empty());
     }
 
     #[test]

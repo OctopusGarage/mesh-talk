@@ -113,6 +113,63 @@ pub(super) struct StickerSources {
 }
 
 impl Node {
+    /// Maximum pending file rows inspected in one metadata turn.
+    pub const MAX_STICKER_DEMAND_ROWS: usize = 64;
+
+    /// Scheduling hints only. Registration and reconstruction retain all proof
+    /// authority. No pending work is claimed and no source cache entry is touched.
+    pub fn pending_sticker_sources(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<(Vec<FileManifestV3>, Option<ConversationId>), NodeError> {
+        let (manifests, next) = self
+            .files
+            .lock()
+            .expect("files lock")
+            .download_demand_page(after, limit)?;
+        let mut eligible = Vec::new();
+        for manifest in manifests {
+            let AnyManifest::V3(media) = manifest else {
+                continue;
+            };
+            let file = media.v2.file_conv;
+            if !sticker::valid_manifest(
+                &media.v2.name,
+                &media.v2.mime,
+                media.v2.size,
+                media.kind == FileKind::Media,
+            ) || self.expired_received_file(file)?
+                || self.file_progress(file)?.is_some_and(|p| p.done >= p.total)
+            {
+                continue;
+            }
+            let consent = self.attachment_consent_status(file)?;
+            let allowed = match consent {
+                Some(super::ReceiveDecision::Accepted) => true,
+                // Incoming consent intentionally excludes our own signed offers.
+                // A current authenticated own offer still permits scheduling;
+                // registration/reconstruction must independently verify proof.
+                None => self.files.lock().expect("files lock").has_author(
+                    file,
+                    Author::from_ed25519(self.identity.public().ed25519_pub),
+                )?,
+                Some(_) => false,
+            };
+            if allowed {
+                eligible.push(media);
+            }
+        }
+        // The file/participant and policy locks are released before this cache lock.
+        let sources = self.sticker_sources.lock().expect("sticker sources lock");
+        eligible.retain(|media| {
+            !sources.entries.iter().any(|(hash, bytes)| {
+                *hash == media.v2.checksum && bytes.len() as u64 == media.v2.size
+            })
+        });
+        Ok((eligible, next))
+    }
+
     /// Register installed sticker artwork for exact-byte reuse. Candidates are
     /// session-local and bounded; every incoming offer is authenticated separately.
     pub fn register_sticker_source(&self, name: &str, bytes: &[u8]) -> Result<(), NodeError> {
@@ -407,6 +464,95 @@ mod source_cache_tests {
         let end = bytes.len();
         bytes[end - 4..].copy_from_slice(&identity.to_le_bytes());
         bytes
+    }
+
+    #[tokio::test]
+    async fn pending_sticker_sources_filtered_page_keeps_its_cursor() {
+        let (dir, node) = node();
+        let channel = node.create_channel("local demand", vec![]).await.unwrap();
+        let path = dir.path().join(NAME);
+        std::fs::write(&path, artwork(42, 0)).unwrap();
+        let file = node
+            .send_file_channel(channel, &path, FileKind::Media)
+            .await
+            .unwrap();
+        node.files.lock().unwrap().request_download(file).unwrap();
+        // Full local chunks need no installed artwork, even while a durable
+        // pending row has not yet been acknowledged by the pull owner.
+        let (items, next) = node.pending_sticker_sources(None, 1).unwrap();
+        assert!(items.is_empty());
+        assert_eq!(next, Some(file));
+        let (items, next) = node.pending_sticker_sources(next, 1).unwrap();
+        assert!(items.is_empty());
+        assert!(next.is_none());
+        assert!(node.files.lock().unwrap().pending_for_test(file));
+        // A local loss after send leaves the original authenticated own offer.
+        node.log.lock().unwrap().drop_conversation(&file).unwrap();
+        std::fs::remove_file(node.media.path_for(file, NAME)).unwrap();
+        assert_eq!(node.attachment_consent_status(file).unwrap(), None);
+        let (items, _) = node.pending_sticker_sources(None, 1).unwrap();
+        assert_eq!(items.len(), 1, "own-only missing bytes remain demand");
+        assert_eq!(items[0].v2.name, NAME);
+        node.register_sticker_source(NAME, &artwork(42, 0)).unwrap();
+        assert!(node.pending_sticker_sources(None, 1).unwrap().0.is_empty());
+        for identity in 100..228 {
+            node.register_sticker_source(NAME, &artwork(identity, 0))
+                .unwrap();
+        }
+        assert_eq!(
+            node.pending_sticker_sources(None, 1).unwrap().0.len(),
+            1,
+            "native cache eviction restores demand without a success receipt"
+        );
+        assert!(node.files.lock().unwrap().pending_for_test(file));
+    }
+
+    #[tokio::test]
+    async fn pending_sticker_sources_ordinary_pending_metadata_is_not_artwork_demand() {
+        let (dir, node) = node();
+        let channel = node
+            .create_channel("ordinary demand", vec![])
+            .await
+            .unwrap();
+        let path = dir.path().join("ordinary.txt");
+        std::fs::write(&path, b"ordinary attachment").unwrap();
+        let file = node
+            .send_file_channel(channel, &path, FileKind::File)
+            .await
+            .unwrap();
+        node.files.lock().unwrap().request_download(file).unwrap();
+        let (items, next) = node.pending_sticker_sources(None, 1).unwrap();
+        assert!(items.is_empty());
+        assert_eq!(next, Some(file));
+        assert!(node.files.lock().unwrap().pending_for_test(file));
+        // Malformed sticker metadata cannot enter the existing durable owner.
+        let base = crate::file::FileManifestV2 {
+            name: NAME.into(),
+            size: 1,
+            mime: "text/plain".into(),
+            checksum: [0; 32],
+            file_conv: ConversationId::new([91; 32]),
+            chunk_count: 1,
+            ..match node.files.lock().unwrap().manifest(file).unwrap().unwrap() {
+                AnyManifest::V3(media) => media.v2,
+                _ => panic!("current outgoing manifest"),
+            }
+        };
+        for (size, mime) in [
+            (0, "image/png"),
+            (sticker::MAX_STICKER_BYTES as u64 + 1, "image/png"),
+            (1, "text/plain"),
+        ] {
+            let mut invalid = base.clone();
+            invalid.size = size;
+            invalid.mime = mime.into();
+            let wire = FileManifestV3 {
+                v2: invalid,
+                kind: FileKind::Media,
+            }
+            .encode();
+            assert!(super::super::files::validated_manifest(&wire).is_none());
+        }
     }
 
     #[test]

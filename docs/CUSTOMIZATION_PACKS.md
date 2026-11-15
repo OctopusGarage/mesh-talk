@@ -73,9 +73,7 @@ An avatar library:
   "kind": "avatar",
   "category": "personal",
   "fit": "cover",
-  "avatars": [
-    { "label": "Ada", "file": "images/ada.webp" }
-  ]
+  "avatars": [{ "label": "Ada", "file": "images/ada.webp" }]
 }
 ```
 
@@ -114,7 +112,12 @@ A sticker library:
   "name": "Reactions",
   "kind": "sticker",
   "stickers": [
-    { "id": "wave", "label": "Wave", "fallback": "👋", "file": "images/wave.webp" }
+    {
+      "id": "wave",
+      "label": "Wave",
+      "fallback": "👋",
+      "file": "images/wave.webp"
+    }
   ]
 }
 ```
@@ -151,9 +154,19 @@ installed-pack lookup and fallback behavior; their original images cannot be
 reconstructed reliably from an ID alone.
 
 For direct messaging, matching installed artwork can supply the image locally.
-The desktop registers validated installed snapshots with the current account's
-node; the optional in-memory cache is bounded to 128 images and 32 MiB and is
-rebuilt for each runtime. A pack ID or sticker ID alone never establishes a match:
+The desktop prepares only artwork requested by the current account's existing
+pending downloads. Startup, file invalidations and sparse recovery read bounded
+metadata pages; they must not preload installed packs without matching demand.
+The serial source worker reads one matching pack transiently and registers only
+the selected image. Current owner, account and pack-content checks fence awaited
+work. Finish paged suffixes before one coalesced fresh-head sweep. Further changes
+wait for the next file/catalog event, activation or existing five-minute repair;
+registration-triggered notifications must not create an endless preparation loop.
+Invalid artwork retains only bounded metadata until its content changes or the
+negative entry is evicted; transient failures remain retryable. The optional
+in-memory cache is bounded to 128 images and 32 MiB and is
+rebuilt for each runtime. Cache eviction permits later preparation; a prior
+registration is not permanent completion. A pack ID or sticker ID alone never establishes a match:
 the incoming authenticated manifest must match the exact checksum and byte size.
 
 Compatible direct peers exchange only the original signed chunk headers when

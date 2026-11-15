@@ -2316,6 +2316,7 @@
     {
       "id": "core-sticker-media",
       "paths": [
+        "crates/mesh-talk-core/src/node/filebook/indexed.rs",
         "crates/mesh-talk-core/src/file/sticker.rs",
         "crates/mesh-talk-core/src/node/sticker_media.rs",
         "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
@@ -2336,6 +2337,7 @@
             "file::sticker::tests::",
             "node::sticker_media_tests::",
             "node::sticker_media::",
+            "node::filebook::indexed::tests::download_demand_page_is_bounded_advances_and_never_writes",
             "node::files::",
             "node::recall::",
             "node::file_completion::",
@@ -2350,6 +2352,10 @@
         "summary": "Deliver immutable encrypted sticker media without requiring recipient pack installation and reuse verified transfer bytes only within the same conversation and deadline.",
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
         "invariants": [
+          {
+            "name": "Pending sticker metadata is a read-only keyset projection with bounded selected rows, continuation through filtered pages, current receive eligibility and re-demand after source-cache eviction; nested policy traversal retains its existing cost.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
           {
             "name": "Completed local group or own media retires recovery without repeated decoding or recipient receipts; failed bound completion metadata and missing media remain retryable",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"

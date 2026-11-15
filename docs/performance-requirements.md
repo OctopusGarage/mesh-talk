@@ -206,6 +206,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Library catalogs and background registration receipts must not retain image
    URLs or archives. Scope point reads to content revisions, bound concurrent
    hydration and release inactive payloads; readiness belongs to the selected asset.
+   A bounded native cache does not justify eagerly filling it from an entire
+   library. Query existing pending metadata first, hydrate only matching assets
+   and permit re-demand after eviction. Keep continuation through filtered pages;
+   a row limit alone does not bound nested per-row history traversal.
    Bound negative caches as well as successful results; eviction permits a later
    retry instead of retaining every failed identifier until logout.
    For fully version-qualified derived plans, elapsed idle time alone must not

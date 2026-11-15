@@ -1447,6 +1447,16 @@ by long-lived subscriptions and registration receipts. Shared hydration qualifie
 each reader before queued disk admission, and a canceled observer cannot release
 an admitted worker slot. The [pack demand regressions](../frontend/src/lib/packDemand.test.ts)
 cover queued retirement, surviving shared demand and finite admission.
+Background source preparation must also be demand-owned: an installed catalog is
+not a request to decode every asset into a bounded native cache. Read the existing
+pending owner without claiming its work, preserve continuation through filtered
+pages and hydrate only selected artwork. Do not let a successful registration
+receipt suppress later demand after cache eviction. The
+[installed source controls](../frontend/src/lib/installedStickerSources.test.ts)
+and [pending file projection](../crates/mesh-talk-core/src/node/filebook/indexed.rs)
+own zero-demand reads, serial lifecycle and read-only continuation evidence;
+[sticker recovery](../crates/mesh-talk-core/src/node/sticker_media_tests.rs) retains
+authenticated missing-body reconstruction and ordinary-transfer fallback.
 
 A bounded work item can still be unnecessary work. Classify demand from the
 owning source before constructing a derived index; stale queue entries alone

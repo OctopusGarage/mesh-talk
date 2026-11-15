@@ -1776,7 +1776,7 @@
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
         "invariants": [
           {
-            "name": "A canonical bounded filename carries presentation identity; the authenticated manifest binds image bytes. Installed exact-byte snapshots are registered only with the current owner/account runtime and never install incoming packs.",
+            "name": "A canonical bounded filename carries presentation identity; the authenticated manifest binds image bytes. Existing pending metadata owns serial installed-source preparation: no demand reads no artwork, filtered pages retain progress and cache eviction permits re-demand. Current owner/account and content fences remain authoritative.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           },
           {

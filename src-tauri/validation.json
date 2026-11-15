@@ -85,6 +85,7 @@
         {
           "package": "mesh-talk",
           "filters": [
+            "chat_commands::files::tests::pending_sticker_sources_rejects_wrong_owner_without_runtime_wait",
             "chat_commands::files::tests::registered_sticker_source_rejects_wrong_owner_before_waiting_for_runtime",
             "chat_commands::files::tests::registered_sticker_source_requires_current_crypto_account_and_valid_image",
             "chat_commands::models::"
@@ -92,11 +93,11 @@
         }
       ],
       "capability": {
-        "summary": "Register installed sticker snapshots in the current node local cache using owner and cryptographic account admission.",
+        "summary": "Read pending sticker demand and register selected snapshots with owner and cryptographic account admission.",
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
         "invariants": [
           {
-            "name": "Account mismatch and session retirement reject registration; core owns image validation and bounded candidate storage.",
+            "name": "Account mismatch and session retirement reject projection and registration; core owns read-only pending continuation, image validation and bounded candidate storage.",
             "reference": "docs/module-boundaries.md"
           },
           {
