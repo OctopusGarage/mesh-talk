@@ -1,3 +1,6 @@
+import { createRosterObservation } from "@/lib/rosterObservation";
+import { presence as rosterPresenceApi } from "@/lib/api/diagnostics";
+import type { RosterTicket } from "@/lib/syncInvalidation";
 import { groupOperationObservation } from "./outgoingIntent/groupOperations";
 import { receptionKinds } from "@/lib/api/reception";
 import {
@@ -607,16 +610,22 @@ const channelRefresh = createChannelRefresh({
   commands: chat,
 });
 
-const rosterRefresh = createRosterRefresh({
+const rosterRefresh: () => Promise<void> = createRosterRefresh({
   capture: () => captureChat(useChat.getState),
   refresh: (hasPending) =>
     refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending),
 });
 
-const presenceRosterRefresh = createRosterRefresh({
+const presenceRosterRefresh = createRosterRefresh<RosterTicket>({
   capture: () => captureChat(useChat.getState),
-  refresh: (hasPending) =>
-    refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending, true),
+  refresh: (hasPending, ticket) =>
+    refreshRosterSnapshot(
+      useChat.setState,
+      useChat.getState,
+      hasPending,
+      true,
+      ticket,
+    ),
 });
 
 /** Apply explicit local-complete floors before archive work can refill deleted caches. */
@@ -723,6 +732,7 @@ async function refreshRosterSnapshot(
   get: Get,
   hasPending: () => boolean,
   presenceOnly = false,
+  ticket?: RosterTicket,
 ) {
   const lease = captureChat(get);
   const set = guardedSet(rawSet, lease.current);
@@ -782,7 +792,18 @@ async function refreshRosterSnapshot(
     // Keep full reads concurrent. Heartbeats first inspect cheap discovery facts;
     // route-only changes still publish peers without rereading account history/policy.
     const observedPeers = presenceOnly
-      ? await readWithDeadline(() => chat.listPeers())
+      ? ticket
+        ? await ticket.read(lease.owner!).then(({ value }) => {
+            if (
+              value.identity.owner !== lease.owner ||
+              value.identity.account_id !== identity.account_id ||
+              value.identity.device_id !== identity.device_id ||
+              value.identity.runtime_id !== identity.runtime_id
+            )
+              throw new Error("Roster source identity changed");
+            return value.peers;
+          })
+        : await readWithDeadline(() => chat.listPeers())
       : null;
     if (!lease.current() || get().rosterRequest !== request || hasPending())
       return;
@@ -1456,12 +1477,38 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         });
         return;
       }
-      notifySyncInvalidation({ owner: lease.owner!, kind });
+      const rosterLease = kind === "roster" ? captureChat(get) : undefined;
+      const ticket =
+        kind === "roster"
+          ? createRosterObservation(
+              lease.owner!,
+              async () => {
+                const value = await rosterPresenceApi.observeRoster(
+                  lease.owner!,
+                );
+                if (
+                  value.identity.owner !== lease.owner ||
+                  value.identity.device_id !== get().myId ||
+                  value.identity.account_id !== get().myAccountId ||
+                  (value.identity.runtime_id !== undefined &&
+                    value.identity.runtime_id !== get().deliveryRuntime)
+                )
+                  throw new Error("Roster source identity changed");
+                return value;
+              },
+              rosterLease!.current,
+            )
+          : undefined;
+      notifySyncInvalidation({
+        owner: lease.owner!,
+        kind,
+        rosterObservation: ticket,
+      });
       if (kind === "state") {
         void refreshRoster(true);
         void get().refreshChannels();
         void get().refreshStatuses(undefined, true);
-      } else if (kind === "roster") void presenceRosterRefresh();
+      } else if (kind === "roster") void presenceRosterRefresh(ticket);
       else void get().refreshStatuses(undefined, true);
       if (kind !== "roster") void refreshGroupOperationIntents(rawSet, get);
     };

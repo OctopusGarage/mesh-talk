@@ -274,7 +274,7 @@ pub enum PresenceResponse {
     },
 }
 
-fn validate_group_revision(revision: Option<&str>) -> Result<(), CommandError> {
+pub(crate) fn validate_group_revision(revision: Option<&str>) -> Result<(), CommandError> {
     if revision.is_some_and(|value| {
         !value.is_empty() && (value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()))
     }) {
@@ -283,34 +283,14 @@ fn validate_group_revision(revision: Option<&str>) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// One shared snapshot. No per-member dials, retained connections or transitive gossip.
-#[tauri::command]
-pub async fn get_presence(
-    state: tauri::State<'_, NodeState>,
-    known_group_revision: Option<String>,
-) -> Result<PresenceResponse, CommandError> {
-    validate_group_revision(known_group_revision.as_deref())?;
-    let node = {
-        let guard = state.0.read().await;
-        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        if !rt.discovery_available() {
-            return Err(CommandError::Internal("discovery unavailable".into()));
-        }
-        rt.handle()
-    };
-    let peers = node
-        .cached_peer_snapshot_async()
-        .await
-        .map_err(|e| CommandError::Io(e.to_string()))?;
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    if !rt.discovery_available() || !std::sync::Arc::ptr_eq(&rt.handle(), &node) {
-        return Err(CommandError::not_started());
-    }
+pub(crate) fn project_people(
+    rt: &mesh_talk_core::node::NodeRuntime,
+    peers: &[PeerRecord],
+) -> HashMap<String, PresenceInfo> {
     let now = Instant::now();
     let mut out = HashMap::new();
-    let offices = post_office_sources(&peers);
-    for peer in &peers {
+    let offices = post_office_sources(peers);
+    for peer in peers {
         // Cached snapshots already reject invalid/retired certificates. Resolve the
         // current binding again rather than assigning evidence to an obsolete account.
         add_current_peer(
@@ -341,6 +321,41 @@ pub async fn get_presence(
             });
         }
     }
+    out
+}
+
+/// One shared snapshot. No per-member dials, retained connections or transitive gossip.
+#[tauri::command]
+pub async fn get_presence(
+    state: tauri::State<'_, NodeState>,
+    known_group_revision: Option<String>,
+) -> Result<PresenceResponse, CommandError> {
+    get_presence_for_state(&state, known_group_revision).await
+}
+
+pub(crate) async fn get_presence_for_state(
+    state: &NodeState,
+    known_group_revision: Option<String>,
+) -> Result<PresenceResponse, CommandError> {
+    validate_group_revision(known_group_revision.as_deref())?;
+    let node = {
+        let guard = state.0.read().await;
+        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        if !rt.discovery_available() {
+            return Err(CommandError::Internal("discovery unavailable".into()));
+        }
+        rt.handle()
+    };
+    let peers = node
+        .cached_peer_snapshot_async()
+        .await
+        .map_err(|e| CommandError::Io(e.to_string()))?;
+    let guard = state.0.read().await;
+    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+    if !rt.discovery_available() || !std::sync::Arc::ptr_eq(&rt.handle(), &node) {
+        return Err(CommandError::not_started());
+    }
+    let mut out = project_people(rt, &peers);
     // Capture before projection so concurrent commits remain dirty for the next read.
     let revision = if known_group_revision.is_some() {
         hex::encode(

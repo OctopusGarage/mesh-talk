@@ -1,3 +1,4 @@
+import type { RosterTicket } from "@/lib/syncInvalidation";
 import {
   startRecoveryRefresh,
   RECOVERY_REFRESH_MS,
@@ -246,6 +247,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
     let lastApplied = 0;
     let inFlight = 0;
     let dirty = false;
+    let pendingTicket: RosterTicket | undefined;
     let baseline: PresenceMap = {};
     let groups: PresenceMap = {};
     let groupsRevision = "";
@@ -304,16 +306,23 @@ export const usePresence = create<PresenceState>((set, get) => ({
           Math.max(1, Math.ceil(next * 1000)),
         );
     };
-    const poll = async (invalidate = false, repair = false) => {
-      if (!current()) return;
+    const poll = async (
+      invalidate = false,
+      repair = false,
+      ticket?: RosterTicket,
+    ) => {
+      if (!current() || (ticket && !ticket.current())) return;
       repairPending ||= repair;
       if (inFlight >= 2) {
-        dirty ||= invalidate || repair;
+        if (invalidate || repair) {
+          dirty = true;
+          pendingTicket = ticket;
+        }
         return;
       }
       inFlight++;
       const pollId = ++nextPoll;
-      const requested = performance.now();
+      let requested = performance.now();
       const revision = repairPending ? "" : groupsRevision;
       repairPending = false;
       const fail = (failure: PresenceFailure) => {
@@ -327,9 +336,25 @@ export const usePresence = create<PresenceState>((set, get) => ({
       };
       const timeout = setTimeout(() => fail({ kind: "timeout" }), 10000);
       try {
-        const response = await readWithDeadline(() =>
-          presenceApi.get(revision),
-        );
+        let response;
+        if (ticket) {
+          const [observed, conditional] = await Promise.all([
+            ticket.read(lease.owner!),
+            readWithDeadline(() => {
+              requested = performance.now();
+              return presenceApi.groupsIfChanged(lease.owner!, revision);
+            }),
+          ]);
+          if ("unchanged" in conditional && conditional.unchanged === true) {
+            requested = observed.requestedAt;
+            // Retention uses the groups currently applied when this read finishes.
+            response = {
+              people: observed.value.people,
+              groups_revision: groupsRevision,
+            };
+          } else response = conditional;
+        } else
+          response = await readWithDeadline(() => presenceApi.get(revision));
         if (!current()) return;
         const isEnvelope = isRecord(response) && "groups_revision" in response;
         const delta = isEnvelope
@@ -510,7 +535,9 @@ export const usePresence = create<PresenceState>((set, get) => ({
         // cannot recursively retry a failing native read.
         if (current() && dirty) {
           dirty = false;
-          queueMicrotask(() => void poll(true));
+          const ticket = pendingTicket;
+          pendingTicket = undefined;
+          queueMicrotask(() => void poll(true, false, ticket));
         }
       }
     };
@@ -520,7 +547,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
         change.owner === lease.owner &&
         (change.kind === "roster" || isDocumentInvalidation(change))
       )
-        void poll(true);
+        void poll(true, false, change.rosterObservation);
     });
     const stopRecovery = startRecoveryRefresh(
       () => {

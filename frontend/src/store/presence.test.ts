@@ -1,8 +1,14 @@
+import { createRosterObservation } from "@/lib/rosterObservation";
 import type { PresenceMap } from "@/lib/types";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-const { getPresence } = vi.hoisted(() => ({ getPresence: vi.fn() }));
-vi.mock("@/lib/api", () => ({ presence: { get: getPresence } }));
+const { getPresence, groupsIfChanged } = vi.hoisted(() => ({
+  getPresence: vi.fn(),
+  groupsIfChanged: vi.fn(),
+}));
+vi.mock("@/lib/api", () => ({
+  presence: { get: getPresence, groupsIfChanged },
+}));
 
 import { useAuth } from "./auth";
 import {
@@ -20,6 +26,7 @@ import {
 beforeEach(() => {
   vi.useFakeTimers();
   getPresence.mockReset();
+  groupsIfChanged.mockReset();
   setPushStateSupport(null);
   usePresence.setState({ map: {} });
   useAuth.setState({
@@ -1179,6 +1186,224 @@ it("ignores pure sync status while preserving roster and document presence wakes
       await vi.advanceTimersByTimeAsync(0);
     }
     expect(getPresence).toHaveBeenCalledTimes(baseline + 3);
+  } finally {
+    stop();
+  }
+});
+
+it("ages a shared roster ticket from its original start and retains applied groups", async () => {
+  const revision = "a".repeat(64);
+  getPresence.mockResolvedValue({
+    people: {},
+    groups: {
+      team: {
+        online: false,
+        last_seen_secs: null,
+        member_keys: ["friend"],
+        member_count: 1,
+      },
+    },
+    groups_revision: revision,
+  });
+  groupsIfChanged.mockResolvedValue({ unchanged: true });
+  const ticket = createRosterObservation("alice", async () => ({
+    identity: { owner: "alice", account_id: "self", device_id: "device" },
+    peers: [],
+    people: {
+      friend: { online: true, last_seen_secs: 0, online_expires_in_secs: 15 },
+    },
+  }));
+  await ticket.read("alice");
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(16000);
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "roster",
+      rosterObservation: ticket,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(usePresence.getState().map.friend.online).toBe(false);
+    expect(usePresence.getState().map.team.member_count).toBe(1);
+    expect(groupsIfChanged).toHaveBeenCalledWith("alice", revision);
+  } finally {
+    stop();
+  }
+});
+
+it("uses changed group response people instead of an older ticket snapshot", async () => {
+  getPresence.mockResolvedValue({
+    people: {},
+    groups: { old: { online: false, last_seen_secs: null } },
+    groups_revision: "a".repeat(64),
+  });
+  groupsIfChanged.mockResolvedValue({
+    people: {
+      fresh: { online: true, last_seen_secs: 0, online_expires_in_secs: 15 },
+    },
+    groups: {
+      new: {
+        online: false,
+        last_seen_secs: null,
+        member_count: 0,
+        member_keys: [],
+      },
+    },
+    groups_revision: "b".repeat(64),
+  });
+  const ticket = createRosterObservation("alice", async () => ({
+    identity: { owner: "alice", account_id: "self", device_id: "device" },
+    peers: [],
+    people: { stale: { online: true, last_seen_secs: 0 } },
+  }));
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "roster",
+      rosterObservation: ticket,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(usePresence.getState().map.fresh.online).toBe(true);
+    expect(usePresence.getState().map.stale).toBeUndefined();
+    expect(usePresence.getState().map.old).toBeUndefined();
+    expect(usePresence.getState().map.new.member_count).toBe(0);
+  } finally {
+    stop();
+  }
+});
+
+it("coalesces busy roster heartbeats to the latest lazy ticket", async () => {
+  let finishStartup!: (value: PresenceMap) => void;
+  let finishGroup!: (value: unknown) => void;
+  getPresence.mockReturnValue(
+    new Promise((resolve) => {
+      finishStartup = resolve;
+    }),
+  );
+  groupsIfChanged
+    .mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishGroup = resolve;
+      }),
+    )
+    .mockResolvedValue({ unchanged: true });
+  const reads: number[] = [];
+  const ticket = (id: number) =>
+    createRosterObservation("alice", async () => {
+      reads.push(id);
+      return {
+        identity: { owner: "alice", account_id: "self", device_id: "device" },
+        peers: [],
+        people: {},
+      };
+    });
+  const stop = usePresence.getState().start();
+  try {
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "roster",
+      rosterObservation: ticket(1),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    for (let n = 2; n <= 1000; n++)
+      notifySyncInvalidation({
+        owner: "alice",
+        kind: "roster",
+        rosterObservation: ticket(n),
+      });
+    expect(reads).toEqual([1]);
+    expect(groupsIfChanged).toHaveBeenCalledTimes(1);
+    finishGroup({ people: {}, groups: {}, groups_revision: "a".repeat(64) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toEqual([1, 1000]);
+    expect(groupsIfChanged).toHaveBeenLastCalledWith("alice", "a".repeat(64));
+  } finally {
+    stop();
+    finishStartup({});
+    await vi.advanceTimersByTimeAsync(0);
+  }
+});
+
+it("does not start queued ticket or group work after its presence consumer is cancelled", async () => {
+  const releases: ((value: PresenceMap) => void)[] = [];
+  getPresence.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        releases.push(resolve);
+      }),
+  );
+  const read = vi.fn(async () => ({
+    identity: { owner: "alice", account_id: "self", device_id: "device" },
+    peers: [],
+    people: {},
+  }));
+  const stop = usePresence.getState().start();
+  notifySyncInvalidation({ owner: "alice", kind: "state" });
+  notifySyncInvalidation({
+    owner: "alice",
+    kind: "roster",
+    rosterObservation: createRosterObservation("alice", read),
+  });
+  stop();
+  for (const release of releases) release({});
+  await vi.advanceTimersByTimeAsync(0);
+  expect(read).not.toHaveBeenCalled();
+  expect(groupsIfChanged).not.toHaveBeenCalled();
+});
+
+it("keeps the newest applied groups and revision when an older unchanged ticket completes", async () => {
+  getPresence.mockResolvedValue({
+    people: {},
+    groups: { old: { online: false, last_seen_secs: null, member_count: 0 } },
+    groups_revision: "a".repeat(64),
+  });
+  let finishOld!: (value: { unchanged: true }) => void;
+  groupsIfChanged
+    .mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishOld = resolve;
+      }),
+    )
+    .mockResolvedValueOnce({
+      people: {},
+      groups: { new: { online: false, last_seen_secs: null, member_count: 0 } },
+      groups_revision: "b".repeat(64),
+    })
+    .mockResolvedValue({ unchanged: true });
+  const ticket = () =>
+    createRosterObservation("alice", async () => ({
+      identity: { owner: "alice", account_id: "self", device_id: "device" },
+      peers: [],
+      people: {},
+    }));
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "roster",
+      rosterObservation: ticket(),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "roster",
+      rosterObservation: ticket(),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    finishOld({ unchanged: true });
+    await vi.advanceTimersByTimeAsync(0);
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "roster",
+      rosterObservation: ticket(),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(groupsIfChanged).toHaveBeenLastCalledWith("alice", "b".repeat(64));
+    expect(usePresence.getState().map.new.member_count).toBe(0);
+    expect(usePresence.getState().map.old).toBeUndefined();
   } finally {
     stop();
   }

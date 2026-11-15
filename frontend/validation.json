@@ -633,12 +633,21 @@
       "paths": [
         "frontend/src/store/presence.ts",
         "frontend/src/store/presence.test.ts",
+        "frontend/src/lib/rosterObservation.ts",
+        "frontend/src/lib/rosterObservation.test.ts",
+        "frontend/src/store/rosterRefresh.ts",
+        "frontend/src/store/rosterRefresh.test.ts",
+        "frontend/src/lib/syncInvalidation.ts",
         "frontend/src/features/chat/PresenceAvailability.tsx",
         "frontend/src/features/chat/PresenceAvailability.test.ts",
         "frontend/e2e/person-presence.spec.ts"
       ],
       "frontend": [
         "src/store/presence.test.ts",
+        "src/store/chat.test.ts",
+        "src/lib/rosterObservation.test.ts",
+        "src/store/rosterRefresh.test.ts",
+        "src/lib/readDeadline.test.ts",
         "src/features/chat/PresenceAvailability.test.ts"
       ],
       "capability": {
@@ -651,6 +660,10 @@
           },
           {
             "name": "Validate delta replies atomically; independent people/group ordering preserves newer tokens, group withdrawal and fresh online counts. Saturated recovery retains one forced repair.",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
+          },
+          {
+            "name": "One event-owned lazy peer/people observation serves independent consumers, retains original evidence age and never crosses runtime generations; blocked group metadata does not block peer publication.",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]

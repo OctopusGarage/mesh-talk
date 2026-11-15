@@ -345,6 +345,8 @@ pub fn run_tauri_configured(
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 crate::window_visibility::initial_presentation_ready,
                 owner_commands::owner_node_identity,
+                owner_commands::owner_roster_observation,
+                owner_commands::owner_presence_if_groups_changed,
                 reception_host::owner_reception_page,
                 reception_host::owner_reception_ack,
                 owner_commands::owner_startup_identity,

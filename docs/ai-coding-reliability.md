@@ -244,6 +244,14 @@ its single signed loopback probe and original deadline, and a real cache-path
 failure must preserve the cache API's error chain rather than time out. This
 control proves error visibility, not the cause of an earlier hosted timeout.
 
+Sharing a read must not join unrelated latency dependencies. The roster owner
+shares only peers and people; conditional group metadata runs outside session
+and runtime-slot guards through participant-owned work. The held-metadata and
+cancelled-observer controls in [owner commands](../src-tauri/src/owner_commands.rs)
+require unrelated identity/peer progress and retirement to await the actual
+worker. Frontend roster tickets belong to one invalidation, preserve original
+evidence age and never carry a result into another runtime generation.
+
 ## R03: Actual work owns its lifetime
 
 Keep concurrency capacity with the same actual owner as retirement admission.

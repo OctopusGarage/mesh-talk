@@ -115,28 +115,55 @@ test("unchanged groups reuse their projection while fresh people update the head
           });
         },
       };
-      host.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
-        const result = await original(cmd, args);
-        if (cmd === "owner_node_identity")
-          return { ...(result as object), supports_push_state: true };
-        if (cmd !== "get_presence") return result;
-        const all = result as PresenceMap;
-        const { [group]: projection, ...people } = all;
-        if (host.__presenceDelta.offline)
-          people[bob] = {
+      const updatePeople = (people: PresenceMap): PresenceMap => {
+        if (!host.__presenceDelta.offline) return people;
+        return {
+          ...people,
+          [bob]: {
             online: false,
             last_seen_secs: 0,
             devices: [],
             online_expires_in_secs: 0,
             reconnect_expires_in_secs: 0,
+          },
+        };
+      };
+      host.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        if (
+          cmd === "owner_presence_if_groups_changed" &&
+          args?.knownGroupRevision === revision
+        ) {
+          host.__presenceDelta.omitted++;
+          return { unchanged: true };
+        }
+        const result = await original(cmd, args);
+        if (cmd === "owner_node_identity")
+          return { ...(result as object), supports_push_state: true };
+        if (cmd === "owner_roster_observation") {
+          const observation =
+            result as import("../src/lib/types").RosterObservation;
+          return { ...observation, people: updatePeople(observation.people) };
+        }
+        if (cmd === "owner_presence_if_groups_changed") {
+          const delta = result as import("../src/lib/types").PresenceDelta;
+          host.__presenceDelta.full++;
+          return {
+            ...delta,
+            people: updatePeople(delta.people),
+            groups_revision: revision,
           };
+        }
+        if (cmd !== "get_presence") return result;
+        const all = result as PresenceMap;
+        const { [group]: projection, ...people } = all;
+        const observedPeople = updatePeople(people);
         if (args?.knownGroupRevision === revision) {
           host.__presenceDelta.omitted++;
-          return { people, groups_revision: revision };
+          return { people: observedPeople, groups_revision: revision };
         }
         host.__presenceDelta.full++;
         return {
-          people,
+          people: observedPeople,
           groups: { [group]: projection },
           groups_revision: revision,
         };

@@ -237,6 +237,19 @@ not a successful empty roster. Publication rechecks the exact installed runtime;
 retirement or replacement rejects the captured result. This does not change
 discovery proof persistence, current account binding or presence expiry.
 
+An ordinary roster invalidation shares one lazy, event-owned peer/people
+observation between the chat and presence consumers. It is not reusable across
+events or runtime generations. Group revision and projection run separately;
+holding or failing them must not prevent peer publication. Equal applied group
+revisions return an explicit unchanged result without another peer snapshot or
+group projection. Changed inputs and forced repair use a coherent full response.
+Presence ages shared evidence from its original request start, retaining the
+currently applied groups without advancing their token on an unchanged result.
+Native metadata work releases session/runtime-slot guards and retains the
+participant's actual-work permit through cancellation and retirement. Both paths
+recheck the exact installed runtime before returning; errors remain unavailable
+observations, never authoritative empty results.
+
 Initial discovery displays Online immediately. After a loss, fresh observations
 must remain successful for five seconds and include a renewed origin before
 clearing recovery confirmation. Authoritative withdrawal or revoked account

@@ -192,6 +192,12 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    rehydrating group history or rereading account rosters. Qualify reuse only after
    successful current publication within the runtime owner; failures remain retryable.
    Validate a complete reply before caching its token.
+   Coalesce independent consumers of the same event at the actual read owner.
+   Keep the observation lazy and scoped to that event and runtime, with only the
+   latest pending invalidation retained. Separate expensive optional projections
+   so they cannot block the shared cheap result. Preserve original evidence age,
+   independent publication order and explicit errors; a cross-event TTL cache
+   cannot replace fresh authority or presence.
    Distinguish failed work from a qualified unchanged round. Empty output alone
    proves neither. Recheck exact source and permission evidence after awaited
    stages; incomplete, denied or unknown work retains recovery. A quiet scheduling

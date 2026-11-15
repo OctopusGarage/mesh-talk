@@ -1,6 +1,12 @@
+import type { createRosterObservation } from "./rosterObservation";
+import type { RosterObservation } from "./types";
+export type RosterTicket = ReturnType<
+  typeof createRosterObservation<RosterObservation>
+>;
 /** Local fan-out after the chat owner validates a native invalidation. */
 export type SyncInvalidation = {
   owner: string;
+  rosterObservation?: RosterTicket;
   scope?: "documents" | "sync_status";
   kind: "state" | "roster" | "delivery" | "files" | "contacts";
 };

@@ -2699,6 +2699,36 @@ export const test = base.extend<{ mockCallsEnabled: boolean }>({
           }),
 
           // presence
+          owner_roster_observation: (a) => ({
+            identity: {
+              owner: a.owner,
+              device_id: SELF.device,
+              account_id: SELF.account,
+              runtime_id: `mock-runtime:${SELF.account}`,
+            },
+            peers: peers.map((peer) => ({ ...peer })),
+            people: Object.fromEntries(
+              Object.entries(presenceSnapshot()).filter(
+                ([, value]) => !value.member_keys,
+              ),
+            ),
+          }),
+          owner_presence_if_groups_changed: () => {
+            const snapshot = presenceSnapshot();
+            return {
+              people: Object.fromEntries(
+                Object.entries(snapshot).filter(
+                  ([, value]) => !value.member_keys,
+                ),
+              ),
+              groups: Object.fromEntries(
+                Object.entries(snapshot).filter(
+                  ([, value]) => value.member_keys,
+                ),
+              ),
+              groups_revision: "a".repeat(64),
+            };
+          },
           get_presence: presenceSnapshot,
 
           // diagnostics / observability

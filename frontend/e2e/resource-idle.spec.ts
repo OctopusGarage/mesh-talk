@@ -112,7 +112,15 @@ test("roster reception updates presence without reloading unrelated state", asyn
   }
   await expect(header).toContainText("3 members · 1 known online");
   const after = (await snapshot()).counts;
-  expect(after.get_presence).toBeGreaterThan(before.get_presence ?? 0);
+  for (const command of [
+    "owner_roster_observation",
+    "owner_presence_if_groups_changed",
+  ]) {
+    expect(after[command] ?? 0, command).toBeGreaterThan(before[command] ?? 0);
+  }
+  for (const command of ["get_presence", "list_peers"]) {
+    expect(after[command] ?? 0, command).toBe(before[command] ?? 0);
+  }
   for (const command of [
     "list_channels",
     "get_account_documents",

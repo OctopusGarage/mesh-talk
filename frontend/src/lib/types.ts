@@ -651,3 +651,15 @@ export interface PendingStickerSourcesPage {
   /** Continue even when items is empty. Null ends this traversal. */
   next_cursor: string | null;
 }
+
+/** Authorized source identity accompanying a single roster observation. */
+export interface RosterObservation {
+  identity: {
+    owner: string;
+    account_id: string;
+    device_id: string;
+    runtime_id?: string | null;
+  };
+  peers: PeerInfo[];
+  people: PresenceMap;
+}

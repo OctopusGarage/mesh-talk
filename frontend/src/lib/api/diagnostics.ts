@@ -22,6 +22,15 @@ export const diag = {
 };
 
 export const presence = {
+  observeRoster: (owner: string) =>
+    invoke<import("../types").RosterObservation>("owner_roster_observation", {
+      owner,
+    }),
+  groupsIfChanged: (owner: string, knownGroupRevision: string) =>
+    invoke<PresenceDelta | { unchanged: true }>(
+      "owner_presence_if_groups_changed",
+      { owner, knownGroupRevision },
+    ),
   /** Shared person/device observations and accepted-account group count summaries. */
   get: (knownGroupRevision?: string) =>
     invoke<PresenceMap | PresenceDelta>("get_presence", { knownGroupRevision }),
