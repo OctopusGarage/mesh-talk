@@ -35,10 +35,25 @@ fn check(path: &Path) -> io::Result<bool> {
         Err(e) => Err(e),
     }
 }
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(not(test), derive(Clone))]
 struct Route {
     public: PublicIdentity,
     ips: Vec<IpAddr>,
+}
+#[cfg(test)]
+thread_local! {
+    static ROUTE_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+impl Clone for Route {
+    fn clone(&self) -> Self {
+        ROUTE_CLONES.with(|count| count.set(count.get() + 1));
+        Self {
+            public: self.public.clone(),
+            ips: self.ips.clone(),
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct LegacyRoute {
@@ -138,33 +153,37 @@ impl RouteCache {
         })
     }
     pub(crate) fn record(&mut self, public: &PublicIdentity, ip: IpAddr) -> io::Result<()> {
-        let mut next = self.routes.clone();
         let id = public.user_id();
-        match next.binary_search_by(|r| r.public.user_id().cmp(&id)) {
+        let position = self
+            .routes
+            .binary_search_by(|r| r.public.user_id().cmp(&id));
+        match position {
             Ok(i) => {
-                if next[i].public != *public {
+                if self.routes[i].public != *public {
                     return Err(invalid());
                 }
-                if next[i].ips.contains(&ip) {
+                if self.routes[i].ips.contains(&ip) {
                     return Ok(());
                 }
+            }
+            Err(_) if self.routes.len() == 1024 => return Err(invalid()),
+            Err(_) => {}
+        }
+        let mut next = self.routes.clone();
+        match position {
+            Ok(i) => {
                 next[i].ips.push(ip);
                 if next[i].ips.len() > 8 {
                     next[i].ips.remove(0);
                 }
             }
-            Err(i) => {
-                if next.len() == 1024 {
-                    return Err(invalid());
-                }
-                next.insert(
-                    i,
-                    Route {
-                        public: public.clone(),
-                        ips: vec![ip],
-                    },
-                );
-            }
+            Err(i) => next.insert(
+                i,
+                Route {
+                    public: public.clone(),
+                    ips: vec![ip],
+                },
+            ),
         }
         self.save(&next)?;
         self.routes = next;
@@ -253,6 +272,75 @@ pub(in crate::node) async fn stable_listener(
 mod tests {
     use super::*;
     use crate::identity::device::DeviceIdentity;
+    #[test]
+    fn full_directory_noops_and_rejections_do_not_clone_routes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut cache = RouteCache::open(&root.path().join("routes"), "pw").unwrap();
+        let ip = "127.0.0.1".parse().unwrap();
+        // Populate the bounded owner directly: no 1024 encrypted writes in setup.
+        cache.routes = (0u32..1024)
+            .map(|i| {
+                let mut ed25519_pub = [0; 32];
+                ed25519_pub[..4].copy_from_slice(&i.to_le_bytes());
+                Route {
+                    public: PublicIdentity {
+                        ed25519_pub,
+                        x25519_pub: [1; 32],
+                    },
+                    ips: vec![ip],
+                }
+            })
+            .collect();
+        cache.routes.sort_by_key(|route| route.public.user_id());
+        let public = cache.routes[500].public.clone();
+        ROUTE_CLONES.with(|count| count.set(0));
+        cache.record(&public, ip).unwrap();
+        let mut wrong_x = public.clone();
+        wrong_x.x25519_pub[0] ^= 1;
+        assert!(cache.record(&wrong_x, ip).is_err());
+        assert!(
+            cache
+                .record(&DeviceIdentity::generate().public(), ip)
+                .is_err()
+        );
+        assert_eq!(ROUTE_CLONES.with(|count| count.get()), 0);
+        let next_ip = "127.0.0.2".parse().unwrap();
+        cache.record(&public, next_ip).unwrap();
+        assert_eq!(ROUTE_CLONES.with(|count| count.get()), 1024);
+        let reopened = RouteCache::open(&root.path().join("routes"), "pw").unwrap();
+        assert_eq!(reopened.routes.len(), 1024);
+        assert!(reopened.contains(&public, next_ip));
+        assert!(reopened.contains(&public, ip));
+    }
+
+    #[test]
+    fn mutations_retain_last_eight_and_failed_save_retries_and_reopens() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("routes");
+        let public = DeviceIdentity::generate().public();
+        let mut cache = RouteCache::open(&path, "pw").unwrap();
+        for i in 1..=9 {
+            cache.record(&public, IpAddr::from([127, 0, 0, i])).unwrap();
+        }
+        let expected: Vec<_> = (2..=9)
+            .map(|i| (public.clone(), IpAddr::from([127, 0, 0, i])))
+            .collect();
+        assert_eq!(cache.routes(), expected);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let next = IpAddr::from([127, 0, 0, 10]);
+        assert!(cache.record(&public, next).is_err());
+        assert_eq!(cache.routes(), expected);
+        fs::remove_dir(&path).unwrap();
+        cache.record(&public, next).unwrap();
+        assert_eq!(
+            RouteCache::open(&path, "pw").unwrap().routes(),
+            cache.routes()
+        );
+        assert!(!cache.contains(&public, IpAddr::from([127, 0, 0, 2])));
+        assert!(cache.contains(&public, next));
+    }
+
     #[test]
     fn retains_multiple_ips_for_one_identity_and_migrates_v1() {
         let root = tempfile::tempdir().unwrap();

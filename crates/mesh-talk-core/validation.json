@@ -608,7 +608,11 @@
             "node::call::tests::",
             "node::linking::pairing_selection_tests::",
             "two_nodes_exchange_a_call_signal_and_bind_from_to_the_authenticated_peer",
-            "periodic_private_probes_reuse_fresh_signed_discovery_but_network_change_forces_noise"
+            "periodic_private_probes_reuse_fresh_signed_discovery_but_network_change_forces_noise",
+            "node::privacy_routes::tests::",
+            "node::privacy_runtime::tests::discovery_snapshot_",
+            "node::privacy_runtime::tests::failed_presence_cache_write_is_not_a_successful_empty_snapshot",
+            "node::privacy_runtime::tests::cached_peer_snapshot_excludes_arrivals_after_its_capture"
           ]
         }
       ],
@@ -667,6 +671,10 @@
           {
             "name": "Periodic private probes reuse only sufficiently fresh direct signed discovery for the exact full binding and endpoint; deadline-minus-handshake-budget recovery, forced network/manual probes, authenticated-only lease renewal and fair cancellation ownership remain intact.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Repeated known routes validate full keys before cloning; discovery snapshots use bounded operation-local full Ed/X/account indexes, preserve peer order and current policy, and expose persistence failure without publishing uncommitted route changes.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },

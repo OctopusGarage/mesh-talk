@@ -1165,14 +1165,29 @@ impl Node {
         let Some(state) = guard.as_mut() else {
             return Ok(peers);
         };
-        let mut successful = Vec::new();
+        // One-operation indexes carry no authority beyond this guarded snapshot.
+        // Keep the first exact duplicate, preserving first-route selection without
+        // letting another exchange key or account binding shadow the valid row.
+        let peer_key = |peer: &crate::discovery::PeerRecord| {
+            (
+                peer.public.ed25519_pub,
+                peer.public.x25519_pub,
+                peer.account_id.clone(),
+            )
+        };
+        let mut by_identity = std::collections::HashMap::with_capacity(peers.len());
+        for (index, peer) in peers.iter().enumerate() {
+            by_identity.entry(peer_key(peer)).or_insert(index);
+        }
+        let mut successful = std::collections::HashSet::with_capacity(proofs.len());
         for proof in proofs {
+            let key = (proof.ed25519_pub, proof.x25519_pub, proof.account_id());
             if proof.account_id().is_none() {
                 if !state.policy.snapshot().invisible
                     && proof.valid_presence()
                     && state.proofs.by_author(&proof.ed25519_pub).is_none()
                 {
-                    successful.push(proof);
+                    successful.insert(key);
                 }
                 continue;
             }
@@ -1191,7 +1206,7 @@ impl Node {
                 );
                 continue;
             }
-            if let Some(peer) = peers.iter().find(|p| p.public == proof.public()) {
+            if let Some(peer) = by_identity.get(&key).map(|index| &peers[*index]) {
                 let ips = if peer.routes.is_empty() {
                     vec![peer.addr.ip()]
                 } else {
@@ -1211,15 +1226,11 @@ impl Node {
                     dependency.changed |= !known;
                 }
             }
-            successful.push(proof);
+            successful.insert(key);
         }
         Ok(peers
             .into_iter()
-            .filter(|peer| {
-                successful.iter().any(|proof| {
-                    proof.public() == peer.public && proof.account_id() == peer.account_id
-                })
-            })
+            .filter(|peer| successful.contains(&peer_key(peer)))
             .collect())
     }
     pub(in crate::node) fn guard_channel(

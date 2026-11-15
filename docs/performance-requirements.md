@@ -151,6 +151,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Paginate changes; drain available pages promptly in bounded batches. A slower fallback
    must not delay each already-available page by another interval.
    A memo that still hydrates its input on every wake is not an I/O optimization.
+   Check idempotent updates against borrowed current records before cloning a
+   directory or serializing a replacement. Within one bounded snapshot, index
+   complete device/account bindings once instead of repeating pairwise searches.
+   Preserve fresh policy, exact-key checks and save-before-publication failures.
    Compute bounded metadata content digests at their mutation owner, lazily after
    invalidation, rather than cloning and sorting unchanged inputs on every query.
    Retain only the digest; include complete canonical content and owner identity.

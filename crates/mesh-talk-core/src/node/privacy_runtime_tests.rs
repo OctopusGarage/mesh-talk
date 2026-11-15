@@ -807,6 +807,134 @@ fn authenticated_private_peer_keeps_route_but_clears_online_roster() {
 }
 
 #[test]
+fn discovery_snapshot_matches_full_identity_and_account_before_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &dir.path().join("alice"),
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let proof = bob.signed_announce("Bob", 4321);
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.1".parse().unwrap(), &alice.user_id());
+    let (_, peers) = alice.discovery_snapshot();
+    let valid = peers[0].clone();
+    let mut conflicting = valid.clone();
+    conflicting.account_id = Some("wrong-account".into());
+    conflicting.addr.set_ip("127.0.0.2".parse().unwrap());
+    conflicting.routes.clear();
+    let mut wrong_x = valid.clone();
+    wrong_x.public.x25519_pub[0] ^= 1;
+    wrong_x.addr.set_ip("127.0.0.3".parse().unwrap());
+    wrong_x.routes.clear();
+    let mut duplicate = valid.clone();
+    duplicate.name = "Later duplicate".into();
+    duplicate.addr.set_ip("127.0.0.4".parse().unwrap());
+    duplicate.routes.clear();
+    let returned = Node::persist_discovery_snapshot(
+        &alice.privacy,
+        (
+            vec![proof],
+            vec![conflicting, wrong_x, valid.clone(), duplicate.clone()],
+        ),
+    )
+    .unwrap();
+    assert_eq!(returned.len(), 2);
+    assert_eq!(returned[0].name, valid.name);
+    assert_eq!(returned[0].addr, valid.addr);
+    assert_eq!(returned[1].name, duplicate.name);
+    assert_eq!(returned[1].addr, duplicate.addr);
+    assert!(
+        returned
+            .iter()
+            .all(|peer| peer.public == valid.public && peer.account_id == valid.account_id)
+    );
+    let guard = alice.privacy.state.read().unwrap();
+    let routes = &guard.as_ref().unwrap().routes;
+    assert!(!routes.contains(&valid.public, "127.0.0.2".parse().unwrap()));
+    assert!(routes.contains(&valid.public, valid.addr.ip()));
+    assert!(!routes.contains(&valid.public, duplicate.addr.ip()));
+}
+
+#[tokio::test]
+async fn discovery_snapshot_legacy_current_policy_and_route_failure_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    let (legacy, _) = node(&dir.path().join("legacy"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let legacy_proof = Announce::new(&legacy.identity, "Legacy", 4321);
+    let proof = bob.signed_announce("Bob", 4321);
+    {
+        let mut roster = alice.roster.lock().unwrap();
+        roster.update(
+            &legacy_proof,
+            "127.0.0.2".parse().unwrap(),
+            &alice.user_id(),
+        );
+        roster.update(&proof, "127.0.0.1".parse().unwrap(), &alice.user_id());
+    }
+    let captured = alice.discovery_snapshot();
+    std::fs::remove_file(path.join("peer-routes")).unwrap();
+    std::fs::create_dir(path.join("peer-routes")).unwrap();
+    assert!(Node::persist_discovery_snapshot(&alice.privacy, captured.clone()).is_err());
+    assert!(
+        alice
+            .privacy
+            .state
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .routes
+            .routes()
+            .is_empty()
+    );
+    std::fs::remove_dir(path.join("peer-routes")).unwrap();
+    let returned = Node::persist_discovery_snapshot(&alice.privacy, captured.clone()).unwrap();
+    assert_eq!(
+        returned.iter().map(|p| &p.public).collect::<Vec<_>>(),
+        captured.1.iter().map(|p| &p.public).collect::<Vec<_>>()
+    );
+    assert!(
+        alice
+            .privacy
+            .state
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .proofs
+            .by_author(&legacy.identity.public().ed25519_pub)
+            .is_none()
+    );
+    alice.set_invisible(true).await.unwrap();
+    let returned = Node::persist_discovery_snapshot(&alice.privacy, captured).unwrap();
+    assert!(
+        returned
+            .iter()
+            .all(|p| p.public != legacy.identity.public())
+    );
+    assert!(returned.iter().any(|p| p.public == bob.identity.public()));
+}
+
+#[test]
 fn discovery_snapshot_caches_both_verified_addresses() {
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = node(&dir.path().join("alice"));

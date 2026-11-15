@@ -1330,6 +1330,15 @@ and rows. The [repository regressions](../crates/mesh-talk-core/src/eventlog/rep
 actual SQLite preparation work while preserving unknown-item authorization,
 fresh revisions and corruption failures.
 
+An idempotent update can still allocate an entire collection before returning
+unchanged. Perform borrowed no-op, identity and capacity checks before copying;
+prepare one bounded exact-identity lookup per synchronous decision. The
+[route cache](../crates/mesh-talk-core/src/node/privacy_routes.rs) counts actual
+record clones, and [discovery snapshot controls](../crates/mesh-talk-core/src/node/privacy_runtime_tests.rs)
+preserve full device/account matching, current invisible policy and real storage
+failure/recovery. No-op optimization cannot skip a changed binding or publish
+an uncommitted mutation.
+
 Filter impossible candidates before canonical history or protection projection;
 an empty attachment query must not build an unrelated history index. Keep current
 protection and final eligibility checks for selected candidates. The
