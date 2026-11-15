@@ -278,6 +278,9 @@ pub struct Roster {
     historical: BTreeMap<UserId, Announce>,
     conflicting_history: HashSet<UserId>,
     linked_bindings: HashMap<UserId, (PublicIdentity, crate::identity::account::DeviceCertificate)>,
+    metadata_digest: Option<[u8; 32]>,
+    #[cfg(test)]
+    pub(crate) metadata_rebuilds: usize,
     changes: std::sync::Arc<Notify>,
     observations: tokio::sync::watch::Sender<u64>,
 }
@@ -290,6 +293,9 @@ impl Default for Roster {
             historical: BTreeMap::new(),
             conflicting_history: HashSet::new(),
             linked_bindings: HashMap::new(),
+            metadata_digest: None,
+            #[cfg(test)]
+            metadata_rebuilds: 0,
             changes: std::sync::Arc::new(Notify::new()),
             observations: tokio::sync::watch::channel(0).0,
         }
@@ -297,6 +303,53 @@ impl Default for Roster {
 }
 
 impl Roster {
+    /// Content identity of exported signed metadata, never presence or authority.
+    pub(crate) fn metadata_digest(&mut self) -> Result<[u8; 32], crate::eventlog::LogError> {
+        use sha2::{Digest, Sha256};
+        if let Some(digest) = self.metadata_digest {
+            return Ok(digest);
+        }
+        #[cfg(test)]
+        {
+            self.metadata_rebuilds += 1;
+        }
+        let historical: Vec<_> = self
+            .historical
+            .iter()
+            .filter(|(id, _)| !self.conflicting_history.contains(*id))
+            .map(|(_, proof)| proof)
+            .collect();
+        let mut live: Vec<_> = self.announcements.values().collect();
+        live.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        let bytes = bincode::serialize(&(historical, live))
+            .map_err(|error| crate::eventlog::LogError::Serialization(error.to_string()))?;
+        let digest = Sha256::digest(bytes).into();
+        self.metadata_digest = Some(digest);
+        Ok(digest)
+    }
+
+    fn store_live(&mut self, announce: &Announce) {
+        if self.announcements.get(&announce.user_id) != Some(announce) {
+            self.metadata_digest = None;
+            self.announcements
+                .insert(announce.user_id.clone(), announce.clone());
+        }
+    }
+
+    fn remove_live(&mut self, id: &str) {
+        if self.announcements.remove(id).is_some() {
+            self.metadata_digest = None;
+        }
+    }
+
+    fn store_history(&mut self, announce: &Announce) {
+        if self.historical.get(&announce.user_id) != Some(announce) {
+            self.metadata_digest = None;
+            self.historical
+                .insert(announce.user_id.clone(), announce.clone());
+        }
+    }
+
     /// Independent subscribers do not consume recovery's coalesced notification.
     pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.observations.subscribe()
@@ -331,6 +384,7 @@ impl Roster {
             || self.conflicting_history.contains(&id);
         if changed {
             self.forget(public);
+            self.metadata_digest = None;
             self.historical.remove(&id);
             self.conflicting_history.remove(&id);
         }
@@ -670,14 +724,12 @@ impl Roster {
                 .map(|(id, _)| id.clone())
         {
             self.peers.remove(&oldest);
-            self.announcements.remove(&oldest);
+            self.remove_live(&oldest);
         }
         if self.historical.len() < MAX_PEERS || self.historical.contains_key(&announce.user_id) {
-            self.historical
-                .insert(announce.user_id.clone(), announce.clone());
+            self.store_history(announce);
         }
-        self.announcements
-            .insert(announce.user_id.clone(), announce.clone());
+        self.store_live(announce);
         let direct = preferred_route(&routes).map(|route| route.addr);
         self.peers.insert(
             announce.user_id.clone(),
@@ -799,7 +851,7 @@ impl Roster {
             peer.last_seen = route.last_seen;
         } else {
             self.peers.remove(&undo.user_id);
-            self.announcements.remove(&undo.user_id);
+            self.remove_live(&undo.user_id);
         }
         self.notify_changes();
     }
@@ -822,12 +874,13 @@ impl Roster {
             old.public() != announce.public()
                 || (old.account_id().is_some() && old.account_id() != announce.account_id())
         }) {
-            self.conflicting_history.insert(announce.user_id.clone());
+            if self.conflicting_history.insert(announce.user_id.clone()) {
+                self.metadata_digest = None;
+            }
         } else if self.historical.len() < MAX_PEERS
             || self.historical.contains_key(&announce.user_id)
         {
-            self.historical
-                .insert(announce.user_id.clone(), announce.clone());
+            self.store_history(announce);
         }
         let addr = SocketAddr::new(source_ip, port);
         let previous = self.peers.get(&announce.user_id);
@@ -874,10 +927,9 @@ impl Roster {
                 .map(|(id, _)| id.clone())
         {
             self.peers.remove(&oldest);
-            self.announcements.remove(&oldest);
+            self.remove_live(&oldest);
         }
-        self.announcements
-            .insert(announce.user_id.clone(), announce.clone());
+        self.store_live(announce);
         self.peers.insert(
             announce.user_id.clone(),
             PeerRecord {
@@ -1015,8 +1067,12 @@ impl Roster {
                 now.saturating_duration_since(r.last_seen) < ttl
             }
         });
+        let live_before = self.announcements.len();
         self.announcements
             .retain(|id, _| self.peers.contains_key(id));
+        if live_before != self.announcements.len() {
+            self.metadata_digest = None;
+        }
         let after: usize = self.peers.values().map(|peer| peer.routes.len() + 1).sum();
         if before != after {
             self.notify_changes();
@@ -1028,7 +1084,7 @@ impl Roster {
         let id = public.user_id();
         if self.peers.get(&id).is_some_and(|p| p.public == *public) {
             self.peers.remove(&id);
-            self.announcements.remove(&id);
+            self.remove_live(&id);
             self.notify_changes();
         }
     }
@@ -1046,7 +1102,7 @@ impl Roster {
             peer.last_seen = route.last_seen;
         } else {
             self.peers.remove(user_id);
-            self.announcements.remove(user_id);
+            self.remove_live(user_id);
         }
         self.notify_changes();
     }
@@ -1054,6 +1110,165 @@ impl Roster {
 
 #[cfg(test)]
 mod routed_tests {
+    fn assert_metadata_oracle(roster: &mut Roster) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut live = roster.announcements();
+        live.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        let mut historical = roster.historical_announcements();
+        historical.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        let oracle: [u8; 32] =
+            Sha256::digest(bincode::serialize(&(historical, live)).unwrap()).into();
+        assert_eq!(roster.metadata_digest().unwrap(), oracle);
+        oracle
+    }
+
+    #[test]
+    fn metadata_digest_tracks_capacity_eviction_in_both_admission_paths() {
+        for relayed in [false, true] {
+            let mut roster = Roster::default();
+            let account = Account::generate();
+            let ip = "127.0.0.1".parse().unwrap();
+            let relay = "127.0.0.2:47479".parse().unwrap();
+            for _ in 0..MAX_PEERS {
+                let proof = Announce::new_with_account(
+                    &DeviceIdentity::generate(),
+                    &account,
+                    "Peer",
+                    47475,
+                );
+                roster.update(&proof, ip, "self");
+            }
+            let before = assert_metadata_oracle(&mut roster);
+            let victim = roster
+                .peers
+                .iter()
+                .min_by_key(|(_, p)| p.last_seen)
+                .unwrap()
+                .0
+                .clone();
+            let incoming =
+                Announce::new_with_account(&DeviceIdentity::generate(), &account, "New", 47475);
+            if relayed {
+                roster.update_relayed(&incoming, relay, "self");
+            } else {
+                roster.update(&incoming, ip, "self");
+            }
+            assert_eq!(roster.peers.len(), MAX_PEERS);
+            assert!(!roster.announcements.contains_key(&victim));
+            assert_ne!(assert_metadata_oracle(&mut roster), before);
+        }
+    }
+
+    #[test]
+    fn metadata_digest_tracks_conflict_recovery_relay_rollback_and_expiry() {
+        let mut roster = Roster::default();
+        let device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&device, &account, "Peer", 47475);
+        let ip = "127.0.0.1".parse().unwrap();
+        let relay = "127.0.0.2:47479".parse().unwrap();
+        let empty = assert_metadata_oracle(&mut roster);
+        let undo = roster.stage_relayed(&proof, relay, "self").unwrap();
+        let staged = assert_metadata_oracle(&mut roster);
+        roster.update(&proof, ip, "self");
+        roster.rollback_relayed(undo, false);
+        assert_eq!(assert_metadata_oracle(&mut roster), staged);
+        roster.forget_relayed(&proof.user_id);
+        assert_eq!(assert_metadata_oracle(&mut roster), staged);
+        let rebuilds = roster.metadata_rebuilds;
+        let mut invalid = proof.clone();
+        invalid.sig[0] ^= 1;
+        assert_eq!(roster.update(&invalid, ip, "self"), UpdateOutcome::Rejected);
+        assert_eq!(
+            roster.update(&proof, ip, &proof.user_id),
+            UpdateOutcome::Rejected
+        );
+        roster.mark_authenticated(&device.public(), "127.0.0.3:47475".parse().unwrap());
+        assert_eq!(assert_metadata_oracle(&mut roster), staged);
+        assert_eq!(roster.metadata_rebuilds, rebuilds);
+        let adopted = Announce::new_with_account(&device, &Account::generate(), "Adopted", 47476);
+        roster.update(&adopted, ip, "self");
+        assert!(roster.historical_announcements().is_empty());
+        assert_ne!(assert_metadata_oracle(&mut roster), staged);
+        roster.authorize_verified_account_transition(
+            &device.public(),
+            adopted.account_cert.as_ref().unwrap(),
+        );
+        assert_eq!(assert_metadata_oracle(&mut roster), empty);
+        assert_eq!(roster.update(&proof, ip, "self"), UpdateOutcome::Rejected);
+        roster.update(&adopted, ip, "self");
+        assert_metadata_oracle(&mut roster);
+        roster.forget(&device.public());
+        let historical = assert_metadata_oracle(&mut roster);
+        assert_ne!(historical, empty);
+        let undo = roster.stage_relayed(&adopted, relay, "self").unwrap();
+        assert_metadata_oracle(&mut roster);
+        roster.rollback_relayed(undo, false);
+        assert_eq!(assert_metadata_oracle(&mut roster), historical);
+        roster.update(&adopted, ip, "self");
+        roster.update_relayed(&adopted, relay, "self");
+        let live = assert_metadata_oracle(&mut roster);
+        // Only the LAN route expires: retained relay must keep the live proof.
+        roster
+            .peers
+            .get_mut(&proof.user_id)
+            .unwrap()
+            .routes
+            .iter_mut()
+            .filter(|r| r.source != RouteSource::PostOffice)
+            .for_each(|r| r.last_seen = Instant::now() - Duration::from_secs(500));
+        roster.evict_stale(Duration::from_secs(1));
+        assert_eq!(assert_metadata_oracle(&mut roster), live);
+        let peer = roster.peers.get_mut(&proof.user_id).unwrap();
+        peer.last_seen = Instant::now() - Duration::from_secs(500);
+        for route in &mut peer.routes {
+            route.last_seen = peer.last_seen;
+        }
+        roster.evict_stale(Duration::from_secs(1));
+        assert_eq!(assert_metadata_oracle(&mut roster), historical);
+    }
+
+    #[test]
+    fn metadata_digest_reuses_equal_heartbeats_and_tracks_exports() {
+        use sha2::{Digest, Sha256};
+        let mut roster = Roster::default();
+        let device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&device, &account, "Peer", 47475);
+        let ip = "127.0.0.1".parse().unwrap();
+        roster.update(&proof, ip, "self");
+        let first = roster.metadata_digest().unwrap();
+        let count = roster.metadata_rebuilds;
+        for _ in 0..8 {
+            roster.update(&proof, ip, "self");
+            assert_eq!(roster.metadata_digest().unwrap(), first);
+        }
+        assert_eq!(
+            roster.metadata_rebuilds, count,
+            "warm heartbeat must not materialize metadata"
+        );
+        let renamed = Announce::new_with_account(&device, &account, "Renamed", 47476);
+        roster.update(&renamed, ip, "self");
+        let changed = roster.metadata_digest().unwrap();
+        assert_ne!(first, changed);
+        let mut live = roster.announcements();
+        live.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        let oracle: [u8; 32] =
+            Sha256::digest(bincode::serialize(&(roster.historical_announcements(), live)).unwrap())
+                .into();
+        assert_eq!(changed, oracle);
+        let office = Announce::new_post_office_with_account(&device, &account, "Renamed", 47476);
+        roster.update(&office, ip, "self");
+        assert_ne!(assert_metadata_oracle(&mut roster), changed);
+        let mut observations = roster.subscribe_changes();
+        let rebuilds = roster.metadata_rebuilds;
+        roster.update(&office, "127.0.0.4".parse().unwrap(), "self");
+        assert!(observations.has_changed().unwrap());
+        observations.borrow_and_update();
+        assert_metadata_oracle(&mut roster);
+        assert_eq!(roster.metadata_rebuilds, rebuilds);
+    }
+
     #[test]
     fn identical_announcements_reuse_only_live_verified_proofs() {
         use crate::discovery::announce::verification_observations;

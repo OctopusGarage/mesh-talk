@@ -27,6 +27,9 @@ pub struct AccountDevices {
     file: EncryptedRecordLog<AccountDevice>,
     by_user: HashMap<String, AccountDevice>,
     own_account_id: String,
+    metadata_digest: Option<[u8; 32]>,
+    #[cfg(test)]
+    pub(crate) metadata_rebuilds: usize,
 }
 
 impl AccountDevices {
@@ -52,6 +55,9 @@ impl AccountDevices {
             file,
             by_user,
             own_account_id: own_account_id.to_string(),
+            metadata_digest: None,
+            #[cfg(test)]
+            metadata_rebuilds: 0,
         })
     }
 
@@ -84,6 +90,7 @@ impl AccountDevices {
         }
         self.file.append(&device)?;
         self.by_user.insert(id, device);
+        self.metadata_digest = None;
         Ok(true)
     }
 
@@ -100,6 +107,26 @@ impl AccountDevices {
                 .by_user
                 .get(&public.user_id())
                 .is_some_and(|device| device.public == *public)
+    }
+
+    /// Deterministic content hint; validated membership and current policy remain separate.
+    pub(crate) fn metadata_digest(&mut self) -> Result<[u8; 32], LogError> {
+        use sha2::{Digest, Sha256};
+        if let Some(digest) = self.metadata_digest {
+            return Ok(digest);
+        }
+        #[cfg(test)]
+        {
+            self.metadata_rebuilds += 1;
+        }
+        let mut devices: Vec<_> = self.by_user.iter().collect();
+        devices.sort_by_key(|(a, _)| *a);
+        let devices: Vec<_> = devices.into_iter().map(|(_, device)| device).collect();
+        let bytes = bincode::serialize(&(&self.own_account_id, devices))
+            .map_err(|error| LogError::Serialization(error.to_string()))?;
+        let digest = Sha256::digest(bytes).into();
+        self.metadata_digest = Some(digest);
+        Ok(digest)
     }
 
     /// Return all linked devices in stable device-ID order.
@@ -121,6 +148,68 @@ mod tests {
             public: identity.public(),
             certificate: account.certify(&identity.public().ed25519_pub),
         }
+    }
+
+    #[test]
+    fn metadata_digest_preserves_failed_append_and_reopens_deterministically() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.log");
+        let account = Account::generate();
+        let owner = account.account_id();
+        let mut devices = AccountDevices::open(&path, "pw", &owner).unwrap();
+        let first = certified(&account, &DeviceIdentity::generate());
+        devices.insert(first.clone()).unwrap();
+        let original = devices.metadata_digest().unwrap();
+        for _ in 0..8 {
+            assert!(!devices.insert(first.clone()).unwrap());
+            assert_eq!(devices.metadata_digest().unwrap(), original);
+        }
+        assert_eq!(devices.metadata_rebuilds, 1);
+        let next = certified(&account, &DeviceIdentity::generate());
+        devices.file.fail_appends_for_test(true).unwrap();
+        assert!(devices.insert(next.clone()).is_err());
+        assert_eq!(devices.devices(), vec![first.clone()]);
+        assert_eq!(devices.metadata_digest().unwrap(), original);
+        assert_eq!(devices.metadata_rebuilds, 1);
+        devices.file.fail_appends_for_test(false).unwrap();
+        let mut invalid = next.clone();
+        invalid.certificate.signature[0] ^= 1;
+        assert!(devices.insert(invalid).is_err());
+        let mut conflict = first;
+        conflict.public.x25519_pub[0] ^= 1;
+        assert!(devices.insert(conflict).is_err());
+        assert_eq!(devices.metadata_digest().unwrap(), original);
+        assert_eq!(devices.metadata_rebuilds, 1);
+        assert!(devices.insert(next).unwrap());
+        let changed = devices.metadata_digest().unwrap();
+        assert_ne!(original, changed);
+        let oracle: [u8; 32] =
+            Sha256::digest(bincode::serialize(&(&owner, devices.devices())).unwrap()).into();
+        assert_eq!(changed, oracle);
+        drop(devices);
+        let mut reopened = AccountDevices::open(&path, "pw", &owner).unwrap();
+        assert_eq!(changed, reopened.metadata_digest().unwrap());
+        let mut other = AccountDevices::open(&dir.path().join("other.log"), "pw", &owner).unwrap();
+        other
+            .insert(certified(&account, &DeviceIdentity::generate()))
+            .unwrap();
+        other
+            .insert(certified(&account, &DeviceIdentity::generate()))
+            .unwrap();
+        assert_eq!(other.devices().len(), reopened.devices().len());
+        assert_ne!(changed, other.metadata_digest().unwrap());
+        let mut empty_a = AccountDevices::open(&dir.path().join("a.log"), "pw", &owner).unwrap();
+        let mut empty_b = AccountDevices::open(
+            &dir.path().join("b.log"),
+            "pw",
+            &Account::generate().account_id(),
+        )
+        .unwrap();
+        assert_ne!(
+            empty_a.metadata_digest().unwrap(),
+            empty_b.metadata_digest().unwrap()
+        );
     }
 
     #[test]

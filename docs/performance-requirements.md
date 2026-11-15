@@ -151,6 +151,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Paginate changes; drain available pages promptly in bounded batches. A slower fallback
    must not delay each already-available page by another interval.
    A memo that still hydrates its input on every wake is not an I/O optimization.
+   Compute bounded metadata content digests at their mutation owner, lazily after
+   invalidation, rather than cloning and sorting unchanged inputs on every query.
+   Retain only the digest; include complete canonical content and owner identity.
+   Keep lease/route notifications, current permission and source checks independent.
    Reject exact peer-known IDs before per-item export lookup or body hydration;
    still validate the current view/owner and charge examined rows/cursor progress.
    Use the existing bounded SQLite statement cache for fixed hot queries. Rebind

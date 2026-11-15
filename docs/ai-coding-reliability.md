@@ -503,7 +503,14 @@ or a completion signal arrives between checking a condition and registering a
 waiter, leaving work asleep indefinitely.
 
 A producer revision gate must precede expensive routing filters and projection
-hydration. A completed last item cannot acknowledge earlier failed or deferred
+hydration. Computing that gate must not repeatedly materialize unchanged metadata.
+Keep a bounded canonical digest at the existing content owner, invalidate it with
+all successful semantic mutations, and preserve separate live-authority and route
+observations. The [roster](../crates/mesh-talk-core/src/discovery/roster.rs),
+[device registry](../crates/mesh-talk-core/src/node/account_devices.rs) and
+[group inventory](../crates/mesh-talk-core/src/node/account_documents/inventory.rs)
+controls compare mutation sequences against fresh canonical content and count warm
+rebuilds; failed persistence and rejected input cannot advance content identity. A completed last item cannot acknowledge earlier failed or deferred
 items: require matching settled evidence for the whole selected cycle. The
 [channel maintenance regressions](../crates/mesh-talk-core/src/node/channel_account_maintenance.rs)
 exercise multi-channel deferral, failed capability cooldown and a new peer behind

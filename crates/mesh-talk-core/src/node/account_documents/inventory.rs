@@ -542,23 +542,32 @@ impl Node {
         );
         let policy = self.device_sync_policy_snapshot().1;
         let documents = *self.account_document_updates.borrow();
-        let mut devices = self.linked_devices();
-        devices.sort_by_key(|device| device.public.user_id());
-        // Announce excludes last-seen timestamps and IP routes: an identical
-        // signed heartbeat is unchanged. Include live bindings too, as private
-        // owner-proof eligibility may consult them. Both roster sets are bounded.
-        let (mut historical, mut live) = {
-            let roster = self.roster.lock().expect("roster mutex");
-            (roster.historical_announcements(), roster.announcements())
-        };
-        historical.sort_by_key(|proof| proof.user_id.clone());
-        live.sort_by_key(|proof| proof.user_id.clone());
-        let roster = (historical, live);
+        // Guards end independently. These owner-local hints exclude routes and leases;
+        // current source, policy, privacy and authorization still remain fresh.
+        let devices = self
+            .account_devices
+            .lock()
+            .expect("account devices mutex")
+            .metadata_digest()?;
+        let roster = self
+            .roster
+            .lock()
+            .expect("roster mutex")
+            .metadata_digest()?;
         let mut groups = self.channels.lock().expect("channels mutex").channel_ids();
         groups.sort_by_key(|group| *group.as_bytes());
         let identity = (self.account_id(), self.user_id());
         let bytes = bincode::serialize(&(
-            identity, source, profiles, avatars, privacy, policy, documents, devices, roster,
+            b"mesh-talk-group-projection-content-v2".as_slice(),
+            identity,
+            source,
+            profiles,
+            avatars,
+            privacy,
+            policy,
+            documents,
+            devices,
+            roster,
             groups,
         ))
         .map_err(|error| crate::eventlog::LogError::Serialization(error.to_string()))?;
@@ -1128,5 +1137,61 @@ impl Node {
             self.try_publish_group_activity_for(*id)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod metadata_digest_tests {
+    use super::*;
+    use crate::identity::account::Account;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn metadata_digest_warm_projection_keeps_policy_privacy_and_document_inputs_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let remote = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&remote, &account, "Peer", 47475);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            account,
+            &proof,
+        );
+        let first = node.group_projection_revision().unwrap();
+        let counts = || {
+            let devices = node.account_devices.lock().unwrap().metadata_rebuilds;
+            let roster = node.roster.lock().unwrap().metadata_rebuilds;
+            (devices, roster)
+        };
+        let initial_counts = counts();
+        for _ in 0..16 {
+            node.roster
+                .lock()
+                .unwrap()
+                .update(&proof, "127.0.0.1".parse().unwrap(), "self");
+            assert_eq!(node.group_projection_revision().unwrap(), first);
+        }
+        assert_eq!(counts(), initial_counts);
+        node.set_device_sync_category(crate::node::SyncCategory::History, false)
+            .unwrap();
+        let policy = node.group_projection_revision().unwrap();
+        assert_ne!(policy, first);
+        node.privacy.generation.fetch_add(1, Ordering::SeqCst);
+        let privacy = node.group_projection_revision().unwrap();
+        assert_ne!(privacy, policy);
+        node.privacy
+            .projection_revision
+            .fetch_add(1, Ordering::SeqCst);
+        let projection = node.group_projection_revision().unwrap();
+        assert_ne!(projection, privacy);
+        node.account_document_updates
+            .send_modify(|stamp| *stamp = stamp.wrapping_add(1));
+        assert_ne!(node.group_projection_revision().unwrap(), projection);
+        assert_eq!(
+            counts(),
+            initial_counts,
+            "fresh unrelated inputs must not rebuild metadata"
+        );
     }
 }

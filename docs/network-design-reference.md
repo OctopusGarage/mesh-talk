@@ -3742,6 +3742,15 @@ local committed mutations wake publication immediately.
 
 Routine local group-access/inventory publication compares the existing source,
 profile, proof, policy, document and device metadata before reading bodies.
+Roster and registered-device owners each retain one lazy 32-byte content digest
+under their existing lock. Roster identity includes all exported filtered historical
+and live signed announcements; registered-device identity includes its account and
+complete canonical devices. Successful content mutations invalidate these hints;
+unchanged heartbeats and duplicate device records do not rebuild them. Device
+persistence failure cannot publish a new digest. The domain-separated outer
+projection hint still captures current source, privacy, policy, profile, proof,
+document and group inputs. Digest reuse grants no permission, extends no presence
+lease and suppresses no route or expiry observation.
 The lifetime-owned maintenance cursor retains its pre-work input across bounded
 pages; newer inputs retain a follow-up. Failed publication stays dirty with its
 own five-second retry deadline; a settled pass keeps a five-minute integrity

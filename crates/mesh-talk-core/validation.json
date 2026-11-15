@@ -307,7 +307,9 @@
         "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
         "crates/mesh-talk-core/src/node/channels.rs",
-        "crates/mesh-talk-core/src/node/account_group/access/view/directory.rs"
+        "crates/mesh-talk-core/src/node/account_group/access/view/directory.rs",
+        "crates/mesh-talk-core/src/discovery/roster.rs",
+        "crates/mesh-talk-core/src/node/account_devices.rs"
       ],
       "rust": [
         {
@@ -320,7 +322,9 @@
             "node::account_sync::",
             "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
             "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery",
-            "node::account_profile_io::tests::unchanged_profile_publication_reuses_retained_events_across_retries_and_reopen"
+            "node::account_profile_io::tests::unchanged_profile_publication_reuses_retained_events_across_retries_and_reopen",
+            "discovery::roster::",
+            "node::account_devices::tests::"
           ]
         }
       ],
@@ -355,6 +359,10 @@
           {
             "name": "Physical local groups exclude already-unused inventory rows before body hydration; nonlocal references and direct readers retain current binding and missing/corrupt-body checks.",
             "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
+          {
+            "name": "Mutation-owned bounded canonical roster/device digests avoid unchanged metadata materialization while every source, policy, privacy and current-authority input remains fresh; route and lease observations are independent.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           }
         ]
       },
@@ -1568,7 +1576,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
