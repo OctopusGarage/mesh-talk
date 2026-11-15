@@ -485,6 +485,11 @@ Readiness has discovery consumers before job admission. Retain their notificatio
 even before a waiter is registered; waking only existing jobs can strand completed
 preparation. Fence racing probes so an older failure cannot reinstall the wait.
 Warm observations are not readiness transitions.
+Failed preparation retains a sparse, nonrenewing retry deadline at its bounded
+view owner. Exclude held views from immediate-work demand and oldest-first
+selection so one persistent storage error cannot monopolize healthy scopes.
+Discovery and queued jobs must preserve that same hold; installing a job's wait
+cannot overwrite a checkpoint wake that already cleared the view's failure.
 An unchanged reception completion is not dependency publication and must not
 clear a blocked deadline. Keep queue-continuation booleans distinct from state
 change evidence: completing the last queued lane can still publish readiness.

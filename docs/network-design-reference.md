@@ -1089,6 +1089,15 @@ source/cache guards; each subsequent attempt still checks current membership,
 retained offer, consent and runtime authority. Ready observations alone do not
 renew work. These scheduling fields remain runtime metadata, not custody proof.
 
+A failed retained authorization preparation is dependency-blocked, not productive
+continuation. Its existing view retains a nonrenewing five-minute repair deadline;
+other unfinished scopes remain eligible. Matching checkpoint publication clears
+the hold through the same view owner after releasing source guards. Queued jobs
+and discovery retain that deadline instead of resetting a short retry. Expiry
+permits a fresh attempt; successful preparation, current authorization and stale
+source retirement keep their existing checks. No failure hold grants custody or
+acknowledges delivery.
+
 Private and group file sends can deposit recipient-encrypted chunk wrappers in
 eligible post offices before a recipient comes online or approves the offer.
 This is custody of ciphertext, not recipient delivery or permission to install

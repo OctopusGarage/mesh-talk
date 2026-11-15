@@ -13,21 +13,27 @@ use std::{
     sync::{Arc, Mutex, atomic::Ordering},
 };
 
+#[cfg(test)]
+thread_local! { static AUTHORIZATION_PREPARE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 type UploadKey = (EventId, [u8; 32]);
 const MAX_GROUP_FILE_JOBS: usize = 10_000;
 const MAX_AUTHORIZATION_VIEWS: usize = 4;
+const AUTHORIZATION_REPAIR: std::time::Duration = std::time::Duration::from_secs(300);
 type AuthorizationKey = ([u8; 32], [u8; 32], [u8; 32]);
 
 struct AuthorizationView {
     upload: super::privacy_sync::HistoryUpload,
     stamp: Option<super::privacy_sync::HistorySyncStamp>,
     ready: bool,
+    repair_after: Option<std::time::Instant>,
     used: std::time::Instant,
 }
 
 enum GroupFileQueueProgress {
     Complete,
     Preparing,
+    Cooling(std::time::Instant),
 }
 
 #[derive(Clone, Copy)]
@@ -35,13 +41,14 @@ enum AuthorizationProbe {
     Allowed,
     Denied,
     Preparing,
+    Cooling(std::time::Instant),
 }
 impl AuthorizationProbe {
     fn ready(self) -> Result<bool, LogError> {
         match self {
             Self::Allowed => Ok(true),
             Self::Denied => Ok(false),
-            Self::Preparing => Err(LogError::StaleCursor),
+            Self::Preparing | Self::Cooling(_) => Err(LogError::StaleCursor),
         }
     }
 }
@@ -421,6 +428,15 @@ impl Node {
                 if matches!(outcome, Ok(GroupFileQueueProgress::Preparing)) {
                     return Err(LogError::StaleCursor);
                 }
+                let cooling = match outcome {
+                    Ok(GroupFileQueueProgress::Cooling(at)) => Some(at),
+                    _ => None,
+                };
+                let outcome = if cooling.is_some() {
+                    Err(LogError::StaleCursor)
+                } else {
+                    outcome
+                };
                 if let Err(error) = outcome {
                     if matches!(error, LogError::StaleCursor) {
                         #[cfg(test)]
@@ -438,7 +454,9 @@ impl Node {
                             current.deferred = Some(DeferredGroupFileDiscovery {
                                 input,
                                 source: scan.source.expect("captured source"),
-                                at: std::time::Instant::now() + std::time::Duration::from_secs(3),
+                                at: cooling.unwrap_or_else(|| {
+                                    std::time::Instant::now() + std::time::Duration::from_secs(3)
+                                }),
                             });
                         }
                     }
@@ -502,7 +520,9 @@ impl Node {
     ) -> Result<(), LogError> {
         match self.queue_group_file_delivery_progress(file, manifest)? {
             GroupFileQueueProgress::Complete => Ok(()),
-            GroupFileQueueProgress::Preparing => Err(LogError::StaleCursor),
+            GroupFileQueueProgress::Preparing | GroupFileQueueProgress::Cooling(_) => {
+                Err(LogError::StaleCursor)
+            }
         }
     }
 
@@ -572,6 +592,7 @@ impl Node {
                 AuthorizationProbe::Allowed => {}
                 AuthorizationProbe::Denied => continue,
                 AuthorizationProbe::Preparing => return Ok(GroupFileQueueProgress::Preparing),
+                AuthorizationProbe::Cooling(at) => return Ok(GroupFileQueueProgress::Cooling(at)),
             }
             let mut jobs = self
                 .group_file_delivery
@@ -707,7 +728,12 @@ impl Node {
                 .lock()
                 .expect("group file authorization lock")
                 .values()
-                .any(|view| !view.ready)
+                .any(|view| {
+                    !view.ready
+                        && view
+                            .repair_after
+                            .is_none_or(|at| at <= std::time::Instant::now())
+                })
     }
 
     /// The existing producer owns the timer; cooled work retains its wake deadline.
@@ -730,7 +756,17 @@ impl Node {
             .expect("group file scan lock")
             .deferred
             .map(|wait| wait.at.saturating_duration_since(now));
-        jobs.into_iter().chain(discovery).min()
+        let authorization = self
+            .group_file_delivery
+            .authorization
+            .lock()
+            .expect("group file authorization lock")
+            .values()
+            .filter_map(|view| view.repair_after)
+            .filter(|at| *at > now)
+            .map(|at| at.saturating_duration_since(now))
+            .min();
+        jobs.into_iter().chain(discovery).chain(authorization).min()
     }
 
     #[cfg(test)]
@@ -906,6 +942,14 @@ impl Node {
                 views.remove(&oldest);
             } else {
                 let advanced = self.advance_group_file_authorization_on(&mut views)?;
+                let cooling = views
+                    .values()
+                    .all(|view| {
+                        view.repair_after
+                            .is_some_and(|at| at > std::time::Instant::now())
+                    })
+                    .then(|| views.values().filter_map(|view| view.repair_after).min())
+                    .flatten();
                 drop(views);
                 if let Some(key) = advanced.completed {
                     self.publish_group_file_readiness(
@@ -915,21 +959,46 @@ impl Node {
                 }
                 return if advanced.progressed {
                     Ok(AuthorizationProbe::Preparing)
+                } else if let Some(at) = cooling {
+                    Ok(AuthorizationProbe::Cooling(at))
                 } else {
                     Err(LogError::StaleCursor)
                 };
             }
         }
+        if let Some(at) = views.get(&key).and_then(|view| view.repair_after)
+            && at > std::time::Instant::now()
+        {
+            return Ok(AuthorizationProbe::Cooling(at));
+        }
         let owner = self.sync_store(peer);
         let store = owner.lock().expect("projection lock");
-        let stamp = store.history_sync_stamp(&channel)?;
+        let stamp = match store.history_sync_stamp(&channel) {
+            Ok(stamp) => stamp,
+            Err(error @ (LogError::StaleCursor | LogError::ConversationRetiring)) => {
+                views.remove(&key);
+                return Err(error);
+            }
+            Err(error) => {
+                if let Some(view) = views.get_mut(&key) {
+                    view.repair_after = Some(std::time::Instant::now() + AUTHORIZATION_REPAIR);
+                }
+                return Err(error);
+            }
+        };
         if let Some(view) = views.get(&key) {
             match store.validate_history_upload(&view.upload) {
                 Ok(()) => {}
                 Err(LogError::StaleCursor | LogError::ConversationRetiring) => {
                     views.remove(&key);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    views
+                        .get_mut(&key)
+                        .expect("existing authorization view")
+                        .repair_after = Some(std::time::Instant::now() + AUTHORIZATION_REPAIR);
+                    return Err(error);
+                }
             }
         }
         if let Some(view) = views.get_mut(&key)
@@ -950,6 +1019,7 @@ impl Node {
                 upload: store.open_history_upload(&channel)?,
                 stamp,
                 ready: false,
+                repair_after: None,
                 used: std::time::Instant::now(),
             });
             // Once per admitted cold view, not once per Pending turn: this
@@ -960,6 +1030,8 @@ impl Node {
         view.used = std::time::Instant::now();
         let before = view.upload.preparation_progress();
         let was_ready = view.ready;
+        #[cfg(test)]
+        AUTHORIZATION_PREPARE_CALLS.with(|calls| calls.set(calls.get() + 1));
         let step = store.prepare_history_upload_step(
             &view.upload,
             crate::eventlog::sync::network::PreparationBudget::default(),
@@ -970,8 +1042,12 @@ impl Node {
                 views.remove(&key);
                 return Err(error);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                view.repair_after = Some(std::time::Instant::now() + AUTHORIZATION_REPAIR);
+                return Err(error);
+            }
         };
+        view.repair_after = None;
         view.ready = step.ready;
         if !step.ready {
             let progressed = step.rows != 0
@@ -1015,7 +1091,12 @@ impl Node {
     ) -> Result<AuthorizationAdvance, LogError> {
         let Some(key) = views
             .iter()
-            .filter(|(_, view)| !view.ready)
+            .filter(|(_, view)| {
+                !view.ready
+                    && view
+                        .repair_after
+                        .is_none_or(|at| at <= std::time::Instant::now())
+            })
             .min_by_key(|(_, view)| view.used)
             .map(|(key, _)| *key)
         else {
@@ -1032,6 +1113,8 @@ impl Node {
             .expect("selected pending authorization view");
         let before = view.upload.preparation_progress();
         let result = store.validate_history_upload(&view.upload).and_then(|()| {
+            #[cfg(test)]
+            AUTHORIZATION_PREPARE_CALLS.with(|calls| calls.set(calls.get() + 1));
             store.prepare_history_upload_step(
                 &view.upload,
                 crate::eventlog::sync::network::PreparationBudget::default(),
@@ -1043,6 +1126,7 @@ impl Node {
                     || step.edges != 0
                     || step.bytes != 0
                     || before != view.upload.preparation_progress();
+                view.repair_after = None;
                 view.ready = step.ready;
                 view.used = std::time::Instant::now();
                 Ok(AuthorizationAdvance {
@@ -1057,7 +1141,10 @@ impl Node {
                     completed: None,
                 })
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                view.repair_after = Some(std::time::Instant::now() + AUTHORIZATION_REPAIR);
+                Err(error)
+            }
         }
     }
 
@@ -1078,6 +1165,20 @@ impl Node {
         channel: ConversationId,
         peer: Option<([u8; 32], [u8; 32])>,
     ) {
+        {
+            let mut views = self
+                .group_file_delivery
+                .authorization
+                .lock()
+                .expect("group file authorization lock");
+            for (key, view) in views.iter_mut() {
+                if key.0 == *channel.as_bytes()
+                    && peer.is_none_or(|(ed, x)| key.1 == ed && key.2 == x)
+                {
+                    view.repair_after = None;
+                }
+            }
+        }
         self.wake_group_file_discovery();
         self.wake_group_file_dependency(channel, peer);
         // Retain publication even if an in-flight probe has not installed its
@@ -1238,6 +1339,23 @@ impl Node {
                         true
                     },
                     Ok(AuthorizationProbe::Denied) => false,
+                    Ok(AuthorizationProbe::Cooling(at)) => {
+                        // Serialize receipt installation with publication: a checkpoint
+                        // which already cleared this hold must not be overwritten.
+                        let views = self.group_file_delivery.authorization.lock().expect("group file authorization lock");
+                        let scope = (*job.channel.as_bytes(), job.recipient.ed25519_pub, job.recipient.x25519_pub);
+                        let held = views.get(&scope).map_or_else(
+                            || views.len() == MAX_AUTHORIZATION_VIEWS
+                                && views.values().all(|view| !view.ready && view.repair_after.is_some_and(|deadline| deadline >= at)),
+                            |view| view.repair_after == Some(at),
+                        );
+                        if let Some(pending) = self.group_file_delivery.jobs.lock().expect("group file jobs lock").get_mut(&key)
+                            .filter(|pending| pending.recipient == job.recipient && pending.file == job.file && pending.demand == job.demand) {
+                            pending.waiting_dependency = held;
+                            pending.retry_after = held.then_some(at);
+                        }
+                        continue;
+                    }
                     Ok(AuthorizationProbe::Preparing) => {
                         self.observe_mailbox_work(super::work_observation::reason::FILE_PREPARING, None);
                         if let Some(pending) = self.group_file_delivery.jobs.lock().expect("group file jobs lock").get_mut(&key)

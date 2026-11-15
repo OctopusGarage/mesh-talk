@@ -122,6 +122,11 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    A stale dependency is not preparation progress: retain its backoff instead
    of repeatedly making the item immediately runnable. Wake only matching
    waiters when the owning dependency publishes readiness; hints grant no access.
+   Failed preparation must not monopolize the oldest unfinished scope. Retain a
+   bounded error hold at the existing work owner, include its deadline in the
+   scheduler, and let healthy scopes advance. Serialize hold installation with
+   matching dependency wakes so a concurrent recovery cannot be lost. Repeated
+   observations cannot renew the hold or turn it back into immediate work.
    Park offline peer work without discarding receiver progress; resume on fresh
    eligible evidence. Send bounded change hints to available siblings and let
    each receiver own its incremental pull. Local maintenance notifications and

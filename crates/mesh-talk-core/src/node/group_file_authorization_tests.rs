@@ -2801,3 +2801,319 @@ async fn isolated_file_lane_group_notifications_do_not_wake_receives() {
         "queuing outgoing custody must not wake the receiving producer"
     );
 }
+
+#[tokio::test]
+async fn group_file_authorization_storage_failure_waits_for_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let node = node(root.path());
+    let peer = DeviceIdentity::generate();
+    let channel = node
+        .create_channel("Repair custody", vec![peer.public()])
+        .await
+        .unwrap();
+    let event = append_history(&node, channel, 128);
+    crate::node::test_support::settle_group_metadata(&node, channel);
+    assert!(matches!(
+        node.group_file_outgoing_contains(channel, event, &peer.public()),
+        Err(LogError::StaleCursor)
+    ));
+    node.storage.database().transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_group_selection BEFORE UPDATE ON participant_work.participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected group preparation failure'); END")?;
+        Ok(())
+    }).unwrap();
+    AUTHORIZATION_PREPARE_CALLS.with(|calls| calls.set(0));
+    assert!(
+        node.advance_group_file_authorization_on(
+            &mut node.group_file_delivery.authorization.lock().unwrap()
+        )
+        .is_err()
+    );
+    assert_eq!(AUTHORIZATION_PREPARE_CALLS.with(|calls| calls.get()), 1);
+    assert!(
+        !node.group_file_work_pending(),
+        "failed orphan must cool rather than demand immediate work"
+    );
+    assert!(node.group_file_retry_delay().is_some());
+    for _ in 0..4 {
+        assert!(matches!(
+            node.group_file_outgoing_contains(channel, event, &peer.public()),
+            Err(LogError::StaleCursor)
+        ));
+        node.retry_group_file_delivery().await;
+    }
+    assert_eq!(
+        AUTHORIZATION_PREPARE_CALLS.with(|calls| calls.get()),
+        1,
+        "cooling must precede the real SQL preparation boundary"
+    );
+    let key = (
+        *channel.as_bytes(),
+        peer.public().ed25519_pub,
+        peer.public().x25519_pub,
+    );
+    let deadline = node.group_file_delivery.authorization.lock().unwrap()[&key]
+        .repair_after
+        .unwrap();
+    assert!(deadline > std::time::Instant::now());
+    assert!(
+        matches!(node.group_file_outgoing_probe(channel,event,&peer.public()), Ok(AuthorizationProbe::Cooling(at)) if at == deadline)
+    );
+    assert_eq!(
+        node.group_file_delivery.authorization.lock().unwrap()[&key].repair_after,
+        Some(deadline)
+    );
+    // The same retained upload retries once its owner deadline expires.
+    node.group_file_delivery
+        .authorization
+        .lock()
+        .unwrap()
+        .get_mut(&key)
+        .unwrap()
+        .repair_after = Some(std::time::Instant::now());
+    assert!(
+        node.advance_group_file_authorization_on(
+            &mut node.group_file_delivery.authorization.lock().unwrap()
+        )
+        .is_err()
+    );
+    assert_eq!(AUTHORIZATION_PREPARE_CALLS.with(|calls| calls.get()), 2);
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_group_selection")?;
+            Ok(())
+        })
+        .unwrap();
+    let held = node.group_file_delivery.authorization.lock().unwrap()[&key].repair_after;
+    let healthy = node
+        .create_channel("Healthy custody", vec![peer.public()])
+        .await
+        .unwrap();
+    let healthy_event = append_history(&node, healthy, 32);
+    crate::node::test_support::settle_group_metadata(&node, healthy);
+    assert!(settle_contains(
+        &node,
+        healthy,
+        healthy_event,
+        &peer.public()
+    ));
+    assert_eq!(
+        node.group_file_delivery.authorization.lock().unwrap()[&key].repair_after,
+        held,
+        "unrelated healthy readiness cannot renew or clear a failed scope"
+    );
+    node.wake_group_file_checkpoint(channel);
+    assert!(node.group_file_work_pending());
+    assert!(settle_contains(&node, channel, event, &peer.public()));
+}
+
+#[tokio::test]
+async fn group_file_four_failed_views_preserve_fifth_admission_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let node = node(root.path());
+    let peers: Vec<_> = (0..5).map(|_| DeviceIdentity::generate()).collect();
+    let channel = node
+        .create_channel(
+            "Failed custody",
+            peers.iter().map(DeviceIdentity::public).collect(),
+        )
+        .await
+        .unwrap();
+    let event = append_history(&node, channel, 128);
+    crate::node::test_support::settle_group_metadata(&node, channel);
+    for peer in &peers[..4] {
+        assert!(matches!(
+            node.group_file_outgoing_contains(channel, event, &peer.public()),
+            Err(LogError::StaleCursor)
+        ));
+    }
+    node.storage.database().transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_group_selection BEFORE UPDATE ON participant_work.participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected group preparation failure'); END")?;
+        Ok(())
+    }).unwrap();
+    AUTHORIZATION_PREPARE_CALLS.with(|calls| calls.set(0));
+    for _ in 0..4 {
+        assert!(
+            node.advance_group_file_authorization_on(
+                &mut node.group_file_delivery.authorization.lock().unwrap()
+            )
+            .is_err()
+        );
+    }
+    let earliest = node
+        .group_file_delivery
+        .authorization
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(|v| v.repair_after)
+        .min()
+        .unwrap();
+    for _ in 0..4 {
+        assert!(
+            matches!(node.group_file_outgoing_probe(channel,event,&peers[4].public()),Ok(AuthorizationProbe::Cooling(at)) if at == earliest)
+        );
+        node.retry_group_file_delivery().await;
+    }
+    assert_eq!(AUTHORIZATION_PREPARE_CALLS.with(|calls| calls.get()), 4);
+    assert_eq!(
+        node.group_file_delivery.authorization.lock().unwrap().len(),
+        4
+    );
+    assert!(!node.group_file_work_pending());
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_group_selection")?;
+            Ok(())
+        })
+        .unwrap();
+    node.wake_group_file_checkpoint(channel);
+    for _ in 0..512 {
+        node.retry_group_file_delivery().await;
+        if !node.group_file_work_pending() {
+            break;
+        }
+    }
+    assert!(settle_contains(&node, channel, event, &peers[4].public()));
+}
+
+#[tokio::test]
+async fn group_file_queued_authorization_failure_retains_dependency_deadline() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let peer = fixture.peers[0].public();
+    node.group_file_delivery
+        .authorization
+        .lock()
+        .unwrap()
+        .clear();
+    for job in node.group_file_delivery.jobs.lock().unwrap().values_mut() {
+        *job.authorization_stamp.lock().unwrap() = None;
+        // The real owner admits two due jobs per pass; select this exact peer.
+        if job.recipient != peer {
+            job.retry_after = Some(std::time::Instant::now() + AUTHORIZATION_REPAIR);
+        }
+    }
+    assert!(matches!(
+        node.group_file_outgoing_contains(fixture.channel, fixture.manifest, &peer),
+        Err(LogError::StaleCursor)
+    ));
+    node.storage.database().transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_group_selection BEFORE UPDATE ON participant_work.participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected group preparation failure'); END")?;
+        Ok(())
+    }).unwrap();
+    assert!(
+        node.advance_group_file_authorization_on(
+            &mut node.group_file_delivery.authorization.lock().unwrap()
+        )
+        .is_err()
+    );
+    let scope = (
+        *fixture.channel.as_bytes(),
+        peer.ed25519_pub,
+        peer.x25519_pub,
+    );
+    let deadline = node.group_file_delivery.authorization.lock().unwrap()[&scope]
+        .repair_after
+        .unwrap();
+    node.retry_group_file_delivery().await;
+    {
+        let jobs = node.group_file_delivery.jobs.lock().unwrap();
+        let job = jobs.values().find(|job| job.recipient == peer).unwrap();
+        assert!(job.waiting_dependency);
+        assert_eq!(job.retry_after, Some(deadline));
+    }
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_group_selection")?;
+            Ok(())
+        })
+        .unwrap();
+    node.wake_group_file_checkpoint(fixture.channel);
+    {
+        let jobs = node.group_file_delivery.jobs.lock().unwrap();
+        let job = jobs.values().find(|job| job.recipient == peer).unwrap();
+        assert!(!job.waiting_dependency);
+        assert_eq!(job.retry_after, None);
+    }
+    assert!(settle_contains(
+        node,
+        fixture.channel,
+        fixture.manifest,
+        &peer
+    ));
+}
+
+#[tokio::test]
+async fn group_file_failed_authorization_receipt_cannot_hide_waiting_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let node = node(root.path());
+    let peer = DeviceIdentity::generate();
+    let channel = node
+        .create_channel("Checkpoint race", vec![peer.public()])
+        .await
+        .unwrap();
+    let event = append_history(&node, channel, 128);
+    crate::node::test_support::settle_group_metadata(&node, channel);
+    assert!(matches!(
+        node.group_file_outgoing_contains(channel, event, &peer.public()),
+        Err(LogError::StaleCursor)
+    ));
+    node.storage.database().transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_group_selection BEFORE UPDATE ON participant_work.participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected group preparation failure'); END")?;
+        Ok(())
+    }).unwrap();
+    let key = (
+        *channel.as_bytes(),
+        peer.public().ed25519_pub,
+        peer.public().x25519_pub,
+    );
+    let mut views = node.group_file_delivery.authorization.lock().unwrap();
+    let progress = views[&key].upload.preparation_progress();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let publisher_node = node.clone();
+    let publisher = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        publisher_node.wake_group_file_checkpoint(channel);
+        done_tx.send(()).unwrap();
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(
+        done_rx.try_recv().is_err(),
+        "publication must wait for the actual authorization owner"
+    );
+    assert!(
+        node.advance_group_file_authorization_on(&mut views)
+            .is_err()
+    );
+    assert!(views[&key].repair_after.is_some());
+    assert_eq!(
+        views[&key].upload.preparation_progress(),
+        progress,
+        "failed SQL must retain the same finite selection progress"
+    );
+    // Source recovery finishes before publication can acquire the receipt owner.
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_group_selection")?;
+            Ok(())
+        })
+        .unwrap();
+    drop(views);
+    let published = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    publisher.join().unwrap();
+    published.expect("checkpoint must progress after authorization releases its owner");
+    assert!(
+        node.group_file_delivery.authorization.lock().unwrap()[&key]
+            .repair_after
+            .is_none()
+    );
+    assert!(node.group_file_work_pending());
+    assert!(settle_contains(&node, channel, event, &peer.public()));
+}
