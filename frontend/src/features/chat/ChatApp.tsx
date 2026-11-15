@@ -42,8 +42,21 @@ export function ChatApp() {
     (s) => s.persistenceError,
   );
   const [mediaWarning, setMediaWarning] = useState(false);
-  const active = useChat((s) => s.active);
-  const peers = useChat((s) => s.peers);
+  // Subscribe to notification meaning, not roster heartbeat object identity.
+  const notificationContext = useChat((s) =>
+    JSON.stringify([
+      s.active?.kind === "account"
+        ? [
+            ...new Set(
+              s.peers
+                .filter((peer) => peer.account_id === s.active?.id)
+                .map((peer) => peer.user_id),
+            ),
+          ].sort()
+        : [],
+      s.active?.kind === "channel" ? s.active.id : null,
+    ]),
+  );
   const accountId = useChat((s) => s.myAccountId);
   useEffect(() => {
     if (!owner || !ready || !accountId) return;
@@ -115,20 +128,16 @@ export function ChatApp() {
   }, [ready]);
 
   useEffect(() => {
-    const activePeerDevices =
-      active?.kind === "account"
-        ? peers
-            .filter((peer) => peer.account_id === active.id)
-            .map((peer) => peer.user_id)
-        : [];
-    const activeChannel = active?.kind === "channel" ? active.id : null;
+    const [activePeerDevices, activeChannel] = JSON.parse(
+      notificationContext,
+    ) as [string[], string | null];
     void chatApi
       .setNotificationContext(activePeerDevices, activeChannel)
       .catch(() => {});
     return () => {
       void chatApi.setNotificationContext([], null).catch(() => {});
     };
-  }, [active, peers, generation]);
+  }, [notificationContext, generation]);
 
   useEffect(() => {
     if (owner) return startUnreadBadge(owner);

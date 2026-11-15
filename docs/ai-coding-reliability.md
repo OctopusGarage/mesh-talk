@@ -146,6 +146,11 @@ peer-check timestamp even when the rows are unchanged. The mounted
 [conversation idle regression](../frontend/src/features/chat/ConversationViewIdle.test.ts)
 requires live status updates without viewport renders, while new messages and
 conversation replacement remain live.
+Apply the same semantic boundary to native effects: the mounted
+[chat shell regression](../frontend/src/features/chat/ChatAppIdle.test.ts) requires
+unchanged notification context through peer freshness and ordering changes,
+while real conversation/device-set changes, session replacement and unmount
+retain publication and cleanup. Native revision admission still fences stale calls.
 Prepare bulk data outside shared commit guards, then reacquire the required
 guards and revalidate before atomic publication. Keep critical sections small
 without splitting a transaction or permitting stale side effects. Replacing a

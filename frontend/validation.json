@@ -2377,7 +2377,8 @@
         "docs/help/topics/history.md",
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/src/features/chat/ReceptionStatus.tsx",
-        "frontend/src/features/chat/ConversationViewIdle.test.ts"
+        "frontend/src/features/chat/ConversationViewIdle.test.ts",
+        "frontend/src/features/chat/ChatAppIdle.test.ts"
       ],
       "frontend": [
         "src/store/reception.test.ts",
@@ -2392,7 +2393,8 @@
         "src/features/chat/sidebar/ConversationRow.test.ts",
         "src/features/chat/ReceptionStatus.test.ts",
         "src/lib/localeParity.test.ts",
-        "src/features/chat/ConversationViewIdle.test.ts"
+        "src/features/chat/ConversationViewIdle.test.ts",
+        "src/features/chat/ChatAppIdle.test.ts"
       ],
       "capability": {
         "summary": "Every application unread count has a review and explicit clear path; confirmed local suppression reconciles exact unread without claiming viewed content; badge writes retry within the current owner lifetime.",
@@ -2417,6 +2419,10 @@
           {
             "name": "Peer-check recovery observations update their small status owner without rerendering unchanged message viewports; new messages, unread review and conversation/session replacement retain their independent reactive ownership.",
             "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
+          {
+            "name": "Notification context follows only the active conversation and canonical active-account device set; roster freshness, names and ordering do not republish unchanged context. Actual membership/conversation changes, session replacement and unmount retain publication and cleanup, with native monotonic revision fencing.",
+            "reference": "docs/group-conversation-reception.md#unread-messages-and-notifications"
           }
         ]
       },

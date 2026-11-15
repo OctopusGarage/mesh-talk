@@ -87,6 +87,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    than the message viewport's parent. A changed peer-check timestamp must update
    its own label without rebuilding unchanged virtualized rows; message, expiry
    and conversation/session changes retain their independent subscriptions.
+   Notification context subscribes only to the active conversation and canonical
+   matching device set. Peer freshness, names and unrelated roster changes must
+   not clear and republish the same native context or rerender the chat shell.
    Replacing an identical binding map is not invalidation; actual removal and
    later restoration must each invalidate their preceding observation.
    Subscribe before the initial read, retain one follow-up for changes during
