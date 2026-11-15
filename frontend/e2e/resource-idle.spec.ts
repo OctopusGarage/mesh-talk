@@ -4,6 +4,7 @@ import { BOB, CHANNEL, enterChat } from "./helpers/session";
 test("roster reception updates presence without reloading unrelated state", async ({
   page,
 }) => {
+  await page.clock.install();
   await page.addInitScript(() => {
     type Scope = {
       owner: string;
@@ -80,6 +81,13 @@ test("roster reception updates presence without reloading unrelated state", asyn
       ).__resourceProbe;
       return { counts: { ...probe.counts }, pending: probe.pending };
     });
+  // Startup arms a two-second fallback before asynchronous identity resolution
+  // advertises native push. Exercise that real recovery before measuring only
+  // reception wakes; pending === 0 cannot qualify an already scheduled timer.
+  await page.clock.runFor(2100);
+  await expect
+    .poll(async () => (await snapshot()).counts.list_peers ?? 0)
+    .toBeGreaterThan(1);
   await expect.poll(async () => (await snapshot()).pending).toBe(0);
   const before = (await snapshot()).counts;
   await page.evaluate((account) => {

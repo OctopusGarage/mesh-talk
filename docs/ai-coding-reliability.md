@@ -1925,6 +1925,10 @@ can otherwise produce an empty delta whose rejection passes the wrong assertion.
 Browser fixtures must make hydrated backend settings agree with the intended
 frontend state before navigation; a later settings response must not silently
 remove the capability under test. The call-readiness fixture owns that setup.
+Zero pending IPC calls does not prove that scheduled startup recovery has finished.
+Before measuring idle event handling, drive the real owned startup callback with
+the browser clock and observe its completion; keep the subsequent call-count
+assertions intact. The resource-idle fixture covers this startup boundary.
 For saved reading positions, exhausting bounded animation-frame polling does not
 prove geometry is ready: retain the conversation-owned target and resume on
 geometry changes, cancelling observers on cleanup and reader intent. Keep one
@@ -1943,6 +1947,11 @@ protected task can still reach its genuine idle deadline. Test barriers belong
 before I/O, inside the owned child, with cancellation releasing their futures;
 post-send hooks must not hide that deadline. Do not repeat long preparation waits
 inside the measured held-read window.
+Install a test's client read gate and its matching server decision observer before
+starting participants or capability warmup. Attaching only the read gate to an
+already acknowledged request can wait forever for a server callback whose boundary
+has passed. The queued-source fixture installs both owners before its full hosts;
+its preparation decision/drop/lifetime controls retain actual child retirement.
 Historical scope completion does not prove an existing child or pair has retired.
 When a fixture requires a natural unpaired read, establish it through receiver-owned
 demand before publishing the Wake that deliberately creates its replacement; observe
@@ -2171,6 +2180,11 @@ witnesses its real explicit negotiation and durable projection. It commits its
 baseline without fanout and explicitly drives each real sync/Have exchange before
 observing custody. A passive observer cannot advance pending work when the
 fixture deliberately has no autonomous recovery owner.
+Manual requesters must also retain the normal reception scope and drain every
+accepted conversation before pooled reuse; a DM-only callback cannot project
+channel controls. The [reference message-action fixture](../crates/mesh-talk-core/src/node/account_group/tests/message_action_reference.rs)
+retains authenticated public recall and reaction projection even when its
+explicit pull receives the signed effect before competing peer fanout.
 
 Keep fixture validation at the narrow boundary it owns. A full-host scenario
 whose only assertion concerns another test helper adds unrelated synchronization

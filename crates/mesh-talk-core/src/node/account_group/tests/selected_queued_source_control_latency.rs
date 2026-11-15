@@ -1220,69 +1220,6 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             }
         }
     }));
-    // Retain the complete production hosts, including public channel recovery.
-    // Readiness observers precede startup; exact current comparisons and their
-    // real child retirement must finish before the natural A hold is armed.
-    let mut servers = tokio::task::JoinSet::new();
-    for (target, listener) in listeners {
-        servers.spawn(async move {
-            Box::pin(target.run_accept_loop(listener)).await;
-        });
-    }
-    a.publish_account_group_access(&mut None);
-    b.publish_account_group_access(&mut None);
-    {
-        let reference = reference.clone();
-        let a = a.clone();
-        let b = b.clone();
-        // The real control observer records Tokio task identity. Keep explicit
-        // bootstrap inside an awaited task, like the autonomous readers.
-        tokio::spawn(async move {
-            super::cold_account_control_setup(
-                super::observe_account_fixture_condition(|| {
-                    [
-                        (&reference, &a),
-                        (&a, &reference),
-                        (&reference, &b),
-                        (&b, &reference),
-                    ]
-                    .into_iter()
-                    .all(|(node, peer)| {
-                        super::has_account_group_operation_support(
-                            node,
-                            peer,
-                            Some(AccountGroupOperationKind::Rename),
-                        )
-                    })
-                }),
-                async {
-                    super::message_action_reference::pull_reference_action_control(
-                        &reference,
-                        &a,
-                        endpoints[0],
-                        group_a,
-                    )
-                    .await;
-                    super::message_action_reference::pull_reference_action_control(
-                        &reference,
-                        &b,
-                        endpoints[1],
-                        group_b,
-                    )
-                    .await;
-                },
-            )
-            .await;
-        })
-        .await
-        .unwrap();
-    }
-    assert_eq!(
-        reference.account_group_access(group_b).unwrap().role,
-        AccountGroupRole::Owner
-    );
-    assert!(!reference.channel_can_manage(group_b).unwrap());
-
     *reference.account_document_read_test_hook.lock().unwrap() = Some(Arc::new({
         let exact = a.identity.public();
         let gate = preparation_read.clone();
@@ -1719,6 +1656,71 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             })
         }
     }));
+    // Retain the complete production hosts, including public channel recovery.
+    // Install BOTH the client read gate and its server decision owner before
+    // any comparison starts. A late read hook could otherwise wait on an
+    // acknowledged request whose server hook boundary has already passed.
+    // Exact current comparisons and real retirement precede the natural A hold.
+    let mut servers = tokio::task::JoinSet::new();
+    for (target, listener) in listeners {
+        servers.spawn(async move {
+            Box::pin(target.run_accept_loop(listener)).await;
+        });
+    }
+    a.publish_account_group_access(&mut None);
+    b.publish_account_group_access(&mut None);
+    {
+        let reference = reference.clone();
+        let a = a.clone();
+        let b = b.clone();
+        // The real control observer records Tokio task identity. Keep explicit
+        // bootstrap inside an awaited task, like the autonomous readers.
+        tokio::spawn(async move {
+            super::cold_account_control_setup(
+                super::observe_account_fixture_condition(|| {
+                    [
+                        (&reference, &a),
+                        (&a, &reference),
+                        (&reference, &b),
+                        (&b, &reference),
+                    ]
+                    .into_iter()
+                    .all(|(node, peer)| {
+                        super::has_account_group_operation_support(
+                            node,
+                            peer,
+                            Some(AccountGroupOperationKind::Rename),
+                        )
+                    })
+                }),
+                async {
+                    super::message_action_reference::pull_reference_action_control(
+                        &reference,
+                        &a,
+                        endpoints[0],
+                        group_a,
+                    )
+                    .await;
+                    super::message_action_reference::pull_reference_action_control(
+                        &reference,
+                        &b,
+                        endpoints[1],
+                        group_b,
+                    )
+                    .await;
+                },
+            )
+            .await;
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        reference.account_group_access(group_b).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    assert!(!reference.channel_can_manage(group_b).unwrap());
+
     let (first_task, first_task_lifetime) = super::cold_account_setup(async {
         // A real setup Wake may replace an active natural comparison. Let
         // that exact signed comparison and its pair finish while the hold is
