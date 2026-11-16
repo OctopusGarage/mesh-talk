@@ -322,6 +322,9 @@
             "node::account_group::tests::owner_targets::legacy_owner_transfers_to_a_deterministic_accepted_target_device",
             "node::account_sync::",
             "node::channel_account_maintenance::tests::scheduling_input_waits_for_history_without_blocking_its_reactor",
+            "node::channels::fanout_tests::channel_custody_startup_continues_beyond_one_bounded_page_before_parking",
+            "node::channels::fanout_tests::channel_custody_input_change_requires_complete_sweep_from_retained_cursor",
+            "node::channels::fanout_tests::settled_channel_custody_waits_for_semantic_change_instead_of_three_second_scan",
             "node::runtime_work::blocking_result_tests::",
             "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
             "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery",
@@ -415,7 +418,10 @@
             "channel_custody_noop_",
             "node::channels::fanout_tests::channel_custody_failed_remote_work_backs_off_without_losing_event_recovery",
             "node::channels::fanout_tests::channel_custody_blocked_group_does_not_delay_other_groups_or_keep_rescanning",
-            "node::channels::fanout_tests::custody_retry_backoff_is_bounded_without_changing_other_recovery_limits"
+            "node::channels::fanout_tests::custody_retry_backoff_is_bounded_without_changing_other_recovery_limits",
+            "node::channels::fanout_tests::channel_custody_startup_continues_beyond_one_bounded_page_before_parking",
+            "node::channels::fanout_tests::channel_custody_input_change_requires_complete_sweep_from_retained_cursor",
+            "node::channels::fanout_tests::settled_channel_custody_waits_for_semantic_change_instead_of_three_second_scan"
           ]
         }
       ],
@@ -444,7 +450,7 @@
             "reference": "docs/performance-requirements.md#design-and-review-rules"
           },
           {
-            "name": "Unchanged failed custody exchanges and missing-report attempts back off per group from three to at most 300 seconds; ready groups and local pages retain prompt continuation, parked work is not confirmed completion, and meaningful input generations bypass old waits without losing fair cursor positions. Other recovery owners retain their existing sixty-second cap.",
+            "name": "Unchanged failed custody exchanges and missing-report attempts back off per group from three to at most 300 seconds; ready groups and local pages retain prompt continuation, parked work is not confirmed completion, and meaningful input generations bypass old waits without losing fair cursor positions. Other recovery owners retain their existing sixty-second cap. Paused-clock custody fixtures observe completed input cycles before clock movement or quiet assertions, retain exact page and generation counts through queued serial repair, and drain admitted work after cancellation.",
             "reference": "docs/network-design-reference.md"
           }
         ]

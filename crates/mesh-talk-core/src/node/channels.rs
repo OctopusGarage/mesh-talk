@@ -1034,25 +1034,51 @@ impl Node {
         let mut retry_at = tokio::time::Instant::now();
         let mut recheck_at = retry_at;
         loop {
-            tokio::select! {
-                _ = tokio::time::sleep_until(retry_at.min(recheck_at)) => {},
-                change = ui.changed() => { if change.is_err() { return; } },
-                change = source.changed() => { if change.is_err() { return; } },
-                change = documents.changed() => { if change.is_err() { return; } },
-                change = roster.changed() => { if change.is_err() { return; } },
-                change = network.changed() => { if change.is_err() { return; } input = None; },
-                change = availability.changed() => { if change.is_err() { return; } },
-                change = metadata.recv() => match change {
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                },
+            {
+                let timer = tokio::time::sleep_until(retry_at.min(recheck_at));
+                tokio::pin!(timer);
+                #[cfg(test)]
+                let timer = std::future::poll_fn(|cx| {
+                    use std::future::Future;
+                    let polled = timer.as_mut().poll(cx);
+                    if polled.is_pending() {
+                        self.trace_account_client(&self.identity.public(), || {
+                            "channel_recovery_custody_wait".into()
+                        });
+                    }
+                    polled
+                });
+                tokio::select! {
+                    _ = timer => {},
+                    change = ui.changed() => { if change.is_err() { return; } },
+                    change = source.changed() => { if change.is_err() { return; } },
+                    change = documents.changed() => { if change.is_err() { return; } },
+                    change = roster.changed() => { if change.is_err() { return; } },
+                    change = network.changed() => { if change.is_err() { return; } input = None; },
+                    change = availability.changed() => { if change.is_err() { return; } },
+                    change = metadata.recv() => match change {
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    },
+                }
             }
             if !self.channel_recovery_periodic_enabled(periodic) {
                 retry_at = tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL;
                 recheck_at = retry_at;
                 continue;
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_custody_input_begin".into()
+            });
             let observed = self.channel_custody_work_input().await.ok();
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!(
+                    "channel_recovery_custody_input_done unchanged={}",
+                    observed.is_some() && observed == input
+                )
+            });
             if observed.is_none()
                 || observed != input
                 || (settled && tokio::time::Instant::now() >= retry_at)
@@ -1117,6 +1143,10 @@ impl Node {
                 recheck_cursor = recheck_cursor.wrapping_add(1);
                 recheck_at = tokio::time::Instant::now() + CHANNEL_CUSTODY_RECHECK_INTERVAL;
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_custody_cycle_done".into()
+            });
             tokio::task::yield_now().await;
         }
     }
@@ -6204,10 +6234,96 @@ mod fanout_tests {
         );
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct CustodyOwnerObservation {
+        entered: usize,
+        inputs: usize,
+        unchanged_input: bool,
+        cycles: usize,
+        scans: usize,
+        begun: usize,
+        rechecks: usize,
+        waiting: bool,
+    }
+
+    fn observe_custody_owner(node: &Node) -> Arc<std::sync::Mutex<CustodyOwnerObservation>> {
+        let observed = Arc::new(std::sync::Mutex::new(CustodyOwnerObservation::default()));
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let observed = observed.clone();
+            move |_, phase| {
+                let mut state = observed.lock().unwrap();
+                match phase.as_str() {
+                    "channel_recovery_custody_input_begin" => {
+                        state.entered += 1;
+                        state.waiting = false;
+                    }
+                    phase if phase.starts_with("channel_recovery_custody_input_done ") => {
+                        state.inputs += 1;
+                        state.unchanged_input = phase.ends_with("unchanged=true");
+                    }
+                    "channel_recovery_custody_begin" => state.begun += 1,
+                    "channel_recovery_custody_done" => state.scans += 1,
+                    "channel_recovery_custody_recheck_begin" => state.rechecks += 1,
+                    "channel_recovery_custody_cycle_done" => state.cycles += 1,
+                    "channel_recovery_custody_wait" => state.waiting = true,
+                    _ => {}
+                }
+            }
+        }));
+        observed
+    }
+
+    async fn await_custody_observation(
+        observed: &std::sync::Mutex<CustodyOwnerObservation>,
+        ready: impl Fn(&CustodyOwnerObservation) -> bool,
+    ) -> CustodyOwnerObservation {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = observed.lock().unwrap().clone();
+            if ready(&snapshot) {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < until,
+                "custody owner phase did not complete: {snapshot:?}"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    // A real same-proof heartbeat gives the owner an input cycle without
+    // manufacturing semantic demand. Wait through the async snapshot and rearm.
+    async fn observe_custody_heartbeat(
+        node: &Node,
+        proof: &Announce,
+        ip: &str,
+        observed: &std::sync::Mutex<CustodyOwnerObservation>,
+    ) -> CustodyOwnerObservation {
+        let before = observed.lock().unwrap().cycles;
+        node.roster
+            .lock()
+            .unwrap()
+            .update(proof, ip.parse().unwrap(), &node.user_id());
+        let completed =
+            await_custody_observation(observed, |state| state.cycles > before && state.waiting)
+                .await;
+        assert!(
+            completed.unchanged_input,
+            "the actual owner must compare an unchanged heartbeat input: {completed:?}"
+        );
+        completed
+    }
+
+    async fn stop_custody_owner(node: &Arc<Node>, worker: tokio::task::JoinHandle<()>) {
+        node.runtime_work.close();
+        worker.abort();
+        let _ = worker.await;
+        node.runtime_work.drain().await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn settled_channel_custody_waits_for_semantic_change_instead_of_three_second_scan() {
         use crate::{identity::account::Account, node::test_support::node_with_files};
-        use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = tempfile::tempdir().unwrap();
         let peer = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&peer, &Account::generate(), "known peer", 12345);
@@ -6228,88 +6344,69 @@ mod fanout_tests {
         node.send_channel_message(channel, b"durable startup message")
             .await
             .unwrap();
-        let completed = Arc::new(AtomicUsize::new(0));
-        let rechecked = Arc::new(AtomicUsize::new(0));
-        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
-            let completed = completed.clone();
-            let rechecked = rechecked.clone();
-            move |_, phase| {
-                if phase == "channel_recovery_custody_recheck_begin" {
-                    rechecked.fetch_add(1, Ordering::SeqCst);
-                }
-                if phase == "channel_recovery_custody_done" {
-                    completed.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-        }));
+        // Slow instrumented preparation must not consume the measured online
+        // baseline's ordinary presence lease. Reuse its exact proof and route.
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.2".parse().unwrap(), &node.user_id());
+        let observed = observe_custody_owner(&node);
         let worker = tokio::spawn(node.clone().run_channel_custody_recovery_loop(true));
-        async fn await_turn(completed: &AtomicUsize, minimum: usize) {
-            for _ in 0..128 {
-                if completed.load(Ordering::SeqCst) >= minimum {
-                    return;
-                }
-                tokio::task::yield_now().await;
-            }
-            panic!("custody owner did not complete expected admitted turn");
-        }
         let result = async {
-            await_turn(&completed, 1).await;
-            let initial = completed.load(Ordering::SeqCst);
+            let initial =
+                await_custody_observation(&observed, |state| state.scans >= 1 && state.waiting)
+                    .await
+                    .scans;
             tokio::time::advance(Duration::from_secs(15)).await;
-            for _ in 0..32 {
-                tokio::task::yield_now().await;
-            }
+            observe_custody_heartbeat(&node, &proof, "127.0.0.2", &observed).await;
             assert_eq!(
-                completed.load(Ordering::SeqCst),
+                observed.lock().unwrap().scans,
                 initial,
                 "settled unchanged custody must not rescan own-message keys every three seconds"
             );
             for ip in ["127.0.0.1", "127.0.0.2"] {
-                node.roster
-                    .lock()
-                    .unwrap()
-                    .update(&proof, ip.parse().unwrap(), &node.user_id());
-                for _ in 0..32 {
-                    tokio::task::yield_now().await;
-                }
+                observe_custody_heartbeat(&node, &proof, ip, &observed).await;
                 assert_eq!(
-                    completed.load(Ordering::SeqCst),
+                    observed.lock().unwrap().scans,
                     initial,
                     "known-route freshness/preference renewal must not admit custody scans"
                 );
             }
             tokio::time::advance(Duration::from_secs(45)).await;
-            for _ in 0..32 {
-                tokio::task::yield_now().await;
-            }
+            await_custody_observation(&observed, |state| state.rechecks >= 2 && state.waiting)
+                .await;
             assert!(
-                rechecked.load(Ordering::SeqCst) >= 2,
+                observed.lock().unwrap().rechecks >= 2,
                 "old claims retain independent sixty-second repair"
             );
             assert_eq!(
-                completed.load(Ordering::SeqCst),
+                observed.lock().unwrap().scans,
                 initial,
                 "old-claim recheck must not invoke the 128-row retry scan"
             );
             tokio::time::advance(Duration::from_secs(240)).await;
-            await_turn(&completed, initial + 1).await;
-            let initial = completed.load(Ordering::SeqCst);
+            await_custody_observation(&observed, |state| state.scans > initial && state.waiting)
+                .await;
+            let initial = observed.lock().unwrap().scans;
             node.send_channel_message(channel, b"new durable message")
                 .await
                 .unwrap();
-            await_turn(&completed, initial + 1).await;
-            let after_message = completed.load(Ordering::SeqCst);
+            await_custody_observation(&observed, |state| state.scans > initial && state.waiting)
+                .await;
+            let after_message = observed.lock().unwrap().scans;
             node.roster.lock().unwrap().update(
                 &proof,
                 "127.0.0.3".parse().unwrap(),
                 &node.user_id(),
             );
-            await_turn(&completed, after_message + 1).await;
+            await_custody_observation(&observed, |state| {
+                state.scans > after_message && state.waiting
+            })
+            .await;
         };
         use futures_util::FutureExt;
         let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
-        worker.abort();
-        let _ = worker.await;
+        stop_custody_owner(&node, worker).await;
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }
@@ -6318,7 +6415,6 @@ mod fanout_tests {
     #[tokio::test(start_paused = true)]
     async fn channel_custody_failed_remote_work_backs_off_without_losing_event_recovery() {
         use crate::{identity::account::Account, node::test_support::node_with_files};
-        use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = tempfile::tempdir().unwrap();
         let peer = DeviceIdentity::generate();
         // Own the failure endpoint: closing an accepted socket fails Noise
@@ -6345,51 +6441,33 @@ mod fanout_tests {
         node.send_channel_message(channel, b"retain pending custody")
             .await
             .unwrap();
-        let begun = Arc::new(AtomicUsize::new(0));
-        let completed = Arc::new(AtomicUsize::new(0));
-        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
-            let begun = begun.clone();
-            let completed = completed.clone();
-            move |_, phase| {
-                if phase == "channel_recovery_custody_begin" {
-                    begun.fetch_add(1, Ordering::SeqCst);
-                }
-                if phase == "channel_recovery_custody_done" {
-                    completed.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-        }));
-        async fn await_count(counter: &AtomicUsize, expected: usize) {
-            // Keep virtual scheduling frozen while the real socket completes.
-            // Yield counts alone are not an operating-system readiness signal.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while counter.load(Ordering::SeqCst) < expected {
-                assert!(Instant::now() < deadline, "custody phase did not complete");
-                tokio::task::yield_now().await;
-            }
-        }
+        // Slow instrumented preparation must not consume the measured online
+        // baseline's ordinary presence lease. Reuse its exact proof and route.
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+        let observed = observe_custody_owner(&node);
         let worker = tokio::spawn(node.clone().run_channel_custody_recovery_loop(true));
         let mut senders = tokio::task::JoinSet::new();
         let result = async {
-            await_count(&completed, 1).await;
+            await_custody_observation(&observed, |state| state.scans >= 1 && state.waiting).await;
             assert_eq!(
-                completed.load(Ordering::SeqCst),
+                observed.lock().unwrap().scans,
                 1,
                 "initial pending work is prompt"
             );
             tokio::time::advance(Duration::from_secs(3)).await;
-            await_count(&completed, 2).await;
+            await_custody_observation(&observed, |state| state.scans >= 2 && state.waiting).await;
             assert_eq!(
-                completed.load(Ordering::SeqCst),
+                observed.lock().unwrap().scans,
                 2,
                 "first retry remains prompt"
             );
             tokio::time::advance(Duration::from_secs(3)).await;
-            for _ in 0..128 {
-                tokio::task::yield_now().await;
-            }
+            observe_custody_heartbeat(&node, &proof, "127.0.0.1", &observed).await;
             assert_eq!(
-                begun.load(Ordering::SeqCst),
+                observed.lock().unwrap().begun,
                 2,
                 "unchanged failed peer work must back off instead of rescanning every three seconds"
             );
@@ -6400,7 +6478,7 @@ mod fanout_tests {
                     .send_channel_message(channel, b"new local demand")
                     .await
             });
-            await_count(&begun, 3).await;
+            await_custody_observation(&observed, |state| state.begun >= 3).await;
             assert_eq!(
                 tokio::time::Instant::now(),
                 before,
@@ -6410,12 +6488,12 @@ mod fanout_tests {
         };
         use futures_util::FutureExt;
         let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
-        worker.abort();
-        let _ = worker.await;
+        node.runtime_work.close();
         senders.abort_all();
         while senders.join_next().await.is_some() {}
         dropper.abort();
         let _ = dropper.await;
+        stop_custody_owner(&node, worker).await;
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }
@@ -6517,7 +6595,6 @@ mod fanout_tests {
     #[tokio::test(start_paused = true)]
     async fn channel_custody_startup_continues_beyond_one_bounded_page_before_parking() {
         use crate::{identity::account::Account, node::test_support::node_with_files};
-        use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = tempfile::tempdir().unwrap();
         let proof = Announce::new_with_account(
             &DeviceIdentity::generate(),
@@ -6540,44 +6617,63 @@ mod fanout_tests {
                 .await
                 .unwrap();
         }
-        let completed = Arc::new(AtomicUsize::new(0));
-        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
-            let completed = completed.clone();
-            move |_, phase| {
-                if phase == "channel_recovery_custody_done" {
-                    completed.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-        }));
+        // Slow instrumented preparation must not consume the measured online
+        // baseline's ordinary presence lease. Reuse its exact proof and route.
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+        let observed = observe_custody_owner(&node);
+        let capacity = node.runtime_work.local_repair_capacity().await.unwrap();
+        let (release, held) = std::sync::mpsc::channel();
+        let held_work = node
+            .runtime_work
+            .admit()
+            .unwrap()
+            .spawn_local_repair_blocking(capacity, move || {
+                let _ = held.recv();
+            });
+        let mut release = Some(release);
+        let mut held_work = Some(held_work);
         let worker = tokio::spawn(node.clone().run_channel_custody_recovery_loop(true));
         let result = async {
-            for _ in 0..128 {
-                tokio::task::yield_now().await;
-            }
-            assert_eq!(completed.load(Ordering::SeqCst), 1);
-            tokio::time::advance(CHANNEL_RECOVERY_INTERVAL).await;
-            for _ in 0..128 {
-                tokio::task::yield_now().await;
-            }
+            let blocked = await_custody_observation(&observed, |state| state.entered >= 1).await;
             assert_eq!(
-                completed.load(Ordering::SeqCst),
+                blocked.inputs, 0,
+                "the real local-repair slot still holds the metadata observation"
+            );
+            assert_eq!(
+                blocked.scans, 0,
+                "entering an async input is not a completed custody page"
+            );
+            release.take().unwrap().send(()).unwrap();
+            drop(held_work.take().unwrap().await.unwrap());
+            await_custody_observation(&observed, |state| state.scans >= 1 && state.waiting).await;
+            assert_eq!(observed.lock().unwrap().scans, 1);
+            tokio::time::advance(CHANNEL_RECOVERY_INTERVAL).await;
+            await_custody_observation(&observed, |state| state.scans >= 2 && state.waiting).await;
+            assert_eq!(
+                observed.lock().unwrap().scans,
                 2,
                 "a full first page cannot acknowledge the unvisited startup tail"
             );
             tokio::time::advance(Duration::from_secs(15)).await;
-            for _ in 0..128 {
-                tokio::task::yield_now().await;
-            }
+            observe_custody_heartbeat(&node, &proof, "127.0.0.1", &observed).await;
             assert_eq!(
-                completed.load(Ordering::SeqCst),
+                observed.lock().unwrap().scans,
                 2,
                 "the completed unchanged sweep must then become quiet"
             );
         };
         use futures_util::FutureExt;
         let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
-        worker.abort();
-        let _ = worker.await;
+        if let Some(release) = release.take() {
+            let _ = release.send(());
+        }
+        if let Some(held_work) = held_work.take() {
+            drop(held_work.await.unwrap());
+        }
+        stop_custody_owner(&node, worker).await;
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }
@@ -6586,7 +6682,6 @@ mod fanout_tests {
     #[tokio::test(start_paused = true)]
     async fn channel_custody_input_change_requires_complete_sweep_from_retained_cursor() {
         use crate::{identity::account::Account, node::test_support::node_with_files};
-        use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = tempfile::tempdir().unwrap();
         let proof = Announce::new_with_account(
             &DeviceIdentity::generate(),
@@ -6609,53 +6704,45 @@ mod fanout_tests {
                 .await
                 .unwrap();
         }
-        let completed = Arc::new(AtomicUsize::new(0));
-        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
-            let completed = completed.clone();
-            move |_, phase| {
-                if phase == "channel_recovery_custody_done" {
-                    completed.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-        }));
+        // Slow instrumented preparation must not consume the measured online
+        // baseline's ordinary presence lease. Reuse its exact proof and route.
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+        let observed = observe_custody_owner(&node);
         let worker = tokio::spawn(node.clone().run_channel_custody_recovery_loop(true));
-        async fn drain_ready() {
-            for _ in 0..128 {
-                tokio::task::yield_now().await;
-            }
-        }
         let result = async {
-            drain_ready().await;
-            assert_eq!(completed.load(Ordering::SeqCst), 1);
+            await_custody_observation(&observed, |state| state.scans >= 1 && state.waiting).await;
+            assert_eq!(observed.lock().unwrap().scans, 1);
             // The retained fair cursor is now #128. A new source generation
             // must cover that boundary too, not settle on the earlier key wrap.
             node.send_channel_message(channel, b"new source generation")
                 .await
                 .unwrap();
-            drain_ready().await;
-            assert_eq!(completed.load(Ordering::SeqCst), 2);
+            await_custody_observation(&observed, |state| state.scans >= 2 && state.waiting).await;
+            assert_eq!(observed.lock().unwrap().scans, 2);
             tokio::time::advance(CHANNEL_RECOVERY_INTERVAL).await;
-            drain_ready().await;
-            assert_eq!(completed.load(Ordering::SeqCst), 3);
+            await_custody_observation(&observed, |state| state.scans >= 3 && state.waiting).await;
+            assert_eq!(observed.lock().unwrap().scans, 3);
             tokio::time::advance(CHANNEL_RECOVERY_INTERVAL).await;
-            drain_ready().await;
+            await_custody_observation(&observed, |state| state.scans >= 4 && state.waiting).await;
             assert_eq!(
-                completed.load(Ordering::SeqCst),
+                observed.lock().unwrap().scans,
                 4,
                 "wrapping to #1 cannot settle a generation whose scan began after #128; the boundary must be reconsidered"
             );
             tokio::time::advance(Duration::from_secs(15)).await;
-            drain_ready().await;
+            observe_custody_heartbeat(&node, &proof, "127.0.0.1", &observed).await;
             assert_eq!(
-                completed.load(Ordering::SeqCst),
+                observed.lock().unwrap().scans,
                 4,
                 "a completed current-generation sweep must then park"
             );
         };
         use futures_util::FutureExt;
         let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
-        worker.abort();
-        let _ = worker.await;
+        stop_custody_owner(&node, worker).await;
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }

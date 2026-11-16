@@ -2030,6 +2030,9 @@ Paused-clock maintenance tests wait for actual retry attempts and assert minimum
 backoff spacing; real measured database duty time cannot imply a fixed number of
 attempts inside an arbitrary virtual-time window. Preserve cancellation, other
 maintenance-class progress and the no-early-retry assertions.
+Scheduler yields do not join blocking work. Consume the named owner's completed
+input/cycle before advancing a paused clock; qualify unchanged-input observations
+before asserting quiet, and drain admitted workers after cancelling the fixture.
 Classify the injected storage failure and its quiet retry boundary before moving
 time; a generic idle marker does not prove either. Account for the timer's actual
 resolution at fractional deadlines without permitting an early retry or advancing
