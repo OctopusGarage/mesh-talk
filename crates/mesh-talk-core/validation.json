@@ -132,6 +132,7 @@
             "paired_control_new_publication_reuses_completed_background_without_dropping_partial_foreground",
             "paired_control_recycles_parked_completed_background_only_for_genuine_followup",
             "queued_setup_retires_wake_replacement_before_arming_the_natural_hold",
+            "queued_setup_wake_requires_exact_receiver_commit_and_preserves_duplicate_boundary",
             "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
             "queued_background_hold_distinguishes_foreground_pair_from_interrupted_resume",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",

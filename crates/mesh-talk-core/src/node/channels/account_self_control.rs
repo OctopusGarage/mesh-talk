@@ -2546,11 +2546,12 @@ pub(in crate::node) mod tests {
                 .run_accept_loop(reference_listener.take().unwrap()),
         ));
         let kind = input.operation().kind();
-        // Require actual completed Control comparisons from the final topology.
-        // Directory carries inventory/hostnames; its independent continuation
-        // cannot qualify or block this signed GroupControl operation. The exact
-        // role, old Member provenance and both capabilities are checked below.
-        let documents_ready = |node: &Node, peer: &Node, direction: usize| {
+        // The requester must consume the executor's signed Control input.
+        // The executor already owns canonical membership; before admission the
+        // requester has no operation to import in the reverse direction.
+        // Require exact negotiated identities/routes in both directions without
+        // coupling admission to reverse global digest or Directory convergence.
+        let protocol_route_ready = |node: &Node, peer: &Node| {
             let public = peer.identity.public();
             let exact_protocol = node
                 .account_group_versions
@@ -2561,8 +2562,7 @@ pub(in crate::node) mod tests {
             let exact_route = node
                 .routing_peer(&peer.user_id())
                 .is_some_and(|route| route.public == public);
-            let settled = settled_scopes.lock().unwrap()[direction];
-            exact_protocol && exact_route && settled[0]
+            exact_protocol && exact_route
         };
         let readiness = || {
             let role_ready = match reference.account_group_access(group) {
@@ -2605,8 +2605,8 @@ pub(in crate::node) mod tests {
                 capability_ready,
                 reverse_ready,
                 old_head_ready,
-                documents_ready(&reference, &online, 0),
-                documents_ready(&online, &reference, 1),
+                protocol_route_ready(&reference, &online) && settled_scopes.lock().unwrap()[0][0],
+                protocol_route_ready(&online, &reference),
             ]
         };
         let online_label = nodes
@@ -2644,7 +2644,7 @@ pub(in crate::node) mod tests {
                 node.group_control_heads(group).iter().any(|head| head.proof.public() == *public
                     && head.access.observation.role == AccountGroupRole::Member)
             }));
-            format!("real private role/capability and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_forward_reverse_old_mandatory_scopes_forward_reverse={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; settled_control_directory_forward_reverse={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}; readiness_prefix_forward_reverse={:?}",
+            format!("real private role/capability, requester Control input and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_caps_forward_reverse_old_requester_control_executor_protocol_route={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; settled_control_directory_forward_reverse={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}; readiness_prefix_forward_reverse={:?}",
                 readiness_started.elapsed().as_millis(), readiness(), forward, reverse, old_heads,
                 *settled_scopes.lock().unwrap(),
                 [reference.certified_sibling(&online.identity.public()), online.certified_sibling(&reference.identity.public())],
@@ -2655,7 +2655,7 @@ pub(in crate::node) mod tests {
                 *readiness_prefix.lock().unwrap())
         }).await;
         eprintln!(
-            "self control readiness completed chosen_online={online_label} readiness_elapsed_ms={} ready_role_forward_reverse_old_mandatory_scopes_forward_reverse={:?} trace_omitted={} bounded_trace={:?}",
+            "self control readiness completed chosen_online={online_label} readiness_elapsed_ms={} ready_role_caps_forward_reverse_old_requester_control_executor_protocol_route={:?} trace_omitted={} bounded_trace={:?}",
             readiness_started.elapsed().as_millis(),
             readiness(),
             trace_omitted.load(std::sync::atomic::Ordering::Relaxed),

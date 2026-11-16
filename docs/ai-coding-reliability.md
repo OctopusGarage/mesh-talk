@@ -1965,6 +1965,12 @@ Historical scope completion does not prove an existing child or pair has retired
 When a fixture requires a natural unpaired read, establish it through receiver-owned
 demand before publishing the Wake that deliberately creates its replacement; observe
 the exact setup task, page completion and pair retirement before arming the next hold.
+A consumed input and retired receiver page do not retire the producer's debounced
+Wake. The queued-source fixture joins its exact setup sender, observes the
+receiver's committed revision, and retires the resulting post-Wake child and pair
+before arming the natural hold. A SessionReady or an earlier comparison cannot
+prove that producer-to-consumer boundary; preserve the later publication's own
+exact partial-page evidence.
 Keep bootstrap input evidence scoped to the named corpus. The queued-source B
 padding check requires exact current metadata, consumed operation input, a real
 successful terminal Control page, its exact child lifetime retirement and no
@@ -1973,6 +1979,11 @@ that padding input is ready; whole-domain digest convergence is a separate
 contract. Retain strict A setup and the later measured A-to-B result/checkpoint
 ordering. Partial, pending, failed, cancelled, wrong-task, stale/unconsumed input
 and live-child/pair controls must still reject bootstrap readiness.
+A reference self-control requester must consume the executor's signed role input
+and negotiate exact identities, routes and capabilities in both directions.
+Before that requester creates an operation, reverse whole-Control convergence is
+not an admission input; retain canonical authority and the actual request/result
+assertions instead of waiting on that unrelated digest.
 Canonical channel presentation and selected metadata fields have separate bounded
 continuations. The two-full-parent control fixture in
 [channel tests](../crates/mesh-talk-core/src/node/channels.rs) completes field-query
@@ -1996,6 +2007,13 @@ a fixture must authenticate the same signed role it advertises in the roster;
 identity-only Noise cannot stand in for an authenticated post-office role.
 Keep the matching presence, actual pool checkout and owned server retirement
 rather than weakening the production role-binding check.
+A multi-stage online fixture must own signed discovery heartbeats through every
+presumed-online stage. One seeded route can outlive its public presence lease;
+a later policy change also invalidates private availability from the old policy.
+Retain the ordinary lease and business deadlines. Start publication only for live
+hosts, capture no Node/profile owners, and stop and join it before host/profile
+retirement on success or panic. The linked-device reconnect fixture and private
+availability policy/reannouncement control own this boundary.
 The
 growing-history fixture measures exact durable originals during continuation,
 then checks the full public

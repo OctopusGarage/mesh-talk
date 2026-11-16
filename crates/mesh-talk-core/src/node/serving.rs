@@ -850,8 +850,24 @@ impl Node {
         };
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
         // timeout on every recv + a per-connection round ceiling (mirrors the relay).
+        #[cfg(test)]
+        self.trace_account_client(channel.peer_identity(), || {
+            format!(
+                "responder_first_frame_wait peer_port={:?}",
+                channel.tcp_peer_addr().ok().map(|addr| addr.port())
+            )
+        });
         let first = match tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await {
-            Ok(Ok(b)) => b,
+            Ok(Ok(b)) => {
+                #[cfg(test)]
+                self.trace_account_client(channel.peer_identity(), || {
+                    format!(
+                        "responder_first_frame_received peer_port={:?}",
+                        channel.tcp_peer_addr().ok().map(|addr| addr.port())
+                    )
+                });
+                b
+            }
             _ => return, // peer error or idle past the timeout
         };
         if is_relay && !self.relay_allowed(channel.peer_identity()) {

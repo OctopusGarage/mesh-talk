@@ -104,8 +104,24 @@ test("an incomplete attachment shows progress and cannot be saved from chat or t
     ),
   ).toBe(0);
 
-  await page.evaluate(() => {
-    (window as unknown as { __transferReady: boolean }).__transferReady = true;
+  await page.evaluate(async () => {
+    const host = window as unknown as {
+      __transferReady: boolean;
+      __TAURI_INTERNALS__: {
+        invoke(cmd: string, args: Record<string, unknown>): Promise<unknown>;
+      };
+      __mockEmit(event: string, payload: unknown): void;
+    };
+    host.__transferReady = true;
+    // Completed host-side receive work publishes its scoped files change.
+    const identity = await host.__TAURI_INTERNALS__.invoke(
+      "owner_node_identity",
+      { owner: "u_self" },
+    );
+    host.__mockEmit("node-state-changed", {
+      ...(identity as Record<string, unknown>),
+      kind: "files",
+    });
   });
   await expect(tray.getByRole("button", { name: "Reveal" })).toBeVisible();
   await expect(bubble.getByRole("progressbar")).toHaveCount(0);
