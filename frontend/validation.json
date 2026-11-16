@@ -876,6 +876,7 @@
         "frontend/src/components/ui/label.tsx",
         "frontend/src/features/auth/LoginScreen.test.ts",
         "frontend/src/features/chat/AccountProtectionNotice.tsx",
+        "frontend/e2e/login-recovery.spec.ts",
         "frontend/src/features/auth/DeviceEnrollmentDialog.tsx",
         "frontend/src/features/auth/DeviceEnrollmentDialog.test.ts",
         "frontend/src/lib/api/auth.ts",
@@ -889,7 +890,7 @@
         "src/lib/api.test.ts"
       ],
       "escalation": [
-        "Run login-recovery browser scenarios for create-and-enter, partial entry failure, password visibility, saved-login retry and optional backup; include minimum-window, macOS guidance and visual evidence. Actual OS Keychain prompts and restart resume require native evidence.",
+        "Run login-recovery browser scenarios for create-and-enter, partial entry failure, password visibility, saved-login retry and optional backup; include minimum-window, macOS guidance and visual evidence. Post-entry assertions await the shared chat-shell readiness owner before their unchanged behavior deadlines; lazy startup keeps its existing platform budget. Actual OS Keychain prompts and restart resume require native evidence.",
         "Run e2e/device-enrollment.spec.ts for signed-out linking and narrow-window cancellation. Real discovery, certified source identity, encrypted credential transfer, publication and OS credential persistence require native cross-device evidence."
       ],
       "capability": {

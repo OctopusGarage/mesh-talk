@@ -274,6 +274,13 @@ follow-up or cancel the queued owner during retirement. The RuntimeWork
 `local_repair_capacity_outlives_blocking_captures_and_panic` control checks capture,
 output and panic cleanup before releasing capacity.
 
+Before reopening a profile, consume and await `NodeRuntime::stop`; dropping the
+runtime requests cancellation but does not join its actual storage owners. Keep
+exclusive-open failures fatal rather than retrying around a live owner. The
+[cached-route restart fixture](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
+awaits both original runtimes before asserting that an offline cached route is
+not fresh presence; retirement's held-writer controls retain lease exclusion.
+
 A UI read watchdog retires observation, not the native operation. Coalesce a
 same-owner/query refresh against the original promise until settlement, retaining
 one valid follow-up; reset or query replacement must not let stale work publish
@@ -1984,8 +1991,11 @@ successful terminal Control page, its exact child lifetime retirement and no
 outstanding pair debt. Other owners can change the global Control digest after
 that padding input is ready; whole-domain digest convergence is a separate
 contract. Retain strict A setup and the later measured A-to-B result/checkpoint
-ordering. Partial, pending, failed, cancelled, wrong-task, stale/unconsumed input
-and live-child/pair controls must still reject bootstrap readiness.
+ordering. A cross-source cancellation request can lose to the exact child's
+successful final poll; preserve its terminal result in either event order, but
+require actual child retirement before readiness. Same-source replacement still
+owes its paired comparison. Partial, pending, failed, actually aborted, wrong-task,
+stale/unconsumed input and live-child/pair controls must reject bootstrap readiness.
 A reference self-control requester must consume the executor's signed role input
 and negotiate exact identities, routes and capabilities in both directions.
 Before that requester creates an operation, reverse whole-Control convergence is
@@ -2151,6 +2161,10 @@ one-way reads. Keep the required receiver owners live during preparation, or
 finish symmetric repair after all initial publications before measuring. Bind
 partial-page proof to the measured publication, exact live request and validated
 completion; startup pages cannot satisfy a later phase's continuation condition.
+Post-login browser notice, retry and backup assertions first await the existing
+[chat-shell readiness owner](../frontend/e2e/helpers/session.ts). Lazy startup
+uses its existing platform budget; content and action assertions retain their
+original behavior deadlines after that boundary.
 
 Negative idle assertions must consume startup JoinSet results and retained wakes,
 then invalidate the old idle marker when the target event is observed. Await the

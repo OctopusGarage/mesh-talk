@@ -17,21 +17,28 @@ struct QueuedSetupComparison {
     task: Option<tokio::task::Id>,
     page_finished: bool,
     terminal_control_page: bool,
-    cancelled: bool,
 }
 
 impl QueuedSetupComparison {
     fn observe(&mut self, phase: &str, task: Option<tokio::task::Id>) {
+        if phase.starts_with("control_cancel ")
+            && !self
+                .task
+                .is_some_and(|owner| phase.starts_with(&format!("control_cancel task={owner:?} ")))
+        {
+            return;
+        }
         if phase.starts_with("control_task ") {
             self.task = task;
             self.page_finished = false;
             self.terminal_control_page = false;
-            self.cancelled = false;
-        } else if phase.starts_with("control_cancel ") {
+        } else if phase.starts_with("control_cancel ") && phase.ends_with("reason=same_source") {
             self.page_finished = false;
             self.terminal_control_page = false;
-            self.cancelled = true;
         }
+        // Cross-source preemption requests an abort; the child's final poll
+        // can still complete successfully. Same-source replacement owes a pair
+        // even if that old poll finishes. Neither intent proves retirement.
         if phase != "document_scope_settled scope=Control" || (task.is_some() && task == self.task)
         {
             self.scope.observe(phase, true);
@@ -40,7 +47,6 @@ impl QueuedSetupComparison {
             && task == self.task
             && phase.starts_with("page_end ")
             && phase.contains("outcome=ok")
-            && !self.cancelled
         {
             self.page_finished = true;
             self.terminal_control_page = [
@@ -55,8 +61,8 @@ impl QueuedSetupComparison {
         }
     }
 
-    fn ready(&self) -> bool {
-        self.scope.ready() && self.page_finished
+    fn ready(&self, lifetime: Option<&std::sync::Weak<()>>) -> bool {
+        self.scope.ready() && self.ready_for_inputs(true, lifetime)
     }
 
     fn ready_for_inputs(
@@ -69,6 +75,17 @@ impl QueuedSetupComparison {
             && self.scope.pair_retired()
             && lifetime.is_some_and(|lifetime| lifetime.strong_count() == 0)
     }
+}
+
+fn queued_setup_ready(
+    comparison: &Mutex<QueuedSetupComparison>,
+    pages: &Mutex<ControlTestPages>,
+) -> bool {
+    let comparison = comparison.lock().unwrap();
+    let lifetime = comparison
+        .task
+        .and_then(|task| pages.lock().unwrap().lifetime(task));
+    comparison.ready(lifetime.as_ref())
 }
 
 // SessionReady is observed before commit. Bind the accepted revision trace to
@@ -173,28 +190,32 @@ fn queued_input_ready(
 #[tokio::test]
 async fn queued_setup_retires_wake_replacement_before_arming_the_natural_hold() {
     tokio::spawn(async {
-        let task = Some(tokio::task::id());
+        let task_id = tokio::task::id();
+        let task = Some(task_id);
+        let owner = Arc::new(());
+        let lifetime = Arc::downgrade(&owner);
+        drop(owner);
         let mut comparison = QueuedSetupComparison::default();
         comparison.observe("control_task paired=false protected=false ", task);
         comparison.observe("document_scope_settled scope=Control", task);
         assert!(
-            !comparison.ready(),
+            !comparison.ready(Some(&lifetime)),
             "scope completion still has an active page"
         );
-        comparison.observe("control_cancel task=old reason=same_source", None);
+        comparison.observe(&format!("control_cancel task={task_id:?} reason=same_source"), None);
         comparison.observe("control_task paired=true protected=true ", task);
         comparison.observe("document_scope_settled scope=Control", task);
         comparison.observe("page_end outcome=ok", None);
-        assert!(!comparison.ready(), "a different task cannot finish setup");
-        comparison.observe("page_end outcome=ok", task);
+        assert!(!comparison.ready(Some(&lifetime)), "a different task cannot finish setup");
+        comparison.observe("page_end outcome=ok scope=Control completed=true pending=false after=false deferred=false", task);
         assert!(
-            !comparison.ready(),
+            !comparison.ready(Some(&lifetime)),
             "the real Wake replacement still owes its pair"
         );
         comparison.observe("control_pair_retired", None);
-        assert!(comparison.ready());
+        assert!(comparison.ready(Some(&lifetime)));
         comparison.observe("control_task paired=false protected=false ", task);
-        assert!(!comparison.ready(), "a new read invalidates old settlement");
+        assert!(!comparison.ready(Some(&lifetime)), "a new read invalidates old settlement");
     })
     .await
     .unwrap();
@@ -203,7 +224,8 @@ async fn queued_setup_retires_wake_replacement_before_arming_the_natural_hold() 
 #[tokio::test]
 async fn queued_padding_requires_current_consumed_input_and_retired_terminal_comparison() {
     tokio::spawn(async {
-        let task = Some(tokio::task::id());
+        let task_id = tokio::task::id();
+        let task = Some(task_id);
         let foreign = Some(tokio::spawn(async { tokio::task::id() }).await.unwrap());
         let terminal = "page_end outcome=ok scope=Control completed=true pending=false after=false deferred=false up_to_date=false";
         let owner = Arc::new(());
@@ -220,7 +242,7 @@ async fn queued_padding_requires_current_consumed_input_and_retired_terminal_com
         comparison.observe("page_end outcome=error scope=Control completed=true pending=false after=false deferred=false", task);
         assert!(!comparison.ready_for_inputs(true, Some(&retired)), "failed exchange cannot finish the comparison");
         comparison.observe(terminal, task);
-        assert!(!comparison.ready(), "global digest convergence remains a separate strict oracle");
+        assert!(!comparison.ready(Some(&retired)), "global digest convergence remains a separate strict oracle");
         assert!(comparison.ready_for_inputs(true, Some(&retired)), "a retired terminal comparison qualifies its verified named input without global convergence");
         assert!(!comparison.ready_for_inputs(false, Some(&retired)), "changed or unconsumed metadata cannot qualify");
         assert!(!comparison.ready_for_inputs(true, None), "missing lifetime evidence cannot prove retirement");
@@ -231,10 +253,82 @@ async fn queued_padding_requires_current_consumed_input_and_retired_terminal_com
         assert!(!comparison.ready_for_inputs(true, Some(&retired)), "a terminal page cannot pay outstanding pair debt");
         comparison.observe("control_pair_retired", None);
         assert!(comparison.ready_for_inputs(true, Some(&retired)));
-        comparison.observe("control_cancel task=old reason=wake", None);
+        comparison.observe(&format!("control_cancel task={task_id:?} reason=same_source"), None);
         comparison.observe(terminal, task);
-        assert!(!comparison.ready_for_inputs(true, Some(&retired)), "a late page cannot revive a cancelled owner");
+        assert!(!comparison.ready_for_inputs(true, Some(&retired)), "a late old page cannot pay same-source replacement debt");
     }).await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_setup_accepts_retired_completion_racing_cross_source_cancel_intent() {
+    let task_id = tokio::spawn(async { tokio::task::id() }).await.unwrap();
+    let task = Some(task_id);
+    let terminal = "page_end outcome=ok scope=Control completed=true pending=false after=false deferred=false up_to_date=true";
+    for reason in ["wake", "selected"] {
+        for cancel_first in [false, true] {
+            let owner = Arc::new(());
+            let lifetime = Arc::downgrade(&owner);
+            let mut comparison = QueuedSetupComparison::default();
+            comparison.observe("control_task paired=false protected=false", task);
+            let cancel = format!("control_cancel task={task_id:?} reason={reason}");
+            if cancel_first {
+                comparison.observe(&cancel, None);
+            }
+            comparison.observe("document_scope_settled scope=Control", task);
+            comparison.observe(terminal, task);
+            if !cancel_first {
+                comparison.observe(&cancel, None);
+            }
+            assert!(
+                !comparison.ready_for_inputs(true, Some(&lifetime)),
+                "completion does not retire its child"
+            );
+            assert!(
+                !comparison.ready(Some(&lifetime)),
+                "A setup also waits for its real child"
+            );
+            drop(owner);
+            assert!(
+                comparison.ready(Some(&lifetime)),
+                "retired scope-complete A setup is ready"
+            );
+            assert!(
+                !comparison.ready(None),
+                "missing retirement evidence cannot qualify A"
+            );
+            let foreign = tokio::spawn(async { tokio::task::id() }).await.unwrap();
+            comparison.observe(
+                &format!("control_cancel task={foreign:?} reason=same_source"),
+                None,
+            );
+            assert!(
+                comparison.ready(Some(&lifetime)),
+                "another task cannot invalidate this comparison"
+            );
+            assert!(
+                comparison.ready_for_inputs(true, Some(&lifetime)),
+                "a retired successful page survives {reason} cancellation intent (cancel_first={cancel_first})"
+            );
+        }
+    }
+    let owner = Arc::new(());
+    let lifetime = Arc::downgrade(&owner);
+    let mut aborted = QueuedSetupComparison::default();
+    aborted.observe("control_task paired=false protected=false", task);
+    aborted.observe("document_scope_settled scope=Control", task);
+    aborted.observe(
+        &format!("control_cancel task={task_id:?} reason=wake"),
+        None,
+    );
+    drop(owner);
+    assert!(
+        !aborted.ready(Some(&lifetime)),
+        "retirement without terminal success is not setup completion"
+    );
+    assert!(
+        !aborted.ready_for_inputs(true, Some(&lifetime)),
+        "actual abort cannot certify the named input"
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1901,7 +1995,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         reference.request_sibling_pull_for_test(&b.identity.public());
         reference.request_sibling_pull_for_test(&a.identity.public());
         loop {
-            let a_ready = a_setup_comparison.lock().unwrap().ready();
+            let a_ready = queued_setup_ready(&a_setup_comparison, &pages);
             let b_ready = queued_input_ready(&b, &reference, &padding_key, &b_readiness, &pages);
             if a_ready && b_ready && reference.account_document_meta(&key) == a.account_document_meta(&key) {
                 break;
@@ -1930,7 +2024,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             });
             after_wake
                 && queued_input_ready(&b, &reference, &padding_key, &b_readiness, &pages)
-                && a_setup_comparison.lock().unwrap().ready()
+                && queued_setup_ready(&a_setup_comparison, &pages)
                 && reference.account_document_meta(&key) == a.account_document_meta(&key)
         }).await;
         record_b_trace(&causal_trace, clock, "B_setup_receiver_retired", format!("epoch={} requested_revision={b_setup_revision} accepted={:?} task={:?}", hex::encode(b_setup_epoch), b_setup_wake_observed.lock().unwrap().receipt(b_setup_epoch, b_setup_revision), b_readiness.lock().unwrap().task));
@@ -1941,14 +2035,14 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     })
         .await
         .unwrap_or_else(|error| {
-            let ready = b_readiness.lock().unwrap().ready();
+            let ready = queued_setup_ready(&b_readiness, &pages);
             let named_ready = queued_input_ready(&b, &reference, &padding_key, &b_readiness, &pages);
             let observed = pages.lock().unwrap().summary();
             let setup = setup_trace.lock().unwrap().clone();
             let wake = *setup_wake_observed.lock().unwrap();
             let (a_task, a_page_finished, a_ready) = {
                 let comparison = a_setup_comparison.lock().unwrap();
-                (comparison.task, comparison.page_finished, comparison.ready())
+                (comparison.task, comparison.page_finished, comparison.ready(comparison.task.and_then(|task| pages.lock().unwrap().lifetime(task)).as_ref()))
             };
             panic!("natural A read must precede real B publication: {error:?}; A_wake={wake:?} A_task={a_task:?} A_page_finished={a_page_finished}; B_named_input_ready={named_ready} B_global_scope_settled={ready} B_partial={}; A_setup_ready={}; armed={}; rejected_unarmed_B_unready_ineligible_not_live_pre_wake_missing_dispatch={:?}; pages={observed:?}; setup={setup:?}", b_partial.load(std::sync::atomic::Ordering::Acquire), a_ready, first_hold_armed.load(std::sync::atomic::Ordering::Acquire), *first_rejections.lock().unwrap());
         })
@@ -2000,7 +2094,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     })
         .await
         .unwrap_or_else(|error| {
-            let ready = b_readiness.lock().unwrap().ready();
+            let ready = queued_setup_ready(&b_readiness, &pages);
             let named_ready = queued_input_ready(&b, &reference, &padding_key, &b_readiness, &pages);
             let roles = origins.lock().unwrap().clone();
             let observed = pages.lock().unwrap().summary();
