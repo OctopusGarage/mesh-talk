@@ -3409,7 +3409,7 @@ dependencies = [
  "url",
  "windows",
  "xcap",
- "zbus 5.19.0",
+ "zbus 6.2.1",
  "zeroize",
  "zstd",
 ]
@@ -6466,7 +6466,6 @@ dependencies = [
  "signal-hook-registry",
  "socket2 0.6.5",
  "tokio-macros",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -7930,7 +7929,6 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_repr",
- "tokio",
  "tracing",
  "uds_windows",
  "uuid",

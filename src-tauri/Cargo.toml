@@ -82,7 +82,7 @@ core-foundation = "0.10"
 raw-window-handle = "0.6"
 ashpd = { version = "0.14.0", default-features = false, features = ["tokio", "screenshot"] }
 url = "2.5"
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "6", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["UI_Notifications", "Networking_Connectivity"] }
