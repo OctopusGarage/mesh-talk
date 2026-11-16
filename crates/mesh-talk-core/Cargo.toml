@@ -68,7 +68,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Netwo
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-rand_chacha = "0.3" # seeded CSPRNG for deterministic property tests (rand_core 0.6 SeedableRng)
+rand_chacha = "0.10" # seeded CSPRNG for deterministic property tests (rand_core 0.6 SeedableRng)
 # Self-dev-dependency on our OWN crate, activating `fast-test-kdf`. This is the lever that
 # makes the multi-process integration rigs fast: when Cargo builds the test targets it unifies
 # features for `mesh-talk-core`, so the `mesh-talk-node` binary handed to the tests via
