@@ -1991,8 +1991,11 @@ successful terminal Control page, its exact child lifetime retirement and no
 outstanding pair debt. Other owners can change the global Control digest after
 that padding input is ready; whole-domain digest convergence is a separate
 contract. Retain strict A setup and the later measured A-to-B result/checkpoint
-ordering. Partial, pending, failed, cancelled, wrong-task, stale/unconsumed input
-and live-child/pair controls must still reject bootstrap readiness.
+ordering. A cross-source cancellation request can lose to the exact child's
+successful final poll; preserve its terminal result in either event order, but
+require actual child retirement before readiness. Same-source replacement still
+owes its paired comparison. Partial, pending, failed, actually aborted, wrong-task,
+stale/unconsumed input and live-child/pair controls must reject bootstrap readiness.
 A reference self-control requester must consume the executor's signed role input
 and negotiate exact identities, routes and capabilities in both directions.
 Before that requester creates an operation, reverse whole-Control convergence is
