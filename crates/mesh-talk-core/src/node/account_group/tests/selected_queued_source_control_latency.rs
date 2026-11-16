@@ -71,6 +71,84 @@ impl QueuedSetupComparison {
     }
 }
 
+// SessionReady is observed before commit. Bind the accepted revision trace to
+// the exact authenticated receiving task/frame, retaining the first receipt of
+// each token so a duplicate delivery cannot manufacture a new setup boundary.
+#[derive(Default)]
+struct QueuedSetupWakes {
+    receiving: std::collections::HashMap<tokio::task::Id, ([u8; 16], u64)>,
+    accepted: std::collections::HashMap<([u8; 16], u64), std::time::Instant>,
+}
+impl QueuedSetupWakes {
+    fn frame(&mut self, task: tokio::task::Id, epoch: [u8; 16], revision: u64) {
+        assert!(self.receiving.len() < 64 || self.receiving.contains_key(&task));
+        self.receiving.insert(task, (epoch, revision));
+    }
+    fn committed(&mut self, task: tokio::task::Id, revision: u64) {
+        if let Some(token) = self
+            .receiving
+            .remove(&task)
+            .filter(|(_, seen)| *seen == revision)
+        {
+            assert!(self.accepted.len() < 64 || self.accepted.contains_key(&token));
+            self.accepted
+                .entry(token)
+                .or_insert_with(std::time::Instant::now);
+        }
+    }
+    fn receipt(&self, epoch: [u8; 16], revision: u64) -> Option<(u64, std::time::Instant)> {
+        self.accepted
+            .iter()
+            .filter(|((seen_epoch, seen_revision), _)| {
+                *seen_epoch == epoch && *seen_revision >= revision
+            })
+            .max_by_key(|((_, seen_revision), _)| *seen_revision)
+            .map(|((_, seen_revision), at)| (*seen_revision, *at))
+    }
+}
+
+#[tokio::test]
+async fn queued_setup_wake_requires_exact_receiver_commit_and_preserves_duplicate_boundary() {
+    let owner = tokio::spawn(async { tokio::task::id() }).await.unwrap();
+    let foreign = tokio::spawn(async { tokio::task::id() }).await.unwrap();
+    let mut wakes = QueuedSetupWakes::default();
+    wakes.frame(owner, [1; 16], 7);
+    assert!(
+        wakes.receipt([1; 16], 7).is_none(),
+        "an acknowledged frame has not committed its revision"
+    );
+    wakes.committed(foreign, 7);
+    assert!(
+        wakes.receipt([1; 16], 7).is_none(),
+        "another receiving task cannot commit this frame"
+    );
+    wakes.committed(owner, 8);
+    assert!(
+        wakes.receipt([1; 16], 7).is_none(),
+        "a different revision cannot commit this frame"
+    );
+    wakes.frame(owner, [1; 16], 7);
+    wakes.committed(owner, 7);
+    let first = wakes.receipt([1; 16], 7).unwrap();
+    wakes.frame(owner, [1; 16], 7);
+    wakes.committed(owner, 7);
+    assert_eq!(
+        wakes.receipt([1; 16], 7),
+        Some(first),
+        "duplicates retain their original receiver boundary"
+    );
+    assert!(
+        wakes.receipt([1; 16], 8).is_none(),
+        "an older revision cannot certify newer setup"
+    );
+    wakes.frame(owner, [2; 16], 8);
+    wakes.committed(owner, 8);
+    assert!(
+        wakes.receipt([1; 16], 8).is_none(),
+        "a replacement epoch cannot certify this source lifetime"
+    );
+}
+
 // B contributes one named padding operation to the later short partial page.
 // Other owners may continue changing the global Control digest after this input
 // is verified. Bootstrap requires this input and a retired real comparison.
@@ -849,6 +927,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let paid_a_dispatch = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let b_page_progress = Arc::new(Mutex::new(ProtectedBPageProgress::default()));
     let b2_publication = Arc::new(Mutex::new(None::<B2Publication>));
+    let causal_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saved_after = Arc::new(Mutex::new(None));
     let b_requests = Arc::new(Mutex::new(Vec::new()));
@@ -865,6 +944,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let setup_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let setup_wake_observed = Arc::new(Mutex::new(None::<std::time::Instant>));
+    let b_setup_wake_observed = Arc::new(Mutex::new(QueuedSetupWakes::default()));
     let setup_wake_min_revision = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let a_setup_comparison = Arc::new(Mutex::new(QueuedSetupComparison::default()));
     let first_hold_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -895,6 +975,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let _release_wake = ReleaseQueuedReads(wake_changed.clone());
     *b.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let source = Arc::downgrade(&b);
+        let causal_trace = causal_trace.clone();
         let operation = operation.clone();
         let trace = trace.clone();
         let peer = reference.identity.public();
@@ -902,6 +983,9 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let owner_trace = executor_owner_trace.clone();
         let admitted = admitted.clone();
         move |observed, phase| {
+            if observed == peer && phase.starts_with("wake_") {
+                record_b_trace(&causal_trace, clock, "B_wake_owner", phase.clone());
+            }
             if admitted.load(std::sync::atomic::Ordering::Acquire)
                 && (phase.starts_with("operation_owner ")
                     || phase.starts_with("operation_publication_owner "))
@@ -929,6 +1013,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         }
     }));
     *reference.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let b_setup_wake_observed = b_setup_wake_observed.clone();
         let trace = trace.clone();
         let peer = b.identity.public();
         let writer = b.user_id();
@@ -938,6 +1023,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let intent_held = intent_held.clone();
         let intent_entered = intent_entered.clone();
         move |observed, frame| {
+            let b_setup_wake_observed = b_setup_wake_observed.clone();
             let trace = trace.clone();
             let peer = peer.clone();
             let writer = writer.clone();
@@ -947,6 +1033,17 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             let intent_held = intent_held.clone();
             let intent_entered = intent_entered.clone();
             Box::pin(async move {
+                if observed == peer
+                    && let AccountHistoryFrame::Wake {
+                        epoch, revision, ..
+                    } = &frame
+                {
+                    b_setup_wake_observed.lock().unwrap().frame(
+                        tokio::task::id(),
+                        *epoch,
+                        *revision,
+                    );
+                }
                 // Arm before durable admission and hold every copy at its origin:
                 // A can relay this signed head to B, and concurrent reads must
                 // not bypass the first held header. Keep the topology unchanged.
@@ -977,6 +1074,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         }
     }));
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let causal_trace = causal_trace.clone();
+        let b_setup_wake_observed = b_setup_wake_observed.clone();
         let b2_publication = b2_publication.clone();
         let b_page_progress = b_page_progress.clone();
         let source = Arc::downgrade(&b);
@@ -1009,6 +1108,21 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let setup_trace = setup_trace.clone();
         let first_held_task = first_held_task.clone();
         move |peer, phase| {
+            if peer == peer_b
+                && let Some(revision) = phase
+                    .strip_prefix("wake_received revision=")
+                    .and_then(|value| value.parse::<u64>().ok())
+            {
+                b_setup_wake_observed
+                    .lock()
+                    .unwrap()
+                    .committed(tokio::task::id(), revision);
+            }
+            if (peer == peer_b && phase.starts_with("wake_received "))
+                || (peer == peer_a && phase.starts_with("control_cancel "))
+            {
+                record_b_trace(&causal_trace, clock, "requester_phase", phase.clone());
+            }
             if peer == peer_a {
                 if phase.starts_with("wake_received ")
                     || phase.starts_with("control_task ")
@@ -1442,6 +1556,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         }
     }));
     *b.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let causal_trace = causal_trace.clone();
         let b2_publication = b2_publication.clone();
         let requester = Arc::downgrade(&reference);
         let expected = reference.identity.public();
@@ -1478,6 +1593,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             let intent_entered = intent_entered.clone();
             let b_page_progress = b_page_progress.clone();
             let b2_publication = b2_publication.clone();
+            let causal_trace = causal_trace.clone();
             let requester = requester.clone();
             Box::pin(async move {
                 if peer != expected {
@@ -1490,36 +1606,85 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                     let server_task = tokio::task::try_id();
                     match &frame {
                         AccountHistoryFrame::DocumentsRequest { body } => {
+                            let mut candidate_reason = String::from("not_control");
                             let candidate = DocumentRequest::decode(body)
                                 .filter(|request| {
                                     request.domain == AccountDocumentDomain::GroupControl
                                 })
                                 .and_then(|request| {
                                     let observed = pages.lock().unwrap();
+                                    candidate_reason = String::from("missing_live_request");
                                     let page = observed.live_request(&request)?;
-                                    if !page.dispatch()?.protected
-                                        || effective_after(&request).is_some()
-                                    {
+                                    candidate_reason = format!(
+                                        "task={:?} origin={} missing_dispatch",
+                                        page.task, page.origin
+                                    );
+                                    let dispatch = page.dispatch()?;
+                                    if !dispatch.protected || effective_after(&request).is_some() {
+                                        candidate_reason = format!(
+                                            "task={:?} origin={} ineligible_dispatch_or_suffix",
+                                            page.task, page.origin
+                                        );
                                         return None;
                                     }
+                                    candidate_reason =
+                                        format!("task={:?} missing_lifetime", page.task);
                                     let lifetime = observed.lifetime(page.task)?;
                                     drop(observed);
+                                    candidate_reason = format!(
+                                        "task={:?} origin={} missing_B2_publication dispatch_ms={}",
+                                        page.task,
+                                        page.origin,
+                                        page.dispatched_at.duration_since(clock).as_millis()
+                                    );
                                     let publication = b2_publication.lock().unwrap().clone()?;
+                                    candidate_reason =
+                                        format!("task={:?} missing_source", page.task);
                                     let source = source.upgrade()?;
+                                    candidate_reason =
+                                        format!("task={:?} missing_requester", page.task);
                                     let requester = requester.upgrade()?;
-                                    if page.dispatched_at < publication.started_at
-                                        || !publication.rows.iter().all(|meta| {
-                                            source.account_document_meta(&meta.key).as_ref()
-                                                == Some(meta)
-                                                && requester
-                                                    .account_document_meta(&meta.key)
-                                                    .is_none()
-                                        })
-                                    {
+                                    candidate_reason = format!(
+                                        "task={:?} origin={} publication_ms={} dispatch_ms={}",
+                                        page.task,
+                                        page.origin,
+                                        publication.started_at.duration_since(clock).as_millis(),
+                                        page.dispatched_at.duration_since(clock).as_millis()
+                                    );
+                                    // Capture the original short-circuit operands, without
+                                    // repeating metadata reads after concurrent imports.
+                                    if page.dispatched_at < publication.started_at {
+                                        candidate_reason.push_str(" dispatched_before_B2");
                                         return None;
                                     }
+                                    let mut rows = Vec::new();
+                                    let rows_current = publication.rows.iter().all(|meta| {
+                                        let current =
+                                            source.account_document_meta(&meta.key).as_ref()
+                                                == Some(meta);
+                                        let absent = current.then(|| {
+                                            requester.account_document_meta(&meta.key).is_none()
+                                        });
+                                        rows.push((current, absent));
+                                        current && absent == Some(true)
+                                    });
+                                    candidate_reason.push_str(&format!(
+                                        " rows_source_current_requester_absent={rows:?}"
+                                    ));
+                                    if !rows_current {
+                                        return None;
+                                    }
+                                    candidate_reason.push_str(" eligible");
                                     Some((page.task, request.operation?.nonce, lifetime))
                                 });
+                            if candidate_reason != "not_control" {
+                                record_b_trace(
+                                    &causal_trace,
+                                    clock,
+                                    "B_candidate",
+                                    format!("server={server_task:?} {candidate_reason}"),
+                                );
+                            }
                             let mut progress = b_page_progress.lock().unwrap();
                             if let Some((request_task, nonce, lifetime)) = candidate {
                                 *progress = ProtectedBPageProgress {
@@ -1743,6 +1908,32 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        // Named input can finish before its producer's debounced Wake is sent.
+        // Join this exact sender at the current revision so an older autonomous
+        // delivery is a duplicate, then retire the receiver's post-Wake child
+        // and pair before opening A. A SessionReady alone is not this fence.
+        let (b_setup_epoch, b_setup_revision) = {
+            let source = b.clone();
+            let requester = reference.clone();
+            let mut sender = tokio::task::JoinSet::new();
+            sender.spawn(async move { send_boundary_wake(&source, &requester).await });
+            // Dropping setup on its existing watchdog also cancels this sender.
+            sender.join_next().await.unwrap().unwrap()
+        };
+        record_b_trace(&causal_trace, clock, "B_setup_sender_joined", format!("revision={b_setup_revision}"));
+        super::observe_account_fixture_condition(|| {
+            let received = b_setup_wake_observed.lock().unwrap().receipt(b_setup_epoch, b_setup_revision);
+            let after_wake = received.is_some_and(|(_, at)| {
+                let comparison = b_readiness.lock().unwrap();
+                comparison.task.and_then(|task| pages.lock().unwrap().task(task))
+                    .is_some_and(|page| page.dispatched_at >= at)
+            });
+            after_wake
+                && queued_input_ready(&b, &reference, &padding_key, &b_readiness, &pages)
+                && a_setup_comparison.lock().unwrap().ready()
+                && reference.account_document_meta(&key) == a.account_document_meta(&key)
+        }).await;
+        record_b_trace(&causal_trace, clock, "B_setup_receiver_retired", format!("epoch={} requested_revision={b_setup_revision} accepted={:?} task={:?}", hex::encode(b_setup_epoch), b_setup_wake_observed.lock().unwrap().receipt(b_setup_epoch, b_setup_revision), b_readiness.lock().unwrap().task));
         setup_wake_ready.close();
         first_hold_armed.store(true, std::sync::atomic::Ordering::Release);
         reference.request_sibling_pull_for_test(&a.identity.public());
@@ -1777,6 +1968,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         assert!(publication_phase.is_none() && !b_partial.load(std::sync::atomic::Ordering::Acquire),
             "startup cannot certify the later B2 partial page: publication_phase={publication_phase:?} candidate_task_after_complete={partial_candidate:?}");
         // Pin the real publication before its owning notifier wakes readers.
+        record_b_trace(&causal_trace, clock, "B2_publication", format!("first_A_task={first_task:?} wake_revision={}", b.account_wake_token_for_test().1));
         let keys = crate::node::account_documents::sync::publish_legacy_control_page_before_notify_for_test(&b, 2, |keys| {
             let rows = keys.iter().map(|key| {
                 assert!(reference.account_document_meta(key).is_none());
@@ -1818,7 +2010,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                 let progress = b_page_progress.lock().unwrap();
                 (progress.headers_attempted, progress.complete_attempted, progress.last_elapsed_ms, progress.lifetime.strong_count() > 0)
             };
-            panic!("B protected partial page must be queued before A resumes: {error:?}; B_named_input_ready={named_ready} B_global_scope_settled={ready} B_partial={}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
+            panic!("B protected partial page must be queued before A resumes: {error:?}; B_named_input_ready={named_ready} B_global_scope_settled={ready} B_partial={}; causal={:?}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire), causal_trace.lock().unwrap().clone());
         })
         .unwrap();
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));
@@ -1992,11 +2184,12 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     // Recovery can make a late terminal look timely. Preserve each owner's
     // bounded body-free phase history at the original receipt boundary.
     eprintln!(
-        "queued_owner_at_receipt_deadline gate_terminal={gate_terminal} receipt_ok={} setup={:?} executor={:?} requester={:?}",
+        "queued_owner_at_receipt_deadline gate_terminal={gate_terminal} receipt_ok={} setup={:?} executor={:?} requester={:?} causal={:?}",
         receipt.is_ok(),
         setup_trace.lock().unwrap().clone(),
         executor_owner_trace.lock().unwrap().clone(),
         requester_owner_trace.lock().unwrap().clone(),
+        causal_trace.lock().unwrap().clone(),
     );
     release_intent.close();
     intent_entered.close();

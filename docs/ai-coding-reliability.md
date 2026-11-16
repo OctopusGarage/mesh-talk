@@ -1965,6 +1965,12 @@ Historical scope completion does not prove an existing child or pair has retired
 When a fixture requires a natural unpaired read, establish it through receiver-owned
 demand before publishing the Wake that deliberately creates its replacement; observe
 the exact setup task, page completion and pair retirement before arming the next hold.
+A consumed input and retired receiver page do not retire the producer's debounced
+Wake. The queued-source fixture joins its exact setup sender, observes the
+receiver's committed revision, and retires the resulting post-Wake child and pair
+before arming the natural hold. A SessionReady or an earlier comparison cannot
+prove that producer-to-consumer boundary; preserve the later publication's own
+exact partial-page evidence.
 Keep bootstrap input evidence scoped to the named corpus. The queued-source B
 padding check requires exact current metadata, consumed operation input, a real
 successful terminal Control page, its exact child lifetime retirement and no
