@@ -4462,12 +4462,16 @@ async fn certified_sibling_session_ready_ignores_unrelated_held_history() {
     let source = peers[0].clone();
     let client = peers[1].clone();
     let phases = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    // Preserve the first negotiation boundaries after the hold independently
+    // of unrelated full-host trace traffic. Diagnostics do not establish readiness.
+    let session_phases = Arc::new(Mutex::new(Vec::new()));
     let mut host_ready = Vec::new();
     for (label, node) in [("source", &source), ("client", &client)] {
         let (ready, ready_rx) = tokio::sync::oneshot::channel();
         host_ready.push(ready_rx);
         let ready = Mutex::new(Some(ready));
         let phases = phases.clone();
+        let session_phases = session_phases.clone();
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
             {
                 let mut phases = phases.lock().unwrap();
@@ -4475,6 +4479,15 @@ async fn certified_sibling_session_ready_ignores_unrelated_held_history() {
                     phases.pop_front();
                 }
                 phases.push_back(format!("{label}: {phase}"));
+            }
+            if phase.starts_with("responder_first_frame_")
+                || phase.starts_with("responder_session_")
+                || phase.starts_with("session_ready_wait_end")
+            {
+                let mut session_phases = session_phases.lock().unwrap();
+                if session_phases.len() < 32 {
+                    session_phases.push(format!("{label}: {phase}"));
+                }
             }
             if phase.starts_with("responder_admission_acquired_accept_begin")
                 && let Some(ready) = ready.lock().unwrap().take()
@@ -4543,6 +4556,7 @@ async fn certified_sibling_session_ready_ignores_unrelated_held_history() {
         releases.push(release);
         entered_rx.await.unwrap();
     }
+    session_phases.lock().unwrap().clear();
     let client_task = client.clone();
     let exchange = client_owner.runtime_handle().spawn(async move {
         client_task
@@ -4572,6 +4586,10 @@ async fn certified_sibling_session_ready_ignores_unrelated_held_history() {
         eprintln!(
             "held-history phases before release: {:?}",
             phases.lock().unwrap()
+        );
+        eprintln!(
+            "held-history negotiation boundaries before release: {:?}",
+            session_phases.lock().unwrap()
         );
     }
     drop(releases);

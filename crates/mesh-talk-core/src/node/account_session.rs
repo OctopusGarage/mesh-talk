@@ -421,6 +421,13 @@ impl Node {
                 }
                 _ => return,
             };
+            #[cfg(test)]
+            self.trace_account_client(channel.peer_identity(), || {
+                format!(
+                    "responder_session_admission_begin peer_port={:?}",
+                    channel.tcp_peer_addr().ok().map(|addr| addr.port())
+                )
+            });
             {
                 let _operation = self.privacy.gate.read().await;
                 if account_id != &self.account_id()
@@ -431,6 +438,13 @@ impl Node {
                     return;
                 }
             }
+            #[cfg(test)]
+            self.trace_account_client(channel.peer_identity(), || {
+                format!(
+                    "responder_session_ready_send_begin peer_port={:?}",
+                    channel.tcp_peer_addr().ok().map(|addr| addr.port())
+                )
+            });
             if !matches!(
                 tokio::time::timeout(
                     NEGOTIATION_TIMEOUT,
@@ -445,6 +459,13 @@ impl Node {
             ) {
                 return;
             }
+            #[cfg(test)]
+            self.trace_account_client(channel.peer_identity(), || {
+                format!(
+                    "responder_session_ready_send_complete peer_port={:?}",
+                    channel.tcp_peer_addr().ok().map(|addr| addr.port())
+                )
+            });
             // Observe only acknowledged, authenticated exchanges. The hook is
             // instance-scoped and never holds a store mutex or disclosure guard.
             #[cfg(test)]

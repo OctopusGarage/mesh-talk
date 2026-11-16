@@ -1973,6 +1973,11 @@ that padding input is ready; whole-domain digest convergence is a separate
 contract. Retain strict A setup and the later measured A-to-B result/checkpoint
 ordering. Partial, pending, failed, cancelled, wrong-task, stale/unconsumed input
 and live-child/pair controls must still reject bootstrap readiness.
+A reference self-control requester must consume the executor's signed role input
+and negotiate exact identities, routes and capabilities in both directions.
+Before that requester creates an operation, reverse whole-Control convergence is
+not an admission input; retain canonical authority and the actual request/result
+assertions instead of waiting on that unrelated digest.
 Canonical channel presentation and selected metadata fields have separate bounded
 continuations. The two-full-parent control fixture in
 [channel tests](../crates/mesh-talk-core/src/node/channels.rs) completes field-query
