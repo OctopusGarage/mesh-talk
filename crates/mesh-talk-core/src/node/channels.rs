@@ -976,9 +976,9 @@ impl Node {
     }
 
     // Independent subscriptions never consume the local recovery Notify permit.
-    fn channel_custody_work_input(&self) -> Result<[u8; 32], LogError> {
+    async fn channel_custody_work_input(self: &Arc<Self>) -> Result<[u8; 32], LogError> {
         use sha2::{Digest, Sha256};
-        let projection = self.group_projection_revision()?;
+        let projection = self.observe_group_projection_revision().await?;
         let custody = self
             .channel_custody
             .lock()
@@ -1052,7 +1052,7 @@ impl Node {
                 recheck_at = retry_at;
                 continue;
             }
-            let observed = self.channel_custody_work_input().ok();
+            let observed = self.channel_custody_work_input().await.ok();
             if observed.is_none()
                 || observed != input
                 || (settled && tokio::time::Instant::now() >= retry_at)

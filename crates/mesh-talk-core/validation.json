@@ -321,6 +321,8 @@
             "node::account_group::tests::owner_targets::modern_owner_transfers_to_the_target_account_without_changing_grants",
             "node::account_group::tests::owner_targets::legacy_owner_transfers_to_a_deterministic_accepted_target_device",
             "node::account_sync::",
+            "node::channel_account_maintenance::tests::scheduling_input_waits_for_history_without_blocking_its_reactor",
+            "node::runtime_work::blocking_result_tests::",
             "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
             "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery",
             "node::account_profile_io::tests::unchanged_profile_publication_reuses_retained_events_across_retries_and_reopen",
@@ -362,7 +364,7 @@
             "reference": "docs/performance-requirements.md#design-and-review-rules"
           },
           {
-            "name": "Mutation-owned bounded canonical roster/device digests avoid unchanged metadata materialization while every source, policy, privacy and current-authority input remains fresh; route and lease observations are independent.",
+            "name": "Mutation-owned bounded canonical roster/device digests avoid unchanged metadata materialization while every source, policy, privacy and current-authority input remains fresh; route and lease observations are independent. Account-channel and custody scheduling observations use the admitted serial repair worker, preserving reactor progress under held history and rejecting retired runtime admission; capacity is released before network work.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           }
         ]
@@ -1921,7 +1923,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Accept-loop-owned Profile maintenance retains meaningful source, proof/route, policy, lease and cleanup wakes; finite retry cuts and later discovery suffixes preserve fairness. Settled or dependency-blocked work uses sparse repair, while real lease expiry, failure recovery and unfinished pages retain their own deadlines and cancellation-owned admission.",
+            "name": "Accept-loop-owned Profile maintenance retains meaningful source, proof/route, policy, lease and cleanup wakes; finite retry cuts and later discovery suffixes preserve fairness. Settled or dependency-blocked work uses sparse repair, while real lease expiry, failure recovery and unfinished pages retain their own deadlines and cancellation-owned admission. Storage-fault acceptance observes the actual injected error and quiet retry boundary, rejects early work under a fractional paused clock, and verifies the original event after the unchanged three-second retry within timer resolution.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

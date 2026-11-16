@@ -515,6 +515,26 @@ impl Node {
             .inventory_body_read_count()
     }
 
+    /// Scheduling reads share the serial repair owner; even bodyless metadata
+    /// waits on storage and must not park a network reactor. Capacity and runtime
+    /// admission remain with the actual worker through cancellation.
+    pub(in crate::node) async fn observe_group_projection_revision(
+        self: &std::sync::Arc<Self>,
+    ) -> Result<[u8; 32], LogError> {
+        let retired = || LogError::AdmissionRejected("participant runtime retired".into());
+        let capacity = self
+            .runtime_work
+            .local_repair_capacity()
+            .await
+            .ok_or_else(retired)?;
+        let work = self.runtime_work.admit().ok_or_else(retired)?;
+        let node = self.clone();
+        work.spawn_local_repair_blocking(capacity, move || node.group_projection_revision())
+            .await
+            .map_err(|error| LogError::Io(std::io::Error::other(error)))?
+            .into_inner()
+    }
+
     /// Bodyless scheduling hint only; direct document integrity checks remain mandatory.
     pub fn group_projection_revision(&self) -> Result<[u8; 32], LogError> {
         use std::sync::atomic::Ordering;

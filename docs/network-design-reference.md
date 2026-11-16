@@ -3800,6 +3800,11 @@ persistence failure cannot publish a new digest. The domain-separated outer
 projection hint still captures current source, privacy, policy, profile, proof,
 document and group inputs. Digest reuse grants no permission, extends no presence
 lease and suppresses no route or expiry observation.
+Account-channel and custody schedulers observe this storage-backed hint through
+the existing single local-repair slot. The actual blocking worker owns its slot
+and retirement admission through cancellation; observation returns only after
+releasing them, before any network exchange. The synchronous projection remains
+available to existing storage workers and direct readers.
 The lifetime-owned maintenance cursor retains its pre-work input across bounded
 pages; newer inputs retain a follow-up. Failed publication stays dirty with its
 own five-second retry deadline; a settled pass keeps a five-minute integrity

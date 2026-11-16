@@ -163,6 +163,13 @@ recheck at the write owner; release its guard before obtaining missing fallback
 evidence. The [privacy admission tests](../crates/mesh-talk-core/src/node/privacy_runtime_tests.rs)
 require real certified-sibling SessionReady while unrelated histories are held,
 and exercise policy tightening with and without genuine shared-group authority.
+Treat scheduling digests as storage work when they acquire a repository or
+history guard. Account-channel and custody observations use the existing serial
+repair worker and release its capacity before network work. The maintenance
+regression `scheduling_input_waits_for_history_without_blocking_its_reactor`
+holds real history while probing the observer's own reactor, then releases and
+joins both owners before checking the unchanged digest. A separate full-host
+SessionReady test retains the real network boundary and its original deadline.
 
 Check that the UI event loop, accept loop and control scheduler can still make
 progress while the worker is paused. Offloading a scan does not help other
@@ -2023,6 +2030,10 @@ Paused-clock maintenance tests wait for actual retry attempts and assert minimum
 backoff spacing; real measured database duty time cannot imply a fixed number of
 attempts inside an arbitrary virtual-time window. Preserve cancellation, other
 maintenance-class progress and the no-early-retry assertions.
+Classify the injected storage failure and its quiet retry boundary before moving
+time; a generic idle marker does not prove either. Account for the timer's actual
+resolution at fractional deadlines without permitting an early retry or advancing
+to an unrelated repair deadline.
 
 Prefer one qualified scenario for a requirement over repeated whole-host
 variants with weaker preparation. The same-source control receipt owner retains
