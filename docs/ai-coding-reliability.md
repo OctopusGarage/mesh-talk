@@ -2220,6 +2220,10 @@ The source's positive message observation uses the same pending-state owner;
 source readiness and sibling delivery share the original delivery deadline.
 Self-control Noise setup likewise waits for the source archive marker through
 `StaleCursor` within its existing shared cold deadline, before measuring the action.
+The [two-parent control fixture](../crates/mesh-talk-core/src/node/channels.rs)
+also preserves the metadata publisher's precommit source guard: only its explicit `StaleCursor` can retry during the original setup
+deadline. Keep revision conflicts, storage and authorization failures fatal, and
+retain the later signed-value and unchanged-source/work assertions.
 An authenticated completion describes its response epoch, not a permanently
 frozen source. Exact metadata comparisons in the
 [control-page fixtures](../crates/mesh-talk-core/src/node/account_documents/sync.rs)

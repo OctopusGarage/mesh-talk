@@ -4873,6 +4873,46 @@ mod fanout_tests {
         );
     }
 
+    // Only the optimistic source guard's explicit stale result is pending.
+    // Publication checks that guard before allocation/append; other failures
+    // must not become successful fixture preparation or a quiet baseline.
+    fn control_metadata_setup_value<T>(result: Result<T, NodeError>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(NodeError::Log(LogError::StaleCursor)) => None,
+            Err(error) => panic!("control metadata setup failed: {error}"),
+        }
+    }
+
+    #[test]
+    fn accept_owner_metadata_setup_preserves_ready_and_explicitly_stale_results() {
+        assert_eq!(control_metadata_setup_value(Ok(())), Some(()));
+        assert!(
+            control_metadata_setup_value::<()>(Err(NodeError::Log(LogError::StaleCursor)))
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "control metadata setup failed:")]
+    fn accept_owner_metadata_setup_rejects_storage_failure() {
+        control_metadata_setup_value::<()>(Err(NodeError::Log(LogError::Io(
+            std::io::Error::other("failed storage"),
+        ))));
+    }
+
+    #[test]
+    #[should_panic(expected = "control metadata setup failed:")]
+    fn accept_owner_metadata_setup_rejects_authorization_failure() {
+        control_metadata_setup_value::<()>(Err(NodeError::Authorization("denied".into())));
+    }
+
+    #[test]
+    #[should_panic(expected = "control metadata setup failed:")]
+    fn accept_owner_metadata_setup_rejects_revision_conflict() {
+        control_metadata_setup_value::<()>(Err(NodeError::RequestConflict));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_full_accept_owners_settle_signed_controls_without_replay_feedback() {
         use crate::{
@@ -4923,7 +4963,15 @@ mod fanout_tests {
                 for node in &nodes {
                     node.set_channel_replica_enabled(group, true).await.unwrap();
                 }
-                nodes[0].set_channel_announcement_if(group, Some("signed metadata before observation"), None, |commit| commit()).await.unwrap();
+                // Both real parents can advance this source between preparation
+                // and its guarded append. Retry only that precommit rejection
+                // inside the original shared twenty-second fixture deadline.
+                loop {
+                    if control_metadata_setup_value(nodes[0].set_channel_announcement_if(group, Some("signed metadata before observation"), None, |commit| commit()).await).is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 // Explicit authenticated warmup is not the measured oracle: each
                 // full parent must serve the real session in both directions.
                 for (from, to) in [(0, 1), (1, 0)] {
@@ -4938,8 +4986,8 @@ mod fanout_tests {
                     // separate bounded continuations. Finish actual field-query
                     // readiness during warmup, inside the original outer budget.
                     let metadata = loop {
-                        let metadata = node.channel_metadata(group).unwrap();
-                        if !metadata.query_pending {
+                        if let Some(metadata) = control_metadata_setup_value(node.channel_metadata(group))
+                            && !metadata.query_pending {
                             break metadata;
                         }
                         tokio::time::sleep(Duration::from_millis(10)).await;

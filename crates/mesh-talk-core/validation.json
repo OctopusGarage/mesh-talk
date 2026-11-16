@@ -1301,7 +1301,7 @@
       },
       "consumers": ["core-node", "desktop-chat"],
       "escalation": [
-        "Validate actual installed desktop and CLI idle behavior separately from unit timing. Require original signed-event offline/reconnect and held-remote progress evidence; pure-helper counters do not establish production-parent scheduling or physical cross-device convergence."
+        "Validate actual installed desktop and CLI idle behavior separately from unit timing. Require original signed-event offline/reconnect and held-remote progress evidence; pure-helper counters do not establish production-parent scheduling or physical cross-device convergence. The two-parent fixture treats only precommit metadata StaleCursor as pending within its original twenty-second setup/observation deadline; storage, authorization and expected-revision conflicts remain fatal. Preserve the signed announcement, real bidirectional warmup, and unchanged source/scan/distribution counters across the original quiet window."
       ]
     },
     {
