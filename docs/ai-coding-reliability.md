@@ -274,6 +274,13 @@ follow-up or cancel the queued owner during retirement. The RuntimeWork
 `local_repair_capacity_outlives_blocking_captures_and_panic` control checks capture,
 output and panic cleanup before releasing capacity.
 
+Before reopening a profile, consume and await `NodeRuntime::stop`; dropping the
+runtime requests cancellation but does not join its actual storage owners. Keep
+exclusive-open failures fatal rather than retrying around a live owner. The
+[cached-route restart fixture](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
+awaits both original runtimes before asserting that an offline cached route is
+not fresh presence; retirement's held-writer controls retain lease exclusion.
+
 A UI read watchdog retires observation, not the native operation. Coalesce a
 same-owner/query refresh against the original promise until settlement, retaining
 one valid follow-up; reset or query replacement must not let stale work publish

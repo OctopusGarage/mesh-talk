@@ -469,6 +469,7 @@
         "crates/mesh-talk-core/src/node/runtime_startup.rs",
         "crates/mesh-talk-core/src/node/runtime_work.rs",
         "crates/mesh-talk-core/src/node/runtime_retirement_tests.rs",
+        "crates/mesh-talk-core/src/node/runtime_privacy_tests.rs",
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/participant_storage_tests.rs",
         "crates/mesh-talk-core/src/storage/profile.rs",
@@ -488,6 +489,8 @@
             "runtime_zero_discovery_port_owns_a_reachable_assigned_endpoint",
             "node::node::participant_storage_tests::",
             "node::runtime::retirement_tests::",
+            "offline_cached_route_is_not_fresh_online_presence_after_restart",
+            "both_invisible_runtimes_restart_with_pinned_routes_and_return_dm",
             "multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
             "current_thread_peer_runtime_cannot_authenticate_while_its_worker_is_held",
             "node::runtime_work::",
@@ -512,7 +515,7 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Shared ownership precedes runtime keystore initialization; construction and admitted blocking captures plus undelivered outputs retain replacement admission until their actual destruction. File/media maintenance uses the same blocking owner so its captured Node is destroyed before retirement permits profile close; direct capture-drop ordering, queued cancellation and undelivered-output controls retain that contract. Returned runtimes retain their consuming stop contract.",
+            "name": "Shared ownership precedes runtime keystore initialization; construction and admitted blocking captures plus undelivered outputs retain replacement admission until their actual destruction. File/media maintenance uses the same blocking owner so its captured Node is destroyed before retirement permits profile close; direct capture-drop ordering, queued cancellation and undelivered-output controls retain that contract. Returned runtimes retain their consuming stop contract. Restart fixtures await that stop before reopening a profile; cancellation requests and scheduler yields cannot release a live storage owner.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

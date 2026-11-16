@@ -183,14 +183,16 @@ async fn offline_cached_route_is_not_fresh_online_presence_after_restart() {
     );
     alice.set_allowed(bob.account_id(), true).await.unwrap();
     let bob_id = bob.user_id().to_owned();
-    drop(alice);
-    drop(bob);
-    tokio::task::yield_now().await;
+    // Cancellation requests do not release a profile still owned by workers.
+    // Join both runtimes before reopening Alice with Bob genuinely offline.
+    alice.stop().await;
+    bob.stop().await;
     let (alice, _) = start(dir.path(), "alice", 0).await;
     assert!(
         alice.peers().iter().all(|p| p.public.user_id() != bob_id),
         "cached route falsely refreshed offline presence"
     );
+    alice.stop().await;
 }
 
 #[tokio::test]
