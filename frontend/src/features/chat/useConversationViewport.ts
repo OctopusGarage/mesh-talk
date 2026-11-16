@@ -426,6 +426,22 @@ export function useConversationViewport(
       pendingScrollIntent.current = true;
       if (restoringScroll.current === key) restoringScroll.current = null;
     },
+    onClickCapture(event: React.MouseEvent) {
+      if (
+        !(event.target instanceof Element) ||
+        !event.target.closest("[aria-expanded]")
+      )
+        return;
+      // Only completed activation requests reveal. Pointer/touch preparation
+      // may instead become a swipe or canceled click and must keep its anchor.
+      // Cancel before the child expands and emits an intermediate scroll that
+      // would otherwise become a reading anchor and undo the browser's reveal.
+      restoringScroll.current = null;
+      anchors.current.delete(key);
+      pendingUserAnchor.current = false;
+      pendingScrollIntent.current = false;
+      userInteractionUntil.current = 0;
+    },
     initialIndex: initialList.current?.index ?? 0,
     atBottomStateChange(bottom: boolean) {
       // Virtuoso can report a previous measurement after a long row changes height.

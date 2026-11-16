@@ -64,7 +64,14 @@ function Harness({
   useLayoutEffect(() => {
     if (reportInitialBottom) viewport.atBottomStateChange(true);
   }, [conversation, reportInitialBottom]);
-  return createElement("div", { ref: viewport.scrollerRef });
+  return createElement("div", {
+    ref: viewport.scrollerRef,
+    onPointerDown: viewport.stopRestoring,
+    onTouchStart: viewport.stopRestoring,
+    onKeyDown: viewport.stopRestoring,
+    onWheel: viewport.stopRestoring,
+    onClickCapture: viewport.onClickCapture,
+  });
 }
 
 async function render(conversation: string, search: Search = null) {
@@ -939,3 +946,127 @@ it("owns live-edge pinning for row insertion and resize until reader input", asy
   expect(scrollTo).not.toHaveBeenCalled();
   expect(scroller.scrollTop).toBe(1100);
 });
+
+it.each([
+  {
+    name: "keyboard Enter activation",
+    prepare: ["keydown"],
+    key: "Enter",
+    click: true,
+    disclosure: true,
+  },
+  {
+    name: "keyboard Space activation",
+    prepare: ["keydown", "keyup"],
+    key: " ",
+    click: true,
+    disclosure: true,
+  },
+  {
+    name: "pointer activation",
+    prepare: ["pointerdown"],
+    click: true,
+    disclosure: true,
+  },
+  {
+    name: "touch activation",
+    prepare: ["pointerdown", "touchstart"],
+    click: true,
+    disclosure: true,
+  },
+  {
+    name: "canceled touch activation or swipe",
+    prepare: ["pointerdown", "touchstart"],
+    click: false,
+    disclosure: true,
+  },
+  {
+    name: "canceled pointer activation",
+    prepare: ["pointerdown"],
+    click: false,
+    disclosure: true,
+  },
+  {
+    name: "wheel over a disclosure",
+    prepare: ["wheel"],
+    click: false,
+    disclosure: true,
+  },
+  {
+    name: "ArrowDown over a disclosure",
+    prepare: ["keydown"],
+    key: "ArrowDown",
+    click: false,
+    disclosure: true,
+  },
+  {
+    name: "ordinary button click",
+    prepare: ["pointerdown"],
+    click: true,
+    disclosure: false,
+  },
+])(
+  "preserves scroll ownership through $name",
+  async ({ prepare, key, click, disclosure }) => {
+    await render("account:alice");
+    const scroller = container.firstElementChild as HTMLElement;
+    Object.defineProperties(scroller, {
+      scrollHeight: { value: 665, configurable: true },
+      clientHeight: { value: 532, configurable: true },
+    });
+    scroller.getBoundingClientRect = () => ({ top: 0, bottom: 532 }) as DOMRect;
+    const row = document.createElement("div");
+    row.dataset.messageId = "first";
+    row.getBoundingClientRect = () =>
+      ({
+        top: 20 - scroller.scrollTop,
+        bottom: 180 - scroller.scrollTop,
+      }) as DOMRect;
+    const trigger = document.createElement("button");
+    if (disclosure) trigger.setAttribute("aria-expanded", "false");
+    // The icon is the actual event target; the owning control is its ancestor.
+    const icon = document.createElement("span");
+    trigger.append(icon);
+    row.append(trigger);
+    scroller.append(row);
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000);
+    try {
+      // Start with a retained historical reading anchor.
+      viewport.stopRestoring();
+      scroller.scrollTop = 1;
+      await act(async () =>
+        viewport.onScroll({
+          currentTarget: scroller,
+        } as React.UIEvent<HTMLElement>),
+      );
+      await act(async () => {
+        for (const type of prepare) {
+          icon.dispatchEvent(
+            type.startsWith("key")
+              ? new KeyboardEvent(type, { key, bubbles: true })
+              : new Event(type, { bubbles: true }),
+          );
+        }
+        if (click)
+          icon.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      // Expansion/gesture scroll arrives before the browser's later reveal.
+      scroller.scrollTop = 1;
+      await act(async () =>
+        viewport.onScroll({
+          currentTarget: scroller,
+        } as React.UIEvent<HTMLElement>),
+      );
+      now.mockReturnValue(1300);
+      scroller.scrollTop = 133;
+      await act(async () =>
+        viewport.onScroll({
+          currentTarget: scroller,
+        } as React.UIEvent<HTMLElement>),
+      );
+      expect(scroller.scrollTop).toBe(click && disclosure ? 133 : 1);
+    } finally {
+      now.mockRestore();
+    }
+  },
+);

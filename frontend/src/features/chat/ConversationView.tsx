@@ -793,6 +793,7 @@ export function ConversationView() {
             onTouchStart={viewport.stopRestoring}
             onPointerDown={viewport.stopRestoring}
             onKeyDown={viewport.stopRestoring}
+            onClickCapture={viewport.onClickCapture}
             // A little tolerance so "at bottom" isn't lost to sub-pixel rounding.
             atBottomThreshold={48}
             increaseViewportBy={400}

@@ -1937,9 +1937,15 @@ prove geometry is ready: retain the conversation-owned target and resume on
 geometry changes, cancelling observers on cleanup and reader intent. Keep one
 owner for automatic scroll correction, including library subscriptions that can
 retain navigation across later measurements; a second writer can override valid
-reader input even when the application owner rejects it. The viewport unit
-regressions cover delayed geometry and insertion/resize pinning under reader intent;
-real browser media scenarios qualify the virtualizer interaction.
+reader input even when the application owner rejects it. Completed disclosure
+activation must cancel a retained reading anchor before the child expands,
+without recording expansion-induced scroll as fresh reading intent; otherwise a
+later browser reveal can be undone after the input window expires. Pointer/touch
+preparation can become a swipe or canceled click, so preserve its reading intent
+until activation completes. Preserve wheel and navigation-key anchoring over the
+same control. The viewport unit regressions cover delayed geometry, disclosure
+reveal and insertion/resize pinning under reader intent; real browser delivery
+and media scenarios qualify the virtualizer interaction.
 
 Raw storage injection in concurrency fixtures must publish through the normal
 owner notification before requiring a peer's unrelated scope to settle. Preserve
