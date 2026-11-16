@@ -6519,9 +6519,12 @@ async fn departure_retry_after_owner_reconnects(automatic: bool) {
                 // This fixture serves inbound sessions without the participant's
                 // metadata owner. Finish the received cut before reading roles.
                 owner.await_channel_metadata(group).await.unwrap();
-                match owner.account_group_projection(group) {
-                    Ok(projection)
-                        if projection.is_authorized(departure.id).unwrap()
+                // Indexed authorization remains fallible after projection
+                // acquisition: a concurrent append can invalidate that cut.
+                match owner
+                    .account_group_projection(group)
+                    .and_then(|projection| {
+                        Ok(projection.is_authorized(departure.id)?
                             && projection
                                 .state
                                 .as_ref()
@@ -6529,11 +6532,10 @@ async fn departure_retry_after_owner_reconnects(automatic: bool) {
                             && owner
                                 .channel_members(group)
                                 .iter()
-                                .all(|peer| peer.user_id() != member.user_id()) =>
-                    {
-                        break;
-                    }
-                    Ok(_) | Err(LogError::StaleCursor) => {}
+                                .all(|peer| peer.user_id() != member.user_id()))
+                    }) {
+                    Ok(true) => break,
+                    Ok(false) | Err(LogError::StaleCursor) => {}
                     Err(error) => panic!("departure projection failed: {error}"),
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;

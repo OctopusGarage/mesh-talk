@@ -722,6 +722,14 @@ fn channel_indexed_authority_keeps_retired_grant_facts_after_checkpoint_reload()
         current.is_authorized(remove.id),
         Err(LogError::StaleCursor)
     ));
+    // Reacquisition after the real owner projects the new epoch must recover
+    // the exact authorization; the stale cut itself never becomes authority.
+    fixture.project();
+    let refreshed = reopened
+        .published_projection(fixture.channel)
+        .unwrap()
+        .unwrap();
+    assert!(refreshed.is_authorized(remove.id).unwrap());
 }
 
 #[test]

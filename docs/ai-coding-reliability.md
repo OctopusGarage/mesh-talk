@@ -2158,8 +2158,12 @@ is not a lease: live sibling attachment recovery can invalidate a canonical hist
 projection between polls. The existing `ready_history` owner in
 [`node_tests.rs`](../crates/mesh-talk-core/src/node/node_tests.rs) preserves
 `StaleCursor` as pending and distinguishes a ready empty history; its storage and
-authorization controls remain fatal. Keep the real checkpoint invalidation and
-linked-device reconnect controls alongside those classification tests.
+authorization controls remain fatal. Indexed queries on an acquired projection
+can themselves become stale after a concurrent append; propagate those results
+through the same pending-state classifier instead of unwrapping inside a match
+guard. Keep real checkpoint invalidation/reacquisition and automatic/manual
+departure recovery controls alongside the linked-device reconnect and
+classification tests.
 The source's positive message observation uses the same pending-state owner;
 source readiness and sibling delivery share the original delivery deadline.
 Timeout diagnostics retain pending/error results instead of unwrapping another
