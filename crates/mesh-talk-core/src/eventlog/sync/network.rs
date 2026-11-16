@@ -4,8 +4,9 @@ use super::{ApplyReport, FileConsentStatus};
 use crate::eventlog::{AppendOutcome, ConversationId, Event, EventId, LogError};
 use std::collections::HashSet;
 
-/// Metadata captured atomically with a finite, owned view. A missing current
-/// cached fingerprint skips the optional probe; it never denotes an empty set.
+/// Scalar metadata from a finite owned view or an exactly qualified probe cache.
+/// This grants no Have/export authority. A missing fingerprint skips the optional
+/// probe; it never denotes an empty set.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SyncMetadata {
     pub count: u64,
@@ -14,6 +15,15 @@ pub struct SyncMetadata {
     pub channel_v4: bool,
     pub channel_v5: bool,
     pub fingerprint: Option<[u8; 32]>,
+}
+
+/// Local scheduling evidence for a completed quiet remote subset, never equality,
+/// custody or delivery. The issuing backend must revalidate the opaque local token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuietComparison {
+    pub local_token: [u8; 32],
+    pub remote_fingerprint: [u8; 32],
+    pub remote_count: u64,
 }
 
 /// Work includes rejected rows and graph edges, not just selected output. The
@@ -128,7 +138,72 @@ pub trait NetworkSyncStore {
     type View;
     type HaveCursor;
     type ExportCursor;
+    /// Qualify optional node-owned preparation reuse with the actual authenticated
+    /// peer. Cached plans grant no remote outcome or custody authority.
+    fn bind_session_peer(&mut self, _peer: &crate::identity::device::PublicIdentity) {}
+    /// Optional current scalar probe. Returning metadata grants no export or Have
+    /// permission; a differing fingerprint still requires a qualified owned view.
+    fn probe_metadata(
+        &self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<SyncMetadata>, LogError> {
+        Ok(None)
+    }
+    /// Optional receiver-only scheduling seam. Runtime opt-in requires an
+    /// ordinary pull-only view whose actual captured Have is unique, has empty
+    /// pending contributors, and exports no events. Earn evidence only after a
+    /// fully completed zero-wire-event exchange proves remote Have is a subset
+    /// of local Have under identical exact before/after local qualification.
+    /// Store fixed metadata in a shared bounded owner with a nonrenewing <=300s
+    /// repair deadline; never cache permission, full equality, custody or delivery.
+    fn quiet_comparison(
+        &self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<QuietComparison>, LogError> {
+        Ok(None)
+    }
+    /// Revalidate exact current owner/source/authority and the original deadline
+    /// after the awaited probe. Unknown, changed or expired evidence opts out.
+    fn validate_quiet_comparison(
+        &self,
+        _conversation: &ConversationId,
+        _hint: QuietComparison,
+    ) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    /// Only opt in when the actual captured ordinary Have is unique and has no
+    /// extra pending contributors; its exact local observation must still match.
+    fn quiet_comparison_token(&self, _view: &Self::View) -> Result<Option<[u8; 32]>, LogError> {
+        Ok(None)
+    }
+    /// Retain only the completed result described above, rechecking the actual
+    /// view and token. Repeated matches must not renew its repair deadline.
+    fn retain_quiet_comparison(
+        &self,
+        _view: &Self::View,
+        _hint: QuietComparison,
+    ) -> Result<(), LogError> {
+        Ok(())
+    }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
+    /// Optionally transfer an exclusively owned, currently qualified prepared
+    /// view to the caller. It must not share mutable export/Have state with any
+    /// other request. A miss uses ordinary bounded authorization preparation.
+    fn take_custody_view(
+        &mut self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<Self::View>, LogError> {
+        Ok(None)
+    }
+    /// Return ownership after an exact custody query and final validation, or
+    /// after an ordinary Response and its terminal Have have both been sent,
+    /// or after the requester's complete probe/followup exchange. This is one
+    /// exclusive local preparation lease, never a cached remote outcome.
+    /// Custody callers keep an uncached view alive through response sending.
+    /// This never caches the custody answer or a partially sent ordinary response.
+    fn retain_custody_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        Ok(Some(view))
+    }
     /// Opening captures a finite source. Implementations with derived authority
     /// prepare it here; there is no collecting fallback in the session adapter.
     fn prepare_view_step(
@@ -142,6 +217,29 @@ pub trait NetworkSyncStore {
             ready: true,
             ..Default::default()
         })
+    }
+    /// Qualify an exclusively owned prepared view for another selection phase.
+    /// True requires the complete current source and authority stamp to match;
+    /// finite-cutoff validation alone may intentionally permit later appends.
+    /// Have-dependent export preparation remains a separate obligation.
+    fn reusable_view(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    /// Reuse completed export preparation only for this exclusively owned view
+    /// under fresh source and authority qualification. Have-dependent plans
+    /// require exact Have; independent plans must rebind their page cursor to
+    /// the current Have. This never skips fresh filtering or bounded reads.
+    fn reusable_export(
+        &self,
+        _view: &Self::View,
+        _have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    /// Whether preparation needs staged peer IDs for ancestor closure. False
+    /// never removes the current Have filter from the final export pages.
+    fn export_preparation_needs_have(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(true)
     }
     /// Have-dependent closure has the same bounded, cancellable work boundary.
     fn reset_export_step(

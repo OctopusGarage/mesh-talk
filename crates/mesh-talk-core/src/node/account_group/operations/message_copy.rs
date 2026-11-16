@@ -3,6 +3,120 @@ use super::*;
 use crate::eventlog::{Event, EventKind};
 
 impl Node {
+    /// Scheduling qualification for settled ordinary publications only. Pending
+    /// requests/lookups need live query, forwarding and capability decisions;
+    /// Recall and expiring File results likewise keep their existing live path.
+    /// This witness contains metadata only and never grants retained custody.
+    pub(in crate::node) fn operation_publication_input(
+        &self,
+        group: ConversationId,
+    ) -> Result<Option<[u8; 32]>, NodeError> {
+        use sha2::{Digest, Sha256};
+        let selected = {
+            let journal = self
+                .group_operations
+                .lock()
+                .expect("operation journal mutex");
+            if journal.lookups.values().any(|lookup| lookup.group == group) {
+                return Ok(None);
+            }
+            // Match projection selection without copying retained plaintext or
+            // allocating a list proportional to the terminal journal history.
+            let mut selected = Vec::with_capacity(17);
+            for entry in journal.entries.values().filter(|entry| {
+                entry.reference.group == group
+                    && !journal.legacy_children.contains_key(&entry.reference.id)
+            }) {
+                if !entry.source {
+                    if !entry.terminal() {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                selected.push((
+                    entry.reference.id,
+                    entry.sequence,
+                    entry.reference.kind,
+                    entry.status.primary_event,
+                    entry.status.phase == AccountGroupOperationPhase::Committed,
+                    entry.terminal(),
+                ));
+                selected.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+                selected.truncate(16);
+            }
+            if selected.iter().any(|entry| {
+                !entry.5
+                    || !matches!(
+                        entry.2,
+                        AccountGroupOperationKind::Text
+                            | AccountGroupOperationKind::Sticker
+                            | AccountGroupOperationKind::File
+                    )
+            }) {
+                return Ok(None);
+            }
+            selected
+        };
+        let source = {
+            let log = self.log.lock().expect("log mutex");
+            let Ok(repository) = log.repository() else {
+                return Ok(None);
+            };
+            (
+                repository.source_revision()?,
+                repository.destructive_policy_revision()?,
+            )
+        };
+        let mut files = Vec::new();
+        for &(_, _, kind, primary, committed, _) in &selected {
+            if kind != AccountGroupOperationKind::File || !committed {
+                continue;
+            }
+            let Some(event) = primary else {
+                continue;
+            };
+            let (row, revision) = {
+                let rows = self.received_files.lock().expect("received files mutex");
+                (
+                    rows.header_in(&group, event)?,
+                    (rows.revision(), rows.rewrite_revision()),
+                )
+            };
+            if row.as_ref().is_some_and(|row| row.deadline.is_some()) {
+                return Ok(None);
+            }
+            let row = row.map(|row| {
+                (
+                    row.ordinal,
+                    row.wall_clock,
+                    row.plaintext_sha256,
+                    row.file_conversation,
+                    row.body_bytes,
+                )
+            });
+            let suppressed = self
+                .account_suppression
+                .lock()
+                .expect("suppression mutex")
+                .contains(group, event)?;
+            let recall = {
+                let recalls = self.recalls.lock().expect("recalls mutex");
+                (recalls.revision(), recalls.contains(group, event)?)
+            };
+            files.push((event, row, revision, suppressed, recall));
+        }
+        let encoded = bincode::serialize(&(
+            self.account_id(),
+            self.identity.public(),
+            group,
+            selected,
+            source,
+            files,
+        ))
+        .map_err(|error| crate::eventlog::LogError::Serialization(error.to_string()))?;
+        Ok(Some(Sha256::digest(encoded).into()))
+    }
+
     pub(super) fn account_group_committed_message_event(
         &self,
         reference: &journal::OperationReference,

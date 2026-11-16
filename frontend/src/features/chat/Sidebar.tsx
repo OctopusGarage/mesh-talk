@@ -17,7 +17,6 @@ import {
 import { IdentityGlyph, PresenceDot } from "@/components/identity";
 import { Logo } from "@/components/Logo";
 import { cn } from "@/lib/utils";
-import { useTheme } from "@/lib/theme";
 import { usePacks } from "@/store/packs";
 import { CreateChannelDialog } from "./CreateChannelDialog";
 import { SearchDialog } from "./SearchDialog";
@@ -88,9 +87,7 @@ export function Sidebar() {
   const channels = useChat((s) => s.channels);
   const peers = useChat((s) => s.peers);
   const favorites = useChat((s) => s.favorites);
-  const selectedTheme = useTheme((s) => s.theme);
-  const themePacks = usePacks((s) => s.packs);
-  const activeThemePack = themePacks.find((pack) => pack.id === selectedTheme);
+  const activeThemePack = usePacks((s) => s.selectedTheme);
   const themeCrest =
     activeThemePack?.kind === "theme" ? activeThemePack.crest : undefined;
   // The active theme's crest (a brand theme) replaces the app mark in the footer, so the

@@ -17,6 +17,7 @@ use tokio::{
 };
 
 pub(super) const MAX_TCP_CONNECTIONS: usize = 8;
+pub(super) const MAX_WATCH_CONNECTIONS: usize = 4;
 pub(super) const MAX_DIRECTION_CONNECTIONS: usize = MAX_TCP_CONNECTIONS - 1;
 const IDLE_TTL: Duration = Duration::from_secs(15);
 const CAPACITY_WAIT: Duration = Duration::from_secs(2);
@@ -174,6 +175,94 @@ impl CapacityDiagnostics {
     }
 }
 
+type HistoricalRouteKey = ([u8; 32], [u8; 32], SocketAddr);
+type HistoricalAuthenticationRetries =
+    super::delivery_retry::RetrySchedule<HistoricalRouteKey, (u64, u64)>;
+
+fn historical_route_key(key: &PeerEndpointKey) -> HistoricalRouteKey {
+    let mut address = key.address;
+    address.set_ip(crate::transport::net::canonical_peer_ip(address.ip()));
+    (key.identity.ed25519_pub, key.identity.x25519_pub, address)
+}
+
+/// Work pacing only. Cancellation and local capacity retain the earlier learned
+/// failures without manufacturing a remote failure or holding any socket lease.
+pub(in crate::node) struct HistoricalAuthenticationAttempt<'a> {
+    retries: &'a Mutex<HistoricalAuthenticationRetries>,
+    key: HistoricalRouteKey,
+    token: u64,
+    completed: bool,
+}
+impl HistoricalAuthenticationAttempt<'_> {
+    pub(in crate::node) fn complete(&mut self, authenticated: bool, now: Instant) {
+        self.retries
+            .lock()
+            .unwrap()
+            .complete(&self.key, self.token, authenticated, now);
+        self.completed = true;
+    }
+}
+impl Drop for HistoricalAuthenticationAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.retries.lock().unwrap().defer(
+                &self.key,
+                self.token,
+                Duration::from_secs(5),
+                Instant::now(),
+            );
+        }
+    }
+}
+
+const SLOW_AUTHENTICATION_REPORT_INTERVAL: Duration = Duration::from_secs(300);
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(in crate::node) struct SlowAuthenticationSummary {
+    pub attempts: u64,
+    pub failures: u64,
+    pub historical: u64,
+    pub longest: Duration,
+}
+#[derive(Default)]
+struct SlowAuthenticationDiagnostics {
+    next_report: Option<Instant>,
+    pending: SlowAuthenticationSummary,
+}
+impl SlowAuthenticationDiagnostics {
+    fn observe(
+        &mut self,
+        now: Instant,
+        elapsed: Duration,
+        authenticated: bool,
+        historical: bool,
+        interactive: bool,
+    ) -> Option<SlowAuthenticationSummary> {
+        if elapsed < Duration::from_secs(2) {
+            return None;
+        }
+        let one = SlowAuthenticationSummary {
+            attempts: 1,
+            failures: u64::from(!authenticated),
+            historical: u64::from(historical),
+            longest: elapsed,
+        };
+        // Explicit user actions retain their own diagnostic; they cannot reset
+        // the background window or turn background noise into repeated reports.
+        if interactive {
+            return Some(one);
+        }
+        self.pending.attempts = self.pending.attempts.saturating_add(1);
+        self.pending.failures = self.pending.failures.saturating_add(one.failures);
+        self.pending.historical = self.pending.historical.saturating_add(one.historical);
+        self.pending.longest = self.pending.longest.max(elapsed);
+        if self.next_report.is_some_and(|next| now < next) {
+            return None;
+        }
+        self.next_report = Some(now + SLOW_AUTHENTICATION_REPORT_INTERVAL);
+        Some(std::mem::take(&mut self.pending))
+    }
+}
+
 #[derive(Default)]
 struct InboundIdleState {
     next: u64,
@@ -220,8 +309,12 @@ async fn wait_registered_inbound(
 pub(in crate::node) struct SessionPool {
     authentication_gates: Mutex<Vec<(PeerEndpointKey, Weak<AuthenticationGate>)>>,
     capacity_diagnostics: Mutex<CapacityDiagnostics>,
+    historical_authentication_retries: Mutex<HistoricalAuthenticationRetries>,
+    slow_authentication_diagnostics: Mutex<SlowAuthenticationDiagnostics>,
     total: Arc<Semaphore>,
     outbound: Arc<Semaphore>,
+    watches: Arc<Semaphore>,
+    historical: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     idle: Arc<Mutex<Vec<Idle>>>,
     inbound_idle: Arc<InboundIdleRegistry>,
@@ -229,7 +322,7 @@ pub(in crate::node) struct SessionPool {
     account_unsupported: Mutex<std::collections::VecDeque<(PeerEndpointKey, Instant)>>,
     file_identity_unsupported: Mutex<std::collections::VecDeque<(PeerEndpointKey, Instant)>>,
     file_identity_scans: Mutex<std::collections::VecDeque<(PublicIdentity, u8, usize)>>,
-    route_affinities: Mutex<std::collections::VecDeque<(PeerEndpointKey, SocketAddr)>>,
+    route_affinities: Mutex<std::collections::VecDeque<(PeerEndpointKey, SocketAddr, Instant)>>,
 }
 
 impl Default for SessionPool {
@@ -237,8 +330,17 @@ impl Default for SessionPool {
         Self {
             authentication_gates: Mutex::new(Vec::new()),
             capacity_diagnostics: Mutex::new(CapacityDiagnostics::default()),
+            historical_authentication_retries: Mutex::new(
+                HistoricalAuthenticationRetries::with_failure_bounds(
+                    Duration::from_secs(300),
+                    Duration::from_secs(300),
+                ),
+            ),
+            slow_authentication_diagnostics: Mutex::new(SlowAuthenticationDiagnostics::default()),
             total: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
             outbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
+            watches: Arc::new(Semaphore::new(MAX_WATCH_CONNECTIONS)),
+            historical: Arc::new(Semaphore::new(2)),
             inbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             idle: Arc::new(Mutex::new(Vec::new())),
             inbound_idle: Arc::new(InboundIdleRegistry::default()),
@@ -252,6 +354,90 @@ impl Default for SessionPool {
 }
 
 impl SessionPool {
+    pub(in crate::node) fn historical_authentication(
+        &self,
+        key: &PeerEndpointKey,
+        network: u64,
+        now: Instant,
+    ) -> Result<HistoricalAuthenticationAttempt<'_>, TransportError> {
+        let route = historical_route_key(key);
+        let (token, _) = self
+            .historical_authentication_retries
+            .lock()
+            .unwrap()
+            .reserve(route, (key.generation, network), now)
+            .ok_or_else(|| TransportError::Noise("historical route retry deferred".into()))?;
+        Ok(HistoricalAuthenticationAttempt {
+            retries: &self.historical_authentication_retries,
+            key: route,
+            token,
+            completed: false,
+        })
+    }
+
+    pub(in crate::node) fn observe_slow_authentication(
+        &self,
+        elapsed: Duration,
+        authenticated: bool,
+        historical: bool,
+        interactive: bool,
+    ) -> Option<SlowAuthenticationSummary> {
+        self.slow_authentication_diagnostics
+            .lock()
+            .unwrap()
+            .observe(
+                Instant::now(),
+                elapsed,
+                authenticated,
+                historical,
+                interactive,
+            )
+    }
+    /// All background producers share this speculative dial budget. The permit
+    /// covers the actual TCP/Noise attempt, never an authenticated session.
+    pub(in crate::node) fn historical_dial(&self) -> Result<OwnedSemaphorePermit, TransportError> {
+        self.historical
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| TransportError::Noise("historical route capacity busy".into()))
+    }
+
+    pub(in crate::node) fn historical_capacity_available(&self) -> bool {
+        self.historical.available_permits() > 0
+    }
+
+    fn remember_authenticated_route(
+        &self,
+        key: PeerEndpointKey,
+        mut actual: SocketAddr,
+        now: Instant,
+    ) {
+        actual.set_ip(crate::transport::net::canonical_peer_ip(actual.ip()));
+        let mut entries = self.route_affinities.lock().unwrap();
+        entries.retain(|(candidate, _, _)| candidate != &key);
+        if entries.len() >= MAX_ROUTE_AFFINITIES {
+            entries.pop_front();
+        }
+        entries.push_back((key, actual, now));
+    }
+
+    pub(in crate::node) fn recently_authenticated_route(
+        &self,
+        key: &PeerEndpointKey,
+        now: Instant,
+    ) -> bool {
+        self.route_affinities
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(candidate, actual, observed)| {
+                candidate.identity == key.identity
+                    && candidate.generation == key.generation
+                    && *actual == key.address
+                    && now.saturating_duration_since(*observed) < Duration::from_secs(15)
+            })
+    }
+
     /// Serialize unauthenticated sockets for one exact route before they acquire
     /// TCP capacity. Weak entries disappear after the last owner/waiter drops;
     /// active gates must never be evicted, including during a policy reset.
@@ -320,6 +506,10 @@ impl SessionPool {
         self.file_identity_unsupported.lock().unwrap().clear();
         self.file_identity_scans.lock().unwrap().clear();
         self.route_affinities.lock().unwrap().clear();
+        self.historical_authentication_retries
+            .lock()
+            .unwrap()
+            .clear();
     }
 
     pub(in crate::node) fn network_changed(&self) {
@@ -348,6 +538,12 @@ impl SessionPool {
             .lock()
             .unwrap()
             .succeeded(&peer.user_id(), address, elapsed);
+        let mut address = address;
+        address.set_ip(crate::transport::net::canonical_peer_ip(address.ip()));
+        self.historical_authentication_retries
+            .lock()
+            .unwrap()
+            .forget(&(peer.ed25519_pub, peer.x25519_pub, address));
     }
 
     pub(in crate::node) fn authentication_timed_out(
@@ -554,6 +750,19 @@ impl SessionPool {
         self.acquire(&self.outbound).await
     }
 
+    /// Parked mailbox notification sockets have their own fixed budget. They
+    /// never enter the sequential exchange pool or consume ordinary TCP slots.
+    /// Each raced route retains its actual permit until its socket is dropped.
+    pub(in crate::node) async fn watch_outbound(
+        &self,
+    ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
+        let permit = tokio::time::timeout(CAPACITY_WAIT, self.watches.clone().acquire_owned())
+            .await
+            .map_err(|_| TransportError::Noise("mailbox watch capacity busy".into()))?
+            .map_err(|_| TransportError::AdmissionDenied)?;
+        Ok(vec![permit])
+    }
+
     /// An alternate route gets its own socket permits. Racing addresses must
     /// not turn one logical dial into unaccounted TCP connections.
     pub(in crate::node) fn try_outbound(&self) -> Option<Vec<OwnedSemaphorePermit>> {
@@ -561,6 +770,11 @@ impl SessionPool {
         let directional = self.outbound.clone().try_acquire_owned().ok()?;
         let shared = self.total.clone().try_acquire_owned().ok()?;
         Some(vec![directional, shared])
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn test_watch_available(&self) -> usize {
+        self.watches.available_permits()
     }
 
     #[cfg(test)]
@@ -714,7 +928,7 @@ impl SessionPool {
 /// no negative evidence about the peer's identity or protocol capabilities.
 pub(in crate::node) fn local_capacity_busy(error: &TransportError) -> bool {
     matches!(error, TransportError::Noise(message) if matches!(message.as_str(),
-        "peer authentication capacity busy" | "TCP connection capacity busy"))
+        "peer authentication capacity busy" | "TCP connection capacity busy" | "historical route capacity busy" | "historical route retry deferred"))
 }
 
 pub(in crate::node) fn retryable_transport_error(error: &TransportError) -> bool {
@@ -868,14 +1082,8 @@ impl Node {
         };
         let mut key = self.peer_endpoint_key(requested, channel.peer_identity());
         key.generation = generation;
-        let mut entries = self.sessions.route_affinities.lock().unwrap();
-        entries.retain(|(candidate, _)| candidate != &key);
-        if key.address != actual {
-            if entries.len() >= MAX_ROUTE_AFFINITIES {
-                entries.pop_front();
-            }
-            entries.push_back((key, actual));
-        }
+        self.sessions
+            .remember_authenticated_route(key, actual, Instant::now());
     }
 
     pub(in crate::node) async fn checkout_reusable_channel(
@@ -904,9 +1112,9 @@ impl Node {
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|(candidate, _)| candidate == &key)
-                .map(|(_, actual)| *actual)
-                .filter(|actual| permitted.contains(actual));
+                .find(|(candidate, _, _)| candidate == &key)
+                .map(|(_, actual, _)| *actual)
+                .filter(|actual| *actual != addr && permitted.contains(actual));
             for addr in std::iter::once(addr).chain(fallback) {
                 if let Some(channel) = self.sessions.checkout(protocol, addr, expected, generation)
                     && self.pooled_presence_current(protocol, &channel)
@@ -919,6 +1127,7 @@ impl Node {
                     {
                         return Err(TransportError::AdmissionDenied);
                     }
+                    self.note_dialed_route(addr, &channel);
                     return Ok(Some(channel));
                 }
             }
@@ -1000,11 +1209,333 @@ impl Node {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn parked_mailbox_watches_preserve_normal_capacity_and_release_on_drop() {
+        let pool = SessionPool::default();
+        let mut watches = Vec::new();
+        for _ in 0..4 {
+            watches.push(pool.watch_outbound().await.unwrap());
+        }
+        assert_eq!(pool.test_capacity_snapshot().0, MAX_TCP_CONNECTIONS);
+        let mut ordinary = Vec::new();
+        for _ in 0..MAX_DIRECTION_CONNECTIONS {
+            ordinary.push(pool.outbound().await.unwrap());
+        }
+        let inbound = pool.inbound().await.unwrap();
+        assert_eq!(pool.test_capacity_snapshot().0, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), pool.watch_outbound())
+                .await
+                .is_err()
+        );
+        drop(watches.pop());
+        watches.push(pool.watch_outbound().await.unwrap());
+        drop(watches);
+        drop(ordinary);
+        drop(inbound);
+        assert_eq!(pool.test_capacity_snapshot().0, MAX_TCP_CONNECTIONS);
+        let mut restored = Vec::new();
+        for _ in 0..4 {
+            restored.push(pool.watch_outbound().await.unwrap());
+        }
+    }
+
+    fn historical_key() -> PeerEndpointKey {
+        PeerEndpointKey {
+            identity: crate::identity::device::DeviceIdentity::generate().public(),
+            address: "127.0.0.1:47479".parse().unwrap(),
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn failed_unchanged_historical_authentication_waits_for_sparse_repair() {
+        let pool = SessionPool::default();
+        let key = historical_key();
+        let now = Instant::now();
+        let mut attempt = pool.historical_authentication(&key, 1, now).unwrap();
+        attempt.complete(false, now);
+        for elapsed in [31, 60, 120, 299] {
+            assert!(
+                pool.historical_authentication(&key, 1, now + Duration::from_secs(elapsed))
+                    .is_err(),
+                "unchanged failed historical endpoint retried after {elapsed}s"
+            );
+        }
+        assert!(
+            pool.historical_authentication(&key, 1, now + Duration::from_secs(301))
+                .is_ok(),
+            "sparse repair must still recover an endpoint without new discovery"
+        );
+    }
+
+    #[test]
+    fn historical_authentication_retains_cancelled_work_without_learning_failure() {
+        let pool = SessionPool::default();
+        let key = historical_key();
+        let now = Instant::now();
+        drop(pool.historical_authentication(&key, 1, now).unwrap());
+        assert!(pool.historical_authentication(&key, 1, now).is_err());
+        let mut attempt = pool
+            .historical_authentication(&key, 1, now + Duration::from_secs(6))
+            .unwrap();
+        attempt.complete(false, now + Duration::from_secs(6));
+        assert!(
+            pool.historical_authentication(&key, 1, now + Duration::from_secs(35))
+                .is_err()
+        );
+        assert!(
+            pool.historical_authentication(&key, 1, now + Duration::from_secs(307))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn historical_authentication_scope_and_late_cancellation_preserve_recovery() {
+        let pool = SessionPool::default();
+        let key = historical_key();
+        let now = Instant::now();
+        let mut first = pool.historical_authentication(&key, 1, now).unwrap();
+        first.complete(false, now);
+        let mapped = PeerEndpointKey {
+            address: "[::ffff:127.0.0.1]:47479".parse().unwrap(),
+            ..key.clone()
+        };
+        assert!(
+            pool.historical_authentication(&mapped, 1, now).is_err(),
+            "mapped addresses share the same failed endpoint"
+        );
+        for changed in [
+            PeerEndpointKey {
+                address: "127.0.0.1:47480".parse().unwrap(),
+                ..key.clone()
+            },
+            PeerEndpointKey {
+                generation: 2,
+                ..key.clone()
+            },
+            PeerEndpointKey {
+                identity: crate::identity::device::DeviceIdentity::generate().public(),
+                ..key.clone()
+            },
+        ] {
+            assert!(pool.historical_authentication(&changed, 1, now).is_ok());
+        }
+        // A changed network replaces this route's reservation. The old guard
+        // must not defer that replacement when it later retires.
+        let old = pool.historical_authentication(&key, 2, now).unwrap();
+        let mut newer = pool.historical_authentication(&key, 3, now).unwrap();
+        drop(old);
+        newer.complete(true, now);
+        assert!(pool.historical_authentication(&key, 3, now).is_ok());
+        pool.authentication_succeeded(&key.identity, key.address, Duration::from_millis(5));
+        assert!(
+            pool.historical_authentication(&key, 3, now).is_ok(),
+            "a real authenticated recovery clears earlier pacing"
+        );
+    }
+
+    #[test]
+    fn historical_authentication_retry_inventory_is_bounded_and_reclaims_expired_slots() {
+        let pool = SessionPool::default();
+        let now = Instant::now();
+        let mut key = historical_key();
+        let mut held = Vec::new();
+        for index in 0..256u64 {
+            key.identity.ed25519_pub[..8].copy_from_slice(&index.to_le_bytes());
+            held.push(pool.historical_authentication(&key, 1, now).unwrap());
+        }
+        key.identity.ed25519_pub[..8].copy_from_slice(&256u64.to_le_bytes());
+        let error = pool.historical_authentication(&key, 1, now).err().unwrap();
+        assert!(
+            local_capacity_busy(&error),
+            "hint capacity is not a remote failure"
+        );
+        drop(held);
+        assert!(
+            pool.historical_authentication(&key, 1, now + Duration::from_secs(6))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn slow_authentication_diagnostics_coalesce_background_and_preserve_interactive_reports() {
+        let now = Instant::now();
+        let mut diagnostics = SlowAuthenticationDiagnostics::default();
+        assert!(
+            diagnostics
+                .observe(now, Duration::from_secs(1), false, true, false)
+                .is_none()
+        );
+        assert_eq!(
+            diagnostics.observe(now, Duration::from_secs(10), false, true, false),
+            Some(SlowAuthenticationSummary {
+                attempts: 1,
+                failures: 1,
+                historical: 1,
+                longest: Duration::from_secs(10)
+            })
+        );
+        assert!(
+            diagnostics
+                .observe(
+                    now + Duration::from_secs(1),
+                    Duration::from_secs(10),
+                    false,
+                    true,
+                    false
+                )
+                .is_none()
+        );
+        assert!(
+            diagnostics
+                .observe(
+                    now + Duration::from_secs(2),
+                    Duration::from_secs(3),
+                    true,
+                    false,
+                    false
+                )
+                .is_none()
+        );
+        assert_eq!(
+            diagnostics
+                .observe(
+                    now + Duration::from_secs(299),
+                    Duration::from_secs(4),
+                    false,
+                    false,
+                    true
+                )
+                .unwrap()
+                .attempts,
+            1
+        );
+        assert_eq!(
+            diagnostics.observe(
+                now + Duration::from_secs(300),
+                Duration::from_secs(8),
+                false,
+                true,
+                false
+            ),
+            Some(SlowAuthenticationSummary {
+                attempts: 3,
+                failures: 2,
+                historical: 2,
+                longest: Duration::from_secs(10)
+            })
+        );
+        assert!(
+            diagnostics
+                .observe(
+                    now + Duration::from_secs(301),
+                    Duration::from_secs(10),
+                    false,
+                    true,
+                    false
+                )
+                .is_none(),
+            "interactive reports never reset the background limit"
+        );
+        let mut independent = SlowAuthenticationDiagnostics::default();
+        assert!(
+            independent
+                .observe(now, Duration::from_secs(3), false, false, false)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn slow_authentication_diagnostics_bound_pending_counters_without_allocating_routes() {
+        let now = Instant::now();
+        let mut diagnostics = SlowAuthenticationDiagnostics {
+            next_report: Some(now + Duration::from_secs(300)),
+            pending: SlowAuthenticationSummary {
+                attempts: u64::MAX,
+                failures: u64::MAX,
+                historical: u64::MAX,
+                longest: Duration::from_secs(10),
+            },
+        };
+        assert!(
+            diagnostics
+                .observe(now, Duration::from_secs(3), false, true, false)
+                .is_none()
+        );
+        assert_eq!(
+            diagnostics
+                .observe(
+                    now + Duration::from_secs(300),
+                    Duration::from_secs(3),
+                    false,
+                    true,
+                    false
+                )
+                .unwrap()
+                .attempts,
+            u64::MAX
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_budget_is_shared_and_cancellation_releases_actual_owner() {
+        let pool = Arc::new(SessionPool::default());
+        let first = pool.historical_dial().unwrap();
+        let second = pool.historical_dial().unwrap();
+        assert!(!pool.historical_capacity_available());
+        assert!(local_capacity_busy(&pool.historical_dial().unwrap_err()));
+        // Historical pressure cannot consume the independent global/directional
+        // capacity needed by fresh peers and explicit interactive operations.
+        let live = pool.outbound().await.unwrap();
+        let task = tokio::spawn(async move {
+            let _owner = second;
+            std::future::pending::<()>().await;
+        });
+        task.abort();
+        let _ = task.await;
+        assert!(pool.historical_capacity_available());
+        assert!(pool.historical_dial().is_ok());
+        drop(first);
+        drop(live);
+        assert_eq!(pool.historical.available_permits(), 2);
+    }
+
+    #[test]
+    fn authenticated_resource_hint_is_exact_expiring_bounded_and_resettable() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let now = Instant::now();
+        pool.remember_authenticated_route(key.clone(), key.address, now);
+        assert!(pool.recently_authenticated_route(&key, now));
+        assert!(!pool.recently_authenticated_route(&key, now + Duration::from_secs(15)));
+        let mut different = key.clone();
+        different.generation += 1;
+        assert!(!pool.recently_authenticated_route(&different, now));
+        different = key.clone();
+        different.address.set_port(2);
+        assert!(!pool.recently_authenticated_route(&different, now));
+        different = key.clone();
+        different.identity = authentication_key(1).identity;
+        assert!(!pool.recently_authenticated_route(&different, now));
+        for port in 2..=MAX_ROUTE_AFFINITIES as u16 + 1 {
+            pool.remember_authenticated_route(authentication_key(port), key.address, now);
+        }
+        assert_eq!(
+            pool.route_affinities.lock().unwrap().len(),
+            MAX_ROUTE_AFFINITIES
+        );
+        assert!(!pool.recently_authenticated_route(&key, now));
+        pool.clear();
+        assert!(pool.route_affinities.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn local_capacity_backpressure_never_classifies_identity_or_protocol_failures_as_busy() {
         for message in [
             "peer authentication capacity busy",
             "TCP connection capacity busy",
+            "historical route capacity busy",
         ] {
             assert!(local_capacity_busy(&TransportError::Noise(message.into())));
         }

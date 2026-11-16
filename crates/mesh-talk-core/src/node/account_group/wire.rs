@@ -327,6 +327,49 @@ impl GroupControlHead {
             AccountGroupRole::Unknown => false,
         }
     }
+    /// Retained decoded memory, including every nested heap allocation. Charge
+    /// capacities (not wire length or logical lengths), with 32 bytes per heap
+    /// allocation for allocator overhead. Inline nested structs are already
+    /// counted by their enclosing vector capacity or the root size.
+    pub(in crate::node) fn allocation_charge(&self) -> usize {
+        fn vector<T>(value: &Vec<T>) -> usize {
+            value
+                .capacity()
+                .saturating_mul(std::mem::size_of::<T>())
+                .saturating_add(32)
+        }
+        fn announce(value: &Announce) -> usize {
+            value
+                .user_id
+                .capacity()
+                .saturating_add(32)
+                .saturating_add(value.name.capacity())
+                .saturating_add(32)
+                .saturating_add(vector(&value.sig))
+            // DeviceCertificate owns fixed arrays only; it is inline in Announce.
+        }
+        let access = &self.access;
+        let mut charge = std::mem::size_of::<Self>()
+            .saturating_add(announce(&self.proof))
+            .saturating_add(vector(&self.signature))
+            .saturating_add(access.owner_proof.as_ref().map_or(0, announce))
+            .saturating_add(vector(&access.controls))
+            .saturating_add(vector(&access.observation.sources))
+            .saturating_add(vector(&access.observation.members))
+            .saturating_add(vector(&access.acknowledgements))
+            .saturating_add(vector(&access.frontier))
+            .saturating_add(vector(&access.local_frontier));
+        for event in &access.controls {
+            charge = charge
+                .saturating_add(vector(&event.parents))
+                .saturating_add(vector(&event.ciphertext))
+                .saturating_add(vector(&event.sig));
+        }
+        for bound in &access.observation.sources {
+            charge = charge.saturating_add(announce(&bound.proof));
+        }
+        charge
+    }
     fn same_source_proof(left: &Announce, right: &Announce) -> bool {
         SourceAccess::same_binding(left, right)
     }
@@ -337,6 +380,8 @@ impl GroupControlHead {
         if bytes.len() > MAX_HEAD_BYTES {
             return None;
         }
+        #[cfg(test)]
+        CONTROL_HEAD_BODY_VALIDATIONS.with(|count| count.set(count.get() + 1));
         let mut value: Self = serde_json::from_slice(bytes).ok()?;
         value.content_hash = crate::node::account_documents::content_hash(bytes);
         value.valid(account).then_some(value)
@@ -365,4 +410,15 @@ pub(in crate::node) fn provenance_anchor(kind: EventKind) -> bool {
 /// sealed bootstrap payload as a public provenance anchor.
 pub(in crate::node) fn authorization_control(kind: EventKind) -> bool {
     provenance_anchor(kind) || kind == EventKind::ChannelDeviceInheritance
+}
+
+// Thread-local instrumentation counts the real full-body decode/crypto path and
+// isolates synchronous query measurements from concurrently running tests.
+#[cfg(test)]
+thread_local! {
+    static CONTROL_HEAD_BODY_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(in crate::node) fn control_head_body_validations() -> usize {
+    CONTROL_HEAD_BODY_VALIDATIONS.with(std::cell::Cell::get)
 }

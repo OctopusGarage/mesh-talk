@@ -23,7 +23,7 @@ pub(in crate::node) fn take_reaction_projection_work_for_test() -> (usize, usize
 impl Node {
     /// React to a message in a DM (toggle off with `remove = true`).
     pub async fn react_dm(
-        &self,
+        self: &std::sync::Arc<Self>,
         recipient: &str,
         target: EventId,
         emoji: &str,
@@ -35,7 +35,7 @@ impl Node {
 
     /// Authorize the synchronous durable acceptance before performing network I/O.
     pub async fn react_dm_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         recipient: &str,
         target: EventId,
         emoji: &str,
@@ -72,7 +72,7 @@ impl Node {
     /// logical message id (from account history). Fans the reaction out to every device
     /// of `target_account_id` + our own devices, so it aggregates account-wide.
     pub async fn react_to_account(
-        &self,
+        self: &std::sync::Arc<Self>,
         target_account_id: &str,
         target: EventId,
         emoji: &str,
@@ -84,7 +84,7 @@ impl Node {
 
     /// Authorize the synchronous durable acceptance before performing network I/O.
     pub async fn react_to_account_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         target_account_id: &str,
         target: EventId,
         emoji: &str,
@@ -242,7 +242,7 @@ impl Node {
 
     /// React to a message in a channel we hold the key for.
     pub async fn react_channel(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: ConversationId,
         target: EventId,
         emoji: &str,
@@ -254,7 +254,7 @@ impl Node {
 
     /// Authorize the synchronous durable acceptance before performing network I/O.
     pub async fn react_channel_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: ConversationId,
         target: EventId,
         emoji: &str,

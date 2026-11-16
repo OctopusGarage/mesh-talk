@@ -593,3 +593,152 @@ fn maximum_transcript_row_fits_explicit_serialized_budget_without_full_backlog_l
         1
     );
 }
+
+#[test]
+fn settled_retirement_does_not_mutate_sql_but_later_acknowledged_work_is_retired() {
+    let mut f = Fixture::new();
+    let zero = f.zero();
+    f.effects
+        .register(ReceptionConsumer::Desktop, zero)
+        .unwrap();
+    let changes = f
+        .effects
+        .profile
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    for _ in 0..4 {
+        // The host skips an unchanged ACK, but still registers and retires.
+        assert_eq!(
+            f.effects
+                .register(ReceptionConsumer::Desktop, zero)
+                .unwrap(),
+            zero
+        );
+        assert_eq!(f.effects.retire(1).unwrap(), 0);
+    }
+    assert_eq!(
+        f.effects
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        changes
+    );
+
+    f.insert(1, 30);
+    let first = f.effects.head().unwrap();
+    f.insert(2, 30);
+    let head = f.effects.head().unwrap();
+    f.effects
+        .acknowledge(ReceptionConsumer::Desktop, zero, head)
+        .unwrap();
+    // A committed ACK may leave multiple bounded retirement batches pending.
+    assert_eq!(f.effects.retire(1).unwrap(), 1);
+    assert_eq!(f.effects.oldest().unwrap(), first);
+    assert_eq!(f.effects.retire(1).unwrap(), 1);
+    assert_eq!(f.effects.oldest().unwrap(), head);
+    let changes = f
+        .effects
+        .profile
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    for _ in 0..4 {
+        assert_eq!(
+            f.effects
+                .register(ReceptionConsumer::Desktop, head)
+                .unwrap(),
+            head
+        );
+        assert_eq!(f.effects.retire(1).unwrap(), 0);
+    }
+    assert_eq!(
+        f.effects
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        changes
+    );
+
+    f.insert(3, 30);
+    let later = f.effects.head().unwrap();
+    let changes = f
+        .effects
+        .profile
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    assert_eq!(f.effects.retire(1).unwrap(), 0);
+    assert_eq!(
+        f.effects
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        changes
+    );
+    f.effects
+        .acknowledge(ReceptionConsumer::Desktop, head, later)
+        .unwrap();
+    assert_eq!(f.effects.retire(1).unwrap(), 1);
+    let f = f.reopen();
+    assert_eq!(f.effects.oldest().unwrap(), later);
+    assert_eq!(
+        f.effects.registered(ReceptionConsumer::Desktop).unwrap(),
+        Some(later)
+    );
+}
+
+#[test]
+fn failed_retirement_after_committed_ack_retries_without_reacknowledgement() {
+    let mut f = Fixture::new();
+    let zero = f.zero();
+    f.insert(1, 30);
+    let head = f.effects.head().unwrap();
+    f.effects
+        .register(ReceptionConsumer::Desktop, zero)
+        .unwrap();
+    f.effects
+        .acknowledge(ReceptionConsumer::Desktop, zero, head)
+        .unwrap();
+    // Fail the stream commit after pending deletion: both must roll back together.
+    f.effects.profile.database().transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_reception_retirement BEFORE UPDATE OF retired_through ON reception_stream BEGIN SELECT RAISE(ABORT,'injected retirement commit failure'); END;")?;
+        Ok(())
+    }).unwrap();
+    assert!(f.effects.retire(1).is_err());
+    assert_eq!(f.effects.oldest().unwrap(), zero);
+    assert_eq!(
+        f.effects.registered(ReceptionConsumer::Desktop).unwrap(),
+        Some(head)
+    );
+    assert_eq!(
+        f.effects
+            .page(zero, head, limit(10, 1000), 100)
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    f.effects
+        .profile
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_reception_retirement")?;
+            Ok(())
+        })
+        .unwrap();
+    // Reopen with the durable ACK ahead of retirement, as after a host crash.
+    let f = f.reopen();
+    assert_eq!(
+        f.effects
+            .register(ReceptionConsumer::Desktop, head)
+            .unwrap(),
+        head
+    );
+    assert_eq!(f.effects.retire(1).unwrap(), 1);
+    assert_eq!(f.effects.oldest().unwrap(), head);
+    assert_eq!(f.effects.retire(1).unwrap(), 0);
+}

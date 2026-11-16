@@ -570,6 +570,32 @@ async fn transfer_ownership(modern: bool) {
         owner.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner
     );
+    owner.try_publish_group_inventory_groups(&[group]).unwrap();
+    let inventory = owner.group_inventory_references();
+    let reference = inventory.get(&hex::encode(group.as_bytes())).unwrap();
+    assert_eq!(reference.legacy_membership, !modern);
+    if modern {
+        assert_eq!(reference.owner_account_id, Some(target.account_id()));
+        let representative = candidates
+            .iter()
+            .min_by_key(|member| member.user_id())
+            .unwrap();
+        assert_eq!(reference.owner, representative.user_id());
+        assert!(reference.members.iter().any(|member| {
+            member.public == *representative
+                && member.account_id == Some(target.account_id())
+                && !member.pending
+        }));
+        assert_eq!(
+            after.state.as_ref().unwrap().owner(),
+            before.state.as_ref().unwrap().owner(),
+            "descriptive inventory must not rewrite the legacy owner field"
+        );
+        assert_eq!(after.authority.grants(), before.authority.grants());
+    } else {
+        assert_eq!(reference.owner, owner.channel_owner(group));
+        assert_eq!(reference.owner_account_id, None);
+    }
     retry(owner, group, operation, status, &effect, baseline).await;
 }
 

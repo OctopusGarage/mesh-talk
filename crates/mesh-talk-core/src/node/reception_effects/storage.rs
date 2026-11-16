@@ -281,7 +281,7 @@ impl ReceptionEffects {
             for sequence in &sequences { c.execute("DELETE FROM reception_pending WHERE sequence=?1",[sequence])?; }
             let next: Option<i64> = c.query_row("SELECT MIN(p.sequence) FROM reception_pending p JOIN reception_identities i ON i.sequence=p.sequence WHERE p.sequence<=?1 AND i.account=?2",params![floor,self.account.as_slice()],|row|row.get(0))?;
             let retired = next.map_or(floor,|sequence|sequence-1);
-            c.execute("UPDATE reception_stream SET retired_through=MAX(retired_through,?1) WHERE account=?2",params![retired,self.account.as_slice()])?;
+            c.execute("UPDATE reception_stream SET retired_through=?1 WHERE account=?2 AND retired_through<?1",params![retired,self.account.as_slice()])?;
             Ok(sequences.len())
         })
     }

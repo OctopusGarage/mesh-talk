@@ -127,7 +127,10 @@ impl IndexedRelayState {
         }
         // Validate owner/epoch before interpreting a newer scope's lifecycle.
         self.repository.validate_network_on(c, &view.repository)?;
-        self.eligible_on(c, &view.conversation, cutoff)?;
+        Self::eligible_metadata(
+            self.mailbox_with_arrival_on(c, &view.conversation, arrival)?,
+            cutoff,
+        )?;
         Ok(())
     }
     pub(crate) fn network_validate_at(

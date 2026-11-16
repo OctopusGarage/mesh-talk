@@ -3,6 +3,8 @@
 //!
 //! The macOS auto-login item uses the standard OS Keychain. The in-app lock
 //! screen separately uses macOS device-owner authentication.
+//! Optional macOS convenience mode uses an encrypted local entry protected by
+//! filesystem user permissions; its local key does not isolate same-user processes.
 //! The password is never written to a plaintext file or localStorage. The feature
 //! remains gated behind the user-controllable "Stay signed in" toggle.
 //!
@@ -15,7 +17,7 @@
 #[cfg_attr(test, allow(dead_code))]
 mod macos;
 #[cfg(all(not(test), target_os = "macos"))]
-pub use macos::{clear, load, save};
+pub use macos::{load, save};
 
 /// The credential service name; the account is the mesh-talk username.
 #[cfg(all(not(test), not(target_os = "macos")))]
@@ -122,10 +124,95 @@ pub fn load(username: &str) -> Option<String> {
 #[cfg(test)]
 pub fn clear(username: &str) {
     test_io(username, "clear");
-    TEST_SECRETS.lock().unwrap().remove(username);
+    let mut secrets = TEST_SECRETS.lock().unwrap();
+    secrets.remove(username);
+    secrets.remove(&format!("local:{username}"));
 }
 
 // Ownership tests use the explicit cfg(test) provider above. They prove auth and
 // metadata sequencing, not a real platform keyring round trip: keyring's built-in
 // mock is per Entry, and the real keyring can be locked or absent in CI. Production
 // platform integration remains a separate end-to-end validation boundary.
+
+#[cfg(any(test, target_os = "macos"))]
+mod local;
+
+/// Select exactly one credential provider; convenience mode never touches Keychain.
+pub(crate) fn load_with_policy(username: &str, verification: bool) -> Option<String> {
+    #[cfg(all(not(test), target_os = "macos"))]
+    if !verification {
+        return local::load(&local_root(), username).ok().flatten();
+    }
+    #[cfg(test)]
+    if !verification {
+        return load(&format!("local:{username}"));
+    }
+    let _ = verification;
+    load(username)
+}
+
+pub(crate) fn save_with_policy(username: &str, password: &str, verification: bool) -> bool {
+    #[cfg(all(not(test), target_os = "macos"))]
+    if !verification {
+        return local::save(&local_root(), username, password).is_ok();
+    }
+    #[cfg(test)]
+    if !verification {
+        return save(&format!("local:{username}"), password);
+    }
+    let _ = verification;
+    save(username, password)
+}
+
+#[cfg(all(not(test), target_os = "macos"))]
+fn local_root() -> std::path::PathBuf {
+    crate::data_dir().join("saved-sessions")
+}
+
+pub(crate) fn clear_local(username: &str) -> Result<(), String> {
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        local::clear(&local_root(), username)
+    }
+    #[cfg(test)]
+    {
+        clear(&format!("local:{username}"));
+        if FAIL_LOCAL_CLEAR.lock().unwrap().remove(username) {
+            return Err("Injected directory sync failure after local removal".into());
+        }
+        Ok(())
+    }
+    #[cfg(all(not(test), not(target_os = "macos")))]
+    {
+        let _ = username;
+        Ok(())
+    }
+}
+
+#[cfg(all(not(test), target_os = "macos"))]
+pub fn clear(username: &str) {
+    // Local recovery is withdrawn before potentially interactive native cleanup.
+    if let Err(error) = clear_local(username) {
+        log::error!("Could not clear local saved login: {error}");
+    }
+    macos::clear(username);
+}
+
+/// Automatic recovery cleans only the selected provider. Explicit sign-out clears all.
+pub(crate) fn clear_with_policy(username: &str, verification: bool) -> Result<(), String> {
+    #[cfg(any(test, target_os = "macos"))]
+    if !verification {
+        return clear_local(username);
+    }
+    let _ = verification;
+    clear(username);
+    Ok(())
+}
+
+#[cfg(test)]
+static FAIL_LOCAL_CLEAR: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+#[cfg(test)]
+pub(crate) fn fail_local_clear_after_removal(username: &str) {
+    FAIL_LOCAL_CLEAR.lock().unwrap().insert(username.into());
+}

@@ -3,6 +3,7 @@ import type {
   AccountGroupControlRequest,
   AccountGroupOperationStatus,
   PersonalConversationState,
+  PendingStickerSourcesPage,
 } from "../types";
 import { invokeSensitive } from "./sensitiveInvoke";
 
@@ -726,11 +727,26 @@ export const chat = {
     invoke<ArrayBuffer | number[]>("read_file", { fileConv }).then(mediaBytes),
   /** Read DURABLE media bytes (image/screenshot/video) from the chat-media store. Survives
    * chunk prune + restart, unlike readFile (transient chunks). Rejects if none is stored. */
+  readMediaPreview: (fileConv: string) =>
+    invoke<ArrayBuffer | number[]>("read_media_preview", { fileConv }).then(
+      mediaBytes,
+    ),
   readMedia: (fileConv: string) =>
     invoke<ArrayBuffer | number[]>("read_media", { fileConv }).then(mediaBytes),
-  /** Write picked/pasted bytes to a temp file and return its path, to feed the file-send
-   *  pipeline. `name` (the picker has one) is kept verbatim so the real filename + extension
-   *  survive; without it a `pasted-<ts>.<ext>` name is synthesized for clipboard bytes. */
+  /** Read current pending sticker metadata without claiming download work. */
+  pendingStickerSources: (
+    owner: string,
+    account: string,
+    afterFile: string | null = null,
+    limit = 32,
+  ) =>
+    invoke<PendingStickerSourcesPage>("pending_sticker_sources", {
+      owner,
+      account,
+      afterFile,
+      limit,
+    }),
+
   registerStickerSource: (
     owner: string,
     account: string,
@@ -738,6 +754,8 @@ export const chat = {
     bytes: number[],
   ) => invoke<void>("register_sticker_source", { owner, account, name, bytes }),
 
+  /** Write picked/pasted bytes to a temp file for the file-send pipeline.
+   * Preserve a supplied filename; otherwise synthesize one for clipboard bytes. */
   writeTempFile: (bytes: number[], ext: string, name?: string) =>
     invoke<string>("write_temp_file", { bytes, ext, name }),
   deleteTempFile: (path: string) => invoke<void>("delete_temp_file", { path }),

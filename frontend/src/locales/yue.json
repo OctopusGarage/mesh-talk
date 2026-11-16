@@ -70,7 +70,9 @@
     "copyFailed": "無法複製。請檢查剪貼簿權限後再試。",
     "clear": "清除",
     "close": "關閉",
-    "dismiss": "略過"
+    "dismiss": "略過",
+    "retry": "再試",
+    "loadFailed": "載入唔到呢個頁面。"
   },
   "windowControls": {
     "minimize": "最小化",
@@ -507,7 +509,10 @@
     "notifications": "通知",
     "notificationsDesc": "當視窗不在前方時，有新訊息則通知你。",
     "staySignedIn": "保持登入狀態",
-    "staySignedInDesc": "將密碼存放於系統鑰匙圈，下次啟動時自動解鎖。",
+    "staySignedInDesc": "喺呢部電腦儲存登入憑證，下次啟動時自動登入。",
+    "startupVerification": "啟動時驗證",
+    "startupVerificationDesc": "自動登入前，用 Touch ID 或 Mac 登入密碼驗證身份。",
+    "startupVerificationLocal": "關閉後，加密嘅登入憑證會儲存喺本機，由系統用戶嘅檔案權限保護。同一用戶下運行嘅其他程序可能存取呢啲憑證。",
     "theme": "主題",
     "themeDesc": "選擇配色主題。",
     "theme_light": "淺色",

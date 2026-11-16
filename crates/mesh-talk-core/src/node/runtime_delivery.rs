@@ -1,15 +1,17 @@
 //! Explicit legacy payload delivery and bounded production observation targets.
-use super::call::ReceivedCallSignal;
+use super::{call::ReceivedCallSignal, ui_state::UiChanges};
 use std::{collections::VecDeque, sync::Mutex};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
+#[cfg(test)]
+use tokio::sync::watch;
 
-pub(super) struct HostPayload<T>(Option<mpsc::UnboundedSender<T>>, watch::Sender<u64>);
+pub(super) struct HostPayload<T>(Option<mpsc::UnboundedSender<T>>, UiChanges);
 impl<T> HostPayload<T> {
-    pub(super) fn legacy(sender: mpsc::UnboundedSender<T>, changes: watch::Sender<u64>) -> Self {
-        Self(Some(sender), changes)
+    pub(super) fn legacy(sender: mpsc::UnboundedSender<T>, changes: impl Into<UiChanges>) -> Self {
+        Self(Some(sender), changes.into())
     }
-    pub(super) fn projection(changes: watch::Sender<u64>) -> Self {
-        Self(None, changes)
+    pub(super) fn projection(changes: impl Into<UiChanges>) -> Self {
+        Self(None, changes.into())
     }
     pub(super) fn is_legacy(&self) -> bool {
         self.0.is_some()
@@ -40,7 +42,7 @@ enum CallDelivery {
     Legacy(mpsc::UnboundedSender<ReceivedCallSignal>),
     Bounded {
         queue: Mutex<CallQueue>,
-        changes: watch::Sender<u64>,
+        changes: UiChanges,
     },
 }
 pub(super) struct CallInbox(CallDelivery);
@@ -48,10 +50,10 @@ impl CallInbox {
     pub(super) fn legacy(sender: mpsc::UnboundedSender<ReceivedCallSignal>) -> Self {
         Self(CallDelivery::Legacy(sender))
     }
-    pub(super) fn bounded(changes: watch::Sender<u64>) -> Self {
+    pub(super) fn bounded(changes: impl Into<UiChanges>) -> Self {
         Self(CallDelivery::Bounded {
             queue: Mutex::new(CallQueue::default()),
-            changes,
+            changes: changes.into(),
         })
     }
     pub(super) fn send(

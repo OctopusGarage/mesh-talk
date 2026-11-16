@@ -134,22 +134,29 @@ export async function refreshDeliveryStatuses(
             postOffices: row.post_offices ?? 0,
           });
       }
-      set((s) => ({
-        messages: s.messages[key]
-          ? {
-              ...s.messages,
-              [key]: s.messages[key].map((m) =>
-                m.fromMe && !m.file && m.id && requestedIds.has(m.id)
-                  ? {
-                      ...m,
-                      replicas: replicas.get(m.id)?.members,
-                      postOfficeCopies: replicas.get(m.id)?.postOffices,
-                    }
-                  : m,
-              ),
-            }
-          : s.messages,
-      }));
+      set((s) => {
+        const current = s.messages[key];
+        if (!current) return { messages: s.messages };
+        let changed = false;
+        const next = current.map((m) => {
+          if (!m.fromMe || m.file || !m.id || !requestedIds.has(m.id)) return m;
+          const counts = replicas.get(m.id);
+          if (
+            m.replicas === counts?.members &&
+            m.postOfficeCopies === counts?.postOffices
+          )
+            return m;
+          changed = true;
+          return {
+            ...m,
+            replicas: counts?.members,
+            postOfficeCopies: counts?.postOffices,
+          };
+        });
+        return {
+          messages: changed ? { ...s.messages, [key]: next } : s.messages,
+        };
+      });
       return;
     }
     // The shared serial ticker also recovers capacity-fallback accepted intents.

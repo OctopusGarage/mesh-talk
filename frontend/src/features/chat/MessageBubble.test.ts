@@ -70,20 +70,7 @@ it.each([
   },
 );
 
-it("exposes the authoritative summary when no inline reactions were retained", () => {
-  const html = renderReactions([], false, vi.fn());
-  expect(html).not.toContain('data-testid="reaction-chip"');
-  const summary = html.match(
-    /<button[^>]*aria-label="More reactions"[^>]*>/,
-  )?.[0];
-  expect(
-    summary,
-    "a bounded-cache remainder must retain its summary entry",
-  ).toBeDefined();
-  expect(summary).not.toMatch(/\sdisabled(?:=|\s|>)/);
-});
-
-it("keeps read-only summary inspection enabled while inline mutations stay disabled", () => {
+it("keeps inline reactions read-only without adding a summary button", () => {
   const html = renderReactions(
     [{ target: "target", emoji: "👍", from_me: true, count: 1 }],
     true,
@@ -92,12 +79,15 @@ it("keeps read-only summary inspection enabled while inline mutations stay disab
   const chip = html.match(/<button[^>]*data-testid="reaction-chip"[^>]*>/)?.[0];
   expect(chip).toBeDefined();
   expect(chip).toMatch(/\sdisabled(?:=|\s|>)/);
-  const summary = html.match(
-    /<button[^>]*aria-label="More reactions"[^>]*>/,
-  )?.[0];
-  expect(summary).toBeDefined();
-  expect(
-    summary,
-    "read-only restricts mutation, not summary inspection",
-  ).not.toMatch(/\sdisabled(?:=|\s|>)/);
+  expect(html).not.toContain('aria-label="More reactions"');
+  expect(html).not.toContain("lucide-smile-plus");
 });
+
+it.each([false, true])(
+  "never renders an inline summary action for unloaded or empty reactions (readOnly=%s)",
+  (readOnly) => {
+    const html = renderReactions([], readOnly, vi.fn());
+    expect(html).not.toContain('aria-label="More reactions"');
+    expect(html).not.toContain("lucide-smile-plus");
+  },
+);

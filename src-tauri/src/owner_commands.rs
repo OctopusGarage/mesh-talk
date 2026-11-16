@@ -67,6 +67,188 @@ pub async fn owner_node_identity(
         .await
 }
 
+#[derive(Serialize)]
+pub struct RosterObservation {
+    identity: NodeIdentity,
+    peers: Vec<crate::chat_commands::PeerInfo>,
+    people: std::collections::HashMap<String, crate::chat_commands::PresenceInfo>,
+}
+
+/// One authorized discovery read; group metadata and bodies have separate owners.
+#[tauri::command]
+pub async fn owner_roster_observation(
+    owner: String,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<RosterObservation, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    roster_observation_with_snapshot(&admission, &node, owner, |handle| async move {
+        handle.cached_peer_snapshot_async().await
+    })
+    .await
+}
+
+async fn roster_observation_with_snapshot<F, Fut>(
+    admission: &RuntimeAdmission,
+    node: &NodeState,
+    owner: String,
+    snapshot: F,
+) -> Result<RosterObservation, CommandError>
+where
+    F: FnOnce(std::sync::Arc<mesh_talk_core::node::Node>) -> Fut,
+    Fut: std::future::Future<
+            Output = std::io::Result<Vec<mesh_talk_core::discovery::roster::PeerRecord>>,
+        >,
+{
+    let handle = admission
+        .with_runtime(|runtime| {
+            if !runtime.discovery_available() {
+                return Err(CommandError::Internal("discovery unavailable".into()));
+            }
+            Ok(runtime.handle())
+        })
+        .await?;
+    let peers = snapshot(handle.clone()).await;
+    admission
+        .with_runtime(|runtime| {
+            if !runtime.discovery_available() || !std::sync::Arc::ptr_eq(&runtime.handle(), &handle)
+            {
+                return Err(CommandError::not_started());
+            }
+            let peers = peers.map_err(|error| CommandError::Io(error.to_string()))?;
+            let people = crate::chat_commands::project_people(runtime, &peers);
+            Ok(RosterObservation {
+                identity: NodeIdentity {
+                    owner,
+                    device_id: runtime.user_id().into(),
+                    account_id: runtime.account_id().into(),
+                    display_name: runtime.display_name(),
+                    history_revision: runtime.account_history_revision(),
+                    supports_push_state: true,
+                    supports_bounded_delivery: runtime.handle().bounded_delivery(),
+                    runtime_id: node.installed_runtime_id(admission.lease())?,
+                },
+                peers: peers
+                    .into_iter()
+                    .map(crate::chat_commands::PeerInfo::from)
+                    .collect(),
+                people,
+            })
+        })
+        .await
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum ConditionalPresence {
+    Unchanged { unchanged: bool },
+    Full(crate::chat_commands::PresenceResponse),
+}
+
+#[tauri::command]
+pub async fn owner_presence_if_groups_changed(
+    owner: String,
+    known_group_revision: String,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<ConditionalPresence, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    presence_if_groups_changed(&admission, &known_group_revision, || {
+        crate::chat_commands::get_presence_for_state(&node, Some(String::new()))
+    })
+    .await
+}
+
+async fn presence_if_groups_changed<F, Fut>(
+    admission: &RuntimeAdmission,
+    known_group_revision: &str,
+    refresh: F,
+) -> Result<ConditionalPresence, CommandError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<crate::chat_commands::PresenceResponse, CommandError>>,
+{
+    presence_if_groups_changed_with_revision(
+        admission,
+        known_group_revision,
+        |node, work| group_revision_with_work(node, work, |node| node.group_projection_revision()),
+        refresh,
+    )
+    .await
+}
+
+async fn group_revision_with_work(
+    node: std::sync::Arc<mesh_talk_core::node::Node>,
+    work: mesh_talk_core::node::ParticipantWork,
+    read: impl FnOnce(
+        std::sync::Arc<mesh_talk_core::node::Node>,
+    ) -> Result<[u8; 32], mesh_talk_core::eventlog::LogError>
+    + Send
+    + 'static,
+) -> Result<String, CommandError> {
+    let mut tasks = tokio::task::JoinSet::new();
+    if !work.spawn(&mut tasks, move || read(node)) {
+        return Err(CommandError::not_started());
+    }
+    tasks
+        .join_next()
+        .await
+        .ok_or_else(CommandError::not_started)?
+        .map_err(|error| CommandError::Internal(error.to_string()))?
+        .map(hex::encode)
+        .map_err(|error| CommandError::Io(error.to_string()))
+}
+
+async fn presence_if_groups_changed_with_revision<F, Fut, R, Revision>(
+    admission: &RuntimeAdmission,
+    known_group_revision: &str,
+    revision: R,
+    refresh: F,
+) -> Result<ConditionalPresence, CommandError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<crate::chat_commands::PresenceResponse, CommandError>>,
+    R: FnOnce(
+        std::sync::Arc<mesh_talk_core::node::Node>,
+        mesh_talk_core::node::ParticipantWork,
+    ) -> Revision,
+    Revision: std::future::Future<Output = Result<String, CommandError>>,
+{
+    crate::chat_commands::validate_group_revision(Some(known_group_revision))?;
+    let (handle, work) = admission
+        .with_runtime(|runtime| {
+            if !runtime.discovery_available() {
+                return Err(CommandError::Internal("discovery unavailable".into()));
+            }
+            Ok((runtime.handle(), runtime.blocking_work()))
+        })
+        .await?;
+    let observed_revision = revision(handle.clone(), work).await;
+    let observed_revision = admission
+        .with_runtime(|runtime| {
+            if !runtime.discovery_available() || !std::sync::Arc::ptr_eq(&runtime.handle(), &handle)
+            {
+                return Err(CommandError::not_started());
+            }
+            observed_revision
+        })
+        .await?;
+    let unchanged = !known_group_revision.is_empty() && known_group_revision == observed_revision;
+    if unchanged {
+        return Ok(ConditionalPresence::Unchanged { unchanged: true });
+    }
+    let response = refresh().await;
+    admission
+        .with_runtime(|runtime| {
+            if !runtime.discovery_available() || !std::sync::Arc::ptr_eq(&runtime.handle(), &handle)
+            {
+                return Err(CommandError::not_started());
+            }
+            response.map(ConditionalPresence::Full)
+        })
+        .await
+}
+
 /// Observe authenticated startup identity without admitting node operations.
 #[tauri::command]
 pub fn owner_startup_identity(
@@ -516,6 +698,7 @@ pub async fn owner_delivery_statuses(
 
 #[cfg(test)]
 mod tests {
+    use super::CommandError;
     use crate::{
         chat_commands::NodeState,
         services::{auth_service::AuthService, user::User},
@@ -543,6 +726,444 @@ mod tests {
         tauri::async_runtime::block_on(async {
             mesh_talk_core::transport::net::discovery_socket(0).unwrap()
         })
+    }
+
+    fn held_roster_owner_control(groups: bool) {
+        let fixture = Fixture::new();
+        let replacement_root = tempfile::tempdir().unwrap();
+        tauri::async_runtime::block_on(async {
+            let replacement = mesh_talk_core::node::NodeRuntime::start(
+                replacement_root.path(),
+                "alice",
+                "Replacement",
+                "pw",
+                0,
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+            )
+            .await
+            .unwrap();
+            let admission =
+                super::RuntimeAdmission::capture(&fixture.app_state, &fixture.node, "alice")
+                    .unwrap();
+            let state = fixture.node.clone();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let query = tokio::spawn(async move {
+                if groups {
+                    super::presence_if_groups_changed(&admission, "", || async {
+                        let response = crate::chat_commands::get_presence_for_state(
+                            &state,
+                            Some(String::new()),
+                        )
+                        .await?;
+                        entered_tx.send(()).unwrap();
+                        release_rx.await.unwrap();
+                        Ok(response)
+                    })
+                    .await
+                    .map(|_| ())
+                } else {
+                    super::roster_observation_with_snapshot(
+                        &admission,
+                        &state,
+                        "alice".into(),
+                        |node| async move {
+                            entered_tx.send(()).unwrap();
+                            release_rx.await.unwrap();
+                            node.cached_peer_snapshot_async().await
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let access =
+                tokio::time::timeout(std::time::Duration::from_secs(2), fixture.node.0.write())
+                    .await;
+            let available = access.is_ok();
+            let old = if let Ok(mut guard) = access {
+                guard.replace(replacement)
+            } else {
+                replacement.stop().await;
+                None
+            };
+            release_tx.send(()).unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), query)
+                .await
+                .unwrap()
+                .unwrap();
+            if let Some(old) = old {
+                old.stop().await;
+            }
+            assert!(
+                available,
+                "snapshot/group observation cannot retain the runtime slot"
+            );
+            assert!(
+                result.is_err(),
+                "same owner replacement must fence the old completion"
+            );
+        });
+    }
+
+    #[test]
+    fn roster_snapshot_fences_same_owner_runtime_replacement_without_holding_slot() {
+        held_roster_owner_control(false);
+    }
+
+    #[test]
+    fn roster_group_response_fences_same_owner_runtime_replacement_without_holding_slot() {
+        held_roster_owner_control(true);
+    }
+
+    #[test]
+    fn roster_held_group_metadata_keeps_registered_identity_and_peer_observation_available() {
+        let fixture = Fixture::new();
+        let admission =
+            super::RuntimeAdmission::capture(&fixture.app_state, &fixture.node, "alice").unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let revision = tauri::async_runtime::block_on(admission.with_runtime(|runtime| {
+            Ok(hex::encode(
+                runtime.handle().group_projection_revision().unwrap(),
+            ))
+        }))
+        .unwrap();
+        let query = tauri::async_runtime::spawn(async move {
+            super::presence_if_groups_changed_with_revision(
+                &admission,
+                &revision,
+                |node, work| {
+                    super::group_revision_with_work(node, work, move |node| {
+                        entered_tx.send(()).unwrap();
+                        release_rx
+                            .recv_timeout(std::time::Duration::from_secs(10))
+                            .unwrap();
+                        node.group_projection_revision()
+                    })
+                },
+                || async { unreachable!("equal group metadata cannot start body work") },
+            )
+            .await
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let webview = fixture.webview.clone();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            let identity = invoke(
+                &webview,
+                "owner_node_identity",
+                serde_json::json!({"owner":"alice"}),
+            );
+            let roster = invoke(
+                &webview,
+                "owner_roster_observation",
+                serde_json::json!({"owner":"alice"}),
+            );
+            finished_tx.send((identity, roster)).unwrap();
+        });
+        let observed = finished_rx.recv_timeout(std::time::Duration::from_secs(5));
+        release_tx.send(()).unwrap();
+        let completed = tauri::async_runtime::block_on(query).unwrap().unwrap();
+        observer.join().unwrap();
+        assert!(matches!(
+            completed,
+            super::ConditionalPresence::Unchanged { unchanged: true }
+        ));
+        let (identity, roster) =
+            observed.expect("held group metadata must not retain session or runtime-slot guards");
+        assert!(identity.is_ok() && roster.is_ok());
+    }
+
+    #[test]
+    fn roster_cancelled_metadata_observer_retains_actual_work_in_runtime_retirement() {
+        let fixture = Fixture::new();
+        tauri::async_runtime::block_on(async {
+            let admission =
+                super::RuntimeAdmission::capture(&fixture.app_state, &fixture.node, "alice")
+                    .unwrap();
+            let (node, work) = admission
+                .with_runtime(|runtime| Ok((runtime.handle(), runtime.blocking_work())))
+                .await
+                .unwrap();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let observer = tokio::spawn(super::group_revision_with_work(node, work, move |node| {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                node.group_projection_revision()
+            }));
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            observer.abort();
+            assert!(observer.await.is_err());
+            let runtime = fixture.node.0.write().await.take().unwrap();
+            let mut retirement = tokio::spawn(runtime.stop());
+            let retained =
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut retirement)
+                    .await
+                    .is_err();
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), retirement)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                retained,
+                "cancelled observer cannot release the actual blocking worker retirement permit"
+            );
+        });
+    }
+
+    #[test]
+    fn roster_failed_observations_recheck_authority_before_publishing_source_errors() {
+        for boundary in 0..3 {
+            let fixture = Fixture::new();
+            tauri::async_runtime::block_on(async {
+                let admission =
+                    super::RuntimeAdmission::capture(&fixture.app_state, &fixture.node, "alice")
+                        .unwrap();
+                let replace = || {
+                    fixture.app_state.session().set(
+                        "replacement".into(),
+                        user("alice"),
+                        "pw".into(),
+                    )
+                };
+                let result = match boundary {
+                    0 => super::roster_observation_with_snapshot(
+                        &admission,
+                        &fixture.node,
+                        "alice".into(),
+                        |_| async {
+                            replace();
+                            Err(std::io::Error::other("retired source cache error"))
+                        },
+                    )
+                    .await
+                    .map(|_| ()),
+                    1 => super::presence_if_groups_changed_with_revision(
+                        &admission,
+                        "",
+                        |_, _| async {
+                            replace();
+                            Err(CommandError::Io("retired source metadata error".into()))
+                        },
+                        || async { unreachable!() },
+                    )
+                    .await
+                    .map(|_| ()),
+                    _ => super::presence_if_groups_changed(&admission, "", || async {
+                        replace();
+                        Err(CommandError::Io("retired source group error".into()))
+                    })
+                    .await
+                    .map(|_| ()),
+                };
+                assert!(
+                    matches!(result, Err(CommandError::Authorization(_))),
+                    "boundary {boundary}: retired source errors must not become current owner failures"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn roster_owner_rejects_same_owner_session_generation_replacement() {
+        let fixture = Fixture::new();
+        tauri::async_runtime::block_on(async {
+            let admission =
+                super::RuntimeAdmission::capture(&fixture.app_state, &fixture.node, "alice")
+                    .unwrap();
+            let app = fixture.app_state.clone();
+            let response = super::roster_observation_with_snapshot(
+                &admission,
+                &fixture.node,
+                "alice".into(),
+                |node| async move {
+                    app.session()
+                        .set("replacement".into(), user("alice"), "pw".into());
+                    node.cached_peer_snapshot_async().await
+                },
+            )
+            .await;
+            assert!(matches!(response, Err(CommandError::Authorization(_))));
+        });
+    }
+
+    #[test]
+    fn roster_group_body_failure_is_explicit_and_equal_metadata_never_starts_it() {
+        let fixture = Fixture::new();
+        tauri::async_runtime::block_on(async {
+            let admission =
+                super::RuntimeAdmission::capture(&fixture.app_state, &fixture.node, "alice")
+                    .unwrap();
+            let revision = admission
+                .with_runtime(|runtime| {
+                    Ok(hex::encode(
+                        runtime.handle().group_projection_revision().unwrap(),
+                    ))
+                })
+                .await
+                .unwrap();
+            let failed = || async {
+                Err(CommandError::Io(
+                    "controlled full group body failure".into(),
+                ))
+            };
+            let unchanged = super::presence_if_groups_changed(&admission, &revision, failed)
+                .await
+                .unwrap();
+            assert!(matches!(
+                unchanged,
+                super::ConditionalPresence::Unchanged { unchanged: true }
+            ));
+            let error = super::presence_if_groups_changed(&admission, "", failed).await;
+            assert!(matches!(error, Err(CommandError::Io(_))));
+        });
+    }
+
+    #[test]
+    fn roster_owner_reads_once_and_equal_groups_skip_the_entire_full_pipeline() {
+        let fixture = Fixture::new();
+        tauri::async_runtime::block_on(async {
+            let admission =
+                super::RuntimeAdmission::capture(&fixture.app_state, &fixture.node, "alice")
+                    .unwrap();
+            let reads = std::sync::atomic::AtomicUsize::new(0);
+            let observed = super::roster_observation_with_snapshot(
+                &admission,
+                &fixture.node,
+                "alice".into(),
+                |node| {
+                    let reads = &reads;
+                    async move {
+                        reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        node.cached_peer_snapshot_async().await
+                    }
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(!observed.people.is_empty());
+            let revision = admission
+                .with_runtime(|runtime| {
+                    Ok(hex::encode(
+                        runtime.handle().group_projection_revision().unwrap(),
+                    ))
+                })
+                .await
+                .unwrap();
+            let body_reads = std::sync::atomic::AtomicUsize::new(0);
+            let response = super::presence_if_groups_changed(&admission, &revision, || async {
+                body_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::chat_commands::get_presence_for_state(&fixture.node, Some(String::new()))
+                    .await
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                response,
+                super::ConditionalPresence::Unchanged { unchanged: true }
+            ));
+            assert_eq!(body_reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+            for known in [String::new(), "f".repeat(64)] {
+                let response = super::presence_if_groups_changed(&admission, &known, || async {
+                    body_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    crate::chat_commands::get_presence_for_state(&fixture.node, Some(String::new()))
+                        .await
+                })
+                .await
+                .unwrap();
+                assert!(matches!(response, super::ConditionalPresence::Full(_)));
+            }
+            assert_eq!(body_reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        });
+    }
+
+    #[test]
+    fn registered_roster_preserves_real_snapshot_io_failure_and_recovers() {
+        let fixture = Fixture::new();
+        let cache = fixture.root.path().join("accounts/alice/peer-proofs");
+        let bytes = std::fs::read(&cache).unwrap();
+        std::fs::remove_file(&cache).unwrap();
+        std::fs::create_dir(&cache).unwrap();
+        fixture.offline_peer();
+        let failed = fixture.invoke(
+            "owner_roster_observation",
+            serde_json::json!({"owner":"alice"}),
+        );
+        std::fs::remove_dir(&cache).unwrap();
+        std::fs::write(&cache, bytes).unwrap();
+        assert_eq!(
+            failed.unwrap_err()["kind"],
+            "io",
+            "real cache persistence failure must remain an IO error"
+        );
+        let response = fixture
+            .invoke(
+                "owner_roster_observation",
+                serde_json::json!({"owner":"alice"}),
+            )
+            .unwrap();
+        assert!(!response["peers"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn registered_conditional_presence_returns_unchanged_only_for_applied_revision() {
+        let fixture = Fixture::new();
+        let full = fixture
+            .invoke(
+                "owner_presence_if_groups_changed",
+                serde_json::json!({"owner":"alice", "knownGroupRevision":""}),
+            )
+            .unwrap();
+        assert!(full["groups"].is_object());
+        let unchanged = fixture
+            .invoke(
+                "owner_presence_if_groups_changed",
+                serde_json::json!({"owner":"alice", "knownGroupRevision":full["groups_revision"]}),
+            )
+            .unwrap();
+        assert_eq!(unchanged, serde_json::json!({"unchanged":true}));
+    }
+
+    #[test]
+    fn registered_roster_observation_is_owner_scoped_and_people_only() {
+        let fixture = Fixture::new();
+        let response = fixture
+            .invoke(
+                "owner_roster_observation",
+                serde_json::json!({"owner":"alice"}),
+            )
+            .unwrap();
+        assert!(response["peers"].is_array());
+        assert!(response["people"].is_object());
+        assert_eq!(response["identity"]["owner"], "alice");
+        assert!(response.get("groups").is_none());
+        assert!(
+            fixture
+                .invoke(
+                    "owner_roster_observation",
+                    serde_json::json!({"owner":"bob"})
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -657,6 +1278,7 @@ mod tests {
                     crate::chat_commands::channel_history,
                     crate::chat_commands::read_file,
                     crate::chat_commands::read_media,
+                    crate::chat_commands::read_media_preview,
                     crate::trust::mark_verified,
                     crate::trust::get_trust,
                     crate::avatars::get_avatars,
@@ -746,6 +1368,8 @@ mod tests {
                     crate::message_favorites::owner_read_favorite_file,
                     crate::message_favorites::owner_save_favorite_file,
                     super::owner_node_identity,
+                    super::owner_roster_observation,
+                    super::owner_presence_if_groups_changed,
                     super::owner_startup_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_channel_text,
@@ -1280,6 +1904,114 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error["kind"], "authorization");
+    }
+
+    #[test]
+    fn personal_state_enumeration_uses_controls_without_reading_unrelated_inventory() {
+        use mesh_talk_core::node::DocumentConversation;
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let handle = fixture.node.0.blocking_read().as_ref().unwrap().handle();
+        let account = handle.account_id();
+        let peer = "ab".repeat(16);
+        handle
+            .delete_account_contact_if(&account, &peer, false, |commit| commit())
+            .unwrap();
+        let unrelated =
+            tauri::async_runtime::block_on(handle.create_channel("Unrelated inventory", vec![]))
+                .unwrap();
+        let deleted =
+            tauri::async_runtime::block_on(handle.create_channel("Deleted group", vec![])).unwrap();
+        tauri::async_runtime::block_on(handle.dissolve_channel(deleted)).unwrap();
+        handle
+            .delete_left_group_if(&account, deleted, |commit| commit())
+            .unwrap();
+        // Positive control: read the real document published by maintenance.
+        // Physical channel listing deliberately skips inventory bodies.
+        // Synchronous reads here and in with_runtime execute on this test thread;
+        // independently owned maintenance runs on the blocking pool.
+        let inventory_key = mesh_talk_core::node::AccountDocumentKey::GroupInventory {
+            channel: hex::encode(unrelated.as_bytes()),
+            source_device: handle.user_id(),
+        };
+        let before = handle.test_group_inventory_body_read_count();
+        tauri::async_runtime::block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    handle.account_document(&inventory_key).unwrap();
+                    if handle.test_group_inventory_body_read_count() > before {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("normal publication must produce readable inventory");
+        });
+        let read_states = || {
+            tauri::async_runtime::block_on(super::owner_personal_conversation_states(
+                "alice".into(),
+                account.clone(),
+                fixture.webview.state::<AppState>(),
+                fixture.webview.state::<NodeState>(),
+            ))
+            .unwrap()
+        };
+        for _ in 0..3 {
+            let reads = handle.test_group_inventory_body_read_count();
+            let states = serde_json::to_value(read_states()).unwrap();
+            assert_eq!(
+                handle.test_group_inventory_body_read_count(),
+                reads,
+                "personal-state enumeration must not hydrate unrelated inventory"
+            );
+            let rows = states.as_array().unwrap();
+            let find = |conversation: DocumentConversation| {
+                rows.iter()
+                    .find(|row| row["conversation"] == serde_json::to_value(&conversation).unwrap())
+            };
+            assert_eq!(
+                find(DocumentConversation::Account(peer.clone())).unwrap()["hidden"],
+                true
+            );
+            assert_eq!(
+                find(DocumentConversation::Channel(hex::encode(
+                    deleted.as_bytes()
+                )))
+                .unwrap()["hidden"],
+                true
+            );
+            assert!(
+                find(DocumentConversation::Channel(hex::encode(
+                    unrelated.as_bytes()
+                )))
+                .is_none()
+            );
+        }
+        handle
+            .reopen_account_conversation_if(&account, &peer, |commit| commit())
+            .unwrap();
+        let states = serde_json::to_value(read_states()).unwrap();
+        assert!(
+            states
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |row| row["conversation"] == serde_json::json!({"kind":"account", "id":peer})
+                        && row["hidden"] == false
+                )
+        );
+        let registered = fixture
+            .invoke(
+                "owner_personal_conversation_states",
+                serde_json::json!({"owner":"alice", "expectedAccount":account}),
+            )
+            .unwrap();
+        assert_eq!(
+            registered, states,
+            "registered owner adapter retains the same state projection"
+        );
     }
 
     #[test]
@@ -2958,7 +3690,7 @@ mod tests {
                     )
                     .is_err()
             );
-            for read in ["read_media", "read_file"] {
+            for read in ["read_media", "read_media_preview", "read_file"] {
                 assert!(
                     fixture
                         .invoke(read, serde_json::json!({"fileConv":accepted["fileConv"]}))
@@ -4334,6 +5066,10 @@ mod tests {
                 ("read_file", serde_json::json!({"fileConv":"00".repeat(32)})),
                 (
                     "read_media",
+                    serde_json::json!({"fileConv":"00".repeat(32)}),
+                ),
+                (
+                    "read_media_preview",
                     serde_json::json!({"fileConv":"00".repeat(32)}),
                 ),
                 (

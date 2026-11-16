@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { prepareArchive, verifyPreparedArchive, validateLcov, collectDefaultArchive, verifyIdentity } from "../ci/windows-coverage.mjs";
+import { prepareArchive, verifyPreparedArchive, validateLcov, collectDefaultArchive, verifyIdentity, verifyLayout } from "../ci/windows-coverage.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { resolve, join } from "node:path";
@@ -99,6 +99,7 @@ function ignoredSelection(full) {
 export function archivedBackendPlan(prepared, { env = process.env, rustLibDir } = {}) {
   const { manifest, binaries, metadata, listings } = prepared;
   const root = manifest.identity.root, target = manifest.identity.targetDirectory;
+  verifyLayout(binaries, root, "linux-workspace");
   assert.equal(target, join(root, "target/llvm-cov-target"), "Ignored archive requires the original Linux coverage target");
   assert.equal(realpathSync(target), target, "Ignored target may not redirect");
   const inside = file => {
@@ -158,7 +159,6 @@ export function archivedBackendPlan(prepared, { env = process.env, rustLibDir } 
     assert.equal(found[0]["binary-id"], suite["binary-id"], "Ignored suite and executable identity differ");
     assert.equal(pkg.targets.filter(row => row.name === name && row.kind.includes("test")).length, 1, "Ignored executable differs from Cargo target");
     const binary = inside(found[0]["binary-path"]);
-    assert.equal(path.dirname(binary), join(target, "debug/deps"), "Ignored harness must retain original target layout");
     return { target: name, expected, ids, binary, binarySha256: executableHash(binary), helperSha256, cwd, env: runtimeEnv,
       args: name === "large_directory_enqueue" ? [LARGE_FOLDER_SCENARIO, "--exact", "--ignored", "--test-threads=1"] : ["--ignored", "--test-threads=1", ...(Object.hasOwn(BACKEND_SUITES, name) ? ["--nocapture"] : [])],
       allowFiltered };
@@ -216,7 +216,10 @@ export function verifyArchivedBackendEvidence(directory, output, trusted) {
   assert.deepEqual(inventory.map(({ target, expected, ids, allowFiltered }) => ({ target, expected, ids, allowFiltered })), selection, "Ignored selected scenarios differ from sealed contract");
   for (const item of inventory) {
     for (const value of [item.binarySha256, item.helperSha256]) assert.match(value ?? "", /^[a-f0-9]{64}$/u, "Ignored executable fingerprints required");
-    assert.equal(path.dirname(item.binary), join(manifest.identity.targetDirectory, "debug/deps"), "Ignored executable path changed");
+    verifyLayout({
+      "rust-build-meta": { "target-directory": manifest.identity.targetDirectory },
+      "rust-binaries": { ignored: { kind: "test", "binary-path": item.binary } },
+    }, manifest.identity.root, "linux-workspace");
     const relative = path.relative(manifest.identity.root, item.cwd);
     assert.ok(relative && !relative.startsWith("..") && !path.isAbsolute(relative), "Ignored cwd escaped source");
     const args = item.target === "large_directory_enqueue" ? [LARGE_FOLDER_SCENARIO, "--exact", "--ignored", "--test-threads=1"] : ["--ignored", "--test-threads=1", ...(Object.hasOwn(BACKEND_SUITES, item.target) ? ["--nocapture"] : [])];

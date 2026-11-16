@@ -232,37 +232,46 @@ impl Node {
     }
 
     pub async fn flush_accepted_message(
-        &self,
+        self: &std::sync::Arc<Self>,
         destination: &MessageDestination,
         message_id: EventId,
     ) {
         match destination {
             MessageDestination::Account(_) => self.flush_delivery(message_id).await,
             MessageDestination::Channel(channel) => {
-                let ready = {
-                    let mut store = self.delivery.lock().expect("delivery lock");
-                    match self.recover_delivery(&mut store) {
-                        Ok(()) => true,
-                        Err(error) => {
-                            log::warn!("accepted channel delivery recovery deferred: {error}");
-                            false
-                        }
-                    }
-                };
-                if !ready {
-                    return;
-                }
-                let members = self
-                    .channels
-                    .lock()
-                    .expect("channels lock")
-                    .state(channel)
-                    .map(|s| s.members().to_vec());
-                if let Some(members) = members {
-                    self.distribute_channel_message(*channel, &members, message_id)
-                        .await;
+                self.flush_accepted_channel_message(*channel, message_id)
+                    .await
+            }
+        }
+    }
+
+    pub(in crate::node) async fn flush_accepted_channel_message(
+        self: &std::sync::Arc<Self>,
+        channel: ConversationId,
+        message_id: EventId,
+    ) {
+        let ready = {
+            let mut store = self.delivery.lock().expect("delivery lock");
+            match self.recover_delivery(&mut store) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("accepted channel delivery recovery deferred: {error}");
+                    false
                 }
             }
+        };
+        if !ready {
+            return;
+        }
+        let members = self
+            .channels
+            .lock()
+            .expect("channels lock")
+            .state(&channel)
+            .map(|s| s.members().to_vec());
+        if let Some(members) = members {
+            self.distribute_channel_message(channel, &members, message_id)
+                .await;
         }
     }
 
@@ -414,7 +423,8 @@ impl Node {
                     transaction: Box::new(transaction),
                 };
             }
-            store.begin(transaction).map_err(NodeError::Log)?;
+            self.begin_delivery_intent(&mut store, transaction)
+                .map_err(NodeError::Log)?;
             drop(book);
             result = Some(id);
             Ok(())
@@ -433,7 +443,6 @@ impl Node {
             log::debug!("accepted channel metadata awaits preparation: {error}");
         }
         self.process_channel(channel);
-        self.delivery_notify.notify_one();
         Ok(id)
     }
 }

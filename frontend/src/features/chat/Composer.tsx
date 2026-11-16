@@ -25,6 +25,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
+import { usePackRequest } from "@/lib/usePack";
 import { installedStickers } from "@/lib/stickerPacks";
 import { usePacks } from "@/store/packs";
 import { ReplyPreview } from "./ReplyPreview";
@@ -187,10 +188,6 @@ export function Composer({
       .filter(Boolean)
       .join(" · ");
   const installedPacks = usePacks((s) => s.packs);
-  const stickers = useMemo(
-    () => installedStickers(installedPacks),
-    [installedPacks],
-  );
   const stickerLibraries = installedPacks.filter(
     (pack) => pack.kind === "sticker",
   );
@@ -274,6 +271,15 @@ export function Composer({
     : (stickerLibraries.find((pack) => pack.id === "google-noto")?.id ??
       stickerLibraries[0]?.id ??
       null);
+  const stickerRequest = usePackRequest(
+    activeStickerPack ?? undefined,
+    expressionTab === "stickers",
+  );
+  const hydratedStickerPack = stickerRequest.pack;
+  const stickers = useMemo(
+    () => installedStickers(hydratedStickerPack ? [hydratedStickerPack] : []),
+    [hydratedStickerPack],
+  );
   const [showTools, setShowTools] = useState(false);
   const [panelPointerMotion, setPanelPointerMotion] = useState(false);
   const panelMotion = { pointer: panelPointerMotion, reduced: !motionOK };
@@ -761,6 +767,23 @@ export function Composer({
                       </button>
                     ))}
                   </div>
+                  {stickerRequest.error && (
+                    <p role="alert" className="p-2 text-sm">
+                      {t("common.loadFailed")}{" "}
+                      <button
+                        type="button"
+                        onClick={stickerRequest.retry}
+                        className="underline"
+                      >
+                        {t("common.retry")}
+                      </button>
+                    </p>
+                  )}
+                  {stickerRequest.loading && (
+                    <p role="status" className="p-2 text-sm">
+                      {t("common.loading")}
+                    </p>
+                  )}
                   <div className="grid grid-cols-5 gap-1">
                     {stickers
                       .filter((sticker) =>

@@ -107,6 +107,21 @@ impl Node {
         let Some(announce) = peer.announcement() else {
             return Ok(());
         };
+        // Existing exact bindings have no transition to apply. Do not make
+        // ordinary authentication wait for unrelated channel history.
+        {
+            let guard = self
+                .privacy
+                .state
+                .read()
+                .expect("privacy state lock not poisoned");
+            if guard
+                .as_ref()
+                .is_none_or(|state| state.proofs.accepts_binding(announce))
+            {
+                return Ok(());
+            }
+        }
         let group = self
             .group_member(peer.public_identity())
             .map_err(|error| TransportError::Io(std::io::Error::other(error)))?

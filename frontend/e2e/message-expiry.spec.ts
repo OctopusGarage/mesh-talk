@@ -4,10 +4,12 @@ import { enterChat, openBobDm, BOB } from "./helpers/session";
 test("send-time countdown expires both directions without reopening and rejects stale history", async ({
   page,
 }) => {
+  // Install before navigation so every timer and monotonic clock in the chat
+  // owner uses the same controlled timeline.
+  await page.clock.install();
   await enterChat(page);
   await openBobDm(page);
-  const frozen = Date.now() + 1000;
-  await page.clock.install({ time: new Date(frozen - 1000) });
+  const frozen = await page.evaluate(() => Date.now() + 1000);
   await page.clock.pauseAt(new Date(frozen));
   await page.getByTestId("composer-expiry").selectOption("60000");
   await page.getByTestId("composer-input").fill("temporary outgoing message");

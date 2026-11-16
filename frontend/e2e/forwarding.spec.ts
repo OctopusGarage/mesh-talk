@@ -221,7 +221,9 @@ test("received merged records render ordered content and media, export attachmen
           ready: true,
         }));
       if (
-        (cmd === "read_media" || cmd === "read_file") &&
+        (cmd === "read_media" ||
+          cmd === "read_media_preview" ||
+          cmd === "read_file") &&
         args.fileConv === "received-merged-record"
       )
         return w.__recordProbe.invalid

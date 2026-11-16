@@ -41,7 +41,7 @@ export function requiredBrowserPaths(tier) {
     ["automatic-delivery.spec.ts", "channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator"],
     ["automatic-delivery.spec.ts", "linked-device channel history waits for copy confirmation before showing a check"],
     ["automatic-delivery.spec.ts", "typed channel File stays pending until canonical metadata commits and original-ID replay stays singular"],
-    ["media-recovery.spec.ts", "received media recovers when bytes become available with stable fileConv"],
+    ["media-recovery.spec.ts", "legacy media availability recovery preserves the stable fileConv and full-size actions"],
     ["media-lifecycle.spec.ts", "same-identity disable/re-enable never returns a revoked URL"],
     ["media-lifecycle.spec.ts", "cleanup during an admitted durable read prevents fallback and blob creation"],
     ["media-lifecycle.spec.ts", "same UUID relogin revokes the old owned URL exactly once"],

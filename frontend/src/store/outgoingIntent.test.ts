@@ -517,6 +517,42 @@ it("projects member and post-office custody separately for exact channel IDs", a
   });
 });
 
+it("preserves channel message references for unchanged custody while applying decreases and unknowns", async () => {
+  const store = session();
+  const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
+  const stable = { ...row("stable"), replicas: 2, postOfficeCopies: 1 };
+  const unknown = row("unknown");
+  const messages = { "channel:group": [stable, unknown] };
+  store.setState({ active: channel, messages });
+  invoke.mockResolvedValue([{ id: "stable", replicas: 2, post_offices: 1 }]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages).toBe(messages);
+  expect(store.getState().messages["channel:group"]).toBe(
+    messages["channel:group"],
+  );
+  expect(store.getState().messages["channel:group"][0]).toBe(stable);
+  expect(store.getState().messages["channel:group"][1]).toBe(unknown);
+
+  invoke.mockResolvedValue([{ id: "stable", replicas: 0, post_offices: 0 }]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages).not.toBe(messages);
+  expect(store.getState().messages["channel:group"][0]).toMatchObject({
+    replicas: 0,
+    postOfficeCopies: 0,
+  });
+  expect(store.getState().messages["channel:group"][1]).toBe(unknown);
+
+  invoke.mockResolvedValue([]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages["channel:group"][0]).toMatchObject({
+    replicas: undefined,
+    postOfficeCopies: undefined,
+  });
+  const absent = store.getState().messages;
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages).toBe(absent);
+});
+
 it("retires stale copy counts only for requested own channel messages omitted by status", async () => {
   const store = session();
   const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
@@ -1386,4 +1422,41 @@ it("retains typed group File admission and retries its original path and ID", as
   expect(store.getState().messages["channel:group"][0].file?.fileConv).toBe(
     "real-file",
   );
+});
+
+it("preserves every cache reference when an expiry check changes nothing", async () => {
+  const { expireConversationMessages } = await import("./conversationState");
+  const state = {
+    ...emptyConversationCache(),
+    messages: { key: [row("live")] },
+  };
+  const patch = expireConversationMessages(state, 1000);
+  expect(patch.messages).toBe(state.messages);
+  expect(patch.reactions).toBe(state.reactions);
+  expect(patch.intents).toBe(state.intents);
+});
+
+it("evicts old payload-heavy conversations before reaching the conversation count cap", async () => {
+  const { openConversationState } = await import("./conversationState");
+  const state = {
+    ...emptyConversationCache(),
+    cacheOrder: ["account:old", "account:recent"],
+    messages: {
+      "account:old": [{ ...row("old"), text: "x".repeat(3 * 1024 * 1024) }],
+      "account:recent": [
+        { ...row("recent"), text: "y".repeat(3 * 1024 * 1024) },
+      ],
+    },
+  };
+  const patch = openConversationState(
+    state,
+    { kind: "account", id: "active", name: "Active" },
+    undefined,
+    1,
+  );
+  expect(patch.messages["account:old"]).toBeUndefined();
+  expect(patch.messages["account:recent"]).toBe(
+    state.messages["account:recent"],
+  );
+  expect(patch.cacheOrder).toEqual(["account:recent", "account:active"]);
 });

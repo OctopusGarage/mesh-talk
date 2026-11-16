@@ -6,12 +6,22 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
-#[derive(Default)]
 pub(super) struct RuntimeWork {
     state: Mutex<State>,
     idle: Notify,
+    local_repair: Arc<Semaphore>,
+}
+
+impl Default for RuntimeWork {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            idle: Notify::new(),
+            local_repair: Arc::new(Semaphore::new(1)),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -59,6 +69,16 @@ impl<F> Drop for TrackedFuture<F> {
 }
 
 impl RuntimeWork {
+    /// Fair capacity for top-level local repair only, never network or leaf work.
+    /// Runtime shutdown cancels queued owners; running work retains its permit.
+    pub(super) async fn local_repair_capacity(&self) -> Option<OwnedSemaphorePermit> {
+        if self.is_closed() {
+            return None;
+        }
+        let capacity = self.local_repair.clone().acquire_owned().await.ok()?;
+        (!self.is_closed()).then_some(capacity)
+    }
+
     pub(super) fn admit(self: &Arc<Self>) -> Option<WorkPermit> {
         let mut state = self.state.lock().expect("runtime work lock not poisoned");
         if state.closed {
@@ -250,11 +270,13 @@ mod tests {
 /// TrackedFuture: their resources are destroyed before admission is released.
 struct BlockingWork<F> {
     work: Option<F>,
+    local_repair: Option<OwnedSemaphorePermit>,
     permit: Option<WorkPermit>,
 }
 
 pub(super) struct TrackedValue<T> {
     value: Option<T>,
+    local_repair: Option<OwnedSemaphorePermit>,
     permit: Option<WorkPermit>,
 }
 
@@ -267,6 +289,7 @@ impl<T> TrackedValue<T> {
 impl<T> Drop for TrackedValue<T> {
     fn drop(&mut self) {
         drop(self.value.take());
+        drop(self.local_repair.take());
         drop(self.permit.take());
     }
 }
@@ -274,6 +297,7 @@ impl<T> Drop for TrackedValue<T> {
 impl<F> Drop for BlockingWork<F> {
     fn drop(&mut self) {
         drop(self.work.take());
+        drop(self.local_repair.take());
         drop(self.permit.take());
     }
 }
@@ -283,14 +307,32 @@ impl WorkPermit {
         self,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> tokio::task::JoinHandle<TrackedValue<T>> {
+        self.spawn_blocking_with_capacity(None, work)
+    }
+
+    pub(super) fn spawn_local_repair_blocking<T: Send + 'static>(
+        self,
+        capacity: OwnedSemaphorePermit,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> tokio::task::JoinHandle<TrackedValue<T>> {
+        self.spawn_blocking_with_capacity(Some(capacity), work)
+    }
+
+    fn spawn_blocking_with_capacity<T: Send + 'static>(
+        self,
+        capacity: Option<OwnedSemaphorePermit>,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> tokio::task::JoinHandle<TrackedValue<T>> {
         let mut owner = BlockingWork {
             work: Some(work),
+            local_repair: capacity,
             permit: Some(self),
         };
         tokio::task::spawn_blocking(move || {
             let value = owner.work.take().expect("blocking work present")();
             TrackedValue {
                 value: Some(value),
+                local_repair: owner.local_repair.take(),
                 permit: owner.permit.take(),
             }
         })
@@ -300,6 +342,59 @@ impl WorkPermit {
 #[cfg(test)]
 mod blocking_result_tests {
     use super::*;
+
+    struct LocalRepairDropProbe {
+        work: Arc<RuntimeWork>,
+        observed: Option<tokio::sync::oneshot::Sender<bool>>,
+    }
+    impl Drop for LocalRepairDropProbe {
+        fn drop(&mut self) {
+            let owned = self.work.local_repair.clone().try_acquire_owned().is_err()
+                && self.work.state.lock().unwrap().active > 0;
+            let _ = self.observed.take().unwrap().send(owned);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_repair_capacity_outlives_blocking_captures_and_panic() {
+        for panic in [false, true] {
+            let work = Arc::new(RuntimeWork::default());
+            let capacity = work.local_repair_capacity().await.unwrap();
+            let (observed, result) = tokio::sync::oneshot::channel();
+            let probe = LocalRepairDropProbe {
+                work: work.clone(),
+                observed: Some(observed),
+            };
+            let task = work
+                .admit()
+                .unwrap()
+                .spawn_local_repair_blocking(capacity, move || {
+                    std::hint::black_box(&probe);
+                    assert!(!panic, "intentional local repair unwind");
+                });
+            let completion = task.await;
+            assert!(
+                result.await.unwrap(),
+                "capture drop must precede both admission releases"
+            );
+            if panic {
+                match completion {
+                    Err(error) => assert!(error.is_panic()),
+                    Ok(_) => panic!("intentional worker panic must reach its owner"),
+                }
+            } else {
+                let value = completion.unwrap();
+                assert!(
+                    work.local_repair.clone().try_acquire_owned().is_err(),
+                    "undelivered blocking output retains its capacity"
+                );
+                drop(value);
+            }
+            assert!(work.local_repair.clone().try_acquire_owned().is_ok());
+            work.close();
+            work.drain().await;
+        }
+    }
     use std::sync::atomic::{AtomicBool, Ordering};
     struct Resource(Arc<AtomicBool>);
     impl Drop for Resource {

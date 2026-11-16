@@ -227,3 +227,27 @@ test("relay directions persist independently and physical LAN scope gates bridge
   await expect(send).toBeDisabled();
   await expect(receive).toBeDisabled();
 });
+
+test("a failed category module retries without closing settings", async ({
+  page,
+}) => {
+  let requests = 0;
+  await page.route(
+    "**/src/features/chat/settings/HistorySettings.tsx*",
+    async (route) => {
+      requests++;
+      if (requests === 1) await route.abort();
+      else await route.continue();
+    },
+  );
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await page.getByTestId("settings-nav-history").click();
+  const panel = page.getByTestId("settings-page-history");
+  await expect(panel.getByRole("alert")).toBeVisible();
+  await panel.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(panel.getByTestId("settings-retention-select")).toBeVisible();
+  expect(requests).toBe(2);
+  await page.getByTestId("settings-nav-general").click();
+  await expect(page.locator("#setting-launch-at-login")).toBeVisible();
+});

@@ -11,6 +11,38 @@ use sha2::{Digest, Sha256};
 const FRAME: &[u8] = b"mesh-talk-file-consent-control-v1\0\0\0\0\0\0\0\0";
 const MAX_BYTES: usize = 1024;
 
+#[cfg(test)]
+pub(super) mod signature_observations {
+    thread_local! {
+        static CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub fn reset() {
+        CHECKS.with(|checks| checks.set(0));
+    }
+    pub fn count() -> usize {
+        CHECKS.with(std::cell::Cell::get)
+    }
+    pub(super) fn check() {
+        CHECKS.with(|checks| checks.set(checks.get() + 1));
+    }
+}
+
+#[cfg(test)]
+pub(super) mod offered_observations {
+    thread_local! {
+        static CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub fn reset() {
+        CHECKS.with(|checks| checks.set(0));
+    }
+    pub fn count() -> usize {
+        CHECKS.with(std::cell::Cell::get)
+    }
+    pub(super) fn check() {
+        CHECKS.with(|checks| checks.set(checks.get() + 1));
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Decision {
     pub file: ConversationId,
@@ -64,7 +96,11 @@ impl Decision {
             || event.kind != EventKind::Message
             || !event.is_canonical()
             || !event.verify_integrity()
-            || !event.verify_signature()
+            || !{
+                #[cfg(test)]
+                signature_observations::check();
+                event.verify_signature()
+            }
         {
             return None;
         }
@@ -82,6 +118,14 @@ impl Decision {
             && decision.sender_account.as_deref().is_none_or(account_valid))
         .then_some(decision)
     }
+}
+
+/// Qualified per-offer preparation, returned after every source guard releases.
+/// An absent result is unqualified; only this explicit pending branch proves
+/// that a background publication currently owes no control.
+pub(in crate::node) enum ConsentControlOutcome {
+    Prepared(Event),
+    PendingNoPublishedControl(ConversationId, EventId),
 }
 
 impl Node {
@@ -154,6 +198,22 @@ impl Node {
         offers: &[(ConversationId, EventId)],
         include_pending: bool,
     ) -> Result<Vec<Event>, LogError> {
+        Ok(self
+            .prepare_file_consent_controls(sender, offers, include_pending)?
+            .into_iter()
+            .filter_map(|outcome| match outcome {
+                ConsentControlOutcome::Prepared(event) => Some(event),
+                ConsentControlOutcome::PendingNoPublishedControl(..) => None,
+            })
+            .collect())
+    }
+
+    pub(in crate::node) fn prepare_file_consent_controls(
+        &self,
+        sender: &PublicIdentity,
+        offers: &[(ConversationId, EventId)],
+        include_pending: bool,
+    ) -> Result<Vec<ConsentControlOutcome>, LogError> {
         if offers.len() > 8 {
             return Err(LogError::InvalidPageBudget);
         }
@@ -173,29 +233,47 @@ impl Node {
         let mut controls = Vec::new();
         let scope = super::conversation::dm_conversation_id(&self.identity.public(), sender);
         for &(file, manifest) in offers {
+            #[cfg(test)]
+            offered_observations::check();
             let parent = self
                 .log
                 .lock()
                 .expect("log lock")
                 .event_conversation(&manifest)?;
-            let group_offer = self.group_file_offer(file, manifest, sender)?;
+            let direct_only = if parent == Some(scope) && self.known_account_allowed(sender) {
+                // Conversation IDs are not disjoint DM/group types. Use the
+                // receive scheduler's conservative metadata classification;
+                // mixed scopes retain full group authorization/completion.
+                let log = self.log.lock().expect("log lock");
+                !log.repository()?
+                    .has_kind(&scope, EventKind::MembershipChange)?
+                    && !self
+                        .channel_checkpoints
+                        .has_local_channel_checkpoint(scope)?
+            } else {
+                false
+            };
+            let group_offer = if direct_only {
+                None
+            } else {
+                self.group_file_offer(file, manifest, sender)?
+            };
             if !(parent == Some(scope) && self.known_account_allowed(sender))
                 && group_offer.is_none()
             {
                 continue;
             }
-            if let Some((event, row)) = group_offer {
-                self.retain_group_file_completion(&event, &row)?;
+            if let Some((event, row)) = group_offer.as_ref() {
+                self.retain_group_file_completion(event, row)?;
             }
-            let Some((automatic, account, _, _)) =
-                self.incoming_offer(file, Some(manifest), Some(sender))?
+            let Some((automatic, account, _, _)) = self.incoming_offer_with_retained_event(
+                file,
+                Some(manifest),
+                Some(sender),
+                group_offer.as_ref().map(|(event, _)| event),
+            )?
             else {
                 continue;
-            };
-            let decision = if automatic {
-                ReceiveDecision::Accepted
-            } else {
-                self.consent_for_file_account(self.equivalent_offer_decision(file)?, &account)?
             };
             let delivery = self.delivery.lock().expect("delivery lock not poisoned");
             if self
@@ -209,6 +287,18 @@ impl Node {
                 .lock()
                 .expect("consent lock not poisoned");
             let generation = policy.generation()?;
+            let explicit = policy.file_decision_snapshot(file)?;
+            let action_sequence = explicit.map_or(0, |(_, sequence)| sequence);
+            let decision = if automatic {
+                ReceiveDecision::Accepted
+            } else {
+                match explicit.map(|(accepted, _)| accepted) {
+                    Some(true) => ReceiveDecision::Accepted,
+                    Some(false) => ReceiveDecision::Declined,
+                    None if policy.preference(&account)? => ReceiveDecision::Accepted,
+                    None => ReceiveDecision::Pending,
+                }
+            };
             let mut store = self
                 .file_consent
                 .lock()
@@ -236,27 +326,29 @@ impl Node {
                     decision,
                     completion,
                 };
-                let previous = store.published_control(manifest)?;
-                let previous_generation = store.published_generation(manifest)?;
+                let previous = store.published_control_with_decision(manifest)?;
+                let previous_action = store.published_action_sequence(manifest)?;
                 if decision == ReceiveDecision::Pending && previous.is_none() && !include_pending {
+                    controls.push(ConsentControlOutcome::PendingNoPublishedControl(
+                        file, manifest,
+                    ));
                     continue;
                 }
-                let event = if let Some(event) = previous.as_ref().filter(|event| {
-                    previous_generation == Some(generation)
-                        && Decision::open(event).as_ref() == Some(&payload)
+                let event = if let Some((event, _)) = previous.as_ref().filter(|(_, decision)| {
+                    previous_action == Some(action_sequence) && *decision == payload
                 }) {
                     event.clone()
                 } else {
                     let revision = previous
-                        .map_or(Some(1), |event| event.seq.checked_add(1))
+                        .map_or(Some(1), |(event, _)| event.seq.checked_add(1))
                         .ok_or_else(|| {
                             LogError::Serialization("file consent revision exhausted".into())
                         })?;
                     let event = payload.event(&self.identity, revision)?;
-                    store.publish_control(event.clone(), generation)?;
+                    store.publish_control_for_action(event.clone(), generation, action_sequence)?;
                     event
                 };
-                controls.push(event);
+                controls.push(ConsentControlOutcome::Prepared(event));
             }
         }
         Ok(controls)
@@ -330,6 +422,15 @@ impl Node {
             if accepted {
                 self.file_pull_notify.notify_one();
                 self.note_file_change();
+                if payload.decision == ReceiveDecision::Accepted && payload.completion.is_none() {
+                    self.request_group_file_custody(
+                        original.conversation_id,
+                        payload.file,
+                        payload.manifest,
+                        peer,
+                        event.id,
+                    );
+                }
             }
             return Ok(true);
         }

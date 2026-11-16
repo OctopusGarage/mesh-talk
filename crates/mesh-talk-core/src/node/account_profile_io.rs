@@ -188,7 +188,7 @@ impl Node {
     /// Biography edits derive the latest nickname inside the publication mutex;
     /// a concurrent ordinary rename cannot be overwritten by a stale UI read.
     pub async fn save_account_bio_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         bio: String,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
@@ -200,7 +200,7 @@ impl Node {
     /// An explicit profile edit may initialize a missing legacy profile using the
     /// host's current account nickname. Existing signed names always win at commit.
     pub async fn save_account_bio_with_initial_name_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         initial_display_name: String,
         bio: String,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
@@ -212,7 +212,7 @@ impl Node {
 
     /// Timestamps and proof lists are intentionally absent from the edit API.
     pub async fn save_account_profile_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         display_name: String,
         bio: String,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
@@ -223,7 +223,7 @@ impl Node {
     }
 
     async fn edit_account_profile_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         display_name: Option<String>,
         initial_display_name: Option<String>,
         bio: String,

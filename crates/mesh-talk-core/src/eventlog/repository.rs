@@ -58,6 +58,10 @@ pub(crate) struct CommittedHeader {
     pub active: bool,
 }
 const HEADER_COLUMNS: &str = "id,conversation,author,seq,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes";
+// Intrinsic Ed25519 evidence only: no bodies, visibility or authorization. Exact
+// bytes are fetched and their canonical content hash is checked on every read.
+const SIGNATURE_PROOFS: usize = 256;
+type SignatureProof = ([u8; 32], [u8; 32], [u8; 64]);
 
 /// Same-transaction decision after owner validation and before new graph writes.
 pub(crate) enum AppendGate<B> {
@@ -72,10 +76,12 @@ pub(crate) enum GatedAppend<B> {
 pub(crate) struct EventRepository {
     database: RepositoryOwner,
     domain: EventDomainId,
+    signature_proofs: Box<std::sync::Mutex<std::collections::HashSet<SignatureProof>>>,
     #[cfg(test)]
     before_mutation: std::sync::Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>,
     store_uuid: [u8; 16],
     selection_owner: [u8; 16],
+    selection_admission: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     receive_owner: std::sync::OnceLock<
         crate::storage::profile::participant::event_ownership::ParticipantEventOwner,
     >,
@@ -87,6 +93,8 @@ pub(crate) struct EventRepository {
     // the header independently before the counted single BLOB fetch.
     #[cfg(test)]
     network_header_fetches: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    scope_queries: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     body_fetches: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -172,10 +180,12 @@ impl EventRepository {
         Ok(Self {
             database,
             domain,
+            signature_proofs: Default::default(),
             #[cfg(test)]
             before_mutation: std::sync::Mutex::new(None),
             store_uuid,
             selection_owner: *uuid::Uuid::new_v4().as_bytes(),
+            selection_admission: Default::default(),
             receive_owner: Default::default(),
             #[cfg(test)]
             body_decodes: std::sync::atomic::AtomicUsize::new(0),
@@ -183,6 +193,8 @@ impl EventRepository {
             fingerprint_ids: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             network_header_fetches: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            scope_queries: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             body_fetches: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -232,14 +244,18 @@ impl EventRepository {
         let domain = self.domain.0.as_slice();
         let conv = event.conversation_id.as_bytes().as_slice();
         let mut missing = Vec::new();
+        let mut has_profile_parent = false;
         let mut stmt =
-            c.prepare("SELECT conversation FROM retained_events WHERE domain=?1 AND id=?2")?;
+            c.prepare("SELECT conversation,kind FROM retained_events WHERE domain=?1 AND id=?2")?;
         for parent in &event.parents {
-            let parent_conv: Option<Vec<u8>> = stmt
-                .query_row(params![domain, parent.as_bytes().as_slice()], |r| r.get(0))
+            let parent_conv: Option<(Vec<u8>, i64)> = stmt
+                .query_row(params![domain, parent.as_bytes().as_slice()], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .optional()?;
             match parent_conv {
-                Some(bytes) => {
+                Some((bytes, kind)) => {
+                    has_profile_parent |= kind == EventKind::Profile as i64;
                     let bytes: [u8; 32] = bytes
                         .try_into()
                         .map_err(|_| corrupt("invalid parent conversation"))?;
@@ -273,7 +289,9 @@ impl EventRepository {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         let domain_count = advance(domain_count)?;
+        let previous_source_revision = source_revision;
         let source_revision = advance(source_revision)?;
+        let previous_domain_estimate = domain_estimate;
         let domain_estimate = checked_total(domain_estimate, estimate)?;
         // Preflight permanent arithmetic before asking a role to evict anything.
         // serialized_size computes scalar length without allocating an event body.
@@ -331,6 +349,14 @@ impl EventRepository {
         }
         c.execute("INSERT INTO event_author_max VALUES(?1,?2,?3,?4) ON CONFLICT(domain,conversation,author) DO UPDATE SET max_seq=max(max_seq,excluded.max_seq)",params![domain,conv,event.author.ed25519_pub().as_slice(),event.seq.to_be_bytes().as_slice()])?;
         c.execute("UPDATE event_conversations SET revision=?3,event_count=?4,stored_bytes=?5,max_lamport=?6,v2_count=?7,v3_count=?8,v4_count=?9,estimated_bytes=?10 WHERE domain=?1 AND conversation=?2",params![domain,conv,revision,count,stored,max.max(event.lamport).to_be_bytes().as_slice(),v2,v3,v4,estimated])?;
+        if event.kind != EventKind::Profile && !has_profile_parent {
+            self.carry_negative_profile_snapshot_on(
+                c,
+                previous_source_revision,
+                source_revision,
+                previous_domain_estimate,
+            )?;
+        }
         c.execute(
             "UPDATE event_domains SET next_commit=?2,source_revision=?3,estimated_bytes=?4,event_count=?5 WHERE domain=?1",
             params![domain, next_commit,source_revision,domain_estimate,domain_count],
@@ -341,8 +367,10 @@ impl EventRepository {
 
     fn has_on(&self, c: &Connection, id: &EventId) -> Result<bool, LogError> {
         self.require_visible_id_on(c, id)?;
-        Ok(c.query_row(
+        Ok(c.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM retained_events WHERE domain=?1 AND id=?2)",
+        )?
+        .query_row(
             params![self.domain.0.as_slice(), id.as_bytes().as_slice()],
             |r| r.get(0),
         )?)
@@ -388,7 +416,7 @@ impl EventRepository {
         // copy SQLite and Rust each own encoded bytes; during decode only Rust
         // owns them. This keeps the documented three-copy estimate meaningful.
         let (header, bytes) = {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {HEADER_COLUMNS},length(body) FROM retained_events WHERE domain=?1 AND id=?2"
             ))?;
             let mut rows =
@@ -403,11 +431,12 @@ impl EventRepository {
             #[cfg(test)]
             self.body_fetches
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let bytes: Vec<u8> = c.query_row(
-                "SELECT body FROM retained_events WHERE domain=?1 AND id=?2",
-                params![self.domain.0.as_slice(), id.as_bytes().as_slice()],
-                |row| row.get(0),
-            )?;
+            let bytes: Vec<u8> = c
+                .prepare_cached("SELECT body FROM retained_events WHERE domain=?1 AND id=?2")?
+                .query_row(
+                    params![self.domain.0.as_slice(), id.as_bytes().as_slice()],
+                    |row| row.get(0),
+                )?;
             (header, bytes)
         };
         decode::preflight(&header, &bytes)?;
@@ -430,11 +459,39 @@ impl EventRepository {
             || header != EventHeader::of(&event, body_len)
             || !event.is_canonical()
             || !event.verify_integrity()
-            || !event.verify_signature()
+            || !self.verify_retained_signature(&event)
         {
             return Err(corrupt("event body and indexed metadata disagree"));
         }
         Ok(Some(event))
+    }
+    /// Called only after current source/header, canonical form and content hash
+    /// checks. A hit proves the same signature, never permission to read an ID.
+    fn verify_retained_signature(&self, event: &Event) -> bool {
+        let Ok(signature) = event.sig.as_slice().try_into() else {
+            return false;
+        };
+        let proof = (*event.id.as_bytes(), *event.author.ed25519_pub(), signature);
+        if self
+            .signature_proofs
+            .lock()
+            .ok()
+            .is_some_and(|proofs| proofs.contains(&proof))
+        {
+            return true;
+        }
+        if !event.verify_signature() {
+            return false;
+        }
+        // A poisoned optional memo degrades to ordinary verification. Never
+        // hold its guard while doing crypto, I/O or acquiring another owner.
+        if let Ok(mut proofs) = self.signature_proofs.lock() {
+            if proofs.len() >= SIGNATURE_PROOFS {
+                proofs.clear();
+            }
+            proofs.insert(proof);
+        }
+        true
     }
     pub(crate) fn header(&self, id: &EventId) -> Result<Option<EventHeader>, LogError> {
         self.database.read(|c| self.header_on(c, id))

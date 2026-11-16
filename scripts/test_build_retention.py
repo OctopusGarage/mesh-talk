@@ -737,9 +737,14 @@ fn main() {
     if std::env::var("RETENTION_LOCK_PROBE").as_deref() != Ok("1") {
         return;
     }
-    let ready = std::env::var("RETENTION_READY").unwrap();
+    let ready = std::path::PathBuf::from(std::env::var_os("RETENTION_READY").unwrap());
     let release = std::env::var("RETENTION_RELEASE").unwrap();
-    std::fs::write(ready, "ready").unwrap();
+    let artifact = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
+        .join("retention-cache-witness");
+    std::fs::write(&artifact, "rebuildable Cargo build output").unwrap();
+    let pending = ready.with_extension("pending");
+    std::fs::write(&pending, artifact.to_str().unwrap()).unwrap();
+    std::fs::rename(pending, ready).unwrap();
     while !std::path::Path::new(&release).exists() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -792,6 +797,13 @@ fn main() {
                     "tiny Cargo build did not reach its build script "
                     f"(exit={process.returncode})\n{output}\n{errors}"
                 )
+            # The actual build-script output is a cache artifact in both
+            # Cargo layouts; a successful v2 build need not create debug/deps.
+            cache_artifact = Path(ready.read_text()).resolve(strict=True)
+            self.assertTrue(cache_artifact.is_relative_to(profile.resolve(strict=True)))
+            self.assertEqual(
+                cache_artifact.read_text(), "rebuildable Cargo build output"
+            )
             idle = self.root / "target/release/deps"
             idle.mkdir(parents=True)
             (idle / "cache").write_text("rebuildable")
@@ -799,7 +811,9 @@ fn main() {
                 with RETENTION.cargo_profile_locks(profile, self.root):
                     pass
             self.run_cli("clean", "--budget-gb", "0")
-            self.assertTrue((profile / "deps").exists())
+            self.assertEqual(
+                cache_artifact.read_text(), "rebuildable Cargo build output"
+            )
             self.assertFalse(idle.exists())
         finally:
             release.touch()
@@ -828,7 +842,7 @@ fn main() {
                 process.wait(timeout=60)
         self.assertEqual(process.returncode, 0, log.read_text())
         self.run_cli("clean", "--budget-gb", "0")
-        self.assertFalse((profile / "deps").exists())
+        self.assertFalse(cache_artifact.exists())
         self.assertTrue((profile / ".cargo-lock").exists())
 
 

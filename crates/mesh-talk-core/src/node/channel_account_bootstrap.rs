@@ -413,6 +413,11 @@ pub(super) fn apply_receive_keys(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static OWN_GROUP_PROOF_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl super::Node {
     pub(super) fn binding_transition_group_member(
         &self,
@@ -523,7 +528,13 @@ impl super::Node {
     }
 
     pub(super) fn own_group_proof(&self) -> Announce {
-        Announce::new_with_account(&self.identity, &self.account, "", 1)
+        self.own_group_proof
+            .get_or_init(|| {
+                #[cfg(test)]
+                OWN_GROUP_PROOF_BUILDS.with(|calls| calls.set(calls.get() + 1));
+                Announce::new_with_account(&self.identity, &self.account, "", 1)
+            })
+            .clone()
     }
     pub(super) async fn query_account_groups(
         &self,

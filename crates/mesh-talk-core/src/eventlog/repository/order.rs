@@ -4,7 +4,9 @@ use super::*;
 
 pub(crate) mod combined;
 mod engine;
+mod observation;
 mod read;
+pub(crate) use observation::OrderWorkCursor;
 #[cfg(test)]
 mod tests;
 
@@ -137,22 +139,8 @@ struct Job {
     child_after: i64,
     tail_after: i64,
 }
-impl EventRepository {
-    fn order_job(
-        &self,
-        c: &Connection,
-        conv: &ConversationId,
-        kind: CausalOrder,
-    ) -> Result<Option<Job>, LogError> {
-        let mut stmt=c.prepare("SELECT job,source_revision,target_count,base_count,cutoff,phase,seed_after,seeded,next_rank,pop,child_after,tail_after FROM event_order_jobs WHERE domain=?1 AND conversation=?2 AND order_kind=?3")?;
-        let mut rows = stmt.query(params![
-            self.domain.0.as_slice(),
-            conv.as_bytes().as_slice(),
-            kind.code()
-        ])?;
-        let Some(r) = rows.next()? else {
-            return Ok(None);
-        };
+impl Job {
+    fn read(r: &Row<'_>) -> Result<Self, LogError> {
         let pop: Option<Vec<u8>> = r.get(9)?;
         let j = Job {
             id: blob(r, 0)?,
@@ -183,7 +171,26 @@ impl EventRepository {
         {
             return Err(corrupt("invalid persistent order state"));
         }
-        Ok(Some(j))
+        Ok(j)
+    }
+}
+impl EventRepository {
+    fn order_job(
+        &self,
+        c: &Connection,
+        conv: &ConversationId,
+        kind: CausalOrder,
+    ) -> Result<Option<Job>, LogError> {
+        let mut stmt=c.prepare("SELECT job,source_revision,target_count,base_count,cutoff,phase,seed_after,seeded,next_rank,pop,child_after,tail_after FROM event_order_jobs WHERE domain=?1 AND conversation=?2 AND order_kind=?3")?;
+        let mut rows = stmt.query(params![
+            self.domain.0.as_slice(),
+            conv.as_bytes().as_slice(),
+            kind.code()
+        ])?;
+        let Some(r) = rows.next()? else {
+            return Ok(None);
+        };
+        Job::read(r).map(Some)
     }
     /// Starts a private immutable base. Repeated ensures do not restart an active
     /// job. Obsolete work must be removed by bounded steps before replacement.

@@ -13,6 +13,7 @@ import { useChat } from "@/store/chat";
 import { usePresenceFor } from "@/store/presence";
 import { LinkDeviceDialog } from "./LinkDeviceDialog";
 import { useSerialPoll } from "./useSerialPoll";
+import { isDocumentInvalidation } from "@/lib/syncInvalidation";
 
 /** Retire both the disclosure and pending reads when its account/runtime changes. */
 export function PersonalDevices() {
@@ -53,6 +54,7 @@ function AccountDevices({
     setHostnames,
     () => setHostnames({}),
     "state",
+    (change) => change.owner === owner && isDocumentInvalidation(change),
   );
   const [failed, setFailed] = useState(false);
   useSerialPoll(
@@ -65,6 +67,7 @@ function AccountDevices({
     },
     () => setFailed(true),
     "state",
+    (change) => change.owner === owner,
   );
   // Inventory comes from the persistent certified roster, never discovery alone.
   // Sync phase describes replication, not whether a device is currently online.

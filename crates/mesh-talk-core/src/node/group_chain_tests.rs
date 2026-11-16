@@ -1777,8 +1777,8 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         loop {
             let poll_started = std::time::Instant::now();
             polls = polls.saturating_add(1);
-            for index in 1..6 {
-                let slot = index - 1;
+            for (slot, receiver) in chain.nodes[1..6].iter().enumerate() {
+                let index = slot + 1;
                 if receipts.completed[slot].is_some() {
                     continue;
                 }
@@ -1805,7 +1805,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                     query_trace.pop_front();
                 }
                 query_trace.push_back((route_started.elapsed().as_millis(), index, "query_begin"));
-                let node = chain.nodes[index].clone();
+                let node = receiver.clone();
                 pending_query = Some((
                     slot,
                     tokio::spawn(async move {

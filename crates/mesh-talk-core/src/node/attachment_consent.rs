@@ -210,6 +210,18 @@ impl Node {
         event_id: Option<EventId>,
         sender: Option<&PublicIdentity>,
     ) -> Result<Option<(bool, String, EventId, PublicIdentity)>, crate::eventlog::LogError> {
+        self.incoming_offer_with_retained_event(file, event_id, sender, None)
+    }
+
+    /// Reuse only an exact event already read and authenticated by the retained
+    /// group-offer owner during this synchronous decision; never a wire event.
+    pub(in crate::node) fn incoming_offer_with_retained_event(
+        &self,
+        file: ConversationId,
+        event_id: Option<EventId>,
+        sender: Option<&PublicIdentity>,
+        retained: Option<&crate::eventlog::Event>,
+    ) -> Result<Option<(bool, String, EventId, PublicIdentity)>, LogError> {
         let book = self.files.lock().expect("files lock").clone();
         let Some(manifest) = book.manifest(file)? else {
             return Ok(None);
@@ -229,9 +241,27 @@ impl Node {
             if event_id.is_some_and(|expected| expected != id) {
                 continue;
             }
-            let Some(event) = ({ self.log.lock().expect("log lock not poisoned").get(&id)? })
-            else {
-                continue;
+            let loaded;
+            let event = if let Some(event) = retained.filter(|event| event.id == id) {
+                // Completion retention can acquire other owners between these
+                // reads. Preserve current visibility and read failures without
+                // fetching and authenticating the immutable body again.
+                if self
+                    .log
+                    .lock()
+                    .expect("log lock not poisoned")
+                    .event_conversation(&id)?
+                    != Some(event.conversation_id)
+                {
+                    continue;
+                }
+                event
+            } else {
+                loaded = self.log.lock().expect("log lock not poisoned").get(&id)?;
+                let Some(event) = loaded.as_ref() else {
+                    continue;
+                };
+                event
             };
             if event.kind != crate::eventlog::EventKind::FileManifest
                 || event.author.ed25519_pub() == &own.ed25519_pub

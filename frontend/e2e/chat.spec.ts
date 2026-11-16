@@ -377,7 +377,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("screenshot-editor")).toBeVisible();
     await expect(page.getByTestId("screenshot-send")).toBeDisabled();
     await expect(
-      page.getByRole("article", { name: /screenshot\.png/ }),
+      page.getByRole("article", { name: /screenshot-\d+\.png/ }),
     ).toHaveCount(0);
     await page
       .getByTestId("screenshot-canvas")
@@ -395,12 +395,12 @@ test.describe("Mesh-Talk UI flow", () => {
       });
     await page.getByTestId("screenshot-send").click();
     await expect(page.getByTestId("composer-pending-files")).toContainText(
-      "screenshot.png",
+      /screenshot-\d+\.png/,
     );
     await page.getByTestId("composer-send").click();
     await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
     await expect(
-      page.getByRole("article", { name: /screenshot\.png/ }),
+      page.getByRole("article", { name: /screenshot-\d+\.png/ }),
     ).toBeVisible();
     const crop = await page.evaluate(() => {
       const bytes = (window as unknown as { __lastWrittenFileBytes?: number[] })
@@ -450,12 +450,12 @@ test.describe("Mesh-Talk UI flow", () => {
       });
     await page.getByTestId("screenshot-send").click();
     await expect(page.getByTestId("composer-pending-files")).toContainText(
-      "screenshot.png",
+      /screenshot-\d+\.png/,
     );
     await page.getByTestId("composer-send").click();
     await expect(page.getByTestId("composer").getByRole("alert")).toBeVisible();
     await expect(page.getByTestId("composer-pending-files")).toContainText(
-      "screenshot.png",
+      /screenshot-\d+\.png/,
     );
     await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
   });

@@ -11,6 +11,11 @@ pub(in crate::node) struct HistoryWork {
     pub(super) receive: HashMap<ConversationId, ReceiveWork>,
     pub(super) send: HashMap<ConversationId, HistoryQuery<(Option<SendSelection>, bool)>>,
     pub(super) sender_after: Option<ConversationId>,
+    pub(super) recovery_after: Option<ConversationId>,
+    pub(super) recovery_upper: Option<ConversationId>,
+    pub(super) recovery_active: bool,
+    pub(super) recovery_complete: bool,
+    pub(super) recovery_resweep: bool,
 }
 pub(super) struct ReceiveWork {
     pub(super) event: EventId,

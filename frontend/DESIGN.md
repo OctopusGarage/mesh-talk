@@ -78,6 +78,12 @@ and restores focus. Reset disclosure on message, conversation or session changes
 Failure text, retry actions and file byte progress retain their separate meaning.
 
 
+### Message reactions
+
+Message rows show actual reaction chips only. Keep the complete reaction summary
+in the message context menu, including read-only inspection. Empty or loading
+projections never add an inline action or placeholder beneath each message.
+
 ### Interaction motion
 
 The shared JS curve is cubic-bezier(0.22, 1, 0.36, 1). Floating surfaces enter in 150–190ms and exit in 100–120ms through Radix presence. Pointer-selected tabs move a measured background in 170ms; keyboard selection updates immediately. Trigger resize observations keep the background aligned when labels change inside a fixed-size list. Only the absolute background interpolates its dimensions; neighboring controls retain their layout. Hidden or unmeasured tabs retain the ordinary selected background. Reaction press feedback affects only the emoji under a fine pointer, never synchronized counts or message layout.

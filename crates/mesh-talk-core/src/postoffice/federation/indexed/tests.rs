@@ -5,7 +5,7 @@ use crate::{
     storage::profile::ProfileStorageLease,
 };
 use tokio::net::TcpListener;
-fn office(identity: DeviceIdentity) -> (tempfile::TempDir, IndexedPostOffice) {
+pub(super) fn office(identity: DeviceIdentity) -> (tempfile::TempDir, IndexedPostOffice) {
     let root = tempfile::tempdir().unwrap();
     let office = IndexedPostOffice::open_with_lease(
         ProfileStorageLease::acquire(root.path()).unwrap(),
@@ -16,7 +16,7 @@ fn office(identity: DeviceIdentity) -> (tempfile::TempDir, IndexedPostOffice) {
     .unwrap();
     (root, office)
 }
-fn opaque_event(seq: u64, author: &DeviceIdentity, receiver: &DeviceIdentity) -> Event {
+pub(super) fn opaque_event(seq: u64, author: &DeviceIdentity, receiver: &DeviceIdentity) -> Event {
     let inner = Event::new(
         author,
         ConversationId::new([42; 32]),
@@ -32,7 +32,7 @@ fn opaque_event(seq: u64, author: &DeviceIdentity, receiver: &DeviceIdentity) ->
         .wrap(&inner)
         .unwrap()
 }
-fn prepare(office: &IndexedPostOffice) {
+pub(super) fn prepare(office: &IndexedPostOffice) {
     let now = unix_now();
     office.state.request_preparation_at(now).unwrap();
     let mut worker = DigestWorker::default();
@@ -237,7 +237,14 @@ async fn sql_and_legacy_federation_preserve_wire_compatibility_both_directions()
                 .await
                 .unwrap();
             if sql_requests {
-                let request = channel.recv().await.unwrap();
+                let mut request = channel.recv().await.unwrap();
+                if request == REQUEST_V5 {
+                    drop(channel);
+                    channel = SecureChannel::accept(listener.accept().await.unwrap().0, &server)
+                        .await
+                        .unwrap();
+                    request = channel.recv().await.unwrap();
+                }
                 let session = Mutex::new(
                     send_inventory(&mut channel, &old_server, None, &request)
                         .await
@@ -538,7 +545,7 @@ async fn cache_overwrite_after_send_keeps_actual_selected_inventory_equality() {
     });
     assert_eq!(
         endpoint
-            .sync_with_relay(addr, &client, &expected)
+            .sync_version(addr, &client, &expected, REQUEST_V4, None, Instant::now())
             .await
             .unwrap(),
         0

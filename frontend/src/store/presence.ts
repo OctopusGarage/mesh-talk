@@ -1,4 +1,10 @@
+import type { RosterTicket } from "@/lib/syncInvalidation";
 import {
+  startRecoveryRefresh,
+  RECOVERY_REFRESH_MS,
+} from "@/lib/recoveryRefresh";
+import {
+  isDocumentInvalidation,
   subscribeSyncInvalidation,
   supportsPushState,
 } from "@/lib/syncInvalidation";
@@ -42,6 +48,97 @@ function reconcile(prev: PresenceMap, next: PresenceMap): PresenceMap {
     }
   }
   return changed ? merged : prev;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+// Validate every field consumed by ageing/presentation before acknowledging a
+// revision. A malformed person must not partially install accompanying groups.
+function validPresenceMap(value: unknown): value is PresenceMap {
+  const seconds = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0;
+  const optionalString = (value: unknown) =>
+    value === undefined || typeof value === "string";
+  return (
+    isRecord(value) &&
+    Object.values(value).every((person) => {
+      if (
+        !isRecord(person) ||
+        typeof person.online !== "boolean" ||
+        !(person.last_seen_secs === null || seconds(person.last_seen_secs)) ||
+        !(
+          person.connection_weak === undefined ||
+          typeof person.connection_weak === "boolean"
+        )
+      )
+        return false;
+      for (const key of [
+        "reconnect_expires_in_secs",
+        "online_expires_in_secs",
+        "member_count",
+        "online_count",
+        "unbound_member_count",
+      ]) {
+        if (person[key] !== undefined && !seconds(person[key])) return false;
+      }
+      if (
+        person.member_keys !== undefined &&
+        (!Array.isArray(person.member_keys) ||
+          !person.member_keys.every((key) => typeof key === "string"))
+      )
+        return false;
+      return (
+        person.devices === undefined ||
+        (Array.isArray(person.devices) &&
+          person.devices.every(
+            (device) =>
+              isRecord(device) &&
+              typeof device.user_id === "string" &&
+              Array.isArray(device.evidence) &&
+              device.evidence.every((evidence) => {
+                if (
+                  !isRecord(evidence) ||
+                  typeof evidence.source !== "string" ||
+                  ![
+                    "local",
+                    "routed",
+                    "directory",
+                    "authenticated",
+                    "unscoped",
+                    "self",
+                  ].includes(evidence.source) ||
+                  !seconds(evidence.last_seen_secs) ||
+                  !seconds(evidence.expires_in_secs) ||
+                  !(
+                    evidence.origin_hops === undefined ||
+                    seconds(evidence.origin_hops)
+                  )
+                )
+                  return false;
+                const office = evidence.post_office;
+                if (
+                  office !== undefined &&
+                  (!isRecord(office) ||
+                    typeof office.endpoint !== "string" ||
+                    !optionalString(office.user_id) ||
+                    !optionalString(office.name))
+                )
+                  return false;
+                const origin = evidence.registration_origin;
+                return (
+                  origin === undefined ||
+                  (isRecord(origin) &&
+                    typeof origin.user_id === "string" &&
+                    typeof origin.name === "string" &&
+                    seconds(origin.expires_in_secs))
+                );
+              }),
+          ))
+      );
+    })
+  );
 }
 
 /** Local/current-device evidence outranks a quality hint inherited from another path. */
@@ -150,8 +247,12 @@ export const usePresence = create<PresenceState>((set, get) => ({
     let lastApplied = 0;
     let inFlight = 0;
     let dirty = false;
-    let nextFallback = 0;
+    let pendingTicket: RosterTicket | undefined;
     let baseline: PresenceMap = {};
+    let groups: PresenceMap = {};
+    let groupsRevision = "";
+    let lastGroupsApplied = 0;
+    let repairPending = false;
     // Presentation hysteresis only: delivery continues independently.
     const recoveryConfirmations = new Map<
       string,
@@ -205,16 +306,25 @@ export const usePresence = create<PresenceState>((set, get) => ({
           Math.max(1, Math.ceil(next * 1000)),
         );
     };
-    const poll = async (invalidate = false) => {
-      if (!current()) return;
+    const poll = async (
+      invalidate = false,
+      repair = false,
+      ticket?: RosterTicket,
+    ) => {
+      if (!current() || (ticket && !ticket.current())) return;
+      repairPending ||= repair;
       if (inFlight >= 2) {
-        dirty ||= invalidate;
+        if (invalidate || repair) {
+          dirty = true;
+          pendingTicket = ticket;
+        }
         return;
       }
       inFlight++;
-      nextFallback = performance.now() + 30000;
       const pollId = ++nextPoll;
-      const requested = performance.now();
+      let requested = performance.now();
+      const revision = repairPending ? "" : groupsRevision;
+      repairPending = false;
       const fail = (failure: PresenceFailure) => {
         if (current() && pollId > lastApplied) {
           lastApplied = pollId;
@@ -226,7 +336,68 @@ export const usePresence = create<PresenceState>((set, get) => ({
       };
       const timeout = setTimeout(() => fail({ kind: "timeout" }), 10000);
       try {
-        const next = await readWithDeadline(() => presenceApi.get());
+        let response;
+        if (ticket) {
+          const [observed, conditional] = await Promise.all([
+            ticket.read(lease.owner!),
+            readWithDeadline(() => {
+              requested = performance.now();
+              return presenceApi.groupsIfChanged(lease.owner!, revision);
+            }),
+          ]);
+          if ("unchanged" in conditional && conditional.unchanged === true) {
+            requested = observed.requestedAt;
+            // Retention uses the groups currently applied when this read finishes.
+            response = {
+              people: observed.value.people,
+              groups_revision: groupsRevision,
+            };
+          } else response = conditional;
+        } else
+          response = await readWithDeadline(() => presenceApi.get(revision));
+        if (!current()) return;
+        const isEnvelope = isRecord(response) && "groups_revision" in response;
+        const delta = isEnvelope
+          ? (response as unknown as import("@/lib/types").PresenceDelta)
+          : undefined;
+        if (
+          delta &&
+          (typeof delta.groups_revision !== "string" ||
+            !/^[a-f0-9]{64}$/i.test(delta.groups_revision) ||
+            !validPresenceMap(delta.people) ||
+            (delta.groups !== undefined && !validPresenceMap(delta.groups)))
+        ) {
+          fail({ kind: "invalid" });
+          return;
+        }
+        if (!delta && !validPresenceMap(response)) {
+          fail({ kind: "invalid" });
+          return;
+        }
+        if (delta?.groups !== undefined && pollId > lastGroupsApplied) {
+          const previousGroupKeys = new Set(Object.keys(groups));
+          groups = delta.groups;
+          groupsRevision = delta.groups_revision;
+          lastGroupsApplied = pollId;
+          if (pollId <= lastApplied) {
+            baseline = agePresence(
+              {
+                ...Object.fromEntries(
+                  Object.entries(age()).filter(
+                    ([key]) => !previousGroupKeys.has(key),
+                  ),
+                ),
+                ...groups,
+              },
+              0,
+            );
+            baselineAt = performance.now();
+            publishAge();
+          }
+        }
+        const next = delta
+          ? { ...delta.people, ...groups }
+          : (response as PresenceMap);
         if (!next || typeof next !== "object" || Array.isArray(next)) {
           fail({ kind: "invalid" });
           return;
@@ -364,7 +535,9 @@ export const usePresence = create<PresenceState>((set, get) => ({
         // cannot recursively retry a failing native read.
         if (current() && dirty) {
           dirty = false;
-          queueMicrotask(() => void poll(true));
+          const ticket = pendingTicket;
+          pendingTicket = undefined;
+          queueMicrotask(() => void poll(true, false, ticket));
         }
       }
     };
@@ -372,18 +545,24 @@ export const usePresence = create<PresenceState>((set, get) => ({
     const unlisten = subscribeSyncInvalidation((change) => {
       if (
         change.owner === lease.owner &&
-        (change.kind === "roster" || change.kind === "state")
+        (change.kind === "roster" || isDocumentInvalidation(change))
       )
-        void poll(true);
+        void poll(true, false, change.rosterObservation);
     });
-    const id = setInterval(() => {
-      if (!supportsPushState(lease.owner) || performance.now() >= nextFallback)
-        void poll();
-      queueMicrotask(publishAge);
-    }, POLL_MS);
+    const stopRecovery = startRecoveryRefresh(
+      () => {
+        publishAge();
+        void poll(false, true);
+      },
+      {
+        background: false,
+        intervalMs: () =>
+          supportsPushState(lease.owner) ? RECOVERY_REFRESH_MS : POLL_MS,
+      },
+    );
     return () => {
       cancelled = true;
-      clearInterval(id);
+      stopRecovery();
       clearTimeout(expiryTimer);
       unlisten();
       if (epoch === session) get().clear();

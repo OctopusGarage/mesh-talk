@@ -1,4 +1,5 @@
 import type { CustomizationPack } from "@/lib/pack";
+import type { PackCatalogEntry } from "@/store/packs";
 
 // Earlier app versions sent unprefixed Noto IDs. Keep those messages readable
 // after moving the artwork into the removable Google Noto pack.
@@ -72,7 +73,7 @@ export function installedStickers(packs: CustomizationPack[]): Sticker[] {
 /** Resolve installed artwork; removed packs show the sent fallback. */
 export function stickerById(
   id: string,
-  packs: CustomizationPack[] = [],
+  packs: (CustomizationPack | PackCatalogEntry)[] = [],
 ): Sticker | undefined {
   // Messages sent by the earlier bundled cat collection used unprefixed IDs.
   const lookupId = id.startsWith("cat-") ? `pack:cats:${id}` : id;
@@ -92,7 +93,10 @@ export function stickerById(
     return (
       sticker && {
         id,
-        url: sticker.url,
+        url:
+          "url" in sticker && typeof sticker.url === "string"
+            ? sticker.url
+            : "",
         emoji: sticker.fallback,
         label: sticker.label,
       }
@@ -111,9 +115,27 @@ export function stickerById(
   return (
     sticker && {
       id,
-      url: sticker.url,
+      url:
+        "url" in sticker && typeof sticker.url === "string" ? sticker.url : "",
       emoji: sticker.fallback,
       label: sticker.label,
     }
+  );
+}
+
+/** Resolve only the owning library; catalog lookup never requires artwork. */
+export function stickerPackId(
+  id: string,
+  packs: PackCatalogEntry[],
+): string | undefined {
+  const lookup = id.startsWith("cat-") ? `pack:cats:${id}` : id;
+  if (lookup.startsWith("pack:")) {
+    const separator = lookup.lastIndexOf(":");
+    return separator > 5 ? lookup.slice(5, separator) : undefined;
+  }
+  if (!LEGACY_NOTO_IDS.has(lookup)) return undefined;
+  return (
+    packs.find((p) => p.kind === "sticker" && p.id === "google-noto")?.id ??
+    packs.find((p) => p.kind === "sticker" && p.id === "noto-favorites")?.id
   );
 }

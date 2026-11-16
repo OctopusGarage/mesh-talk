@@ -1,3 +1,4 @@
+import { startRecoveryRefresh } from "@/lib/recoveryRefresh";
 import { useMessageFavorites } from "@/store/messageFavorites";
 import {
   startAutomaticDownloads,
@@ -23,7 +24,7 @@ import { ease, useMotionOK } from "@/lib/motion";
 import { startLinkedContacts } from "@/lib/linkedContacts";
 import { useDrafts } from "@/store/drafts";
 import { startLinkedReadReceipts } from "@/lib/linkedReadReceipts";
-import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
+import { subscribeDocumentInvalidation } from "@/lib/syncInvalidation";
 
 import { DeliveryRecoveryProvider } from "./DeliveryRecoveryProvider";
 
@@ -41,17 +42,33 @@ export function ChatApp() {
     (s) => s.persistenceError,
   );
   const [mediaWarning, setMediaWarning] = useState(false);
-  const active = useChat((s) => s.active);
-  const peers = useChat((s) => s.peers);
+  // Subscribe to notification meaning, not roster heartbeat object identity.
+  const notificationContext = useChat((s) =>
+    JSON.stringify([
+      s.active?.kind === "account"
+        ? [
+            ...new Set(
+              s.peers
+                .filter((peer) => peer.account_id === s.active?.id)
+                .map((peer) => peer.user_id),
+            ),
+          ].sort()
+        : [],
+      s.active?.kind === "channel" ? s.active.id : null,
+    ]),
+  );
   const accountId = useChat((s) => s.myAccountId);
   useEffect(() => {
     if (!owner || !ready || !accountId) return;
     void useDrafts.getState().start(owner, generation, accountId);
-    const timer = setInterval(() => {
+    const stopRecovery = startRecoveryRefresh(
+      () => {
+        void useDrafts.getState().refresh();
+      },
+      { background: false },
+    );
+    const unsubscribe = subscribeDocumentInvalidation(owner, () => {
       void useDrafts.getState().refresh();
-    }, 15000);
-    const unsubscribe = subscribeSyncInvalidation((change) => {
-      if (change.owner === owner) void useDrafts.getState().refresh();
     });
     const flush = () => {
       void useDrafts.getState().flush();
@@ -60,7 +77,7 @@ export function ChatApp() {
     document.addEventListener("visibilitychange", flush);
     window.addEventListener("pagehide", flush);
     return () => {
-      clearInterval(timer);
+      stopRecovery();
       unsubscribe();
       window.removeEventListener("blur", flush);
       document.removeEventListener("visibilitychange", flush);
@@ -111,20 +128,16 @@ export function ChatApp() {
   }, [ready]);
 
   useEffect(() => {
-    const activePeerDevices =
-      active?.kind === "account"
-        ? peers
-            .filter((peer) => peer.account_id === active.id)
-            .map((peer) => peer.user_id)
-        : [];
-    const activeChannel = active?.kind === "channel" ? active.id : null;
+    const [activePeerDevices, activeChannel] = JSON.parse(
+      notificationContext,
+    ) as [string[], string | null];
     void chatApi
       .setNotificationContext(activePeerDevices, activeChannel)
       .catch(() => {});
     return () => {
       void chatApi.setNotificationContext([], null).catch(() => {});
     };
-  }, [active, peers, generation]);
+  }, [notificationContext, generation]);
 
   useEffect(() => {
     if (owner) return startUnreadBadge(owner);

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Official nextest archives, fixed source paths, serial hash shards and receipts.
-// Pinned LLVM coverage uses v1 target/debug/{deps,examples}; see upstream #520.
+// Preserve Cargo's v1/v2 object discovery metadata in official Nextest archives.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -15,6 +15,7 @@ import {
   readFileSync,
   realpathSync,
   readdirSync,
+  statSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -23,7 +24,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const versions = Object.freeze({ nextest: "0.9.150", llvmCov: "0.8.7" });
+export const versions = Object.freeze({ nextest: "0.9.150", llvmCov: "0.9.1" });
 export const windowsPartitions = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
 export function archiveProfile(name = "windows") {
   assert.ok(
@@ -627,6 +628,7 @@ export function verifyLayout(binaries, root, profileName = "windows") {
       normalize(metadata["build-directory"]) === target,
     "Unsupported separate build directory (upstream cargo-llvm-cov #520)",
   );
+  const fingerprints = new Set();
   for (const binary of Object.values(binaries["rust-binaries"])) {
     const expected = normalize(
       path.join(
@@ -635,12 +637,18 @@ export function verifyLayout(binaries, root, profileName = "windows") {
         binary.kind === "example" ? "examples" : "deps",
       ),
     );
-    assert.ok(
-      path.isAbsolute(binary["binary-path"]) &&
-        normalize(path.dirname(binary["binary-path"])) === expected,
-      "Unsupported build layout/profile (upstream cargo-llvm-cov #520); expected v1 target/debug/deps or example target/debug/examples",
-    );
+    const directory = normalize(path.dirname(binary["binary-path"]));
+    const relative = path.relative(target, directory);
+    const parts = relative.split(path.sep);
+    const v2 = parts.length === 5 && parts[0] === "debug" &&
+      parts[1] === "build" && /^[a-zA-Z0-9_-]+$/u.test(parts[2]) &&
+      /^[a-f0-9]{16}$/u.test(parts[3]) && parts[4] === "out";
+    assert.ok(path.isAbsolute(binary["binary-path"]) &&
+      (directory === expected || v2),
+      `Unsupported build layout/profile; observed ${JSON.stringify({ kind: binary.kind, path: binary["binary-path"], expected })}`);
+    if (v2) fingerprints.add(path.join(...parts.slice(0, 4), "fingerprint"));
   }
+  return [...fingerprints].sort();
 }
 
 // Darwin's default unpacked line tables live in compiler object files. Keep only
@@ -664,6 +672,16 @@ export function macDebugSymbolPaths(binaries, root) {
     );
   }
   return [...new Set(selected)].sort();
+}
+function verifyObjectMetadata(target, paths) {
+  for (const relative of paths) {
+    const directory = path.join(target, relative);
+    assert.ok(existsSync(directory) && statSync(directory).isDirectory(),
+      "Missing Cargo object discovery metadata");
+    const actual = path.relative(realpathSync(target), realpathSync(directory));
+    assert.ok(actual && !actual.startsWith("..") && !path.isAbsolute(actual),
+      "Cargo object discovery metadata escaped the target");
+  }
 }
 async function verifyMacDebugSymbols(
   binaries,
@@ -713,14 +731,24 @@ export async function produce(
   mkdirSync(directory, { recursive: true });
   let debugSymbols,
     archiveConfigArgs = [];
+  const selectedBinaries = await list([
+    ...profile.buildArgs,
+    "--list-type",
+    "binaries-only",
+  ]);
+  const fingerprints = verifyLayout(selectedBinaries, process.cwd(), profile.name);
+  const extras = [];
+  if (profile.instrumented) {
+    // cargo-llvm-cov discovers v2 objects through Cargo's sibling fingerprint
+    // directories (#520). Archive the real producer metadata, never synthesize
+    // a successful build marker or omit the existing coverage assertions.
+    const target = targetDirectory(process.cwd(), profile);
+    verifyObjectMetadata(target, fingerprints);
+    extras.push(...fingerprints);
+  }
   if (!profile.instrumented) {
-    const binaries = await list([
-      ...profile.buildArgs,
-      "--list-type",
-      "binaries-only",
-    ]);
     debugSymbols = [];
-    for (const binary of macDebugSymbolPaths(binaries, process.cwd())) {
+    for (const binary of macDebugSymbolPaths(selectedBinaries, process.cwd())) {
       const bundle = `${binary}.dSYM`;
       await command([binary, "-o", bundle], { binary: "dsymutil" });
       debugSymbols.push({
@@ -739,10 +767,13 @@ export async function produce(
         ),
       });
     }
-    const configFile = path.join(directory, "archive-debug-symbols.toml");
+    extras.push(...debugSymbols.map((row) => `${row.binary}.dSYM`));
+  }
+  if (extras.length) {
+    const configFile = path.join(directory, "archive-metadata.toml");
     writeFileSync(
       configFile,
-      `[profile.default.archive]\ninclude = [\n${debugSymbols.map((row) => `  { path = ${JSON.stringify(`${row.binary}.dSYM`)}, relative-to = "target", on-missing = "error" }`).join(",\n")}\n]\n`,
+      `[profile.default.archive]\ninclude = [\n${extras.map((relative) => `  { path = ${JSON.stringify(relative.split(path.sep).join("/"))}, relative-to = "target", on-missing = "error" }`).join(",\n")}\n]\n`,
     );
     archiveConfigArgs = ["--tool-config-file", `mesh-talk:${configFile}`];
   }
@@ -765,7 +796,9 @@ export async function produce(
     "--list-type",
     "binaries-only",
   ]);
-  verifyLayout(binaries, process.cwd(), profile.name);
+  const archivedFingerprints = verifyLayout(binaries, process.cwd(), profile.name);
+  assert.deepEqual(archivedFingerprints, fingerprints, "Archived object metadata inventory differs");
+  if (profile.instrumented) verifyObjectMetadata(path.join(probe, "target"), fingerprints);
   if (!profile.instrumented)
     await verifyMacDebugSymbols(binaries, process.cwd(), debugSymbols, probe);
   const binaryFile = path.join(directory, "producer-binaries.json");
@@ -1013,7 +1046,8 @@ export async function prepareArchive(
           ],
           evidence("extract"),
         );
-  verifyLayout(binaries, process.cwd(), profile.name);
+  const fingerprints = verifyLayout(binaries, process.cwd(), profile.name);
+  if (profile.instrumented) verifyObjectMetadata(targetDirectory(process.cwd(), profile), fingerprints);
   if (!profile.instrumented)
     await verifyMacDebugSymbols(binaries, process.cwd(), manifest.debugSymbols);
   const binaryFile = path.join(output, "consumer-binaries.json");

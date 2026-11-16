@@ -397,6 +397,191 @@ fn copy(from: &Node, to: &Node, channel: crate::eventlog::ConversationId) {
 }
 
 #[tokio::test]
+async fn ordinary_dm_receive_does_not_schedule_channel_projection() {
+    use crate::eventlog::EventKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let receiver = node(dir.path());
+    let peer = DeviceIdentity::generate();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&receiver.identity.public(), &peer.public());
+    for kind in [EventKind::Profile, EventKind::Message] {
+        receiver
+            .append_event(conversation, kind, vec![7; 128])
+            .unwrap();
+        let before = receiver
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        // Opaque mailbox admission invokes this owner for every accepted inner
+        // conversation, including ordinary signed DM profiles and messages.
+        receiver
+            .process_channel_reception_inner(conversation, "catch_up")
+            .unwrap();
+        receiver.retry_channel_plaintext();
+        let after = receiver
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        let work: (i64, i64) = receiver
+            .storage
+            .database()
+            .read(|c| {
+                c.query_row(
+                    "SELECT (SELECT count(*) FROM event_order_jobs WHERE conversation=?1), (SELECT count(*) FROM channel_runtime_work WHERE channel=?1)",
+                    [conversation.as_bytes().as_slice()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(work, (0, 0), "ordinary {kind:?} scheduled channel work");
+        assert_eq!(after, before, "channel scheduling read ordinary DM bodies");
+    }
+}
+
+#[tokio::test]
+async fn ordinary_dm_receive_retires_legacy_channel_demand_without_rebuilding_order() {
+    use crate::eventlog::EventKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let receiver = node(dir.path());
+    let peer = DeviceIdentity::generate();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&receiver.identity.public(), &peer.public());
+    receiver
+        .append_event(conversation, EventKind::Profile, vec![7; 128])
+        .unwrap();
+    // Reconstruct the previous receive owner's real derived work, without
+    // changing signed history or relying on the corrected scheduling gate.
+    let mut ready = false;
+    for _ in 0..256 {
+        let log = receiver.log.lock().unwrap();
+        if receiver
+            .channel_checkpoints
+            .project_step(log.repository().unwrap(), &receiver.identity, conversation)
+            .unwrap()
+        {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "legacy fixture projection did not finish");
+    receiver
+        .storage
+        .database()
+        .transaction(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO channel_dirty VALUES(?1)",
+                [conversation.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for kind in [EventKind::Profile, EventKind::Message] {
+        receiver
+            .channel_checkpoints
+            .queue_runtime(conversation)
+            .unwrap();
+        receiver
+            .append_event(conversation, kind, vec![8; 128])
+            .unwrap();
+        let snapshot = || {
+            receiver.storage.database().read(|c| {
+                c.query_row(
+                    "SELECT job,source_revision,phase,next_rank FROM event_order_jobs WHERE conversation=?1 AND order_kind=0",
+                    [conversation.as_bytes().as_slice()],
+                    |r| Ok((r.get::<_, Vec<u8>>(0)?,r.get::<_, i64>(1)?,r.get::<_, i64>(2)?,r.get::<_, i64>(3)?)),
+                ).map_err(Into::into)
+            }).unwrap()
+        };
+        let before = snapshot();
+        let body_reads = receiver
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        receiver
+            .process_channel_reception_inner(conversation, "catch_up")
+            .unwrap();
+        for _ in 0..4 {
+            receiver.retry_channel_plaintext();
+        }
+        assert_eq!(snapshot(), before, "ordinary DM rebuilt its legacy order");
+        assert_eq!(
+            receiver
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            body_reads
+        );
+        assert!(
+            receiver
+                .channel_checkpoints
+                .next_runtime(None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            receiver
+                .channels
+                .lock()
+                .unwrap()
+                .state(&conversation)
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn channel_receive_resumes_when_membership_arrives_after_nonchannel_rows() {
+    use crate::eventlog::EventKind;
+
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let owner = node(a.path());
+    let receiver = node(b.path());
+    let group = owner
+        .create_channel("delayed membership", vec![receiver.identity.public()])
+        .await
+        .unwrap();
+    // Before the signed group controls arrive, conversation identity alone
+    // cannot authorize expensive channel preparation or mean an empty group.
+    receiver
+        .append_event(group, EventKind::Profile, vec![9; 128])
+        .unwrap();
+    receiver
+        .process_channel_reception_inner(group, "catch_up")
+        .unwrap();
+    assert!(receiver.channels.lock().unwrap().state(&group).is_none());
+
+    for event in owner.metadata_events(group).unwrap() {
+        receiver.log.lock().unwrap().append(event).unwrap();
+    }
+    // Membership admission must reclassify demand; the earlier non-channel
+    // observation cannot permanently suppress a valid group or its continuation.
+    receiver
+        .process_channel_reception_inner(group, "catch_up")
+        .unwrap();
+    settle_channel(&receiver, group);
+    let channels = receiver.channels.lock().unwrap();
+    let state = channels.state(&group).expect("delayed group was installed");
+    assert_eq!(state.name(), "delayed membership");
+    assert!(state.is_member(&receiver.identity.public().user_id()));
+}
+
+#[tokio::test]
 async fn accepted_holder_releases_only_current_metadata_without_owner_or_history() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();

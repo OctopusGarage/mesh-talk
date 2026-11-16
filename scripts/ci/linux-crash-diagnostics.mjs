@@ -15,6 +15,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { join, resolve, sep, basename } from "node:path";
+import { verifyLayout } from "./windows-coverage.mjs";
 import { fileURLToPath } from "node:url";
 
 export const limits = Object.freeze({
@@ -34,9 +35,17 @@ export function decodeCoreName(name) {
 export async function validateExecutable(name, workspace) {
   const decoded = decodeCoreName(name);
   const owner = await realpath(
-    join(workspace, "target/llvm-cov-target/debug/deps"),
+    join(workspace, "target/llvm-cov-target"),
   );
   const executable = await realpath(decoded.executable);
+  try {
+    verifyLayout({
+      "rust-build-meta": { "target-directory": owner },
+      "rust-binaries": { core: { kind: "test", "binary-path": executable } },
+    }, await realpath(workspace), "linux-workspace");
+  } catch (cause) {
+    throw new Error("Core executable is outside the exact coverage owner", { cause });
+  }
   if (
     !executable.startsWith(owner + sep) ||
     !(await lstat(executable)).isFile() ||

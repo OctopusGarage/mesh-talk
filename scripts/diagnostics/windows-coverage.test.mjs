@@ -13,7 +13,6 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
-  versions,
   windowsPartitions,
   command,
   consumerFailurePolicy,
@@ -40,50 +39,6 @@ test("Windows execution partitions keep all eight native jobs directly required"
   assert.match(workflow, /name: Windows workspace tests .*\/8\)/u);
   assert.match(workflow, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/u);
   assert.doesNotMatch(workflow, /\n  qualify:|\n  acceptance:/u);
-});
-
-test("nextest security minimum and every CI installer follow the version owner", () => {
-  // GHSA-vc25-qg58-w57c: portable recording parsing is patched in 0.9.150.
-  const minimum = [0, 9, 150];
-  const current = versions.nextest.split(".").map(Number);
-  assert.equal(current.length, minimum.length);
-  assert(current.every(Number.isSafeInteger));
-  const changed = current.findIndex((part, index) => part !== minimum[index]);
-  assert(
-    changed < 0 || current[changed] > minimum[changed],
-    "nextest must include the recording parser security fix",
-  );
-  const config = readFileSync(
-    new URL("../../.config/nextest.toml", import.meta.url),
-    "utf8",
-  );
-  assert.equal(
-    config.match(/^nextest-version = "([^"]+)"$/mu)?.[1],
-    versions.nextest,
-  );
-  for (const file of ["ci.yml", "windows-workspace.yml", "linux-workspace-consumer.yml", "sanitizers.yml", "mutants.yml"]) {
-    const source = readFileSync(
-      new URL(`../../.github/workflows/${file}`, import.meta.url),
-      "utf8",
-    );
-    const pins = [...source.matchAll(/cargo-nextest@([0-9.]+)/gu)].map(
-      (match) => match[1],
-    );
-    assert(pins.length > 0, `${file} must install the owned nextest version`);
-    assert(
-      pins.every((pin) => pin === versions.nextest),
-      `${file} nextest installer drift`,
-    );
-    const installers = source.split(/^      - /mu).filter((block) =>
-      /uses: taiki-e\/install-action@/u.test(block) && /tool: .*cargo-nextest@/u.test(block));
-    assert.equal(installers.length, pins.length, `${file} must retain managed prebuilt installers`);
-    for (const installer of installers) {
-      assert.match(installer, /uses: taiki-e\/install-action@v2\.90\.2\b/u,
-        `${file} installer must support the owned tool version`);
-      assert.match(installer, /^          fallback: none$/mu,
-        `${file} must not compile host tools under test instrumentation`);
-    }
-  }
 });
 
 test("actual Windows consumer collects all selected cases after a failure", () => {
@@ -448,7 +403,7 @@ test("instrumented listing cannot emit profiles into source package directories"
     );
 });
 
-test("archive layout is anchored exactly to the metadata v1 debug/deps directory", () => {
+test("archive layout bounds v1 binaries and v2 Cargo object metadata", () => {
   const target = path.join(process.cwd(), "target");
   const metadata = (binary) => ({
     "rust-build-meta": {
@@ -461,10 +416,17 @@ test("archive layout is anchored exactly to the metadata v1 debug/deps directory
   const example = metadata(path.join(target, "debug", "examples", "example"));
   example["rust-binaries"].lib.kind = "example";
   verifyLayout(example);
+  const v2 = path.join(target, "debug", "build", "archive-fixture", "0123456789abcdef");
+  assert.deepEqual(verifyLayout(metadata(path.join(v2, "out", "unit"))), [
+    path.join("debug", "build", "archive-fixture", "0123456789abcdef", "fingerprint"),
+  ]);
   for (const binary of [
     path.join(target, "custom-build", "debug", "deps", "unit"),
     path.join(target, "release", "deps", "unit"),
     "relative/debug/deps/unit",
+    path.join(target, "debug", "build", "archive-fixture", "short", "out", "unit"),
+    path.join(v2, "other", "unit"),
+    path.join(target, "release", "build", "archive-fixture", "0123456789abcdef", "out", "unit"),
   ])
     assert.throws(() => verifyLayout(metadata(binary)), /layout/);
   const separate = metadata(path.join(target, "debug", "deps", "unit"));

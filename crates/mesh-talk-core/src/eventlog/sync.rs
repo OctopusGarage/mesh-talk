@@ -1327,7 +1327,7 @@ mod tests {
     #[test]
     fn random_partitions_converge() {
         use rand_chacha::ChaCha20Rng;
-        use rand_core::{RngCore, SeedableRng};
+        use rand_chacha::rand_core::{Rng, SeedableRng};
         use std::collections::HashMap;
 
         // 70% inclusion, expressed against next_u32() so the test needs no `rand` crate.

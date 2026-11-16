@@ -372,6 +372,38 @@ async fn ordinary_group_file_crosses_federation_after_consent_and_client_restart
 }
 
 #[tokio::test]
+async fn accepted_group_download_after_restart_pulls_direct_without_new_demand() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut f = GroupRelayFixture::new().await;
+        let (manifest, file, payload) = f.offer().await;
+        f.b.decide_attachment(file, true).unwrap();
+        let before = f.b.file_consent_controls(&f.a.identity.public(), &[(file, manifest)], false).unwrap();
+        assert_eq!(before.len(), 1);
+        f.restart_clients();
+        settle_group_files(&f.b, f.group).await;
+        assert_eq!(f.b.file_consent_controls(&f.a.identity.public(), &[(file, manifest)], false).unwrap(), before);
+        assert!(f.b.file_progress(file).unwrap().is_some_and(|progress| progress.done < progress.total));
+        // Remove all relay payloads. The accepted receiver's direct download
+        // owner must recover independently of custody dispatch and reapproval.
+        *f.ps.lock().unwrap() = PostOffice::open(&f.directory.path().join("empty-p.log"), "pw", DeviceIdentity::generate()).unwrap();
+        *f.qs.lock().unwrap() = PostOffice::open(&f.directory.path().join("empty-q.log"), "pw", DeviceIdentity::generate()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let current = Announce::new_with_account(&f.a.identity, &f.a.account,
+            "Direct recovery source", listener.local_addr().unwrap().port());
+        f.b.roster.lock().unwrap().update(&current, "127.0.0.1".parse().unwrap(), &f.b.user_id());
+        let source = f.a.clone();
+        f.tasks.push(tokio::spawn(source.run_accept_loop(listener)));
+        for _ in 0..8 {
+            f.b.pull_pending_files_direct().await;
+            if f.b.file_ready_to_save(file).unwrap() { break; }
+        }
+        assert_eq!(f.b.read_file(file).expect("the unchanged Accepted receiver must recover actual bytes from its returning source"), payload);
+        assert_eq!(f.b.file_consent_controls(&f.a.identity.public(), &[(file, manifest)], false).unwrap(), before,
+            "direct recovery must not invent a new receiver approval or demand revision");
+    }).await.expect("accepted direct recovery must make bounded progress");
+}
+
+#[tokio::test]
 async fn declined_group_file_and_removed_recipient_do_not_receive_relay_chunks() {
     tokio::time::timeout(Duration::from_secs(20), async {
         let mut f = GroupRelayFixture::new().await;
@@ -762,4 +794,173 @@ async fn offline_group_file_is_deposited_before_consent_and_received_after_sende
     })
     .await
     .expect("offline group file custody and later receipt must make bounded progress");
+}
+
+#[tokio::test]
+async fn participant_outgoing_custody_runs_without_manual_pull_or_incoming_work() {
+    use crate::node::{ParticipantConfig, PreparedParticipant};
+    let f = GroupRelayFixture::new().await;
+    let path = f.directory.path().join("runtime-custody.bin");
+    std::fs::write(&path, vec![19; crate::file::CHUNK_SIZE + 31]).unwrap();
+    let (_, file) =
+        f.a.enqueue_file_channel_progress_expiring_if(
+            f.group,
+            &path,
+            crate::file::FileKind::File,
+            |_| {},
+            None,
+            |commit| commit(),
+        )
+        .await
+        .unwrap();
+    f.a.await_channel_metadata(f.group).await.unwrap();
+    let final_chunk =
+        f.a.log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .into_iter()
+            .last()
+            .unwrap();
+    let outer =
+        crate::postoffice::opaque::RelayMailbox::federated(&f.a.identity, &f.b.identity.public())
+            .unwrap()
+            .wrap(&final_chunk)
+            .unwrap()
+            .id;
+    assert!(
+        !f.ps.lock().unwrap().has(&outer),
+        "fixture must owe actual relay custody"
+    );
+    // The relay fixture has no discovery daemon. Refresh only its identical
+    // availability proof; these renewals must not act as file-work notifications.
+    let heartbeat = {
+        let node = f.a.clone();
+        let proof = f.pproof.clone();
+        tokio::spawn(async move {
+            loop {
+                node.roster.lock().unwrap().update(
+                    &proof,
+                    "127.0.0.1".parse().unwrap(),
+                    &node.user_id(),
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        })
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let running = PreparedParticipant::prepare(
+        f.a.clone(),
+        listener,
+        Arc::new(crate::discovery::DiscoveryVisibility::new(false)),
+        ParticipantConfig {
+            discovery_port: 0,
+            candidate_source: None,
+        },
+    )
+    .unwrap()
+    .launch("Runtime custody sender");
+    let delivered = tokio::time::timeout(Duration::from_secs(30), async {
+        while !f.ps.lock().unwrap().has(&outer) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    heartbeat.abort();
+    let _ = heartbeat.await;
+    running.stop().await;
+    assert!(
+        delivered.is_ok(),
+        "the owned outgoing producer must deposit the exact final chunk without any manual file pull"
+    );
+}
+
+#[tokio::test]
+async fn managed_plaintext_without_retained_ciphertext_cannot_authorize_group_custody() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let f = GroupRelayFixture::new().await;
+        let (manifest, file, payload) = f.enqueue_offer_expiring(None).await;
+        let ready = || {
+            for _ in 0..4096 {
+                match f
+                    .a
+                    .group_file_custody_ready_for_test(f.group, file, manifest, &f.bp.public())
+                {
+                    Err(crate::eventlog::LogError::StaleCursor) => continue,
+                    result => return result.unwrap(),
+                }
+            }
+            panic!("bounded group authorization must finish");
+        };
+        assert!(ready(), "current original ciphertext must remain eligible");
+        let chunks = f.a.log.lock().unwrap().events(&file).unwrap();
+        assert!(!chunks.is_empty());
+        let stored = f.a.files.lock().unwrap().manifest(file).unwrap().unwrap();
+        let source = f.directory.path().join("ordinary-document.bin");
+        f.a.media
+            .store_from_path(file, stored.name(), &source)
+            .unwrap();
+        assert_eq!(
+            f.a.log.lock().unwrap().drop_conversation(&file).unwrap(),
+            chunks.len()
+        );
+        let progress = f.a.file_progress(file).unwrap().unwrap();
+        assert_eq!(
+            progress.done, progress.total,
+            "UI completeness may use retained managed plaintext"
+        );
+        let saved = f.directory.path().join("export-after-raw-retirement.bin");
+        f.a.save_file(file, &saved).unwrap();
+        assert_eq!(std::fs::read(saved).unwrap(), payload);
+        assert!(
+            f.a.group_file_offer(file, manifest, &f.bp.public())
+                .unwrap()
+                .is_some(),
+            "the exact manifest and group grant remain current"
+        );
+        assert!(
+            !ready(),
+            "managed plaintext cannot authorize custody of absent signed ciphertext"
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        *f.a.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "group_file_relay_attempt" {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        f.a.retry_group_file_delivery().await;
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "an absent ciphertext source must not dial a relay"
+        );
+        assert!(
+            !f.a.files
+                .lock()
+                .unwrap()
+                .group_custody_settled(file, manifest, &f.bp.public(), None)
+                .unwrap(),
+            "local export must never certify remote custody"
+        );
+        for chunk in chunks {
+            f.a.log.lock().unwrap().append_durable(chunk).unwrap();
+        }
+        assert!(
+            ready(),
+            "a later restored signed ciphertext source must become eligible"
+        );
+        // The owning queue, rather than only the isolated predicate, must
+        // reconstruct dispatch after a valid source becomes available again.
+        f.a.queue_group_file_delivery(file, manifest).unwrap();
+        f.a.retry_group_file_delivery().await;
+        assert!(
+            attempts.load(Ordering::SeqCst) > 0,
+            "restored retained ciphertext must admit a real relay attempt"
+        );
+    })
+    .await
+    .expect("retained ciphertext qualification must stay bounded");
 }

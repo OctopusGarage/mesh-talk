@@ -41,6 +41,17 @@ pub(crate) struct DomainChargeMetadata {
     pub event_count: u64,
     pub estimated_bytes: u64,
 }
+const PROFILE_PUBLICATIONS: &str = "CREATE TABLE profile_publication_hints(sequence INTEGER PRIMARY KEY AUTOINCREMENT,domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),publication BLOB NOT NULL CHECK(typeof(publication)='blob' AND length(publication)=32),event_id BLOB NOT NULL CHECK(typeof(event_id)='blob' AND length(event_id)=32),UNIQUE(domain,publication));";
+const MAX_PROFILE_PUBLICATIONS: i64 = 1024;
+fn publication_table_present(c: &Connection) -> Result<bool, LogError> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='profile_publication_hints')",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(Into::into)
+}
+
 impl EventRepository {
     /// Exact retained kind cardinality, without fetching encrypted event bodies.
     pub(crate) fn count_kind(
@@ -112,6 +123,47 @@ impl EventRepository {
     pub(crate) fn count(&self, conv: &ConversationId) -> Result<u64, LogError> {
         Ok(self.metadata(conv)?.map_or(0, |m| m.count))
     }
+    /// Optional sender provenance only. Missing/retired originals never qualify.
+    pub(crate) fn profile_publication_id(
+        &self,
+        key: &[u8; 32],
+    ) -> Result<Option<EventId>, LogError> {
+        self.database.read(|c| {
+            if !publication_table_present(c)? {
+                return Ok(None);
+            }
+            crate::storage::profile::manifest::validate_ddl(c, PROFILE_PUBLICATIONS)?;
+            let id: Option<Vec<u8>> = c.query_row(
+                "SELECT event_id FROM profile_publication_hints WHERE domain=?1 AND publication=?2",
+                params![self.domain.0.as_slice(), key.as_slice()], |r| r.get(0)).optional()?;
+            id.map(|id| {
+                id.try_into()
+                    .map(EventId::new)
+                    .map_err(|_| corrupt("invalid profile publication reference"))
+            })
+            .transpose()
+        })
+    }
+    /// The fingerprint is local sender provenance. Commit it with its canonical
+    /// event, so a failed append cannot leave evidence of a successful publication.
+    pub(crate) fn append_profile_publication(
+        &self,
+        event: &Event,
+        key: &[u8; 32],
+    ) -> Result<AppendOutcome, LogError> {
+        if event.kind != EventKind::Profile {
+            return Err(corrupt("profile publication requires a Profile event"));
+        }
+        self.database.transaction(|c| {
+            let outcome = self.append_on(c, event)?;
+            if !publication_table_present(c)? { c.execute_batch(PROFILE_PUBLICATIONS)?; }
+            crate::storage::profile::manifest::validate_ddl(c, PROFILE_PUBLICATIONS)?;
+            c.execute("INSERT INTO profile_publication_hints(domain,publication,event_id) VALUES(?1,?2,?3) ON CONFLICT(domain,publication) DO UPDATE SET event_id=excluded.event_id", params![self.domain.0.as_slice(), key.as_slice(), event.id.as_bytes().as_slice()])?;
+            c.execute("DELETE FROM profile_publication_hints WHERE sequence IN (SELECT sequence FROM profile_publication_hints ORDER BY sequence DESC LIMIT -1 OFFSET ?1)", [MAX_PROFILE_PUBLICATIONS])?;
+            Ok(outcome)
+        })
+    }
+
     pub(crate) fn authored_header(
         &self,
         conv: &ConversationId,

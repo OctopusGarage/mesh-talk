@@ -1,3 +1,8 @@
+import { startRecoveryRefresh } from "@/lib/recoveryRefresh";
+import {
+  subscribeDocumentInvalidation,
+  subscribeSyncInvalidation,
+} from "@/lib/syncInvalidation";
 import { useEffect, useRef, useState } from "react";
 import { Download, Eye } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -36,26 +41,50 @@ export function FavoriteAttachment({
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
+    let reading = false;
+    let dirty = false;
     const refresh = async () => {
-      if (!lease.current()) return;
+      if (!active || !lease.current()) return;
+      if (reading) {
+        dirty = true;
+        return;
+      }
+      reading = true;
       try {
-        const available = await messageFavorites.fileAvailable(
-          lease.owner!,
-          file.file_conv,
-        );
-        if (active && lease.current()) setReady(available);
-      } catch (e) {
-        if (active && lease.current()) {
-          setReady(false);
-          setError(errorMessage(e));
-        }
+        do {
+          dirty = false;
+          try {
+            const available = await messageFavorites.fileAvailable(
+              lease.owner!,
+              file.file_conv,
+            );
+            if (active && lease.current()) setReady(available);
+          } catch (e) {
+            if (active && lease.current()) {
+              setReady(false);
+              setError(errorMessage(e));
+            }
+          }
+        } while (active && lease.current() && dirty);
+      } finally {
+        reading = false;
       }
     };
+    const stopDocuments = subscribeDocumentInvalidation(
+      lease.owner!,
+      () => void refresh(),
+    );
+    const stopFiles = subscribeSyncInvalidation((change) => {
+      if (change.owner === lease.owner && change.kind === "files")
+        void refresh();
+    });
+    const stopRecovery = startRecoveryRefresh(() => void refresh());
     void refresh();
-    const timer = setInterval(() => void refresh(), 15_000);
     return () => {
       active = false;
-      clearInterval(timer);
+      stopDocuments();
+      stopFiles();
+      stopRecovery();
     };
   }, [file.file_conv, lease]);
   useEffect(

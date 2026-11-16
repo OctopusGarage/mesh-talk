@@ -11,9 +11,41 @@ pub async fn my_id(state: tauri::State<'_, NodeState>) -> Result<String, Command
 
 #[tauri::command]
 pub async fn list_peers(state: tauri::State<'_, NodeState>) -> Result<Vec<PeerInfo>, CommandError> {
+    list_peers_with_snapshot(&state, |node| async move {
+        node.cached_peer_snapshot_async().await
+    })
+    .await
+}
+
+async fn list_peers_with_snapshot<F, Fut>(
+    state: &NodeState,
+    snapshot: F,
+) -> Result<Vec<PeerInfo>, CommandError>
+where
+    F: FnOnce(std::sync::Arc<mesh_talk_core::node::Node>) -> Fut,
+    Fut: std::future::Future<
+            Output = std::io::Result<Vec<mesh_talk_core::discovery::roster::PeerRecord>>,
+        >,
+{
+    let node = {
+        let guard = state.0.read().await;
+        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        if !rt.discovery_available() {
+            return Err(CommandError::Internal("discovery unavailable".into()));
+        }
+        rt.handle()
+    };
+    // Core owns the blocking persistence and its retirement permit. The runtime
+    // slot stays available for installation and unrelated session operations.
+    let peers = snapshot(node.clone())
+        .await
+        .map_err(|error| CommandError::Io(error.to_string()))?;
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(rt.peers().into_iter().map(PeerInfo::from).collect())
+    if !rt.discovery_available() || !std::sync::Arc::ptr_eq(&rt.handle(), &node) {
+        return Err(CommandError::not_started());
+    }
+    Ok(peers.into_iter().map(PeerInfo::from).collect())
 }
 
 #[tauri::command]
@@ -455,5 +487,154 @@ mod recovery_accounts_tests {
         assert_eq!(rows[0].account_id, "shared-account");
         assert_eq!(rows[0].device_count, 0);
         assert!(rows[0].names.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod peer_query_tests {
+    use super::*;
+    use mesh_talk_core::node::NodeRuntime;
+    use std::time::Duration;
+    use tauri::Manager;
+
+    async fn start(root: &std::path::Path, owner: &str) -> NodeRuntime {
+        NodeRuntime::start(
+            root,
+            owner,
+            owner,
+            "test-password",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_peers_preserves_cache_failure_and_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        let source_root = tempfile::tempdir().unwrap();
+        let source = start(source_root.path(), "source").await;
+        let target = start(root.path(), "target").await;
+        let state = NodeState::default();
+        *state.0.write().await = Some(target);
+        let app = tauri::test::mock_builder()
+            .manage(state.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let cache = root.path().join("accounts/target/peer-proofs");
+        let bytes = std::fs::read(&cache).unwrap();
+        std::fs::remove_file(&cache).unwrap();
+        std::fs::create_dir(&cache).unwrap();
+        {
+            let guard = state.0.read().await;
+            guard
+                .as_ref()
+                .unwrap()
+                .probe_endpoint(([127, 0, 0, 1], source.discovery_port()).into())
+                .await
+                .unwrap();
+        }
+        let failed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let result = list_peers(app.state()).await;
+                if result.is_err() {
+                    break result;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        std::fs::remove_dir(&cache).unwrap();
+        std::fs::write(&cache, bytes).unwrap();
+        let recovered = list_peers(app.state()).await;
+        state.0.write().await.take().unwrap().stop().await;
+        source.stop().await;
+        assert!(
+            matches!(failed, Ok(Err(CommandError::Io(_)))),
+            "a failed certified snapshot must remain an IO error"
+        );
+        assert!(
+            !recovered.unwrap().is_empty(),
+            "restored storage must expose peers again"
+        );
+    }
+
+    // These controls hold the injected observer future, not physical Core IO.
+    // The real managed-handler test above qualifies filesystem error composition.
+    async fn held_snapshot_control(replacement: Option<bool>) {
+        let root = tempfile::tempdir().unwrap();
+        let replacement_root = tempfile::tempdir().unwrap();
+        let state = NodeState::default();
+        *state.0.write().await = Some(start(root.path(), "owner").await);
+        let replacement_runtime = if replacement == Some(true) {
+            Some(start(replacement_root.path(), "owner").await)
+        } else {
+            None
+        };
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let task_state = state.clone();
+        let query = tokio::spawn(async move {
+            list_peers_with_snapshot(&task_state, |node| async move {
+                entered_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                node.cached_peer_snapshot_async().await
+            })
+            .await
+        });
+        entered_rx.await.unwrap();
+        let access = tokio::time::timeout(Duration::from_secs(2), state.0.write()).await;
+        let progressed = access.is_ok();
+        let mut retired = None;
+        if let Ok(mut guard) = access
+            && replacement.is_some()
+        {
+            retired = guard.take();
+            *guard = replacement_runtime;
+        }
+        release_tx.send(()).unwrap();
+        let result = query.await.unwrap();
+        if let Some(runtime) = retired {
+            runtime.stop().await;
+        }
+        if let Some(runtime) = state.0.write().await.take() {
+            runtime.stop().await;
+        }
+        assert!(
+            progressed,
+            "runtime installation must progress while snapshot is held"
+        );
+        if replacement.is_some() {
+            assert!(
+                result.is_err(),
+                "an obsolete runtime cannot publish its snapshot"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "the same runtime may publish after the hold"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn held_peer_snapshot_releases_runtime_slot() {
+        held_snapshot_control(None).await;
+    }
+
+    #[tokio::test]
+    async fn held_peer_snapshot_rejects_same_owner_runtime_replacement() {
+        held_snapshot_control(Some(true)).await;
+    }
+
+    #[tokio::test]
+    async fn held_peer_snapshot_rejects_removed_runtime() {
+        held_snapshot_control(Some(false)).await;
     }
 }

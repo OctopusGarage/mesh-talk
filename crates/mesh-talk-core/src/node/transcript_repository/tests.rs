@@ -91,6 +91,80 @@ fn auxiliary_sources_recover_each_barrier_without_changing_transcript_schema() {
 }
 
 #[test]
+fn initial_history_barrier_sync_failure_requires_retry_before_publication() {
+    use publication::PublishedHistorySource;
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let path = dir.path().join("custody.log");
+    let (mut legacy, _) = EncryptedRecordLog::<u64>::open(&path, "pw", b"MTAUX1").unwrap();
+    legacy.append(&7).unwrap();
+    drop(legacy);
+    crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+    crate::storage::profile::publication::tests::CUT
+        .with(|value| *value.borrow_mut() = Some("parent-sync"));
+    let result = PublishedHistorySource::open(
+        owner.clone(),
+        &path,
+        "pw",
+        CHANNEL_CUSTODY,
+        |_, path, password| {
+            let (_, records) = EncryptedRecordLog::<u64>::open(path, password, b"MTAUX1")?;
+            assert_eq!(records, [7]);
+            Ok(())
+        },
+    );
+    crate::storage::profile::publication::tests::CUT.with(|value| *value.borrow_mut() = None);
+    assert!(
+        result.is_err(),
+        "an unsynchronized first barrier must not produce a published owner"
+    );
+    assert!(
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()) > 0
+    );
+    assert_eq!(
+        owner
+            .database()
+            .read(|c| Ok(c.query_row(
+                "SELECT published FROM auxiliary_history_sources WHERE kind=?1",
+                [CHANNEL_CUSTODY],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        0
+    );
+    assert!(
+        EncryptedRecordLog::<u64>::open(&path, "pw", b"MTAUX1").is_err(),
+        "the renamed downgrade barrier must already reject a legacy writer"
+    );
+    drop(owner);
+    let owner = profile(dir.path(), &identity, &account);
+    crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+    let source =
+        PublishedHistorySource::open(owner.clone(), &path, "pw", CHANNEL_CUSTODY, |_, _, _| {
+            panic!("a committed import must not replay after failed directory synchronization")
+        })
+        .unwrap();
+    assert!(
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()) > 0,
+        "publication retry must synchronize the existing exact barrier before SQL marks it published"
+    );
+    assert_eq!(
+        owner
+            .database()
+            .read(|c| Ok(c.query_row(
+                "SELECT published FROM auxiliary_history_sources WHERE kind=?1",
+                [CHANNEL_CUSTODY],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        1
+    );
+    source.check_barrier().unwrap();
+}
+
+#[test]
 fn runtime_leaf_gap_revisions_survive_warm_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let identity = DeviceIdentity::generate();
@@ -1179,4 +1253,119 @@ fn channel_consumed_evidence_is_atomic_and_survives_restart_without_body() {
     assert!(store.processed(id).unwrap());
     assert_eq!(store.usage().unwrap().records, 0);
     assert_eq!(store.body_reads(), 0);
+}
+
+#[test]
+fn warm_metadata_reads_reuse_statements_and_observe_current_rows() {
+    use rusqlite::StatementStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let path = dir.path().join("sent.log");
+    let mut writer = SentStore::from_profile(owner.clone(), &path, "pw").unwrap();
+    writer.record_durable(&sent(1)).unwrap();
+    let repository = TranscriptRepository::open(owner.clone(), &path, "pw", SENT, |_, _, _| {
+        panic!("published history must not be imported again")
+    })
+    .unwrap();
+    let mut key = vec![0];
+    key.extend(1u64.to_be_bytes());
+    owner
+        .database()
+        .read(|c| {
+            c.flush_prepared_statement_cache();
+            Ok(())
+        })
+        .unwrap();
+    let before = owner.database().read(|c| Ok(c.total_changes())).unwrap();
+    for _ in 0..4 {
+        for scope in [None, Some(conv(1)), Some(conv(2))] {
+            let page = repository
+                .header_scan_page(
+                    scope.as_ref(),
+                    None,
+                    TranscriptPageLimit::new(1, 256).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(page.rows.len(), usize::from(scope != Some(conv(2))));
+            owner
+                .database()
+                .read(|c| {
+                    let header =
+                        TranscriptRepository::find_header_on(c, SENT, scope.as_ref(), &key)?;
+                    assert_eq!(header.is_some(), scope != Some(conv(2)));
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+    assert_eq!(repository.body_reads(), 0);
+    assert_eq!(
+        owner.database().read(|c| Ok(c.total_changes())).unwrap(),
+        before
+    );
+    let runs = owner.database().read(|c| {
+        let mut runs = Vec::new();
+        for scoped in [false, true] {
+            let host = if scoped {" AND conversation=?2"} else {" AND ?2 IS NULL"};
+            let scan = format!("SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1{host} AND ?5 IS NULL AND ordinal>?3 ORDER BY ordinal LIMIT ?4");
+            let host = if scoped {" AND conversation=?3"} else {" AND ?3 IS NULL"};
+            let lookup = format!("SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND row_key=?2{host} ORDER BY ordinal LIMIT 1");
+            for sql in [scan, lookup] {
+                runs.push(c.prepare_cached(&sql)?.get_status(StatementStatus::Run));
+            }
+        }
+        Ok(runs)
+    }).unwrap();
+    assert_eq!(
+        runs,
+        [4, 4, 8, 8],
+        "warm reads must retain the executed SQLite VMs"
+    );
+    // Reusing a program must not cache its results or retain old parameter values.
+    let mut second = sent(2);
+    second.conversation = conv(2);
+    writer.record_durable(&second).unwrap();
+    let current = repository
+        .header_scan_page(
+            Some(&conv(2)),
+            None,
+            TranscriptPageLimit::new(1, 256).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(current.rows.len(), 1);
+    assert_eq!(current.rows[0].sequence, 2);
+    writer.remove_ordinals(&[current.rows[0].ordinal]).unwrap();
+    assert!(
+        repository
+            .header_scan_page(
+                Some(&conv(2)),
+                None,
+                TranscriptPageLimit::new(1, 256).unwrap()
+            )
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    owner
+        .database()
+        .read(|c| {
+            c.execute_batch("ALTER TABLE transcript_rows ADD COLUMN cache_recovery_probe INTEGER")?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        repository
+            .header_scan_page(
+                Some(&conv(1)),
+                None,
+                TranscriptPageLimit::new(1, 256).unwrap()
+            )
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    assert_eq!(repository.body_reads(), 0);
 }

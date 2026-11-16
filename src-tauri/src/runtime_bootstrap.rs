@@ -210,8 +210,22 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     )),
                 );
                 let handle = runtime.handle();
+                let mut ui_changes = handle.subscribe_desktop_ui_changes();
+                // Capture at subscription, before installation can delay this worker.
+                // Later arrivals remain unobserved until the admitted forwarding turn.
+                let observed = *ui_changes.borrow_and_update();
+                runtime.register_host_task(tokio::spawn(after_install(
+                    installation.clone(),
+                    forward_ui_changes(
+                        app_handle.clone(),
+                        authority.clone(),
+                        runtime.account_id().to_owned(),
+                        runtime.user_id().to_owned(),
+                        observed,
+                        ui_changes,
+                    ),
+                )));
                 for (kind, changes) in [
-                    ("state", handle.subscribe_ui_changes()),
                     ("files", handle.subscribe_file_changes()),
                     ("roster", handle.subscribe_roster_changes()),
                 ] {
@@ -475,6 +489,53 @@ async fn after_install(
         return;
     }
     operation.await;
+}
+
+async fn forward_ui_changes<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    authority: RuntimeAuthority,
+    account: String,
+    device: String,
+    mut observed: mesh_talk_core::node::DesktopUiRevisions,
+    mut changes: tokio::sync::watch::Receiver<mesh_talk_core::node::DesktopUiRevisions>,
+) {
+    while changes.changed().await.is_ok() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let current = *changes.borrow_and_update();
+        let documents = current.documents != observed.documents;
+        let status = current.sync_status != observed.sync_status;
+        let kinds: &[&'static str] = if current.state != observed.state {
+            &["state"]
+        } else {
+            match (documents, status) {
+                (true, true) => &["documents", "sync_status"],
+                (true, false) => &["documents"],
+                (false, true) => &["sync_status"],
+                (false, false) => &[],
+            }
+        };
+        // A later revision during emission remains ready on the next changed().
+        // Broad state covers both narrow domains in this captured batch only.
+        observed = current;
+        for &kind in kinds {
+            if authority
+                .current(|_| {
+                    crate::events::emit_node_state_changed(
+                        &app,
+                        crate::events::NodeStateChangedEvent {
+                            owner: authority.lease.owner().to_owned(),
+                            account_id: account.clone(),
+                            device_id: device.clone(),
+                            kind,
+                        },
+                    );
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
 }
 
 async fn forward_state_changes<R: tauri::Runtime>(
@@ -1272,6 +1333,92 @@ mod tests {
             panic!("failed installation must not run host producers")
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn qualified_ui_forwarder_preserves_preinstall_mixed_and_concurrent_updates() {
+        use mesh_talk_core::node::DesktopUiRevisions;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let (session, node, authority) = authority();
+        let app = tauri::test::mock_app();
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (changes, mut receiver) = tokio::sync::watch::channel(DesktopUiRevisions::default());
+        let observed = *receiver.borrow_and_update();
+        let inject = Arc::new(AtomicBool::new(false));
+        let injection = inject.clone();
+        let arrivals = changes.clone();
+        app.listen("node-state-changed", move |event| {
+            let event: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+            let kind = event["kind"].as_str().unwrap().to_owned();
+            events.send(kind.clone()).unwrap();
+            if kind == "documents" && injection.swap(false, Ordering::SeqCst) {
+                arrivals.send_modify(|current| {
+                    current.state += 1;
+                    current.sync_status += 1;
+                });
+            }
+        });
+        let (installed, ready) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(after_install(
+            ready,
+            forward_ui_changes(
+                app.handle().clone(),
+                authority.clone(),
+                "account".into(),
+                "device".into(),
+                observed,
+                receiver,
+            ),
+        ));
+        changes.send_replace(DesktopUiRevisions {
+            state: 1,
+            documents: 1,
+            sync_status: 1,
+        });
+        tokio::task::yield_now().await;
+        assert!(received.try_recv().is_err());
+        installed.send_replace(true);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, "state");
+        assert!(received.try_recv().is_err());
+        changes.send_modify(|current| {
+            current.documents += 1;
+            current.sync_status += 1;
+        });
+        for expected in ["documents", "sync_status"] {
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                expected
+            );
+        }
+        inject.store(true, Ordering::SeqCst);
+        changes.send_modify(|current| current.documents += 1);
+        for expected in ["documents", "state"] {
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                expected
+            );
+        }
+        let _replacement =
+            RuntimeAuthority::request(session, authority.lease.clone(), node).unwrap();
+        changes.send_modify(|current| current.sync_status += 1);
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(received.try_recv().is_err());
     }
 
     #[tokio::test]

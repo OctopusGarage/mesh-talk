@@ -21,7 +21,7 @@ type MediaWindow = Window & {
   };
 };
 
-test("received media recovers when bytes become available with stable fileConv", async ({
+test("legacy media availability recovery preserves the stable fileConv and full-size actions", async ({
   page,
   browserName,
 }) => {
@@ -95,7 +95,9 @@ test("received media recovers when bytes become available with stable fileConv",
         );
       }
       if (
-        (cmd === "read_media" || cmd === "read_file") &&
+        (cmd === "read_media" ||
+          cmd === "read_media_preview" ||
+          cmd === "read_file") &&
         args.fileConv === d.identity
       ) {
         d.calls.push({ cmd, available: d.available, rejected: !d.available });
@@ -178,9 +180,10 @@ test("received media recovers when bytes become available with stable fileConv",
               imgs.some((img) => (img as HTMLImageElement).naturalWidth > 0),
             ),
         {
-          timeout: 4000,
+          // This fixture intentionally omits push capability: legacy recovery is five seconds.
+          timeout: 7000,
           message:
-            "Received image should decode after late bytes become available without remount, events or identity changes",
+            "Legacy image should decode within the five-second recovery cadence without remount, events or identity changes",
         },
       )
       .toBe(true);

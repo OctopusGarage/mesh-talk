@@ -1115,11 +1115,12 @@ pub(crate) fn emit_node_state_changed<R: Runtime>(
     app: &tauri::AppHandle<R>,
     event: NodeStateChangedEvent,
 ) {
-    if crate::reception_host::invalidate_identity(
+    if crate::reception_host::invalidate_identity_kind(
         app,
         &event.owner,
         &event.account_id,
         &event.device_id,
+        event.kind,
     ) {
         return;
     }

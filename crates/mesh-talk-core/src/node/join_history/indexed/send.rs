@@ -183,49 +183,124 @@ impl Node {
     /// One existing worker turn selects one channel and advances one bounded
     /// history continuation. An appended release schedules the next control turn.
     pub(in crate::node) fn retry_join_history(&self) -> Result<Vec<ConversationId>, NodeError> {
-        self.retry_join_history_turn(true)
+        self.retry_join_history_turn(true, false)
+            .map(|(channels, _)| channels)
     }
-    pub(in crate::node) fn retry_join_history_new(&self) -> Result<Vec<ConversationId>, NodeError> {
-        self.retry_join_history_turn(false)
+    pub(in crate::node) fn note_join_history_recovery_input(&self) {
+        let mut work = self.join_history_work.lock().expect("history retry lock");
+        if work.recovery_active {
+            work.recovery_resweep = true;
+        } else {
+            work.recovery_complete = false;
+        }
+    }
+    pub(in crate::node) fn retry_join_history_owned(
+        &self,
+    ) -> Result<(Vec<ConversationId>, bool), NodeError> {
+        let result = self.retry_join_history_turn(false, true);
+        let mut work = self.join_history_work.lock().expect("history retry lock");
+        match &result {
+            Ok((_, more)) => work.recovery_complete = !more,
+            Err(_) => {
+                work.recovery_complete = false;
+                work.recovery_resweep = true;
+            }
+        }
+        result
     }
     fn retry_join_history_turn(
         &self,
         redistribute_ready: bool,
-    ) -> Result<Vec<ConversationId>, NodeError> {
+        owned_turn: bool,
+    ) -> Result<(Vec<ConversationId>, bool), NodeError> {
+        if owned_turn
+            && self
+                .join_history_work
+                .lock()
+                .expect("history retry lock")
+                .recovery_complete
+        {
+            return Ok((Vec::new(), false));
+        }
+        #[cfg(test)]
+        if owned_turn {
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_history_entered".into()
+            });
+        }
         let _membership = self
             .channel_membership_commit
             .lock()
             .expect("channel membership commit lock");
         let mut channels = self.channels.lock().expect("channels lock").channel_ids();
         channels.sort_by_key(|channel| *channel.as_bytes());
-        let Some(channel) = ({
+        let (selected, more) = {
             let mut work = self.join_history_work.lock().expect("history retry lock");
+            if owned_turn && !work.recovery_active {
+                work.recovery_upper = channels.last().copied();
+                work.recovery_after = None;
+                work.recovery_active = true;
+            }
+            let after = if owned_turn {
+                work.recovery_after
+            } else {
+                work.sender_after
+            };
             let selected = channels
                 .iter()
                 .copied()
                 .find(|channel| {
-                    work.sender_after
-                        .is_none_or(|after| channel.as_bytes() > after.as_bytes())
+                    after.is_none_or(|after| channel.as_bytes() > after.as_bytes())
+                        && (!owned_turn
+                            || work
+                                .recovery_upper
+                                .is_some_and(|upper| channel.as_bytes() <= upper.as_bytes()))
                 })
-                .or_else(|| channels.first().copied());
-            work.sender_after = selected;
-            selected
-        }) else {
-            return Ok(Vec::new());
+                .or_else(|| (!owned_turn).then(|| channels.first().copied()).flatten());
+            let more = selected.is_some_and(|selected| {
+                channels.iter().any(|channel| {
+                    channel.as_bytes() > selected.as_bytes()
+                        && work
+                            .recovery_upper
+                            .is_some_and(|upper| channel.as_bytes() <= upper.as_bytes())
+                })
+            });
+            if owned_turn {
+                work.recovery_after = selected;
+                if !more {
+                    work.recovery_active = false;
+                    let again = std::mem::take(&mut work.recovery_resweep);
+                    (selected, again)
+                } else {
+                    (selected, true)
+                }
+            } else {
+                work.sender_after = selected;
+                (selected, false)
+            }
         };
+        let Some(channel) = selected else {
+            return Ok((Vec::new(), more));
+        };
+        #[cfg(test)]
+        if owned_turn {
+            self.trace_account_client(&self.identity.public(), || {
+                format!("channel_recovery_history_selected {channel:?}")
+            });
+        }
         if !self.channel_replica_enabled(channel, &self.user_id()) {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), more));
         }
         let projection = match self.account_group_projection(channel) {
             Ok(value) => value,
-            Err(LogError::StaleCursor) => return Ok(Vec::new()),
+            Err(LogError::StaleCursor) => return Ok((Vec::new(), more)),
             Err(error) => return Err(error.into()),
         };
         let Some(current) = projection.state.as_ref() else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), more));
         };
         if current.is_dissolved() || !self.channel_identity_is_current(current)? {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), more));
         }
         let plan = self.plan_join_history_release(channel, projection)?;
         let appended = plan.payload.is_some();
@@ -233,10 +308,13 @@ impl Node {
             self.append_channel_control_from_source(&plan.source, kind, payload)?;
             self.channel_recovery_notify.notify_one();
         }
-        Ok(if plan.ready && (redistribute_ready || appended) {
-            vec![channel]
-        } else {
-            Vec::new()
-        })
+        Ok((
+            if plan.ready && (redistribute_ready || appended) {
+                vec![channel]
+            } else {
+                Vec::new()
+            },
+            more,
+        ))
     }
 }

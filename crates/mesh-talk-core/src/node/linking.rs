@@ -314,7 +314,7 @@ impl Node {
         }
         let mut channel = tokio::time::timeout(
             PAIRING_CONNECT_TIMEOUT,
-            self.privacy_dial(addr, peer_public),
+            self.privacy_dial_interactive(addr, peer_public),
         )
         .await
         .map_err(|_| {

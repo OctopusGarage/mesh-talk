@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { installedTheme } from "@/store/packs";
+import { installedTheme, usePacks } from "@/store/packs";
 import type { ThemePack } from "@/lib/pack";
 
 // Base modes use the default Ink & Signal look. Football and nature themes apply
@@ -193,10 +193,12 @@ export const useTheme = create<ThemeState>((set, get) => ({
     const next: Theme = get().theme === "light" ? "dark" : "light";
     persist(next, true, get().packWallpaperIds);
     set({ theme: next });
+    if (ALL_THEMES.includes(next)) void usePacks.getState().prepareTheme(next);
   },
   set: (next: Theme) => {
     persist(next, true, get().packWallpaperIds);
     set({ theme: next });
+    if (ALL_THEMES.includes(next)) void usePacks.getState().prepareTheme(next);
   },
   setWallpaperEnabled: (enabled: boolean) => {
     if (typeof localStorage !== "undefined") {

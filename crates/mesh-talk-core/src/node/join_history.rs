@@ -643,7 +643,7 @@ impl Node {
     }
 
     pub async fn set_channel_history_policy(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: ConversationId,
         policy: HistoryPolicy,
     ) -> Result<(), NodeError> {
@@ -651,7 +651,7 @@ impl Node {
             .await
     }
     pub async fn set_channel_history_policy_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: ConversationId,
         policy: HistoryPolicy,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,

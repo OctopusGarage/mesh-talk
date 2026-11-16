@@ -37,6 +37,29 @@ use tokio::sync::mpsc;
 /// ~9 GB; we cap at a conservative 4 GiB and reject only absurd sizes up front.
 pub(in crate::node) const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
+/// A count-only maintenance lease. No mutex or database guard spans network I/O.
+pub(in crate::node) struct ProfileCompactionLease {
+    active: Arc<Mutex<usize>>,
+    wake: crate::storage::database::MaintenanceWake,
+}
+
+impl Drop for ProfileCompactionLease {
+    fn drop(&mut self) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *active = active
+            .checked_sub(1)
+            .expect("profile compaction lease count");
+        let released = *active == 0;
+        drop(active);
+        if released {
+            self.wake.notify();
+        }
+    }
+}
+
 /// A peer's avatar, propagated to us via a signed profile and surfaced to the app so the
 /// UI can render it keyed by the sender's ACCOUNT id. `avatar` is `None` when the peer
 /// CLEARED their avatar (the UI reverts that account to its glyph).
@@ -249,6 +272,8 @@ pub struct Node {
     pub(in crate::node) sessions: super::session_pool::SessionPool,
     pub(in crate::node) expiry_clock_start: (std::time::Instant, u64),
     pub(in crate::node) expiry_first_seen: Mutex<HashMap<EventId, std::time::Instant>>,
+    pub(in crate::node) received_expiry_schedule:
+        Mutex<Option<super::expiry_policy::ReceivedExpirySchedule>>,
     pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
     #[cfg(test)]
     pub(in crate::node) control_fanout_start_test_hook: BlockingTestHook,
@@ -305,6 +330,7 @@ pub struct Node {
     pub(in crate::node) post_office_send_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_receive_enabled: std::sync::atomic::AtomicBool,
     /// Optional disk hints, checked against retained history during mailbox sync.
+    pub(in crate::node) opaque_upload_cache: Mutex<super::opaque_relay::incremental::UploadCache>,
     pub(in crate::node) opaque_receive_cache:
         Mutex<super::opaque_receive_cache::OpaqueReceiveCache>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
@@ -316,9 +342,15 @@ pub struct Node {
     /// account is injected by [`Node::open_with_account`]. Holds the secret so this
     /// device can serve a pairing request (transfer the account to a new device).
     pub(in crate::node) account: Account,
+    /// Certified self-binding bytes depend only on this runtime's immutable keys.
+    pub(in crate::node) own_group_proof: std::sync::OnceLock<crate::discovery::Announce>,
     pub(in crate::node) account_devices: Mutex<super::account_devices::AccountDevices>,
     pub(in crate::node) account_transitions:
         Mutex<super::account_transition_store::AccountTransitionStore>,
+    #[cfg(test)]
+    pub(in crate::node) inventory_body_validations: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(in crate::node) inventory_live_binding_checks: std::sync::atomic::AtomicUsize,
     pub(in crate::node) account_documents:
         Mutex<super::account_documents::store::AccountDocumentStore>,
     pub(in crate::node) group_file_prepare_gate: Arc<tokio::sync::Mutex<()>>,
@@ -365,7 +397,7 @@ pub struct Node {
     pub(in crate::node) sentlog: Mutex<SentLog>,
     pub(in crate::node) roster: Arc<Mutex<Roster>>,
     /// Session-local preferred address after a successful pinned Noise handshake.
-    pub(in crate::node) preferred_routes: Mutex<HashMap<UserId, std::net::SocketAddr>>,
+    pub(in crate::node) preferred_routes: Mutex<super::route_timing::PreferredRoutes>,
     pub(in crate::node) incoming: super::runtime_delivery::HostPayload<ReceivedDm>,
     pub(in crate::node) channel_incoming:
         super::runtime_delivery::HostPayload<ReceivedChannelMessage>,
@@ -375,6 +407,7 @@ pub struct Node {
     pub(in crate::node) channels: Mutex<ChannelBook>,
     pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
     pub(in crate::node) pending_channel_files: Mutex<Option<super::files::ChannelFileTurn>>,
+    pub(in crate::node) prepared_sync_views: Mutex<super::privacy_sync::PreparedSyncCache>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
     pub(in crate::node) raw_group_views: Mutex<super::account_group::RawViewCache>,
@@ -407,12 +440,14 @@ pub struct Node {
     pub(super) group_file_sharing: super::network_cost::GroupFileSharingPolicy,
     /// Coalesced hint for the durable download work owned by `files`.
     pub(in crate::node) file_pull_notify: tokio::sync::Notify,
+    /// Outgoing custody preparation never wakes receive/download repair.
+    pub(in crate::node) group_file_notify: tokio::sync::Notify,
     pub(in crate::node) file_pull_cursor: std::sync::atomic::AtomicUsize,
     pub(in crate::node) file_pull_gate: tokio::sync::Mutex<()>,
     pub(super) group_file_delivery: super::group_file_delivery::GroupFileDelivery,
     pub(in crate::node) relay_retry_after: Mutex<HashMap<String, std::time::Instant>>,
     pub(in crate::node) relay_drain_cursor: Mutex<HashMap<String, usize>>,
-    pub(in crate::node) ui_changes: tokio::sync::watch::Sender<u64>,
+    pub(in crate::node) ui_changes: super::ui_state::UiChanges,
     pub(in crate::node) file_changes: tokio::sync::watch::Sender<u64>,
     /// Encrypted, account-local attachment receive preferences and exact offer decisions.
     pub(in crate::node) attachment_consent:
@@ -454,6 +489,7 @@ pub struct Node {
     /// Exact device fingerprints the host user has safety-number verified for
     /// recipient-initiated DM catch-up. Discovery alone never adds entries.
     pub(in crate::node) verified_dm_pull_peers: Mutex<HashSet<UserId>>,
+    pub(in crate::node) delivery_demand_generation: std::sync::atomic::AtomicU64,
     /// Ephemeral identities introduced by an explicitly enabled bridge relay.
     pub(in crate::node) bridge_dm_pull_peers: Mutex<HashMap<UserId, std::time::Instant>>,
     pub(in crate::node) physical_lan_only: std::sync::atomic::AtomicBool,
@@ -496,6 +532,9 @@ pub struct Node {
     /// Exact profile receive facts and bounded metadata discovery/retry.
     pub(in crate::node) profile_receive_work:
         Mutex<super::profile_receive_work::ProfileReceiveWork>,
+    pub(in crate::node) profile_compaction_leases: Arc<Mutex<usize>>,
+    pub(in crate::node) order_work_observation:
+        Option<Mutex<super::work_observation::OrderWorkObserver>>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
     pub(in crate::node) reaction_queries: Mutex<super::reactions::ReactionQueryWork>,
     pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::IndexedReactionStore>,
@@ -536,6 +575,23 @@ pub(crate) struct LegacyPayloadTargets {
 }
 
 impl Node {
+    pub(in crate::node) fn acquire_profile_compaction_lease(
+        &self,
+    ) -> Result<ProfileCompactionLease, LogError> {
+        let active = Arc::clone(&self.profile_compaction_leases);
+        let mut count = active
+            .lock()
+            .map_err(|_| LogError::CorruptFile("profile compaction lease owner poisoned".into()))?;
+        *count = count
+            .checked_add(1)
+            .ok_or(LogError::RepositoryCounterExhausted)?;
+        drop(count);
+        Ok(ProfileCompactionLease {
+            active,
+            wake: self.storage.database().maintenance_waker(),
+        })
+    }
+
     /// Close every legacy handle and the encrypted connection before directory
     /// relocation. Independently retained Node/facade owners prevent publication.
     pub fn close_profile(self: Arc<Self>) -> Result<(), LogError> {
@@ -701,7 +757,7 @@ impl Node {
             password,
         } = request;
         let legacy_delivery = targets.is_some();
-        let ui_changes = tokio::sync::watch::channel(0).0;
+        let ui_changes = super::ui_state::UiChanges::default();
         let (incoming, channel_incoming, file_incoming) = match targets {
             Some(targets) => (
                 super::runtime_delivery::HostPayload::legacy(targets.incoming, ui_changes.clone()),
@@ -958,6 +1014,13 @@ impl Node {
             )?;
         account_transitions.commit_own(&identity.public(), &account.public().ed25519_pub)?;
         account_transitions.discard_pending(&identity.public(), &account.public().ed25519_pub)?;
+        let continuity =
+            account_transitions.own_chain(&identity.public(), &account.public().ed25519_pub);
+        log::info!(
+            "account binding continuity: available={}, links={}",
+            !continuity.is_empty(),
+            continuity.len()
+        );
         let account_document_updates = tokio::sync::watch::channel(0).0;
         super::account_documents::store::AccountDocumentStore::authenticate_legacy(
             &storage,
@@ -1191,6 +1254,7 @@ impl Node {
             storage,
             expiry_clock_start: (std::time::Instant::now(), now_millis()),
             expiry_first_seen: Mutex::new(HashMap::new()),
+            received_expiry_schedule: Mutex::new(None),
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
             control_fanout_start_test_hook: Mutex::new(None),
@@ -1239,8 +1303,13 @@ impl Node {
             privacy,
             identity,
             account,
+            own_group_proof: std::sync::OnceLock::new(),
             account_devices: Mutex::new(account_devices),
             account_transitions: Mutex::new(account_transitions),
+            #[cfg(test)]
+            inventory_body_validations: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            inventory_live_binding_checks: std::sync::atomic::AtomicUsize::new(0),
             account_documents: Mutex::new(account_documents),
             group_file_prepare_gate: Arc::new(tokio::sync::Mutex::new(())),
             group_operation_publication: Mutex::new(()),
@@ -1275,6 +1344,8 @@ impl Node {
             call_signal_incoming: call_signal_tx,
             call_signal_rx: Mutex::new(call_signal_rx),
             profile_receive_work: Mutex::new(profile_receive_work),
+            profile_compaction_leases: Arc::new(Mutex::new(0)),
+            order_work_observation: super::work_observation::OrderWorkObserver::from_env(),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),
             sentlog: Mutex::new(sentlog),
@@ -1297,6 +1368,7 @@ impl Node {
             channel_senders: Mutex::new(channel_senders),
             channel_checkpoints,
             channel_custody: Mutex::new(channel_custody),
+            prepared_sync_views: Mutex::new(Default::default()),
             channel_projection_cache: Mutex::new(Default::default()),
             raw_group_views: Mutex::new(Default::default()),
             group_metadata_cache: Mutex::new(Default::default()),
@@ -1309,6 +1381,7 @@ impl Node {
             manifest_scopes,
             group_file_sharing: Default::default(),
             file_pull_notify: tokio::sync::Notify::new(),
+            group_file_notify: tokio::sync::Notify::new(),
             file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),
             file_pull_gate: tokio::sync::Mutex::new(()),
             group_file_delivery: Default::default(),
@@ -1337,6 +1410,7 @@ impl Node {
             network_changes: tokio::sync::watch::channel(0).0,
             delivery_status_notify: tokio::sync::Notify::new(),
             verified_dm_pull_peers: Mutex::new(HashSet::new()),
+            delivery_demand_generation: std::sync::atomic::AtomicU64::new(0),
             bridge_dm_pull_peers: Mutex::new(HashMap::new()),
             physical_lan_only: std::sync::atomic::AtomicBool::new(false),
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),
@@ -1354,7 +1428,8 @@ impl Node {
             post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
             opaque_receive_cache: Mutex::new(opaque_receive_cache),
-            preferred_routes: Mutex::new(HashMap::new()),
+            opaque_upload_cache: Mutex::new(Default::default()),
+            preferred_routes: Mutex::new(super::route_timing::PreferredRoutes::default()),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
@@ -1577,7 +1652,10 @@ impl Node {
             .into_iter()
             .map(|channel| (*channel.id.as_bytes(), channel))
             .collect();
-        for reference in self.group_inventory_references().into_values() {
+        for reference in self
+            .group_inventory_references_excluding_local(&local_ids)
+            .into_values()
+        {
             let Ok(bytes) = hex::decode(&reference.channel_id) else {
                 continue;
             };
@@ -1730,7 +1808,29 @@ impl Node {
             channel,
             kind,
             ciphertext,
-            required_profile_parent,
+            required_profile_parent.map(|parent| super::profile_io::LocalProfilePublication {
+                required_parent: Some(parent),
+                payload: None,
+            }),
+            None,
+            |_| Ok(()),
+        )
+    }
+
+    pub(in crate::node) fn append_profile_publication(
+        &self,
+        peer: &PublicIdentity,
+        wire: &[u8],
+        required_parent: Option<EventId>,
+    ) -> Result<(u64, EventId), NodeError> {
+        self.append_event_checked(
+            super::conversation::dm_conversation_id(&self.identity.public(), peer),
+            EventKind::Profile,
+            Vec::new(),
+            Some(super::profile_io::LocalProfilePublication {
+                required_parent,
+                payload: Some((peer, wire)),
+            }),
             None,
             |_| Ok(()),
         )
@@ -1764,7 +1864,7 @@ impl Node {
         channel: ConversationId,
         kind: EventKind,
         ciphertext: Vec<u8>,
-        required_profile_parent: Option<EventId>,
+        profile: Option<super::profile_io::LocalProfilePublication<'_>>,
         source: Option<&super::channel::checkpoint::ChannelSource>,
         check: impl FnOnce(&super::delivery_store::DeliveryStore) -> Result<(), NodeError>,
     ) -> Result<(u64, EventId), NodeError> {
@@ -1795,6 +1895,51 @@ impl Node {
             // is installed. Recheck after pending local WAL recovery as well.
             self.channel_checkpoints.check_source(source)?;
         }
+        let required_profile_parent = profile
+            .as_ref()
+            .and_then(|publication| publication.required_parent);
+        if let Some(parent) = required_profile_parent
+            && (kind != EventKind::Profile
+                || !log.get(&parent)?.is_some_and(|event| {
+                    event.kind == EventKind::Profile
+                        && event.conversation_id == channel
+                        && event.author == self_author
+                }))
+        {
+            return Err(NodeError::InvalidInput(
+                "required profile parent is not a local profile in this conversation".into(),
+            ));
+        }
+        // The delivery -> log allocation guards cover lookup and append together,
+        // so concurrent reconnect/edit producers cannot manufacture duplicate IDs.
+        let publication = profile
+            .as_ref()
+            .and_then(|publication| publication.payload)
+            .map(|(peer, wire)| {
+                (
+                    self.profile_publication_key(peer, wire, required_profile_parent),
+                    peer,
+                    wire,
+                )
+            });
+        if let Some((key, _, _)) = &publication
+            && let Some(existing) = self.retained_profile_publication(
+                &log,
+                key,
+                channel,
+                required_profile_parent,
+                independent_profile,
+            )?
+        {
+            return Ok(existing);
+        }
+        // Sealing is new-publication work, after exact retained provenance misses.
+        let ciphertext = if let Some((_, peer, wire)) = &publication {
+            crate::dm::seal(&self.identity, &peer.x25519_pub, wire)
+                .map_err(|error| NodeError::Log(LogError::Serialization(error.to_string())))?
+        } else {
+            ciphertext
+        };
         let (mut parents, lamport) = log.prepare(&channel).map_err(NodeError::Log)?;
         if independent_profile {
             // Signed profile leaves must remain ingestible while sibling content
@@ -1802,17 +1947,6 @@ impl Node {
             parents.clear();
         }
         if let Some(parent) = required_profile_parent {
-            if kind != EventKind::Profile
-                || !log.get(&parent)?.is_some_and(|event| {
-                    event.kind == EventKind::Profile
-                        && event.conversation_id == channel
-                        && event.author == self_author
-                })
-            {
-                return Err(NodeError::InvalidInput(
-                    "required profile parent is not a local profile in this conversation".into(),
-                ));
-            }
             // Even independent sibling profiles retain this Profile-only edge. It
             // never depends on paused message/file categories and prevents a legacy
             // avatar projection from overtaking its signed metadata across pages.
@@ -1845,7 +1979,12 @@ impl Node {
             ));
         }
         let id = event.id;
-        log.append(event).map_err(NodeError::Log)?;
+        if let Some((key, _, _)) = publication {
+            log.append_profile_publication(event, &key)
+                .map_err(NodeError::Log)?;
+        } else {
+            log.append(event).map_err(NodeError::Log)?;
+        }
         Ok((seq, id))
     }
 }

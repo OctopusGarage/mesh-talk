@@ -18,7 +18,8 @@ import {
   Download,
   FolderOpen,
   RotateCw,
-  SmilePlus,
+  Smile,
+  Ellipsis,
   Trash2,
   Undo2,
 } from "lucide-react";
@@ -49,7 +50,7 @@ import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { formatTime, humanSize, shortId } from "@/lib/format";
 import { fadeSlideUp, useMotionOK } from "@/lib/motion";
 import { EMOJIS, renderWithMentions } from "@/lib/mentions";
-import { stickerById } from "@/lib/stickerPacks";
+import { useStickerAsset } from "@/lib/usePack";
 import { usePacks } from "@/store/packs";
 import type { ReactionInfo } from "@/lib/types";
 import {
@@ -427,10 +428,9 @@ export function MessageBubble({
   const stickerDescription = presentation
     ? stickerSummary(presentation, t("message.sticker"))
     : t("message.sticker");
-  const sticker =
-    !mediaSticker && m.sticker
-      ? stickerById(m.sticker, installedPacks)
-      : undefined;
+  const sticker = useStickerAsset(
+    presentation && !mediaSticker ? (m.sticker ?? undefined) : undefined,
+  );
   const isSticker = !!presentation;
   const [pickerOpen, setPickerOpen] = useState(false);
   // Copy the message text to the clipboard. File messages have no text → no-op.
@@ -759,6 +759,15 @@ export function MessageBubble({
                 <CornerUpLeft className="h-3.5 w-3.5 opacity-70" />
                 {t("message.reply")}
               </ContextMenuItem>
+              {onMoreReactions && (
+                <ContextMenuItem
+                  data-testid="msg-more-reactions"
+                  onSelect={() => setTimeout(() => onMoreReactions(), 0)}
+                >
+                  <Ellipsis className="h-3.5 w-3.5 opacity-70" />
+                  {t("message.reactionsMore")}
+                </ContextMenuItem>
+              )}
               <ContextMenuItem
                 data-testid="msg-react"
                 disabled={!m.id || readOnly}
@@ -766,7 +775,7 @@ export function MessageBubble({
                 // (avoids a focus/layer fight between the two radix overlays).
                 onSelect={() => setTimeout(() => setPickerOpen(true), 0)}
               >
-                <SmilePlus className="h-3.5 w-3.5 opacity-70" />
+                <Smile className="h-3.5 w-3.5 opacity-70" />
                 {t("message.react")}
               </ContextMenuItem>
               {canRecall && (
@@ -823,7 +832,7 @@ export function MessageBubble({
         )}
 
         {/* reaction chips */}
-        {(reactions.length > 0 || onMoreReactions) && (
+        {reactions.length > 0 && (
           <div
             className={cn("mt-1 flex flex-wrap gap-1", mine && "justify-end")}
           >
@@ -854,17 +863,6 @@ export function MessageBubble({
                 </button>
               );
             })}
-            {onMoreReactions && (
-              <button
-                type="button"
-                onClick={onMoreReactions}
-                aria-label={t("message.reactionsMore")}
-                title={t("message.reactionsMore")}
-                className="flex h-7 w-7 items-center justify-center rounded-full border border-border hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <SmilePlus className="h-3.5 w-3.5" />
-              </button>
-            )}
           </div>
         )}
 

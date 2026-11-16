@@ -345,6 +345,8 @@ pub fn run_tauri_configured(
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 crate::window_visibility::initial_presentation_ready,
                 owner_commands::owner_node_identity,
+                owner_commands::owner_roster_observation,
+                owner_commands::owner_presence_if_groups_changed,
                 reception_host::owner_reception_page,
                 reception_host::owner_reception_ack,
                 owner_commands::owner_startup_identity,
@@ -476,6 +478,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::safety_number,
                 crate::chat_commands::read_file,
                 crate::chat_commands::read_media,
+                crate::chat_commands::read_media_preview,
                 crate::chat_commands::react_dm,
                 crate::chat_commands::react_channel,
                 crate::chat_commands::search,
@@ -504,6 +507,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::rescan_peers,
                 crate::chat_commands::probe_peer_endpoint,
                 crate::chat_commands::register_sticker_source,
+                crate::chat_commands::pending_sticker_sources,
                 crate::chat_commands::write_temp_file,
                 crate::chat_commands::delete_temp_file,
                 crate::chat_commands::capture_screen,
@@ -570,7 +574,10 @@ pub fn run_tauri_configured(
                         .reject(commands::CommandError::Authorization("app locked".into()));
                     true
                 } else {
-                    handler(invoke)
+                    let work_name = crate::logger::capture_ipc_work_name(invoke.message.command());
+                    let handled = handler(invoke);
+                    crate::logger::record_ipc_work(work_name, handled);
+                    handled
                 }
             }
         })

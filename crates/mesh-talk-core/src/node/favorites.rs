@@ -151,6 +151,14 @@ impl FavoriteRecord {
 pub(super) struct FavoriteStore {
     file: EncryptedRecordLog<FavoriteRecord>,
     pub(super) current: BTreeMap<String, FavoriteRecord>,
+    mutation_revision: u64,
+    media_prune: Option<FavoriteMediaPrune>,
+}
+
+struct FavoriteMediaPrune {
+    favorites: u64,
+    media: i64,
+    next_expiry: Option<u64>,
 }
 impl FavoriteStore {
     pub(super) fn open(path: &Path, password: &str) -> Result<Self, LogError> {
@@ -159,6 +167,8 @@ impl FavoriteStore {
         let mut store = Self {
             file,
             current: BTreeMap::new(),
+            mutation_revision: 0,
+            media_prune: None,
         };
         for record in records {
             store.validate(&record)?;
@@ -194,6 +204,8 @@ impl FavoriteStore {
         }
         self.file.append_durable(&record)?;
         self.current.insert(record.favorite.id.clone(), record);
+        self.mutation_revision = self.mutation_revision.wrapping_add(1);
+        self.media_prune = None;
         Ok(true)
     }
     pub(super) fn live_files(&self, now: u64) -> std::collections::HashSet<ConversationId> {

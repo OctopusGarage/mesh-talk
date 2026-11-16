@@ -33,7 +33,9 @@ for (const theme of ["light", "dark"] as const) {
         const invoke = w.__TAURI_INTERNALS__.invoke;
         w.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
           if (
-            (cmd === "read_media" || cmd === "read_file") &&
+            (cmd === "read_media" ||
+              cmd === "read_media_preview" ||
+              cmd === "read_file") &&
             args.fileConv === "quote-photo"
           )
             return png;

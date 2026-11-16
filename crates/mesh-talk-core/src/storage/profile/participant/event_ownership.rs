@@ -1,5 +1,6 @@
 //! Account ownership of participant event commit intervals. This is part of
 //! participant adoption, not a receive queue or an additional recovery journal.
+pub(crate) const CHECK_EVENT_OWNER_SQL: &str = "SELECT EXISTS(SELECT 1 FROM participant_profile p JOIN participant_event_ownership o ON o.singleton=p.singleton WHERE p.singleton=1 AND p.account=?1 AND p.bootstrap_previous IS NULL AND o.generation=?2)";
 use super::{AccountPublic, LogError, invalid};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -265,7 +266,11 @@ pub(crate) fn check_event_owner_on(
     c: &Connection,
     owner: &ParticipantEventOwner,
 ) -> Result<(), LogError> {
-    let current: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM participant_profile p JOIN participant_event_ownership o ON o.singleton=p.singleton WHERE p.singleton=1 AND p.account=?1 AND p.bootstrap_previous IS NULL AND o.generation=?2)", params![owner.account.as_slice(),owner.generation], |r| r.get(0))?;
+    let current: bool = c
+        .prepare_cached(CHECK_EVENT_OWNER_SQL)?
+        .query_row(params![owner.account.as_slice(), owner.generation], |r| {
+            r.get(0)
+        })?;
     if !current {
         return Err(LogError::StaleCursor);
     }

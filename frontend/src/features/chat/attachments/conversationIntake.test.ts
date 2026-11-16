@@ -851,6 +851,32 @@ it("confirms a screenshot into the composer without writing or sending until exp
   expect(composer.stagedScreenshot?.type).toBe("image/png");
 });
 
+it("names screenshots by acquisition timestamp rather than editor confirmation time", async () => {
+  let intake!: ReturnType<typeof useAttachmentIntake>;
+  function Probe() {
+    intake = useAttachmentIntake(i18n.t);
+    return null;
+  }
+  await act(async () => root.render(createElement(Probe)));
+  native.invoke.mockResolvedValue([1]);
+  const now = vi.spyOn(Date, "now");
+  try {
+    for (const timestamp of [1794465000000, 1794465001000]) {
+      now.mockReturnValue(timestamp);
+      await act(async () => intake.captureScreenshot(false));
+      now.mockReturnValue(timestamp + 60000);
+      await act(async () =>
+        intake.sendScreenshot(new Uint8Array([137, 80, 78, 71])),
+      );
+      expect(intake.stagedScreenshot?.name).toBe(`screenshot-${timestamp}.png`);
+      expect(intake.stagedScreenshot?.type).toBe("image/png");
+    }
+    expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+  } finally {
+    now.mockRestore();
+  }
+});
+
 it("clears an already staged screenshot when its owning account changes", async () => {
   native.invoke.mockResolvedValue([1]);
   await act(async () => {

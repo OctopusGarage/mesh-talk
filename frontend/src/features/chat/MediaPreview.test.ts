@@ -15,6 +15,9 @@ const state = vi.hoisted(() => ({
     total: 4,
     ready: true,
   } as FileStatus,
+  sources: vi.fn(),
+  failPreview: false,
+  previewError: null as null | (() => void),
   setError: vi.fn(),
   writeText: vi.fn(async (_text: string) => {}),
   writeSelection: vi.fn((_type: string, _value: string) => {}),
@@ -70,8 +73,22 @@ vi.mock("@/store/fileAvailability", () => ({
 }));
 vi.mock("./mediaFile", () => ({
   blobMime: () => "image/png",
-  useFileObjectUrl: (_fileConv: string, enabled: boolean) =>
-    enabled ? state.url : null,
+  useFileObjectUrl: (
+    _fileConv: string,
+    enabled: boolean,
+    _mime: string,
+    options?: {
+      preview?: boolean;
+      onReadError?: () => void;
+      retryKey?: number;
+    },
+  ) => {
+    state.sources(enabled, options?.preview === true, options?.retryKey);
+    if (options?.preview) state.previewError = options.onReadError ?? null;
+    return enabled && !(options?.preview && state.failPreview)
+      ? state.url
+      : null;
+  },
   useVideoPoster: () => ({ poster: null, failed: false }),
   withinInlineCap: () => true,
 }));
@@ -92,6 +109,7 @@ beforeEach(() => {
   );
   ancestorMenu.mockClear();
   document.body.addEventListener("contextmenu", ancestorMenu);
+  state.failPreview = false;
   state.mac = true;
   state.current = true;
   state.confirm = false;
@@ -425,6 +443,117 @@ it("anchors wheel zoom, clamps dragging and resets on double click", async () =>
   expect(transform.style.transform).toMatch(
     /^translate\(0px(?:, 0px)?\) scale\(1\)$/,
   );
+});
+
+it("uses a thumbnail inline and admits the original only after opening the lightbox", async () => {
+  state.sources.mockClear();
+  await renderImage();
+  expect(
+    state.sources.mock.calls.some(([enabled, preview]) => enabled && preview),
+  ).toBe(true);
+  expect(
+    state.sources.mock.calls.some(([enabled, preview]) => enabled && !preview),
+  ).toBe(false);
+  await openImage();
+  expect(
+    state.sources.mock.calls.some(([enabled, preview]) => enabled && !preview),
+  ).toBe(true);
+});
+
+it("offers explicit full-size access after a thumbnail failure without an eager original read", async () => {
+  state.sources.mockClear();
+  await renderImage();
+  await act(async () => {
+    state.failPreview = true;
+    state.previewError?.();
+  });
+  expect(
+    host.querySelector('[data-testid="file-image-unsupported"]'),
+  ).not.toBeNull();
+  expect(
+    state.sources.mock.calls.some(([enabled, preview]) => enabled && !preview),
+  ).toBe(false);
+  const open = Array.from(host.querySelectorAll("button")).find(
+    (button) => button.textContent === "files.viewFullSize",
+  );
+  await act(async () => open!.click());
+  expect(
+    state.sources.mock.calls.some(([enabled, preview]) => enabled && !preview),
+  ).toBe(true);
+  expect(
+    host.querySelector('[data-testid="file-image-lightbox"]'),
+  ).not.toBeNull();
+  state.sources.mockClear();
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('button[aria-label="common.close"]')!
+      .click(),
+  );
+  expect(
+    state.sources.mock.calls.some(([enabled, preview]) => enabled && !preview),
+  ).toBe(false);
+  expect(
+    host.querySelector('[data-testid="file-image-unsupported"]'),
+  ).not.toBeNull();
+});
+
+it("displays a successful preview after a failed read and new readiness", async () => {
+  await renderImage();
+  await act(async () => {
+    state.failPreview = true;
+    state.previewError?.();
+  });
+  state.status = { ...state.status, ready: false };
+  await renderImage();
+  state.status = { ...state.status, ready: true };
+  state.failPreview = false;
+  await renderImage();
+  expect(host.querySelector('[data-testid="file-image"]')).not.toBeNull();
+  expect(
+    host.querySelector('[data-testid="file-image-unsupported"]'),
+  ).toBeNull();
+});
+
+it.each(["animation.gif", "animation.webp", "clip.webm"])(
+  "preserves the original inline path for %s",
+  async (name) => {
+    state.sources.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(MediaPreview, {
+          fileConv: "ordinary-image",
+          name,
+          size: 100,
+        }),
+      ),
+    );
+    expect(
+      state.sources.mock.calls.some(([enabled, preview]) => enabled && preview),
+    ).toBe(false);
+    expect(
+      state.sources.mock.calls.some(
+        ([enabled, preview]) => enabled && !preview,
+      ),
+    ).toBe(true);
+  },
+);
+
+it("retries a failed bounded preview on activation without admitting the original", async () => {
+  await renderImage();
+  await act(async () => {
+    state.failPreview = true;
+    state.previewError?.();
+  });
+  state.sources.mockClear();
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(
+    state.sources.mock.calls.some(
+      ([enabled, preview, retry]) => enabled && preview && retry === 1,
+    ),
+  ).toBe(true);
+  expect(
+    state.sources.mock.calls.some(([enabled, preview]) => enabled && !preview),
+  ).toBe(false);
 });
 
 it("keeps video controls interactive and restores focus after Escape", async () => {
