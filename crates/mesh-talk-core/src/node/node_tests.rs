@@ -10190,6 +10190,30 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
 
     // Each device owns its protocol reactor; the observer must not share a
     // synchronous maintenance turn with either simulated application.
+    // Model discovery only while the corresponding host is online. The
+    // immutable signed proofs are valid heartbeats; captures retain rosters,
+    // never Node/profile owners. This producer is retired before any host.
+    fn publish_presence(
+        publishers: &mut tokio::task::JoinSet<()>,
+        proof: Announce,
+        observers: Vec<(Arc<Mutex<Roster>>, String)>,
+    ) {
+        assert!(proof.valid_presence());
+        publishers.spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                for (roster, own) in &observers {
+                    roster
+                        .lock()
+                        .unwrap()
+                        .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), own);
+                }
+            }
+        });
+    }
+    let mut presence_publishers = tokio::task::JoinSet::new();
     let mut a1_peer = None;
     let mut a2_peer = None;
     let mut bob_peer = None;
@@ -10197,11 +10221,24 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let mut source = IndependentPeerRuntime::start_multithreaded(Arc::clone(&a1_node), a1_listener).await;
     source.launch();
     a1_peer = Some(source);
+    publish_presence(
+        &mut presence_publishers,
+        a1_node.signed_announce("A1", a1_port),
+        vec![
+            (a2_node.roster.clone(), a2_node.user_id()),
+            (bob_node.roster.clone(), bob_node.user_id()),
+        ],
+    );
     // Bob is online when sending this DM. Local acceptance plus one best-effort
     // flush is insufficient: its actual host owns recovery after a failed round.
     let mut sender = IndependentPeerRuntime::start_multithreaded(Arc::clone(&bob_node), bob_listener).await;
     sender.launch();
     bob_peer = Some(sender);
+    publish_presence(
+        &mut presence_publishers,
+        bob_node.signed_announce("Bob", bob_port),
+        vec![(a1_node.roster.clone(), a1_node.user_id())],
+    );
     phase("incoming_dm_send_begin");
     bob_node
         .send_to_account(&alice_account.account_id(), b"while A2 was offline", None)
@@ -10256,6 +10293,11 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let mut sibling = IndependentPeerRuntime::start_multithreaded(Arc::clone(&a2_node), a2_listener).await;
     sibling.launch();
     a2_peer = Some(sibling);
+    publish_presence(
+        &mut presence_publishers,
+        a2_node.signed_announce("A2", a2_port),
+        vec![(a1_node.roster.clone(), a1_node.user_id())],
+    );
     phase("sibling_join_observation_begin");
     let join_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     tokio::time::timeout_at(join_deadline, async {
@@ -11005,6 +11047,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     // Cancelling the accept loop does not cancel admitted blocking storage work.
     // Retire it before the same exclusive profile is opened again.
     phase("sibling_retirement_begin");
+    presence_publishers.shutdown().await;
     a2_node.clear_delivery_observations();
     let mut retirement = Box::pin(a2_peer.take().unwrap().stop());
     let retired_in_budget = tokio::time::timeout(Duration::from_secs(5), &mut retirement).await;
@@ -11089,6 +11132,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     .await;
     // Retire actual workers on assertion failure too, before the exclusive
     // profile directories and the observer runtime can be dropped.
+    // Panic cleanup also joins the discovery producer before host retirement.
+    presence_publishers.shutdown().await;
     let mut cleanup_failure = None;
     if let Some(sibling) = a2_peer.take() {
         cleanup_failure = std::panic::AssertUnwindSafe(sibling.stop())

@@ -205,6 +205,19 @@ mod tests {
     async fn private_evidence_rejects_network_policy_and_identity_replacement() {
         let (_dir, source, receiver) = super::super::selection_tests::sibling_nodes();
         let public = source.identity.public();
+        let announce = source.signed_announce("source", 1);
+        let ip = "127.0.0.1".parse().unwrap();
+        receiver
+            .roster
+            .lock()
+            .unwrap()
+            .update(&announce, ip, &receiver.user_id());
+        assert!(receiver.sibling_sync_available(&public));
+        // Remove only public discovery evidence without sleeping through its
+        // lease; certification and later authenticated availability remain real.
+        receiver.roster.lock().unwrap().evict_stale(Duration::ZERO);
+        assert!(receiver.certified_sibling(&public));
+        assert!(!receiver.sibling_sync_available(&public));
         receiver.observe_sibling_availability(&public);
         let mut changed_identity = public.clone();
         changed_identity.x25519_pub[0] ^= 1;
@@ -251,6 +264,14 @@ mod tests {
         assert_eq!(status.phase, SyncPhase::Offline);
         assert_eq!(status.pending_attachments, 9);
         assert!(status.error.is_none());
+        // A real signed reannouncement restores eligibility in the new policy
+        // scope. A local preference notification alone cannot replace presence.
+        receiver
+            .roster
+            .lock()
+            .unwrap()
+            .update(&announce, ip, &receiver.user_id());
+        assert!(receiver.sibling_sync_available(&public));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

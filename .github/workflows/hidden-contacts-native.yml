@@ -23,7 +23,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2022, macos-latest]
     runs-on: ${{ (inputs.full || 'true') == 'true' && matrix.os || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    # Cold production/driver builds, native scenarios and evidence/cache cleanup
+    # share this envelope. Keep the build and scenario watchdogs unchanged.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

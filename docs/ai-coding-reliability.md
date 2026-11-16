@@ -1996,6 +1996,13 @@ a fixture must authenticate the same signed role it advertises in the roster;
 identity-only Noise cannot stand in for an authenticated post-office role.
 Keep the matching presence, actual pool checkout and owned server retirement
 rather than weakening the production role-binding check.
+A multi-stage online fixture must own signed discovery heartbeats through every
+presumed-online stage. One seeded route can outlive its public presence lease;
+a later policy change also invalidates private availability from the old policy.
+Retain the ordinary lease and business deadlines. Start publication only for live
+hosts, capture no Node/profile owners, and stop and join it before host/profile
+retirement on success or panic. The linked-device reconnect fixture and private
+availability policy/reannouncement control own this boundary.
 The
 growing-history fixture measures exact durable originals during continuation,
 then checks the full public

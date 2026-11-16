@@ -27,6 +27,13 @@ content-digest validation at the consumer; an artifact ID alone is not acceptanc
 Before adding a suite, fixture, dependency, platform or workflow, identify the
 existing owner and the observable failure it must detect. Inspect the affected
 plan and consumers through the [validation protocol](testing-feedback-loop.md#validation-stages-and-agent-responsibilities).
+
+Budget hosted job envelopes for cold source builds, scenario execution, evidence
+publication and cache cleanup together. Keep build-command and business-scenario
+watchdogs independent; successful assertions can still leave an unsuccessful job
+when post-actions exceed its envelope. Inspect the timed-out phase and its
+measurements before changing a deadline.
+
 Answer four questions in the change when they are material:
 
 - What requirement needs new evidence, and why is existing evidence insufficient?
