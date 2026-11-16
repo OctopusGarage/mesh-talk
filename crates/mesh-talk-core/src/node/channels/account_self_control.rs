@@ -2453,13 +2453,29 @@ pub(in crate::node) mod tests {
                     .send_channel_message(group, b"unrelated retained archive")
                     .await
                     .unwrap();
-                archive_source
-                    .history(group, 100)
-                    .unwrap()
-                    .into_iter()
-                    .find(|row| row.text == b"unrelated retained archive")
-                    .unwrap()
-                    .id
+                // A durable send does not lease a ready history projection:
+                // live sibling recovery can invalidate it before this read.
+                let mut archive = None;
+                wait_self_control_noise_diagnosed(
+                    readiness_deadline,
+                    || {
+                        archive = match archive_source.history(group, 100) {
+                            Ok(rows) => rows
+                                .into_iter()
+                                .find(|row| row.text == b"unrelated retained archive")
+                                .map(|row| row.id),
+                            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => None,
+                            Err(error) => panic!("source archive history failed: {error}"),
+                        };
+                        archive.is_some()
+                    },
+                    || {
+                        "source archive marker must be ready within the shared cold setup deadline"
+                            .into()
+                    },
+                )
+                .await;
+                archive.unwrap()
             }),
         )
         .await
