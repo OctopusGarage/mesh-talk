@@ -10412,6 +10412,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         ("source", &a1_node, a2_node.identity.public()),
         ("sibling", &a2_node, a1_node.identity.public()),
     ] {
+        let own = current.identity.public();
         let trace = delivery_trace.clone();
         let work = delivery_work.clone();
         let omitted = delivery_trace_omitted.clone();
@@ -10436,23 +10437,28 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
                         replay_changed.notify_one();
                     }
                 }
-                if observed != peer
+                let local = observed == own && phase.starts_with("channel_recovery_");
+                if !local && (observed != peer
                     || !(phase.starts_with("dial_")
                         || phase.starts_with("session_")
                         || phase.starts_with("negotiation_")
                         || phase.starts_with("page_")
                         || phase.starts_with("history_")
                         || phase.starts_with("favorite_")
-                        || phase.starts_with("wake_"))
+                        || phase.starts_with("wake_")))
                 {
                     return;
+                }
+                if local || phase.starts_with("history_retry_scheduled") || phase.starts_with("history_serve_") {
+                    let kind = phase.split_ascii_whitespace().next().unwrap_or("channel_recovery").to_owned();
+                    work.lock().unwrap().insert((label, kind), (delivery_trace_started.elapsed().as_millis(), phase.clone()));
                 }
                 if let Some(kind) = ["history_", "favorite_"]
                     .into_iter()
                     .find(|prefix| phase.starts_with(prefix))
                 {
                     work.lock().unwrap().insert(
-                        (label, kind),
+                        (label, kind.to_owned()),
                         (delivery_trace_started.elapsed().as_millis(), phase.clone()),
                     );
                 }
@@ -10471,6 +10477,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
                                 "reused=",
                                 "priority=",
                                 "failed=",
+                                "failures=",
+                                "stale_cursor=",
                             ]
                             .iter()
                             .any(|prefix| token.starts_with(prefix)))
@@ -10545,6 +10553,34 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     .await;
     phase("new_channel_delivery_observation_returned");
     if new_channel_delivery.is_err() {
+        // Failure-only metadata from the consuming SQL owner, not the book's
+        // display cache. Never read receiver checkpoints or key material.
+        let expected_epoch = a1_node.log.lock().unwrap().get(&original_new).unwrap()
+            .and_then(|event| crate::channel::ChannelState::sender_message_epoch(&a1_node.user_id(), &event.ciphertext));
+        let epoch = expected_epoch.map(u64::to_be_bytes);
+        let checkpoints: Vec<_> = [("source", &a1_node), ("sibling", &a2_node)].into_iter().map(|(label, current)| {
+            let snapshot = current.channel_checkpoints.profile().database().read(|c| {
+                use rusqlite::OptionalExtension;
+                let pending: Option<(i64, bool, i64, i64)> = c.query_row(
+                    "SELECT reason,admitted,attempt_revision,wake_at FROM channel_pending WHERE channel=?1 AND event=?2",
+                    rusqlite::params![channel.as_bytes().as_slice(), original_new.as_bytes().as_slice()],
+                    |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+                ).optional()?;
+                let receiver: (i64, Option<i64>, Option<i64>, Option<i64>) = c.query_row(
+                    "SELECT count(*),max(next_n),max(key_revision),max(revision) FROM channel_receivers WHERE channel=?1 AND author=?2 AND epoch=?3",
+                    rusqlite::params![channel.as_bytes().as_slice(), a1_node.user_id(), epoch.as_ref().map(|value| value.as_slice())],
+                    |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+                )?;
+                let progress: (bool, bool, bool) = c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM channel_processed WHERE channel=?1 AND event=?2),EXISTS(SELECT 1 FROM channel_dirty WHERE channel=?1),EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                    rusqlite::params![channel.as_bytes().as_slice(), original_new.as_bytes().as_slice()],
+                    |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+                )?;
+                Ok((pending, receiver, progress))
+            });
+            (label, snapshot)
+        }).collect();
+        eprintln!("linked authoritative checkpoint expected_epoch={expected_epoch:?} (pending_reason_admitted_attempt_wake,receiver_count_next_keyrevision_revision,processed_dirty_runtime)={checkpoints:?}");
         eprintln!(
             "linked plaintext branch before_new_send={before_new_send} first_public_arrival={first_public_arrival:?} finish={}",
             linked_plaintext_metadata(&a2_node, original_new)

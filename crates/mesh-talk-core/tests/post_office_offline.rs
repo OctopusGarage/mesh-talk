@@ -5,15 +5,19 @@
 //! start: two KDFs), and UDP broadcast. Run explicitly:
 //!   nice -n 10 cargo test -p mesh-talk-core --test post_office_offline -- --ignored
 
+#[path = "support/cli_output.rs"]
+mod cli_output;
 #[path = "support/peer_observer.rs"]
 mod peer_observer;
 mod support;
 
-use std::io::{BufRead, BufReader, Write};
+use cli_output::{read_cli_lines, retain_line};
+use std::collections::VecDeque;
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     mpsc::{self, Receiver},
 };
 use std::time::{Duration, Instant};
@@ -34,6 +38,8 @@ struct CliNode {
     child: Child,
     stdin: ChildStdin,
     lines: Receiver<String>,
+    transcript: Arc<Mutex<VecDeque<String>>>,
+    readers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl CliNode {
@@ -60,28 +66,27 @@ impl CliNode {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn mesh-talk-node");
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = child.stdout.take().expect("child stdout");
+        let stderr = child.stderr.take().expect("child stderr");
+        let transcript = Arc::new(Mutex::new(VecDeque::new()));
+        retain_line(&transcript, format!("spawn {name} pid={}", child.id()));
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                match line {
-                    Ok(l) => {
-                        if tx.send(l).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        let output_trace = transcript.clone();
+        let error_trace = transcript.clone();
+        let readers = vec![
+            std::thread::spawn(move || read_cli_lines(stdout, "stdout", &output_trace, Some(tx))),
+            std::thread::spawn(move || read_cli_lines(stderr, "stderr", &error_trace, None)),
+        ];
         CliNode {
             child,
             stdin,
             lines: rx,
+            transcript,
+            readers,
         }
     }
 
@@ -94,6 +99,7 @@ impl CliNode {
     }
 
     fn send(&mut self, line: &str) {
+        retain_line(&self.transcript, format!("stdin: {line}"));
         writeln!(self.stdin, "{line}").expect("write to child stdin");
         self.stdin.flush().expect("flush child stdin");
     }
@@ -117,6 +123,18 @@ impl CliNode {
 impl Drop for CliNode {
     fn drop(&mut self) {
         support::stop_cli(&mut self.child, &mut self.stdin);
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        if std::thread::panicking() {
+            let pending_stdout = self.lines.try_iter().take(64).collect::<Vec<_>>();
+            eprintln!(
+                "CLI pid={} exit={:?} pending stdout={pending_stdout:?} bounded transcript={:?}",
+                self.child.id(),
+                self.child.try_wait(),
+                self.transcript.lock().unwrap()
+            );
+        }
     }
 }
 
@@ -144,6 +162,7 @@ fn read_startup(node: &CliNode, prefix: &str, timeout: Duration) -> (String, Soc
 /// Opening its retired legacy path cannot inspect the indexed store, and an
 /// observer must not acquire a second writer lease over either live profile.
 fn await_relay_event(
+    phase: &str,
     runtime: &tokio::runtime::Runtime,
     address: SocketAddr,
     identity: &DeviceIdentity,
@@ -195,7 +214,21 @@ fn await_relay_event(
         }
         std::thread::sleep(Duration::from_millis(100).min(remaining));
     }
-    panic!("relay durably contains only the opaque wrapper within 45s: {last_observation}");
+    let observed = store.lock().unwrap();
+    let wrappers = observed.events(&mailbox.id());
+    let inner_metadata = wrappers
+        .iter()
+        .take(16)
+        .map(|outer| {
+            mailbox
+                .open(outer)
+                .map(|inner| (inner.kind, inner.author.user_id(), inner.conversation_id))
+        })
+        .collect::<Vec<_>>();
+    panic!(
+        "{phase}: relay durably contains only the opaque wrapper within 45s: {last_observation}; observed_wrappers={} inner_metadata={inner_metadata:?}",
+        wrappers.len()
+    );
 }
 
 /// Poll `/peers` until `want_uid` appears in `node`'s roster, or fail after 25s.
@@ -282,6 +315,7 @@ fn offline_dm_delivered_via_post_office() {
     let mailbox = RelayMailbox::new(&alice_id, &bob_id.public(), &relay_id.public()).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let replicated = await_relay_event(
+        "offline DM",
         &runtime,
         po_address,
         &alice_id,
@@ -303,6 +337,7 @@ fn offline_dm_delivered_via_post_office() {
     let group = ConversationId::new(hex::decode(&group_hex).unwrap().try_into().unwrap());
     alice.send(&format!("/channel-msg {} held-channel", &group_hex[..8]));
     let replicated_group = await_relay_event(
+        "offline channel message",
         &runtime,
         po_address,
         &alice_id,

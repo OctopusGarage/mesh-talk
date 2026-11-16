@@ -2170,6 +2170,28 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             Some(0),
             "the negative survives a fresh encrypted-store open"
         );
+        // A retry turn can return without completing a transfer. Hold the
+        // existing exact-endpoint authentication owner to exercise that real
+        // deferral; no reception may be inferred from its None report.
+        a.sessions.clear();
+        let authentication = a.sessions.authentication_admission(
+            a.peer_endpoint_key(bob_peer.addr, &bob_peer.public),
+        ).await.unwrap();
+        let (received, received_event) = tokio::sync::oneshot::channel();
+        let received = std::sync::Mutex::new(Some(received));
+        let expected_phase = format!(
+            "gossip_diag_ciphertext_applied channel={} event={}",
+            hex::encode(channel.as_bytes()), event.to_hex(),
+        );
+        *lost.account_client_test_hook.lock().unwrap() = Some(std::sync::Arc::new(move |_, phase| {
+            if phase == expected_phase
+                && let Some(received) = received.lock().unwrap().take()
+            {
+                let _ = received.send(());
+            }
+        }));
+        let repair_deadline = tokio::time::Instant::now()
+            + crate::node::account_group::FUNCTIONAL_ACCOUNT_CONVERGENCE_BUDGET;
         // Only now expose the repaired holder as a normal delivery route.
         a.roster.lock().unwrap().update(
             &Announce::new_with_account(&lost.identity, &other, "Bob", bob_peer.addr.port()),
@@ -2186,6 +2208,19 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .is_none()
         );
         assert!(
+            lost.log.lock().unwrap().get(&event).unwrap().is_none(),
+            "a deferred retry turn cannot certify remote reception while authentication is held"
+        );
+        assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(0));
+        drop(authentication);
+        // Roster publication wakes the existing custody recovery owner. Observe
+        // its exact accepted payload without resetting its cursor or backoff.
+        tokio::time::timeout_at(repair_deadline, received_event)
+            .await
+            .expect("the shared negative must permit recovery after authentication capacity returns")
+            .expect("the exact raw-reception observer must remain live");
+        *lost.account_client_test_hook.lock().unwrap() = None;
+        assert!(
             lost.log.lock().unwrap().get(&event).unwrap().is_some(),
             "a shared negative must allow retry despite an old local journal positive"
         );
@@ -2201,6 +2236,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .await
             .is_none()
         );
+        wait_custody_source_count(&a, channel, event, 1, repair_deadline)
+            .await
+            .expect("the recovery owner must confirm the repaired external copy");
         assert_eq!(
             a.channel_custody_count(channel, event).unwrap(),
             Some(1),

@@ -989,7 +989,7 @@ impl Node {
         known_digest: [u8; 32],
         wanted: DeviceSyncPolicy,
     ) -> bool {
-        tokio::time::timeout(
+        let result = tokio::time::timeout(
             Duration::from_secs(20),
             self.serve_account_history_inner(
                 channel,
@@ -1000,8 +1000,21 @@ impl Node {
                 wanted,
             ),
         )
-        .await
-        .unwrap_or(false)
+        .await;
+        #[cfg(test)]
+        if !matches!(&result, Ok(true)) {
+            self.trace_account_client(channel.peer_identity(), || {
+                format!(
+                    "history_serve_stopped outcome={}",
+                    if result.is_err() {
+                        "deadline"
+                    } else {
+                        "rejected"
+                    }
+                )
+            });
+        }
+        result.unwrap_or(false)
     }
 
     async fn serve_account_history_inner(
@@ -1073,6 +1086,17 @@ impl Node {
                     })
                     .await;
                 let Ok(page) = result else {
+                    #[cfg(test)]
+                    self.trace_account_client(channel.peer_identity(), || {
+                        format!(
+                            "history_serve_export_failed outcome={} stale_cursor={}",
+                            super::account_session::client_trace_outcome(&result),
+                            matches!(
+                                &result,
+                                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor))
+                            )
+                        )
+                    });
                     return false;
                 };
                 page
@@ -1155,6 +1179,10 @@ impl Node {
             if host.is_some_and(|host| {
                 !self.account_private_channel_export_allowed(host, channel.peer_identity())
             }) {
+                #[cfg(test)]
+                self.trace_account_client(channel.peer_identity(), || {
+                    "history_serve_record_scope_stopped".into()
+                });
                 return false;
             }
             let (header, plaintext) = match record {
@@ -1208,6 +1236,10 @@ impl Node {
                 if host.is_some_and(|host| {
                     !self.account_private_channel_export_allowed(host, channel.peer_identity())
                 }) {
+                    #[cfg(test)]
+                    self.trace_account_client(channel.peer_identity(), || {
+                        "history_serve_chunk_scope_stopped".into()
+                    });
                     return false;
                 }
                 if self
@@ -1231,6 +1263,10 @@ impl Node {
         if channel_hosts.iter().any(|host| {
             !self.account_private_channel_export_allowed(*host, channel.peer_identity())
         }) {
+            #[cfg(test)]
+            self.trace_account_client(channel.peer_identity(), || {
+                "history_serve_terminal_scope_stopped".into()
+            });
             return false;
         }
         self.send_account_history_frame(
@@ -4118,6 +4154,11 @@ impl Node {
                                     // favorite cursors and queued demand until its retry deadline.
                                     status.phase = SyncPhase::CatchingUp;
                                     state.history_retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
+                                    #[cfg(test)]
+                                    self.trace_account_client(&peer.public, || format!(
+                                        "history_retry_scheduled retry_ms=5000 failures={} outcome={}", state.history_failures,
+                                        super::account_session::client_trace_outcome(&Err::<(), _>(error))
+                                    ));
                                     continuation = false;
                                 }
                                 Err(error) => {
@@ -4129,6 +4170,11 @@ impl Node {
                                     let delay = Duration::from_secs((5u64 << state.history_failures.min(6)).min(300));
                                     state.history_failures = state.history_failures.saturating_add(1);
                                     state.history_retry_at = Some(std::time::Instant::now() + delay);
+                                    #[cfg(test)]
+                                    self.trace_account_client(&peer.public, || format!(
+                                        "history_retry_scheduled retry_ms={} failures={} outcome={}", delay.as_millis(), state.history_failures,
+                                        super::account_session::client_trace_outcome(&Err::<(), _>(error))
+                                    ));
                                     continuation = false;
                                 }
                             }

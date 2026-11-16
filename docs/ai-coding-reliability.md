@@ -2206,6 +2206,10 @@ Wake-settled snapshot is not a prerequisite for that accounting contract: it can
 restart and create unrelated capacity contention while an observer waits. Remove
 the global observer and its helper-only full-host tests; retain signed channel
 floors, exact-peer capabilities and the real automatic custody/offline controls.
+Qualify custody completion through the exact holder's durable reception witness.
+A best-effort retry turn can return `None` after deferral or an exchange error;
+keep the existing recovery owner and functional convergence budget while
+preserving shared-negative, journal-migration and distinct-member count oracles.
 Do not add a clock switch solely to rescue a helper's self-test. Keep a loopback
 business scenario focused on its named behavior. The member-invitation proof
 ends after epoch delivery, pre-join isolation and role rejection. Existing
