@@ -709,26 +709,47 @@ impl Node {
         let mut deadline = tokio::time::Instant::now();
         let mut continuation = false;
         let mut sweep = ProfileRetrySweep::default();
+        #[cfg(test)]
+        let mut observe_initial_timer = true;
         loop {
-            let demand = tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => !continuation,
-                changed = source.changed() => { if changed.is_err() { return; } true },
-                changed = maintenance.changed() => { if changed.is_err() { return; } true },
-                changed = network.changed() => { if changed.is_err() { return; } true },
-                changed = roster.changed() => {
-                    if changed.is_err() { return; }
-                    let next = self.profile_dependency_input();
-                    #[cfg(test)]
-                    self.trace_account_client(&self.identity.public(), || "profile_maintenance_roster_observed".into());
-                    if next == input { continue; }
-                    true
-                },
-                changed = ui.changed() => {
-                    if changed.is_err() { return; }
-                    let next = self.profile_dependency_input();
-                    if next == input { continue; }
-                    true
-                },
+            let demand = {
+                let timer = tokio::time::sleep_until(deadline);
+                tokio::pin!(timer);
+                #[cfg(test)]
+                let timer = std::future::poll_fn(|cx| {
+                    use std::future::Future;
+                    let polled = timer.as_mut().poll(cx);
+                    if observe_initial_timer {
+                        observe_initial_timer = false;
+                        self.trace_account_client(&self.identity.public(), || {
+                            format!(
+                                "profile_maintenance_initial_timer_armed pending={}",
+                                polled.is_pending()
+                            )
+                        });
+                    }
+                    polled
+                });
+                tokio::select! {
+                    _ = timer => !continuation,
+                    changed = source.changed() => { if changed.is_err() { return; } true },
+                    changed = maintenance.changed() => { if changed.is_err() { return; } true },
+                    changed = network.changed() => { if changed.is_err() { return; } true },
+                    changed = roster.changed() => {
+                        if changed.is_err() { return; }
+                        let next = self.profile_dependency_input();
+                        #[cfg(test)]
+                        self.trace_account_client(&self.identity.public(), || "profile_maintenance_roster_observed".into());
+                        if next == input { continue; }
+                        true
+                    },
+                    changed = ui.changed() => {
+                        if changed.is_err() { return; }
+                        let next = self.profile_dependency_input();
+                        if next == input { continue; }
+                        true
+                    },
+                }
             };
             if demand {
                 if sweep.upper.is_some() && !sweep.finished {
@@ -768,10 +789,24 @@ impl Node {
             let outcome = match result {
                 Ok((next, Ok(outcome))) => {
                     sweep = next;
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        let outcome = match &outcome {
+                            ProfileTurn::Continue => "continue",
+                            ProfileTurn::Blocked(_) => "blocked",
+                            ProfileTurn::Settled => "settled",
+                            ProfileTurn::Retry => "retry",
+                        };
+                        format!("profile_maintenance_succeeded outcome={outcome}")
+                    });
                     outcome
                 }
                 Ok((next, Err(error))) => {
                     sweep = next;
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        format!("profile_maintenance_failed error={error}")
+                    });
                     log::warn!("profile log compaction failed; will retry: {error}");
                     ProfileTurn::Retry
                 }
@@ -782,6 +817,8 @@ impl Node {
                 }
             };
             continuation = matches!(outcome, ProfileTurn::Continue);
+            #[cfg(test)]
+            let retry = matches!(&outcome, ProfileTurn::Retry);
             deadline = match outcome {
                 ProfileTurn::Continue => tokio::time::Instant::now() + Duration::from_millis(25),
                 ProfileTurn::Blocked(at) => at,
@@ -799,6 +836,16 @@ impl Node {
                 && !source.has_changed().unwrap_or(true)
                 && !maintenance.has_changed().unwrap_or(true)
             {
+                if retry {
+                    self.trace_account_client(&self.identity.public(), || {
+                        format!(
+                            "profile_maintenance_retry_wait retry_ms={}",
+                            deadline
+                                .saturating_duration_since(tokio::time::Instant::now())
+                                .as_millis()
+                        )
+                    });
+                }
                 self.trace_account_client(&self.identity.public(), || {
                     "profile_maintenance_wait".into()
                 });
@@ -1249,6 +1296,32 @@ mod compaction_lease_tests {
 
     #[tokio::test(start_paused = true)]
     async fn profile_owner_storage_failure_keeps_the_three_second_retry() {
+        use std::collections::VecDeque;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        async fn observe_phase(
+            received: &mut tokio::sync::mpsc::UnboundedReceiver<(String, tokio::time::Instant)>,
+            trace: &mut VecDeque<(String, tokio::time::Instant)>,
+            prefix: &str,
+        ) -> Option<(String, tokio::time::Instant)> {
+            let until = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < until {
+                while let Ok(event) = received.try_recv() {
+                    let matched = event.0.starts_with(prefix);
+                    if trace.len() == 32 {
+                        trace.pop_front();
+                    }
+                    trace.push_back(event.clone());
+                    if matched {
+                        return Some(event);
+                    }
+                }
+                // Keep the paused clock fixed while real blocking work retires.
+                tokio::task::yield_now().await;
+            }
+            None
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let node = owner_node(directory.path());
         let author = DeviceIdentity::generate();
@@ -1262,14 +1335,48 @@ mod compaction_lease_tests {
         node.storage.database().transaction(|c| {
             c.execute_batch("CREATE TEMP TRIGGER fail_profile_owner_scan BEFORE UPDATE ON profile_receive_scan BEGIN SELECT RAISE(ABORT,'profile owner fault'); END")?;Ok(())
         }).unwrap();
-        let (owner, mut idle) = start_owner(&node);
-        let failed = wait_idle(&mut idle).await;
+        let turns = Arc::new(AtomicUsize::new(0));
+        let observed_turns = turns.clone();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "profile_maintenance_turn" {
+                observed_turns.fetch_add(1, Ordering::SeqCst);
+            }
+            if phase.starts_with("profile_maintenance_initial_timer_armed ")
+                || phase.starts_with("profile_maintenance_failed ")
+                || phase.starts_with("profile_maintenance_retry_wait ")
+                || phase.starts_with("profile_maintenance_succeeded ")
+                || phase == "profile_maintenance_turn"
+            {
+                let _ = sent.send((phase, tokio::time::Instant::now()));
+            }
+        }));
+        // Force Tokio's millisecond rounding boundary without waiting in real
+        // time. A frozen fractional sleep_until(now) is not a startup receipt.
+        tokio::time::advance(Duration::from_micros(500)).await;
+        let owner = tokio::spawn(node.clone().run_profile_compaction_loop());
+        let mut trace = VecDeque::new();
+        let initial = observe_phase(
+            &mut received,
+            &mut trace,
+            "profile_maintenance_initial_timer_armed ",
+        )
+        .await;
+        let initial_pending = initial
+            .as_ref()
+            .is_some_and(|(phase, _)| phase.ends_with("pending=true"));
+        let no_start_before_tick = turns.load(Ordering::SeqCst) == 0;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let fault = observe_phase(&mut received, &mut trace, "profile_maintenance_failed ").await;
+        let retry =
+            observe_phase(&mut received, &mut trace, "profile_maintenance_retry_wait ").await;
         let before = node
             .profile_receive_work
             .lock()
             .unwrap()
             .processed(id)
             .unwrap();
+        let retry_turns = turns.load(Ordering::SeqCst);
         node.storage
             .database()
             .transaction(|c| {
@@ -1277,16 +1384,79 @@ mod compaction_lease_tests {
                 Ok(())
             })
             .unwrap();
-        tokio::time::advance(Duration::from_secs(3)).await;
-        let recovered = settle_owner(&mut idle).await;
-        let processed = node
+        tokio::time::advance(Duration::from_millis(2999)).await;
+        let early_turns = turns.load(Ordering::SeqCst);
+        let early_processed = node
             .profile_receive_work
             .lock()
             .unwrap()
             .processed(id)
             .unwrap();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let exact_deadline = tokio::time::Instant::now();
+        // Tokio rounds timer deadlines up to a millisecond. This one resolution
+        // tick follows the full three seconds; it does not change the retry.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let first_retry =
+            observe_phase(&mut received, &mut trace, "profile_maintenance_turn").await;
+        let mut recovered = None;
+        let mut processed = false;
+        // Retain the existing finite continuation allowance. A successful
+        // discovery slice is not itself proof that this target was processed.
+        for _ in 0..128 {
+            recovered =
+                observe_phase(&mut received, &mut trace, "profile_maintenance_succeeded ").await;
+            processed = node
+                .profile_receive_work
+                .lock()
+                .unwrap()
+                .processed(id)
+                .unwrap();
+            let continuing = recovered
+                .as_ref()
+                .is_some_and(|(phase, _)| phase.ends_with("outcome=continue"));
+            if processed || !continuing {
+                break;
+            }
+            tokio::time::advance(Duration::from_millis(25)).await;
+            // The controlled clock remains fractional on each continuation.
+            tokio::time::advance(Duration::from_millis(1)).await;
+        }
         stop_owner(&node, owner).await;
-        assert!(failed && !before && recovered && processed);
+        assert!(
+            initial_pending && no_start_before_tick,
+            "fractional startup must be armed without admitting a turn before its timer tick: initial={initial:?} turns={retry_turns} trace={trace:?}"
+        );
+        assert!(
+            fault
+                .as_ref()
+                .is_some_and(|(phase, _)| phase.contains(&format!(
+                    "Error code {}:",
+                    rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+                ))),
+            "the actual scan trigger must fail before fault removal: fault={fault:?} trace={trace:?}"
+        );
+        assert!(
+            retry
+                .as_ref()
+                .is_some_and(|(phase, at)| phase.ends_with("retry_ms=3000")
+                    && exact_deadline.duration_since(*at) == Duration::from_secs(3)),
+            "the quiet failed turn must retain its exact three-second deadline: retry={retry:?} trace={trace:?}"
+        );
+        assert!(
+            !before && !early_processed && early_turns == retry_turns,
+            "fault removal must not retry before its deadline: before={before} early_processed={early_processed} turns={retry_turns}->{early_turns} trace={trace:?}"
+        );
+        assert!(
+            first_retry
+                .as_ref()
+                .zip(retry.as_ref())
+                .is_some_and(|((_, started), (_, failed_at))| *started
+                    >= *failed_at + Duration::from_secs(3))
+                && recovered.is_some()
+                && processed,
+            "the real retry must process the original profile after its deadline: first_retry={first_retry:?} recovered={recovered:?} processed={processed} trace={trace:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

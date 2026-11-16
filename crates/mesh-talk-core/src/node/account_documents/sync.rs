@@ -3026,7 +3026,9 @@ mod group_control_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows() {
         use crate::node::{AccountGroupOperationPhase, AccountGroupTextInput, SyncCategory};
-        let mut fixture = UpgradeFixture::new().await;
+        // This page experiment owns each publication epoch, including the
+        // final exact comparison after normal and legacy rows are repaired.
+        let mut fixture = UpgradeFixture::inbound_only().await;
         for node in [&fixture.source, &fixture.target] {
             node.set_device_sync_category(SyncCategory::History, false)
                 .unwrap();
@@ -3324,8 +3326,9 @@ mod group_control_tests {
             cursor.personal_upgrade,
             control_scope_differences(source, target),
         );
-        assert!(
-            control_scope_metadata(source) == control_scope_metadata(target),
+        assert_eq!(
+            control_scope_metadata(source),
+            control_scope_metadata(target),
             "settled repair must retain the complete exact source metadata set"
         );
     }
@@ -3448,7 +3451,10 @@ mod group_control_tests {
         use crate::node::account_group::operations::legacy_wire::{
             LegacyOperationFrame, LegacyOperationProjection,
         };
-        let mut fixture = UpgradeFixture::new().await;
+        // Mutate source roles only at the explicit between-page boundary;
+        // autonomous publication would make the final exact comparison race
+        // with a newer, independently valid source epoch.
+        let mut fixture = UpgradeFixture::inbound_only().await;
         let group = fixture
             .source
             .create_channel("known page prefix", vec![])

@@ -159,9 +159,9 @@ impl ChannelAccountMaintenance {
     // authority, privacy and source fences. Capture before work, so mutations
     // during a turn cannot be acknowledged by that turn's completion.
     // Watch generations and last-seen timestamps are deliberately excluded.
-    fn input(&self, node: &Node) -> Result<[u8; 32], LogError> {
+    async fn input(&self, node: &Arc<Node>) -> Result<[u8; 32], LogError> {
         use sha2::{Digest, Sha256};
-        let revision = node.group_projection_revision()?;
+        let revision = node.observe_group_projection_revision().await?;
         let consent = node
             .channel_migration
             .lock()
@@ -397,7 +397,7 @@ impl Node {
         // Explicit drivers and event-only recovery have no timer to advance
         // retained work, so their existing progress contract stays independent.
         if timed_recovery && Instant::now() < work.deadline() {
-            let input = work.input(self).ok();
+            let input = work.input(self).await.ok();
             if input.is_some() && input == work.observed_input {
                 return;
             }
@@ -409,7 +409,7 @@ impl Node {
         self: &Arc<Self>,
         work: &mut ChannelAccountMaintenance,
     ) {
-        let selected_input = work.input(self).ok();
+        let selected_input = work.input(self).await.ok();
         if selected_input.is_some()
             && work.input == selected_input
             && Instant::now() < work.deadline()
@@ -561,7 +561,7 @@ impl Node {
                 let channel = channels[work.channel_cursor % channels.len()].id;
                 work.channel_cursor = work.channel_cursor.wrapping_add(1);
                 let ready = self.maintain_one_account_channel(channel, work).await;
-                let completed_input = work.input(self).ok();
+                let completed_input = work.input(self).await.ok();
                 let now = Instant::now();
                 cycle_complete = ready
                     && completed_input.is_some()
@@ -581,7 +581,7 @@ impl Node {
             if result.is_ok()
                 && cycle_complete
                 && selected_input.is_some()
-                && work.input(self).ok() == selected_input
+                && work.input(self).await.ok() == selected_input
                 && !work.peers.values().any(|peer| {
                     peer.supported
                         && (!peer.pending.is_empty()
@@ -698,7 +698,7 @@ impl Node {
                 return false;
             }
         }
-        let selected_input = work.input(self).ok();
+        let selected_input = work.input(self).await.ok();
         if let Some(input) = selected_input
             && work
                 .settled
@@ -1174,6 +1174,64 @@ mod tests {
         sync::Mutex,
     };
     use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
+
+    #[tokio::test]
+    async fn scheduling_input_waits_for_history_without_blocking_its_reactor() {
+        use crate::node::test_support::IndependentPeerRuntime;
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let remote = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&remote, &account, "Peer", 47475);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            account,
+            &proof,
+        );
+        // Isolate the actual scheduling observation on one reactor. The separate
+        // full-host SessionReady regression retains real background services.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let owner = IndependentPeerRuntime::start(node.clone(), listener).await;
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (held, held_rx) = tokio::sync::oneshot::channel();
+        let held_node = node.clone();
+        let holder = node.runtime_work.admit().unwrap().spawn_blocking(move || {
+            let _log = held_node.log.lock().unwrap();
+            held.send(()).unwrap();
+            let _ = released.recv();
+        });
+        held_rx.await.unwrap();
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let observed_node = node.clone();
+        let observation = owner.runtime_handle().spawn(async move {
+            entered.send(()).unwrap();
+            ChannelAccountMaintenance::default()
+                .input(&observed_node)
+                .await
+        });
+        entered_rx.await.unwrap();
+        let mut reactor = owner.runtime_handle().spawn(async {});
+        let progressed = tokio::time::timeout(Duration::from_secs(1), &mut reactor)
+            .await
+            .is_ok();
+        drop(release);
+        drop(holder.await.unwrap());
+        let observed = observation.await.unwrap().unwrap();
+        if !progressed {
+            reactor.await.unwrap();
+        }
+        let expected = ChannelAccountMaintenance::default()
+            .input(&node)
+            .await
+            .unwrap();
+        owner.stop().await;
+        assert!(node.observe_group_projection_revision().await.is_err());
+        assert_eq!(
+            observed, expected,
+            "observation must retain its exact inputs"
+        );
+        assert!(progressed, "history observation must not block its reactor");
+    }
 
     struct Group {
         _dir: tempfile::TempDir,
@@ -2534,7 +2592,7 @@ mod tests {
         }
         *node.roster.lock().unwrap() = Roster::default();
         let work = ChannelAccountMaintenance::default();
-        let before = work.input(node).unwrap();
+        let before = work.input(node).await.unwrap();
         let mut changes = node.subscribe_sibling_availability();
         drop(
             node.privacy_dial(address, &source.identity.public())
@@ -2546,7 +2604,7 @@ mod tests {
             "real private authentication must wake the owner"
         );
         changes.borrow_and_update();
-        let available = work.input(node).unwrap();
+        let available = work.input(node).await.unwrap();
         assert_ne!(
             available, before,
             "the new watch must invalidate the producer gate"
@@ -2561,7 +2619,7 @@ mod tests {
             !changes.has_changed().unwrap(),
             "unchanged authentication renewal must coalesce"
         );
-        assert_eq!(work.input(node).unwrap(), available);
+        assert_eq!(work.input(node).await.unwrap(), available);
     }
 
     #[tokio::test]
@@ -2590,7 +2648,7 @@ mod tests {
         assert!(
             work.deadline().saturating_duration_since(Instant::now()) <= Duration::from_secs(3)
         );
-        let observed = work.input(node).unwrap();
+        let observed = work.input(node).await.unwrap();
         assert_eq!(work.observed_input, Some(observed));
         assert!(work.deadline() > Instant::now());
         let eligibility = work.eligibility_reads;
@@ -2618,7 +2676,7 @@ mod tests {
         node.privacy
             .projection_revision
             .fetch_add(1, Ordering::SeqCst);
-        assert_ne!(work.input(node).unwrap(), observed);
+        assert_ne!(work.input(node).await.unwrap(), observed);
         node.maintain_account_channels_after_wake(&mut work, true)
             .await;
         assert!(
@@ -2686,9 +2744,9 @@ mod tests {
             node.channel_checkpoints.state_hydrations(),
         );
         let work = ChannelAccountMaintenance::default();
-        let input = work.input(node).unwrap();
+        let input = work.input(node).await.unwrap();
         for _ in 0..8 {
-            assert_eq!(work.input(node).unwrap(), input);
+            assert_eq!(work.input(node).await.unwrap(), input);
         }
         assert_eq!(
             (
@@ -2738,7 +2796,7 @@ mod tests {
         value.poll_failed = true;
         value.binding_failed = true;
         let deadlines = (value.poll_at, value.binding_poll_at);
-        work.observed_input = Some(work.input(node).unwrap());
+        work.observed_input = Some(work.input(node).await.unwrap());
         work.input = work.observed_input;
         work.run_at = Some(Instant::now() + REFRESH);
         node.privacy
