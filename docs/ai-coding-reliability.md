@@ -216,6 +216,9 @@ The [fresh-handshake and own-copy controls](../crates/mesh-talk-core/src/node/de
 exercise recovery of the same accepted message without resending; the latter
 holds both sibling workers after its durable copy completes and requires target
 confirmation while they remain held; unrelated devices cannot share that stall.
+The sender-restart control closes work admission, joins producers, clears pooled
+sessions and drains admitted reception work before reopening the profile. A
+recipient receipt certifies delivery while that cleanup may still own its lease.
 
 **Evidence:** pause actual expensive work after admission and assert availability
 of the unrelated guard or operation. Release the pause and verify the final data.
@@ -2206,7 +2209,13 @@ Wake-settled snapshot is not a prerequisite for that accounting contract: it can
 restart and create unrelated capacity contention while an observer waits. Remove
 the global observer and its helper-only full-host tests; retain signed channel
 floors, exact-peer capabilities and the real automatic custody/offline controls.
-Qualify custody completion through the exact holder's durable reception witness.
+Qualify custody completion through the exact holder's durable reception witness. Durable ciphertext custody does not prove
+that the independent plaintext projection is visible. Observe that projection
+within the same existing functional deadline and retain unrelated protocol holds
+through its business assertions. Preserve completed setup evidence for unchanged
+peers and corpus; invalidate it before an actual topology withdrawal, rather than
+discarding a completed comparison after reannouncing the same routes. The
+held-directory custody and reference self-control fixtures own these boundaries.
 A best-effort retry turn can return `None` after deferral or an exchange error;
 keep the existing recovery owner and functional convergence budget while
 preserving shared-negative, journal-migration and distinct-member count oracles.

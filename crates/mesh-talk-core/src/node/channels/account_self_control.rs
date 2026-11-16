@@ -2497,6 +2497,11 @@ pub(in crate::node) mod tests {
             ).await;
         }
         if let Some(index) = offline_index {
+            // Only a real topology withdrawal invalidates completed setup.
+            // Clear before that boundary so a new comparison cannot be lost.
+            // Pending accept/decline keeps the same exact peers and corpus;
+            // reannouncing their routes must not demand another global page.
+            *settled_scopes.lock().unwrap() = [[false; 2]; 2];
             let offline = offline.as_ref().unwrap();
             offline.runtime_work.close();
             let handle = handles[index].take().unwrap();
@@ -2535,7 +2540,6 @@ pub(in crate::node) mod tests {
                 }
             }
         }
-        *settled_scopes.lock().unwrap() = [[false; 2]; 2];
         handles[1] = Some(tokio::spawn(
             reference
                 .clone()

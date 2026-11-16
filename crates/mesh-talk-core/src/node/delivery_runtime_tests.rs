@@ -8067,10 +8067,18 @@ async fn early_recipient_receipt_preserves_offline_own_fanout_across_sender_rest
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    // The receipt can retire its transport task before admitted blocking
+    // reception work releases the profile. Join that owner before reopening.
+    a.runtime_work.close();
+    b.runtime_work.close();
     at.abort();
     bt.abort();
     let _ = at.await;
     let _ = bt.await;
+    a.sessions.clear();
+    b.sessions.clear();
+    a.runtime_work.drain().await;
+    b.runtime_work.drain().await;
     drop(a);
     drop(b);
     let (a, _) = node(
@@ -8091,8 +8099,14 @@ async fn early_recipient_receipt_preserves_offline_own_fanout_across_sender_rest
         "Delivered must retain unfinished own-device copy after restart"
     );
     assert!(c.delivery.lock().unwrap().retry_receipts(8).is_empty());
+    a.runtime_work.close();
+    c.runtime_work.close();
     ct.abort();
     let _ = ct.await;
+    a.sessions.clear();
+    c.sessions.clear();
+    a.runtime_work.drain().await;
+    c.runtime_work.drain().await;
 }
 
 #[tokio::test]

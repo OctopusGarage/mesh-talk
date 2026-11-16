@@ -858,28 +858,29 @@ test("scoped acceptance revalidates exact source and executes real npm/browser o
   assert.doesNotMatch(source, /pull_request_target|secrets: inherit|continue-on-error/u);
 });
 
-test("auto-merge admits only known npm minor/patch metadata", async (t) => {
-  const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
-  const root = mkdtempSync(join(tmpdir(), "auto-merge-policy-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const valid = { TARGET: "dev", ECOSYSTEM: "npm_and_yarn", DIRECTORY: "/frontend", UPDATE: "version-update:semver-patch", NAMES: "jsdom", MAINTAINER_CHANGES: "false" };
-  for (const [i, override] of [{}, { DIRECTORY: "/tools/help" }, { UPDATE: "version-update:semver-major" }, { ECOSYSTEM: "cargo" }, { NAMES: "@tauri-apps/api" }, { NAMES: "" }, { MAINTAINER_CHANGES: "true" }, { DIRECTORY: "/unknown" }, { TARGET: "main" }, { ECOSYSTEM: "", UPDATE: "", MAINTAINER_CHANGES: "" }].entries()) {
-    const file = join(root, String(i));
-    const result = runGate("dependabot-auto-merge.yml", "Classify auto-merge eligibility", { ...valid, ...override, GITHUB_OUTPUT: file });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(readFileSync(file, "utf8"), `eligible=${i < 2}\n`);
+test("dependency updates cannot generate or automatically merge PRs", async () => {
+  const { existsSync } = await import("node:fs");
+  for (const path of [
+    ".github/dependabot.yml",
+    ".github/dependabot.yaml",
+    ".github/workflows/dependabot-auto-merge.yml",
+  ]) {
+    assert.equal(
+      existsSync(new URL(`../../${path}`, import.meta.url)),
+      false,
+      path,
+    );
   }
-  const source = read("dependabot-auto-merge.yml");
-  assert.doesNotMatch(source, /actions\/checkout|skip-verification: true/u);
-  assert.match(source, /gh pr merge --disable-auto/u);
-  const revoke = step(source, "Retain manual review for other updates");
-  assert.match(revoke, /if: \$\{\{ always\(\) && steps\.policy\.outputs\.eligible != 'true' \}\}/u);
-  const job = workflowJob(source, "dependabot");
-  assert.doesNotMatch(job.match(/^    if:.*$/mu)?.[0] ?? "", /base\.ref/u);
-
-  assert.match(source, /--match-head-commit "\$EVENT_HEAD"/u);
+  const advisory = read("glib-0.20-watch.yml");
+  assert.match(advisory, /contents: read/u);
+  assert.doesNotMatch(
+    advisory,
+    /contents: write|pull-requests:|create-pull-request|gh pr (?:create|merge)/u,
+  );
+  assert.match(advisory, /cargo update -p tauri/u);
+  assert.match(advisory, /python3 -B scripts\/ci\/glib-migration\.py/u);
+  assert.match(advisory, /cargo build --lib --bins/u);
+  assert.match(advisory, /cargo test --lib/u);
 });
 
 test("reduced UI acceptance still requires source and health checks", () => {

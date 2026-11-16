@@ -1,5 +1,5 @@
 use super::*;
-use std::{collections::HashMap, pin::Pin, task::Poll};
+use std::{collections::HashMap, num::NonZeroUsize, pin::Pin, task::Poll};
 use zbus::export::futures_core::Stream;
 
 const SERVICE: &str = "org.freedesktop.NetworkManager";
@@ -9,7 +9,7 @@ const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 async fn current(connection: &zbus::Connection) -> zbus::Result<NetworkCost> {
     let proxy = zbus::Proxy::new(connection, SERVICE, PATH, PROPERTIES).await?;
     // Explicit Properties.Get: a repair query must not return a cached value.
-    let value: zbus::zvariant::OwnedValue = proxy.call("Get", &(SERVICE, "Metered")).await?;
+    let value: zbus::OwnedVariant = proxy.call("Get", &(SERVICE, "Metered")).await?;
     let value = u32::try_from(value)?;
     Ok(match value {
         1 | 3 => classify(true, true),
@@ -29,23 +29,26 @@ impl Observation {
         // sender match survives NetworkManager disappearing and returning.
         let property_rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
-            .sender(SERVICE)?
-            .path(PATH)?
-            .interface(PROPERTIES)?
-            .member("PropertiesChanged")?
-            .arg(0, SERVICE)?
-            .build();
+            .sender(SERVICE)
+            .path(PATH)
+            .interface(PROPERTIES)
+            .member("PropertiesChanged")
+            .arg(0, SERVICE)
+            .build()?;
         let properties =
-            zbus::MessageStream::for_match_rule(property_rule, &connection, Some(8)).await?;
+            zbus::MessageStream::for_match_rule(property_rule, &connection, NonZeroUsize::new(8))
+                .await?;
         let owner_rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
-            .sender("org.freedesktop.DBus")?
-            .path("/org/freedesktop/DBus")?
-            .interface("org.freedesktop.DBus")?
-            .member("NameOwnerChanged")?
-            .arg(0, SERVICE)?
-            .build();
-        let owners = zbus::MessageStream::for_match_rule(owner_rule, &connection, Some(8)).await?;
+            .sender("org.freedesktop.DBus")
+            .path("/org/freedesktop/DBus")
+            .interface("org.freedesktop.DBus")
+            .member("NameOwnerChanged")
+            .arg(0, SERVICE)
+            .build()?;
+        let owners =
+            zbus::MessageStream::for_match_rule(owner_rule, &connection, NonZeroUsize::new(8))
+                .await?;
         Ok(Self {
             connection,
             properties,
@@ -55,11 +58,7 @@ impl Observation {
 }
 
 fn cost_changed(message: &zbus::Message) -> bool {
-    type PropertiesChanged = (
-        String,
-        HashMap<String, zbus::zvariant::OwnedValue>,
-        Vec<String>,
-    );
+    type PropertiesChanged = (String, HashMap<String, zbus::OwnedVariant>, Vec<String>);
     match message.body().deserialize::<PropertiesChanged>() {
         Ok((interface, changed, invalidated)) => {
             interface == SERVICE
@@ -197,7 +196,7 @@ mod tests {
             bus
         }
         async fn connect(&self) -> zbus::Result<zbus::Connection> {
-            zbus::connection::Builder::address(self.address.as_str())?
+            zbus::connection::Builder::address(self.address.as_str())
                 .build()
                 .await
         }
@@ -234,7 +233,7 @@ mod tests {
                 "PropertiesChanged",
                 &(
                     SERVICE,
-                    HashMap::<&str, zbus::zvariant::Value<'_>>::new(),
+                    HashMap::<&str, zbus::Variant<'_>>::new(),
                     vec![property],
                 ),
             )

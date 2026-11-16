@@ -1646,6 +1646,17 @@ async fn channel_custody_converges_while_directory_is_held() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         wait_custody_source_count(&source, channel, event, 1, deadline).await.expect("the real external holder must confirm while the independent directory remains held");
         assert_eq!(source.channel_custody_count(channel, event).unwrap(), Some(1));
+        // Durable ciphertext custody precedes the independent plaintext
+        // projection. Observe its actual owner within the same functional
+        // budget while the unrelated Directory handler remains held.
+        tokio::time::timeout_at(deadline, async {
+            while !ready_history(external.channel_history(channel, 10))
+                .is_some_and(|history| history.iter().any(|row| row.id == event)) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the exact external plaintext must project while the independent directory remains held");
+        assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(!release.is_closed());
         assert!(external.channel_history(channel, 10).unwrap().iter().any(|row| row.id == event));
         let external_head = source.channel_custody_observations(channel, event).into_iter().find(|meta| {
             meta.writer_device == source.user_id()

@@ -1141,16 +1141,24 @@ branch name, SemVer label or PR title alone. The existing real-Git scope control
 and CI policy fixtures own positive profiles, source/identity rejection and
 failed/cancelled/missing selected-check evidence.
 
-Automatic merge additionally requires verified Dependabot metadata for npm
-minor/patch updates in these two directories, no Tauri dependency and no reported
-maintainer change. Other updates have automatic merge disabled and require manual
-review. The privileged metadata workflow never executes PR source; merge enablement
-is bound to the event head. Coverage uploads requiring unavailable Dependabot
-credentials remain excluded; tests and retained local artifacts are independent
-of external coverage publication.
+Dependency upgrades require manual reviewed PRs. The repository has no Dependabot
+version-update configuration or dependency auto-merge workflow. GitHub's automated
+security fixes setting must remain disabled independently of the removed version
+configuration; verify it with `GET /repos/{owner}/{repo}/automated-security-fixes`.
+Disabling PR generation must preserve Dependabot vulnerability alerts, dependency
+review, CodeQL, secret scanning and their existing acceptance gates. Coverage
+uploads requiring unavailable Dependabot credentials remain excluded; tests and
+retained local artifacts are independent of external coverage publication.
+
+The scheduled/manual glib migration watcher retains its resolution probe and
+conditional build/test checks as advisory evidence with read-only repository
+permissions. It never creates a dependency PR. Its all-resolved-branches migration
+check remains authoritative; a successful probe does not authorize an upgrade or
+claim native acceptance. Release maintenance retains its separately reviewed
+next-development-version PR contract.
 
 Deploy this policy through a reviewed main change, then align `dev` through a
-reviewed integration before refreshing its dependency PRs. Existing `dev`
+reviewed integration. Existing `dev`
 workflows cannot acquire fixes from main automatically. Preserve current required
 checks; any protection migration uses its existing owner. Measure selected hosted
 jobs after rollout, recording source, first failures, runner/setup/test time and

@@ -2838,8 +2838,10 @@ existing participants see an ordinary signed account/device author.
   GPG-signed commits are enforced by `hooks/pre-push`.
 - **CI** (`.github/workflows/`): `ci.yml` (Linux, macOS, and Windows matrix → the `verify` aggregate
   check, required by branch protection; coverage → Codecov on Linux), `check-health.yml`,
-  `gitleaks.yml`, CodeQL, `dependabot-auto-merge.yml` (Dependabot PRs to `dev`, gated by required checks),
-  `glib-0.20-watch.yml` (monthly dep watcher).
+  `gitleaks.yml`, CodeQL, and `glib-0.20-watch.yml` (read-only monthly dependency
+  advisory; no PR creation). Dependency updates use manual reviewed PRs; automatic
+  version/security-update PR generation and dependency auto-merge are disabled,
+  while vulnerability alerts and security scans remain enabled.
 - **Automated bug-finding** (defence in depth — surfaces issues without anyone looking):
   - _Coverage-guided fuzzing_ (`fuzz/`, `fuzz.yml`, weekly + dispatch) of selected public
     untrusted wire and opened-payload decoders; the `decoder_smoke` test is the always-on
