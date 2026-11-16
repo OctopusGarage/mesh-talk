@@ -2206,6 +2206,12 @@ The source's positive message observation uses the same pending-state owner;
 source readiness and sibling delivery share the original delivery deadline.
 Self-control Noise setup likewise waits for the source archive marker through
 `StaleCursor` within its existing shared cold deadline, before measuring the action.
+An authenticated completion describes its response epoch, not a permanently
+frozen source. Exact metadata comparisons in the
+[control-page fixtures](../crates/mesh-talk-core/src/node/account_documents/sync.rs)
+own their controlled publication epochs under the
+[protocol fixture contract](testing-feedback-loop.md#protocol-fixture-response-epochs);
+retain separate live-provider mutation and re-comparison coverage.
 Timeout diagnostics retain pending/error results instead of unwrapping another
 history query and masking the primary failure.
 

@@ -1977,7 +1977,11 @@ store. A later source publication belongs to another epoch; comparing its live
 digest with an earlier completion is not response-integrity evidence. The v5
 access-only scope fixtures use an inbound-only authenticated provider and retain
 positive-role and operation-exclusion checks. Separate live-provider tests retain
-mid-page mutation, retry and re-comparison coverage. Provider teardown closes
+mid-page mutation, retry and re-comparison coverage. Controlled operation-prefix
+and known-role page fixtures likewise own their explicit between-page publication
+epochs; their final exact metadata comparison cannot race an autonomous publisher.
+Keep the real authenticated provider, 64-row pages, changed-role repair and full
+metadata equality assertions. Provider teardown closes
 admission, aborts its owned connections and drains actual work under one watchdog.
 Preparation of the queued-source fixture uses an instance-scoped test-only
 client gate after the genuine authenticated acknowledgement and before read

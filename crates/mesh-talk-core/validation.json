@@ -745,7 +745,7 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Access-only v5 scope fixtures validate actual received signed role metadata and payloads against their completion digest inside an authenticated stable-provider epoch; later source publication belongs to another epoch. Live-provider mutation retains its cursor re-comparison contract.",
+            "name": "Access-only v5 scope fixtures validate actual received signed role metadata and payloads against their completion digest inside an authenticated stable-provider epoch; controlled operation-prefix and known-role page fixtures own their explicit publication epochs and retain full metadata equality. Later source publication belongs to another epoch. Live-provider mutation retains its cursor re-comparison contract.",
             "reference": "docs/testing-feedback-loop.md#protocol-fixture-response-epochs"
           },
           {
