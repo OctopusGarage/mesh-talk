@@ -2158,6 +2158,10 @@ one-way reads. Keep the required receiver owners live during preparation, or
 finish symmetric repair after all initial publications before measuring. Bind
 partial-page proof to the measured publication, exact live request and validated
 completion; startup pages cannot satisfy a later phase's continuation condition.
+Post-login browser notice, retry and backup assertions first await the existing
+[chat-shell readiness owner](../frontend/e2e/helpers/session.ts). Lazy startup
+uses its existing platform budget; content and action assertions retain their
+original behavior deadlines after that boundary.
 
 Negative idle assertions must consume startup JoinSet results and retained wakes,
 then invalidate the old idle marker when the target event is observed. Await the
