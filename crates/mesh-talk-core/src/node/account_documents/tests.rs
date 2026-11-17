@@ -1370,6 +1370,70 @@ impl Drop for CustodyTransferHold<'_> {
     }
 }
 
+// A successful public send does not lease a ready history projection. Observe
+// its exact outgoing body without resending or changing the caller's deadline.
+async fn wait_custody_source_event(
+    source: &Node,
+    channel: crate::eventlog::ConversationId,
+    text: &[u8],
+    deadline: tokio::time::Instant,
+) -> Result<crate::eventlog::EventId, tokio::time::error::Elapsed> {
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            if let Some(history) = ready_history(source.channel_history(channel, 10))
+                && let Some(row) = history
+                    .into_iter()
+                    .find(|row| row.from_me && row.text.as_slice() == text)
+            {
+                break row.id;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn custody_source_history_observation_keeps_identity_and_original_deadline() {
+    use std::time::Duration;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(directory.path(), &account);
+    let channel = source
+        .create_channel("source observation", vec![])
+        .await
+        .unwrap();
+    let text = b"the exact outgoing custody message";
+    source.send_channel_message(channel, text).await.unwrap();
+    // No autonomous hosts run in this controlled source fixture.
+    let event = source.channel_history(channel, 10).unwrap()[0].id;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let missing = tokio::time::timeout(
+        Duration::from_secs(9),
+        wait_custody_source_event(&source, channel, b"another message", deadline),
+    )
+    .await;
+    let missing_finished_at = tokio::time::Instant::now();
+    let observed = wait_custody_source_event(
+        &source,
+        channel,
+        text,
+        tokio::time::Instant::now() + Duration::from_secs(8),
+    )
+    .await;
+    source.runtime_work.close();
+    source.runtime_work.drain().await;
+    assert!(
+        matches!(missing, Ok(Err(_))),
+        "an unrelated ready row cannot satisfy source readiness"
+    );
+    assert_eq!(
+        missing_finished_at, deadline,
+        "missing identity retains its original absolute deadline"
+    );
+    assert_eq!(observed.unwrap(), event);
+}
+
 // Observes the real owner's durable confirmation without driving network work.
 // Register before the read: a publication between the read and await must wake us.
 async fn wait_custody_source_count(
@@ -1640,24 +1704,28 @@ async fn channel_custody_converges_while_directory_is_held() {
         assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0);
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "the sibling must have no route for an independent external-holder query");
         let mut custody_hold = CustodyTransferHold::new(&source, &sibling);
-        source.send_channel_message(channel, b"independent custody progress").await.unwrap();
+        let text = b"independent custody progress";
+        source.send_channel_message(channel, text).await.unwrap();
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "public send must not teach the sibling an external-holder route");
-        let event = source.channel_history(channel, 10).unwrap()[0].id;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let event = wait_custody_source_event(&source, channel, text, deadline).await.expect("the exact outgoing source event must become readable within the shared custody setup deadline");
         wait_custody_source_count(&source, channel, event, 1, deadline).await.expect("the real external holder must confirm while the independent directory remains held");
         assert_eq!(source.channel_custody_count(channel, event).unwrap(), Some(1));
         // Durable ciphertext custody precedes the independent plaintext
         // projection. Observe its actual owner within the same functional
         // budget while the unrelated Directory handler remains held.
-        tokio::time::timeout_at(deadline, async {
-            while !ready_history(external.channel_history(channel, 10))
-                .is_some_and(|history| history.iter().any(|row| row.id == event)) {
+        let external_history = tokio::time::timeout_at(deadline, async {
+            loop {
+                if let Some(history) = ready_history(external.channel_history(channel, 10))
+                    && history.iter().any(|row| row.id == event) {
+                    break history;
+                }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await.expect("the exact external plaintext must project while the independent directory remains held");
         assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0);
         assert!(!release.is_closed());
-        assert!(external.channel_history(channel, 10).unwrap().iter().any(|row| row.id == event));
+        assert!(external_history.iter().any(|row| row.id == event));
         let external_head = source.channel_custody_observations(channel, event).into_iter().find(|meta| {
             meta.writer_device == source.user_id()
                 && matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if *holder == external.user_id())
@@ -1851,16 +1919,20 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     });
     let mut required_source_observation = None;
     a.trace_account_client(&sibling.identity.public(), || "fixture_before_send".into());
-    a.send_channel_message(channel, b"synthetic custody fixture")
+    let text = b"synthetic custody fixture";
+    a.send_channel_message(channel, text)
         .await
         .unwrap();
     a.trace_account_client(&sibling.identity.public(), || "fixture_after_send".into());
-    let event = a.channel_history(channel, 10).unwrap()[0].id;
+    let source_deadline = tokio::time::Instant::now()
+        + Duration::from_secs(if external_online { 30 } else { 8 });
+    let event = wait_custody_source_event(&a, channel, text, source_deadline)
+        .await.expect("the exact outgoing source event must become readable within the existing preparation or delivery budget");
     if external_online {
         // Sender acceptance is not receiver projection completion. Its actual
         // independent host owns reception; share the existing cold setup bound
         // with the exact durable-have observation before withdrawing the holder.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = source_deadline;
         tokio::time::timeout_at(deadline, async {
             loop {
                 match bob.channel_history(channel, 10) {
@@ -1929,7 +2001,14 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     a.trace_account_client(&sibling.identity.public(), || {
         "fixture_holder_offline".into()
     });
-    tokio::time::timeout(Duration::from_secs(8), async {
+    // The already-offline branch shares its existing first delivery budget
+    // with source identification; the post-stop branch starts its original clock.
+    let history_deadline = if external_online {
+        tokio::time::Instant::now() + Duration::from_secs(8)
+    } else {
+        source_deadline
+    };
+    tokio::time::timeout_at(history_deadline, async {
         while !ready_history(sibling.channel_history(channel, 10))
             .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me))
         {
