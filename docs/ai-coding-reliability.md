@@ -1130,6 +1130,19 @@ qualifies the real read failure, verifies text removal and suppression, and
 retains the unrelated live file. File erasure still revokes its keys before
 physical removal, and reconciliation still rejects stale revisions.
 
+Native permission observations and the operation they describe must share the
+same application identity and native provider. Do not query one notification API
+while sending through another that can substitute a process-wide bundle identity.
+The [notification owner](../src-tauri/src/notifications.rs) shares the macOS center
+between observation, explicit prompting and delivery; its unavailable-identity
+and request-content regressions cover rejection and distinct delivery IDs.
+Contradictory native fields must remain unknown, not an inferred grant or denial.
+The macOS status regression includes enabled alerts alongside denied/undetermined
+authorization, and the opt-in bundled control observes permission and actual
+Notification Center delivery as independent assertions.
+Packaged authorization, revocation and actual alert presentation still require
+native evidence; neither a dismissed banner nor a valid signature proves permission.
+
 Keep inspection affordances separate from mutation permissions, and propagate
 the containing view's restrictions into nested inspectors. Opening a reader must
 not restore mutation authority. A bounded projection may omit existing data;
@@ -1148,6 +1161,16 @@ no overlapping mutation and correct late settlement. See
 [coordinated state owners](module-boundaries.md#coordinated-state-owners).
 
 ## R08: Durable state and failure semantics
+
+Before replacing an installed application, fetch and compare the intended source
+base with the current integration branch and inspect persisted schema compatibility.
+A locally successful build can still downgrade an installed reader. Never delete
+or recreate a newer database to make an older reader start. The
+[pack storage owner](../frontend/src/store/packs.ts) and its
+[storage regressions](../frontend/src/store/packs.test.ts) own catalog migration;
+verify installed appearance and retained library contents after replacement,
+not only a clean-profile startup. Keep source freshness and schema compatibility
+as separate evidence from signature validity and notification authorization.
 
 **Failure pattern:** a read-modify-write race loses another update; optimistic
 success precedes durable acceptance; retries duplicate writes; a failed/corrupt
