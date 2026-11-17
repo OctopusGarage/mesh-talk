@@ -7871,21 +7871,28 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
     };
     assert_eq!(
         setup_eof.get(),
-        3,
-        "the card, receipt and file best-effort legs each close after real authentication"
+        2,
+        "the card and file legs close after authentication without a false receipt query"
     );
 
     // Resume the same durable pending work after those actual transport failures.
+    let pending = alice_node
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .unwrap()
+        .0;
+    assert_eq!(pending.file_conversation, file_conv);
     assert_eq!(
-        alice_node
-            .delivery
-            .lock()
+        alice_node.delivery_status(pending.id),
+        Some(crate::node::DeliveryStatus::Awaiting)
+    );
+    assert!(
+        !alice_node
+            .outgoing_file_progress(pending.id)
             .unwrap()
-            .next_file_destination(None)
-            .unwrap()
-            .0
-            .file_conversation,
-        file_conv
+            .delivered
     );
     let original_chunks: Vec<_> = alice_node
         .log

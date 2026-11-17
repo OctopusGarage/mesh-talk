@@ -446,6 +446,17 @@ fn channel_install_commits_body_evidence_and_effect_together() {
         )
         .unwrap();
     let effects = ReceptionEffects::open(owner.clone()).unwrap();
+    assert!(
+        !owner
+            .database()
+            .read(|c| Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='retained_events')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?))
+            .unwrap(),
+        "plaintext reception must not require a raw-event repository"
+    );
     let metadata = ReceptionMetadata {
         from_device: "alice".into(),
         received_at: 55,
@@ -458,10 +469,16 @@ fn channel_install_commits_body_evidence_and_effect_together() {
     };
     let row = received(10);
     rows.check_write().unwrap();
+    let reached_injection = std::cell::Cell::new(false);
     let failed: Result<(), LogError> = owner.database().transaction(|c| {
         assert!(ReceivedStore::install_channel_on(c, &row, Some(&metadata))?);
+        reached_injection.set(true);
         Err(std::io::Error::other("checkpoint installation failed").into())
     });
+    assert!(
+        reached_injection.get(),
+        "an earlier SQL error cannot qualify the intended rollback injection"
+    );
     assert!(failed.is_err());
     assert!(!rows.contains(row.event_id).unwrap());
     assert!(!rows.processed(row.event_id).unwrap());
@@ -472,6 +489,12 @@ fn channel_install_commits_body_evidence_and_effect_together() {
         .transaction(|c| ReceivedStore::install_channel_on(c, &row, Some(&metadata)))
         .unwrap();
     rows.note_channel_commit(usize::from(inserted));
+    assert_eq!(
+        effects
+            .received_via(row.conversation, row.event_id)
+            .unwrap(),
+        None
+    );
     assert_eq!(rows.revision(), 1);
     assert_eq!(effects.head().unwrap().sequence, 1);
     assert!(rows.processed(row.event_id).unwrap());

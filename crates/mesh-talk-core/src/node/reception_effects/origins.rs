@@ -144,9 +144,13 @@ pub(super) fn project_on(
     account: &[u8; 32],
     source: ReceptionSource,
 ) -> Result<(), LogError> {
-    let ambiguous: bool = c.query_row("SELECT count(*)>1 FROM (SELECT 1 FROM pending_ingress_origins WHERE account=?1 AND event_id=?2 LIMIT 2)",params![account.as_slice(),source.event_id.as_bytes().as_slice()],|r|r.get(0))?;
-    if ambiguous {
-        return Err(invalid("ambiguous ingress source domain"));
+    let pending: i64 = c.query_row("SELECT count(*) FROM (SELECT 1 FROM pending_ingress_origins WHERE account=?1 AND event_id=?2 LIMIT 2)",params![account.as_slice(),source.event_id.as_bytes().as_slice()],|r|r.get(0))?;
+    match pending {
+        // Plaintext-only stores have no raw-event repository. Without ingress
+        // evidence, avoid writes whose foreign keys would require that owner.
+        0 => return Ok(()),
+        1 => {}
+        _ => return Err(invalid("ambiguous ingress source domain")),
     }
     c.execute("INSERT INTO transcript_ingress_origins(ordinal,account,via,peer_device) SELECT t.ordinal,p.account,p.via,p.peer_device FROM transcript_rows t JOIN pending_ingress_origins p ON p.account=?1 AND p.event_id=t.row_key WHERE t.kind=?2 AND t.conversation=?3 AND t.row_key=?4 ON CONFLICT(ordinal) DO NOTHING", params![account.as_slice(), source.kind.transcript_kind(),source.conversation.as_bytes().as_slice(),source.event_id.as_bytes().as_slice()])?;
     c.execute(

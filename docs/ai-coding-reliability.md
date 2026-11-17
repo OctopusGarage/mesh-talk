@@ -1236,6 +1236,12 @@ superseded source while preserving local arrival timing. The
 cover rollback, duplicate stability, canonical DM relocation, reopen, account
 replacement and cascaded reclamation; real receive-loop assertions cover sender,
 member and post-office paths.
+Optional ingress projection must do no writes when there is no captured source.
+Standalone plaintext reception must not acquire a raw-event repository dependency
+through a child table's foreign keys. The [transcript installation regression](../crates/mesh-talk-core/src/node/transcript_repository/tests.rs)
+omits that raw owner, requires an unknown source and proves its intended failure
+injection is reached before checking rollback; an earlier SQL error cannot stand
+in for that boundary.
 Prepare expensive work separately, then compare expected revision and lifetime
 under the owning commit guard. Preserve operation IDs, ordering, atomic replacement
 and existing compatibility rules. Multi-store changes are not automatically one
@@ -2537,7 +2543,10 @@ requires two packaged builds with different code identities. Verify actual promp
 not merely the absence of an explicit authentication call.
 
 Record the tested source, command, environment, count and outcome. Reassess
-consumers after merging new callers or changing a shared helper. Static scans,
+consumers after merging new callers or changing a shared helper. Execute the
+existing affected plan's consumer selections, including standalone stores; a
+manually narrowed owner suite does not establish the complete affected gate.
+Static scans,
 passing unit tests and browser IPC mocks do not establish native OS behavior or
 the absence of every deadlock. Cancelled, interrupted, empty and unavailable runs
 remain distinct from passes. Completed individual commands do not turn a cancelled

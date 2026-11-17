@@ -1415,6 +1415,8 @@ Native history resolves the complete validated alias bundle and owns its source,
 including unknown. Frontend receipt times describe only locally observed entries.
 Neither this timing nor cached messages can override the projection or supply a
 missing source, even when a later receipt uses the canonical logical-message ID.
+Plaintext-only transcript reception without raw ingress evidence remains valid:
+it leaves the source unknown without requiring a raw-event repository.
 
 Reads are bounded metadata lookups on selected history/receipt rows. There is no
 new background loop, timer, retained body or network request. Startup performs
