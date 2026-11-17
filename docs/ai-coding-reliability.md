@@ -1751,6 +1751,14 @@ the returned draft at preparation and publication boundaries. The existing
 reject changed titles before dispatch or publication; a successful API call alone
 does not establish that the visible result follows the release convention.
 
+Release preflight fixtures must own their version inputs and curated notes rather
+than read the checkout's live changelog. The development target can legitimately
+advance before Stable notes exist. The [preflight regression](../scripts/diagnostics/release-preflight.test.mjs)
+provides exact-version fixture notes to reach published-release rejection, while
+its independent missing-notes control must still reject before remote access or
+build-output publication. An earlier unrelated rejection does not exercise the
+intended release guard.
+
 When replacing a background owner, inspect every producer started by the actual
 runtime. A lower-level loop can become quiet while a legacy sibling keeps
 scanning the same durable facts. Exercise the production parent with unchanged
