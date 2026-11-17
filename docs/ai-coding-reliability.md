@@ -1743,6 +1743,14 @@ retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
 
+External publication metadata must follow the owning contract even when an API
+accepts a mutation. Derive Stable titles from the validated version tag and check
+the returned draft at preparation and publication boundaries. The existing
+[version automation](../scripts/diagnostics/version-automation.test.mjs) and
+[release-state CLI](../scripts/diagnostics/release-state.test.mjs) regressions
+reject changed titles before dispatch or publication; a successful API call alone
+does not establish that the visible result follows the release convention.
+
 When replacing a background owner, inspect every producer started by the actual
 runtime. A lower-level loop can become quiet while a legacy sibling keeps
 scanning the same durable facts. Exercise the production parent with unchanged

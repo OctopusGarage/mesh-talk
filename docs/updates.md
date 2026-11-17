@@ -460,6 +460,10 @@ ready. Maintainers own the release decision and product-facing notes:
    changing remote state. The target must exceed the highest published numeric Stable.
    It creates an immutable exact-source tag and an **unpublished draft**, then explicitly
    dispatches **Tauri Release** on that tag with both publication flags disabled.
+   The Stable release title must equal its canonical version tag, for example `v0.4.5`.
+   Draft preparation and the existing asset-recording, verification and publication
+   guards reject a missing title, added product prefix or different version. Repair
+   the draft's display title before resuming; keep its immutable tag and source unchanged.
 4. Wait for the complete signed, source-attested and verified asset set. Then select the
    version tag in **Tauri Release → Run workflow** and enable **publish_release** to use
    the existing exact-source, downloaded-draft, signature, provenance and container gates.
