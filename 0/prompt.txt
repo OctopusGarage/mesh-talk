@@ -1,0 +1,25 @@
+发布新的release正式版本，publish；publish；publish；publish；publish；
+
+---
+
+为什么release page标题不是规范跟其他一样，是0.4.5, 而是“Mesh-Talk v0.4.5” ，analyze；analyze；analyze；analyze；analyze；
+
+---
+
+仓库没有可复用的脚本之类的吗，为什么老是自己重新，而且没规范吗，重新也乱写？？？analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+增量更新的机制正常吗？我在客户端好像没增量更新的按钮之类的？analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+origin/main CI 报错， analyze
+
+---
+
+那你继续吧，continue；，continue；，continue；，continue；
+
+---
+
+跟着PR合并在一起解决吧：https://github.com/OctopusGarage/mesh-talk/pull/376， continue； continue； continue； continue； continue； continue； continue； continue；
