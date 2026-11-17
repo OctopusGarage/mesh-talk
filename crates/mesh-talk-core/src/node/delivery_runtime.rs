@@ -1845,7 +1845,18 @@ impl Node {
                         {
                             self.file_pull_notify.notify_one();
                             if !self.certified_sibling(&sender) {
+                                let logical = self.file_message_row_logical_id(&entry)?;
+                                let aliases = self
+                                    .file_message_identities
+                                    .lock()
+                                    .expect("file identities lock")
+                                    .aliases(entry.conversation, logical)?;
                                 let _ = self.file_incoming.send(ReceivedFile {
+                                    received_via: self.reception_effects.received_file_via(
+                                        entry.conversation,
+                                        entry.event_id,
+                                        &aliases,
+                                    )?,
                                     protection: manifest.protection(),
                                     expires_at_ms: crate::expiry::deadline(&entry.plaintext),
                                     conv: original_conv,
@@ -1860,7 +1871,7 @@ impl Node {
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
                                     media: super::media_store::manifest_is_media(&manifest),
-                                    event_id: self.file_message_row_logical_id(&entry)?,
+                                    event_id: logical,
                                     authored_at: entry.wall_clock,
                                     received_at: super::node::now_millis(),
                                     arrival_kind: "live",
@@ -1887,6 +1898,12 @@ impl Node {
                         .map_or_else(|| sender.user_id(), |proof| proof.name);
                     if !self.certified_sibling(&sender) {
                         let _ = self.incoming.send(ReceivedDm {
+                            received_via: self.reception_effects.received_via(
+                                entry.conversation,
+                                envelope
+                                    .as_ref()
+                                    .map_or(entry.event_id, |env| EventId::new(env.msg_id)),
+                            )?,
                             message_id: envelope.as_ref().map(|env| EventId::new(env.msg_id)),
                             from_account: envelope
                                 .as_ref()

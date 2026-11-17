@@ -3193,6 +3193,10 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
     assert_eq!(received.from, alice_uid);
     assert_eq!(received.from_name, "Alice");
     assert_eq!(received.text, b"held-hello");
+    assert_eq!(
+        received.received_via,
+        Some(crate::node::ReceivedVia::PostOffice)
+    );
 
     let conv = dm_conversation_id(&alice_node.identity.public(), &bob_node.identity.public());
     let mailbox = crate::postoffice::opaque::RelayMailbox::new(
@@ -5317,6 +5321,10 @@ async fn channel_member_recovers_missed_message_from_peer() {
         .expect("channel stream open");
     assert_eq!(recovered.text, b"recover from Bob");
     assert_eq!(recovered.arrival_kind, "catch_up");
+    assert_eq!(
+        recovered.received_via,
+        Some(crate::node::ReceivedVia::Member)
+    );
     assert!(recovered.received_at > 0);
     assert_eq!(recovered.event_id, sent_id);
     assert!(!recovered.batch_complete);
@@ -5366,6 +5374,10 @@ async fn channel_member_recovers_missed_message_from_peer() {
     .expect("recovered history is readable within the shared recovery window");
     assert_eq!(recovered_history.len(), 1);
     assert_eq!(recovered_history[0].id, sent_id);
+    assert_eq!(
+        recovered_history[0].received_via,
+        Some(crate::node::ReceivedVia::Member)
+    );
     let resumed_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, carol_port))
         .await
         .unwrap();
@@ -5913,6 +5925,7 @@ async fn next_channel_content(
 async fn channel_content_receiver_distinguishes_terminal_from_empty_message() {
     let channel = ConversationId::new([91; 32]);
     let content = crate::node::channel::ReceivedChannelMessage {
+        received_via: None,
         channel_id: channel,
         channel_name: "general".into(),
         from: "sender".into(),
@@ -6643,6 +6656,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
             .expect("channel stream open");
         assert!(got.received_at > 0);
         assert_eq!(got.arrival_kind, "live");
+        assert_eq!(got.received_via, Some(crate::node::ReceivedVia::Sender));
         assert!(!got.own_device);
         assert_eq!(got.batch_size, 1);
         assert!(got.batch_complete);
@@ -8514,6 +8528,10 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
     .unwrap();
     assert_eq!(recovered_card.file_conv, missed_file);
     assert_eq!(recovered_card.arrival_kind, "catch_up");
+    assert_eq!(
+        recovered_card.received_via,
+        Some(crate::node::ReceivedVia::Member)
+    );
     assert!(
         recovered_card
             .batch_id

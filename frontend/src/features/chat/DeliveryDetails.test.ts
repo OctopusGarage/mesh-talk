@@ -28,6 +28,68 @@ const base: ChatMessage = {
   delivery: "awaiting",
   deliveryObservation: { kind: "attempting", ageMs: 3000, sampledAt: 100 },
 };
+
+it("discloses member and post-office confirmations independently as status changes", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  await i18n.changeLanguage("en");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const show = (postOfficeCopies: number) =>
+    act(async () =>
+      root.render(
+        createElement(DeliveryFooter, {
+          message: { ...base, replicas: 1, postOfficeCopies },
+          isChannel: true,
+        }),
+      ),
+    );
+  try {
+    await show(0);
+    expect(host.querySelectorAll("button[aria-expanded]")).toHaveLength(1);
+    await show(1);
+    const buttons = host.querySelectorAll<HTMLButtonElement>(
+      "button[aria-expanded]",
+    );
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].getAttribute("aria-label")).toBe(
+      "Last confirmed: 1 member copy",
+    );
+    expect(buttons[1].getAttribute("aria-label")).toBe(
+      "Post office confirmed a stored copy",
+    );
+    for (const button of buttons) {
+      await act(async () => button.click());
+      const panel = document.getElementById(
+        button.getAttribute("aria-controls")!,
+      );
+      expect(panel?.textContent).toContain(button.getAttribute("aria-label"));
+      expect(panel?.textContent).toContain(
+        button === buttons[0]
+          ? "not a delivery or read receipt"
+          : "Recipient delivery, downloads and reading are separate.",
+      );
+    }
+    await act(async () =>
+      buttons[1].dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+    expect(buttons[0].getAttribute("aria-expanded")).toBe("true");
+    expect(buttons[1].getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(buttons[1]);
+    await show(0);
+    expect(host.querySelectorAll("button[aria-expanded]")).toHaveLength(1);
+    expect(host.textContent).not.toContain(
+      "Post office confirmed a stored copy",
+    );
+    expect(host.textContent).toContain("Last confirmed: 1 member copy");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
 it("keeps sticker receipts compact and accessible while retaining delivery details", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   await i18n.changeLanguage("en");
@@ -548,4 +610,145 @@ it("keeps copy and delivered states icon-only until explicitly expanded inline",
   }
   await act(async () => root.unmount());
   host.remove();
+});
+
+it.each([
+  ["sender", "Received from the sender"],
+  ["member", "Received from another member"],
+  ["post_office", "Received from a post office"],
+  ["linked_device", "Received from a linked device"],
+  [undefined, "Reception source unknown"],
+] as const)(
+  "discloses incoming %s message ingress without changing author or custody",
+  async (receivedVia, label) => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    await i18n.changeLanguage("en");
+    const host = document.createElement("div");
+    const root = createRoot(host);
+    try {
+      await act(async () =>
+        root.render(
+          createElement(DeliveryFooter, {
+            message: { ...base, fromMe: false, receivedVia },
+            isChannel: true,
+            showTime: false,
+          }),
+        ),
+      );
+      const button = host.querySelector<HTMLButtonElement>(
+        '[data-testid="message-source-trigger"]',
+      );
+      expect(button?.getAttribute("aria-label")).toBe(label);
+      await act(async () => button!.click());
+      expect(
+        host.querySelector('[data-testid="message-source"]')?.textContent,
+      ).toContain("first reached this device");
+      for (const hidden of [
+        { fromMe: true },
+        { recalled: true },
+        { pending: true },
+      ]) {
+        await act(async () =>
+          root.render(
+            createElement(DeliveryFooter, {
+              message: { ...base, fromMe: false, receivedVia, ...hidden },
+              isChannel: true,
+            }),
+          ),
+        );
+        expect(
+          host.querySelector('[data-testid="message-source-trigger"]'),
+        ).toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+    }
+  },
+);
+
+it("retires open reception details on source, message, conversation and session replacement", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  await i18n.changeLanguage("en");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const original: ChatMessage = {
+    ...base,
+    fromMe: false,
+    receivedVia: "member",
+    arrivalKind: "catch_up",
+    receivedAt: 42,
+  };
+  const show = (message: ChatMessage) =>
+    act(async () =>
+      root.render(createElement(DeliveryFooter, { message, isChannel: true })),
+    );
+  const trigger = () =>
+    host.querySelector<HTMLButtonElement>(
+      '[data-testid="message-source-trigger"]',
+    )!;
+  try {
+    await show(original);
+    expect(host.querySelector('[data-testid="message-time"]')).not.toBeNull();
+    expect(
+      host.querySelector('[data-testid="delayed-message"]'),
+    ).not.toBeNull();
+    await act(async () => trigger().click());
+    const panel = host.querySelector<HTMLElement>(
+      '[data-testid="message-source"]',
+    )!;
+    expect(panel.textContent).toContain("not describe the full route");
+    await act(async () =>
+      panel.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(trigger());
+    for (const replacement of [
+      { ...original, receivedVia: "sender" as const },
+      { ...original, id: "another-message" },
+    ]) {
+      await act(async () => trigger().click());
+      await show(replacement);
+      expect(host.querySelector('[data-testid="message-source"]')).toBeNull();
+      await show(original);
+    }
+    const savedActive = useChat.getState().active;
+    const savedGeneration = useAuth.getState().generation;
+    try {
+      for (const invalidate of [
+        () =>
+          useChat.setState({
+            active: { kind: "channel", id: "other", name: "Other" },
+          }),
+        () =>
+          useAuth.setState((state) => ({ generation: state.generation + 1 })),
+      ]) {
+        await act(async () => trigger().click());
+        await act(async () => invalidate());
+        expect(host.querySelector('[data-testid="message-source"]')).toBeNull();
+      }
+    } finally {
+      await act(async () => {
+        useChat.setState({ active: savedActive });
+        useAuth.setState({ generation: savedGeneration });
+      });
+    }
+    await show({
+      ...original,
+      announcement: {
+        revision: "r",
+        content: "notice",
+        author: "owner",
+        authored_at: 1,
+      },
+    });
+    expect(
+      host.querySelector('[data-testid="message-source-trigger"]'),
+    ).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
 });

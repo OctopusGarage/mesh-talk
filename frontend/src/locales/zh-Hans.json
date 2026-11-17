@@ -329,6 +329,15 @@
     "source_unscoped": "签名发现记录（网络范围未确定）"
   },
   "message": {
+    "source": {
+      "sender": "从发送者接收",
+      "member": "从其他成员接收",
+      "post_office": "从邮局接收",
+      "linked_device": "从关联设备接收",
+      "unknown": "接收来源未知",
+      "help": "此消息或文件卡片首次到达本设备的来源，不代表完整转发路径、文件下载来源、送达或已读状态。",
+      "unknownHelp": "未记录此消息或文件卡片首次到达本设备的来源。旧历史或导入的历史可能没有来源信息。"
+    },
     "sticker": "[表情]",
     "recalledSummary": "[消息已撤回]",
     "expiresIn": "发送后倒计时 {{time}}，到期双方消息均消失",

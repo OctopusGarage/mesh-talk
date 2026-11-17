@@ -3540,7 +3540,7 @@ impl Node {
         channel: ConversationId,
         event_id: EventId,
         peer: &PeerRecord,
-    ) -> Result<u64, crate::transport::TransportError> {
+    ) -> Result<u64, super::session::SessionError> {
         let mut conn = self.privacy_sync_dial(peer.addr, &peer.public).await?;
         let before = conn.sent_frame_bytes();
         let store = self.sync_store(conn.peer_identity());
@@ -3549,7 +3549,20 @@ impl Node {
             .ok_or(crate::transport::TransportError::AdmissionDenied)?;
         let round = request_round(&mut conn, &store, channel).await;
         self.dispatch_received_sync_work(&store);
-        let reusable = if round.is_ok() {
+        if let Err(error) = round {
+            // A failed whole-history exchange cannot establish completion. Its
+            // partially consumed connection and reception capacity must retire
+            // before an independent exact-message query can be admitted.
+            drop(_reception);
+            drop(store);
+            drop(conn);
+            if matches!(error, super::session::SessionError::NoProgress) {
+                self.recheck_channel_custody_peer(channel, event_id, peer)
+                    .await;
+            }
+            return Err(error);
+        }
+        let reusable = {
             match request_durable_have(&mut conn, channel, event_id).await {
                 Ok(held) => {
                     if held {
@@ -3580,8 +3593,6 @@ impl Node {
                 }
                 Err(_) => false,
             }
-        } else {
-            false
         };
         let bytes = conn.sent_frame_bytes().saturating_sub(before);
         if reusable {
@@ -4093,18 +4104,33 @@ impl Node {
                                     // for a fresh view through the existing backoff.
                                     deferred.store(true, std::sync::atomic::Ordering::Relaxed);
                                 }
-                                Ok(())
+                                Ok::<(), super::session::SessionError>(())
                             }
                         })
                         .await;
                         if !matches!(
                             &result,
-                            Ok(Ok(())) | Ok(Err(crate::transport::TransportError::AdmissionDenied))
+                            Ok(Ok(()))
+                                | Ok(Err(super::session::SessionError::Transport(
+                                    crate::transport::TransportError::AdmissionDenied
+                                )))
                         ) {
                             failed.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
+                        if result.is_err() {
+                            // Expiry cancels unfinished work; it cannot retire
+                            // the existing committed group fanout revision.
+                            deferred.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                         if let Ok(Err(error)) = result
-                            && super::session_pool::local_capacity_busy(&error)
+                            && (matches!(
+                                &error,
+                                super::session::SessionError::NoProgress
+                                    | super::session::SessionError::ResourceUnavailable
+                                    | super::session::SessionError::Store(LogError::StaleCursor)
+                            ) || super::session_pool::retryable_sync_error(&error)
+                                || matches!(&error, super::session::SessionError::Transport(error)
+                                    if super::session_pool::local_capacity_busy(error)))
                         {
                             deferred.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -4411,6 +4437,107 @@ mod fanout_tests {
     use crate::identity::device::DeviceIdentity;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Instant;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn confirming_fanout_retains_retry_after_authenticated_sync_closes() {
+        confirming_fanout_failed_exchange_fixture(false).await;
+    }
+
+    #[tokio::test]
+    async fn confirming_fanout_retains_retry_after_authenticated_sync_times_out() {
+        confirming_fanout_failed_exchange_fixture(true).await;
+    }
+
+    async fn confirming_fanout_failed_exchange_fixture(hold_until_timeout: bool) {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        let dir = tempfile::tempdir().unwrap();
+        let holder_identity = DeviceIdentity::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof = Announce::new_with_account(
+            &holder_identity,
+            &Account::generate(),
+            "holder",
+            listener.local_addr().unwrap().port(),
+        );
+        let (source, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        source.roster.lock().unwrap().forget(&proof.public());
+        assert!(source.routing_peer(&proof.public().user_id()).is_none());
+        let channel = source
+            .create_channel("retry sync", vec![proof.public()])
+            .await
+            .unwrap();
+        let event = source
+            .enqueue_channel_message_reply_expiring_if(channel, b"retry me", None, None, |commit| {
+                commit()
+            })
+            .unwrap();
+        source
+            .roster
+            .lock()
+            .unwrap()
+            .update(&proof, Ipv4Addr::LOCALHOST.into(), &source.user_id());
+        let (ready, authenticated) = tokio::sync::oneshot::channel();
+        let server_proof = proof.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut connection = crate::transport::SecureChannel::accept_with_presence(
+                stream,
+                &holder_identity,
+                Some(&server_proof),
+                |_| true,
+            )
+            .await
+            .unwrap();
+            connection.recv().await.unwrap();
+            ready.send(()).unwrap();
+            if hold_until_timeout {
+                assert!(
+                    connection.recv().await.is_err(),
+                    "timed-out exchange must retire its socket"
+                );
+            }
+            // Authentication and the first sync frame precede either failure.
+        });
+        let sender = source.clone();
+        let target = proof.public();
+        let client = tokio::spawn(async move {
+            sender
+                .distribute_channel_targets_outcome(channel, &[target], None, false, Some(event))
+                .await
+        });
+        tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, authenticated)
+            .await
+            .unwrap()
+            .unwrap();
+        if hold_until_timeout {
+            // Real I/O and authentication are already complete; only advance
+            // the existing caller-owned exchange deadline.
+            tokio::time::pause();
+            tokio::time::advance(CHANNEL_RECOVERY_PEER_TIMEOUT + Duration::from_secs(1)).await;
+        }
+        let outcome = client.await.unwrap();
+        if hold_until_timeout {
+            tokio::time::resume();
+        }
+        server.await.unwrap();
+        assert!(
+            outcome.failed,
+            "a failed sync must reach the distribution owner"
+        );
+        assert!(
+            outcome.deferred,
+            "the committed fanout must retain its retry ticket"
+        );
+        assert_eq!(
+            source.channel_custody_count(channel, event).unwrap(),
+            Some(0)
+        );
+    }
 
     async fn custody_notification_probe_fixture(sync: bool) {
         use crate::{

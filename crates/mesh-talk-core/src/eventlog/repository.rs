@@ -206,6 +206,23 @@ impl EventRepository {
         self.database.transaction(|tx| self.append_on(tx, event))
     }
 
+    /// Install local observations only for a newly admitted event, atomically
+    /// with its durable body. The observer uses this connection and must not
+    /// acquire another owner or re-enter the database.
+    pub(crate) fn append_observed(
+        &self,
+        event: &Event,
+        observe: impl FnOnce(&Connection, EventDomainId, &Event) -> Result<(), LogError>,
+    ) -> Result<AppendOutcome, LogError> {
+        self.database.transaction(|tx| {
+            let outcome = self.append_on(tx, event)?;
+            if outcome == AppendOutcome::Appended {
+                observe(tx, self.domain, event)?;
+            }
+            Ok(outcome)
+        })
+    }
+
     pub(crate) fn append_on(
         &self,
         c: &Connection,

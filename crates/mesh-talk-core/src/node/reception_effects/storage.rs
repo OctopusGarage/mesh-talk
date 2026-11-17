@@ -125,6 +125,9 @@ pub(crate) fn install_on(
     {
         return Err(invalid("reception sequence did not advance"));
     }
+    if !metadata.reception_only {
+        super::origins::project_on(c, &account, source)?;
+    }
     natural(sequence)
 }
 
@@ -138,6 +141,7 @@ impl ReceptionEffects {
                 c.execute_batch(SCHEMA)?;
             }
             manifest::validate_ddl(c,SCHEMA)?;
+            super::origins::initialize_on(c)?;
             let account=active_account_on(c)?;
             ensure_stream_on(c,&account)?;
             state_on(c,&account)?;

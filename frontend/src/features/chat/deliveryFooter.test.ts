@@ -231,6 +231,32 @@ it("shows confirmed post-office custody without claiming member delivery", async
   expect(html).not.toContain("sending…");
 });
 
+it("keeps post-office confirmation visible alongside member copies", async () => {
+  await i18n.changeLanguage("en");
+  for (const replicas of [1, 2, 8]) {
+    const html = render({ ...base, replicas, postOfficeCopies: 1 }, true);
+    expect(html).toContain(
+      replicas === 1
+        ? "Last confirmed: 1 member copy"
+        : "Last confirmed: 2+ member copies",
+    );
+    expect(html).toContain('aria-label="Post office confirmed a stored copy"');
+    expect(html).toContain("lucide-copy");
+    expect(html).toContain("lucide-inbox");
+    expect(html).not.toContain("data-delivery=");
+  }
+});
+
+it("never infers post-office confirmation from member copies", async () => {
+  await i18n.changeLanguage("en");
+  for (const postOfficeCopies of [undefined, 0]) {
+    const html = render({ ...base, replicas: 1, postOfficeCopies }, true);
+    expect(html).toContain("Last confirmed: 1 member copy");
+    expect(html).not.toContain("Post office confirmed a stored copy");
+    expect(html).not.toContain("lucide-inbox");
+  }
+});
+
 it("excludes details for recalled, pending, failed and unaccepted messages", () => {
   for (const message of [
     { ...base, recalled: true },
@@ -267,3 +293,24 @@ it.each([true, false])(
     expect(html).toMatch(/aria-label="[^"]*Protected message/);
   },
 );
+
+it("shows file-card ingress without claiming byte-download provenance", async () => {
+  await i18n.changeLanguage("en");
+  const html = render(
+    {
+      ...base,
+      fromMe: false,
+      receivedVia: "post_office",
+      file: {
+        fileConv: "incoming",
+        name: "document.pdf",
+        size: 12,
+        mime: "application/pdf",
+        media: false,
+      },
+    },
+    true,
+  );
+  expect(html).toContain('aria-label="Received from a post office"');
+  expect(html).not.toContain("data-custody=");
+});

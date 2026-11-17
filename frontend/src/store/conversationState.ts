@@ -93,6 +93,7 @@ export function fromHistoryItem(h: HistoryItem): ChatMessage {
       ? { fileMessageAliases: h.file_message_aliases }
       : {}),
     fromMe: h.from_me,
+    receivedVia: h.received_via,
     who: h.who,
     text: h.protection ? "" : h.text,
     protection: h.protection,
@@ -242,6 +243,7 @@ export function reconcileMessages(
       return {
         ...m,
         receivedAt: old?.receivedAt ?? m.receivedAt,
+        receivedVia: old?.receivedVia ?? m.receivedVia,
         arrivalKind: old?.arrivalKind ?? m.arrivalKind,
         clientId: old?.clientId,
         delivery: old?.delivery,

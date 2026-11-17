@@ -338,6 +338,14 @@ Local observations or explicit actions indicating viewed conversation content.
 It is separate from receipt, history coverage and public read receipts.
 _Avoid_: delivered, globally read.
 
+**Reception source**:
+The authenticated application peer from which this device first retained a
+message: its sender account, another member, a post office or a linked device.
+It is device-local ingress evidence, separate from authorship, copy custody and
+the path through intermediate networks. Missing evidence remains unknown;
+importing history does not inherit another device's reception source.
+_Avoid_: complete route, file download source, read receipt.
+
 **File availability**:
 Whether authorized attachment bytes can be obtained and verified. A retained
 message or file manifest alone does not establish byte availability.

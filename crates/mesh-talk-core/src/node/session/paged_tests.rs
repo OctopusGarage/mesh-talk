@@ -3494,3 +3494,125 @@ fn guarded_pull_only_remote_subset_have_duplicates_and_budget() {
     }
     assert!(budget.try_admit().is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_exact_custody_survives_unrelated_no_progress_on_fresh_connection() {
+    channel_exact_custody_after_no_progress_fixture(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_exact_custody_negative_after_no_progress_stays_unconfirmed() {
+    channel_exact_custody_after_no_progress_fixture(false).await;
+}
+
+async fn channel_exact_custody_after_no_progress_fixture(held: bool) {
+    use crate::{discovery::Announce, identity::account::Account};
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let directory = tempfile::tempdir().unwrap();
+        let holder = DeviceIdentity::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof = Announce::new_with_account(&holder, &Account::generate(), "holder", listener.local_addr().unwrap().port());
+        let (source, _, _) = super::super::test_support::node_with_files(
+            directory.path(), DeviceIdentity::generate(), Account::generate(), &proof,
+        );
+        source.roster.lock().unwrap().forget(&proof.public());
+        assert!(source.routing_peer(&proof.public().user_id()).is_none());
+        let conversation = source.create_channel("exact custody", vec![proof.public()]).await.unwrap();
+        let target = source.enqueue_channel_message_reply_expiring_if(
+            conversation, b"already retained", None, None, |commit| commit(),
+        ).unwrap();
+        source.roster.lock().unwrap().update(&proof, std::net::Ipv4Addr::LOCALHOST.into(), &source.user_id());
+        let server_proof = proof.clone();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut connection = SecureChannel::accept_with_presence(stream, &holder, Some(&server_proof), |_| true).await.unwrap();
+            let mut pushes = 0;
+            loop {
+                match decode(&connection.recv().await.unwrap()).unwrap() {
+                    SyncWire::FpRequest(_) | SyncWire::FpRequestV2(_) | SyncWire::FpRequestV3(_)
+                    | SyncWire::FpRequestV4(_) | SyncWire::FpRequestV5(_) => {
+                        connection.send(&encode(&SyncWire::FpResponse(FpResponse { matched: false })).unwrap()).await.unwrap();
+                    }
+                    SyncWire::Request(_) | SyncWire::RequestV2(_) | SyncWire::RequestV3(_)
+                    | SyncWire::RequestV4(_) | SyncWire::RequestV5(_) => {
+                        recv_have(&mut connection, true, conversation).await.unwrap();
+                        connection.send(&encode(&SyncWire::Response(SyncResponse {
+                            conversation, events: vec![], have: vec![],
+                        })).unwrap()).await.unwrap();
+                        // The exact message is held, but an unrelated control
+                        // repeatedly fails acceptance and prevents convergence.
+                        connection.send(&encode(&SyncWire::RespHave(HaveChunk {
+                            conversation, ids: vec![target], more: false,
+                        })).unwrap()).await.unwrap();
+                        if pushes > 0 { break; }
+                    }
+                    SyncWire::Followup(f) | SyncWire::FollowupV2(f) | SyncWire::FollowupV3(f)
+                    | SyncWire::FollowupV4(f) | SyncWire::FollowupV5(f) => {
+                        assert!(!f.events.is_empty());
+                        assert!(f.events.iter().all(|event| event.id != target));
+                        pushes += 1;
+                    }
+                    wire => panic!("unexpected first-connection frame: {wire:?}"),
+                }
+            }
+            assert!(connection.recv().await.is_err(), "failed protocol connection must be discarded");
+            drop(connection);
+            let Ok(Ok((stream, _))) = tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept()).await else {
+                return false;
+            };
+            let mut connection = SecureChannel::accept_with_presence(stream, &holder, Some(&server_proof), |_| true).await.unwrap();
+            assert!(matches!(decode(&connection.recv().await.unwrap()).unwrap(),
+                SyncWire::DurableHaveRequest { conversation: c, event_id } if c == conversation && event_id == target));
+            connection.send(&encode(&SyncWire::DurableHaveResponse {
+                conversation, event_id: target, stored: held,
+            }).unwrap()).await.unwrap();
+            true
+        });
+        let deferred = source.distribute_channel_confirming(conversation, &[proof.public()], Some(target)).await;
+        let fresh_probe = task.await.unwrap();
+        assert!(fresh_probe, "NoProgress must not suppress independent exact custody evidence");
+        assert_eq!(source.channel_custody_count(conversation, target).unwrap(), Some(usize::from(held)));
+        assert!(deferred, "exact custody does not finish the unrelated control fanout");
+    }).await.expect("exact custody regression timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_optional_custody_close_does_not_defer_completed_control_fanout() {
+    use crate::{discovery::Announce, identity::account::Account};
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let directory = tempfile::tempdir().unwrap();
+        let holder = DeviceIdentity::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof = Announce::new_with_account(&holder, &Account::generate(), "legacy holder", listener.local_addr().unwrap().port());
+        let (source, _, _) = super::super::test_support::node_with_files(
+            directory.path(), DeviceIdentity::generate(), Account::generate(), &proof,
+        );
+        source.roster.lock().unwrap().forget(&proof.public());
+        assert!(source.routing_peer(&proof.public().user_id()).is_none());
+        let conversation = source.create_channel("Legacy optional custody", vec![proof.public()]).await.unwrap();
+        let event = source.enqueue_channel_message_reply_expiring_if(
+            conversation, b"retained without optional evidence", None, None, |commit| commit(),
+        ).unwrap();
+        source.roster.lock().unwrap().update(&proof, std::net::Ipv4Addr::LOCALHOST.into(), &source.user_id());
+        let server_proof = proof.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut connection = SecureChannel::accept_with_presence(stream, &holder, Some(&server_proof), |_| true).await.unwrap();
+            assert!(matches!(decode(&connection.recv().await.unwrap()).unwrap(),
+                SyncWire::FpRequest(_) | SyncWire::FpRequestV2(_) | SyncWire::FpRequestV3(_)
+                | SyncWire::FpRequestV4(_) | SyncWire::FpRequestV5(_)));
+            // A complete matching ordinary round is independent of support for
+            // the appended optional custody request on this disposable stream.
+            connection.send(&encode(&SyncWire::FpResponse(FpResponse { matched: true })).unwrap()).await.unwrap();
+            assert!(matches!(decode(&connection.recv().await.unwrap()).unwrap(),
+                SyncWire::DurableHaveRequest { conversation: c, event_id } if c == conversation && event_id == event));
+            // An older endpoint closes here instead of producing custody proof.
+        });
+        let deferred = source.distribute_channel_confirming(conversation, &[proof.public()], Some(event)).await;
+        server.await.unwrap();
+        assert!(!deferred, "an unsupported optional check cannot retire a successfully completed control round as unfinished");
+        assert_eq!(source.channel_custody_count(conversation, event).unwrap(), Some(0));
+        assert!(source.channel_custody_observations(conversation, event).is_empty(),
+            "a closed optional query must publish neither positive nor negative custody evidence");
+    }).await.expect("legacy optional custody scenario timed out");
+}

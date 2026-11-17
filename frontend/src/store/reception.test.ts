@@ -645,3 +645,180 @@ it("does not create overflow unread from suppressed entries when bounding the le
   const next = emptyReception(ledger);
   expect(next.overflowUnread["channel:a"] ?? 0).toBe(0);
 });
+
+it("retains the first ingress source through duplicates and history reconciliation", () => {
+  const first = receiveIdentity(emptyReception(), "channel:a", {
+    event_id: "m",
+    received_at: 10,
+    received_via: "post_office",
+  });
+  const duplicate = receiveIdentity(first, "channel:a", {
+    event_id: "m",
+    received_at: 20,
+    received_via: "sender",
+  });
+  expect(duplicate.ledger["channel:a"].m.receivedVia).toBe("post_office");
+  const restored = reconcileHistory(
+    duplicate,
+    "channel:a",
+    [{ id: "m", fromMe: false }],
+    false,
+  );
+  expect(restored.ledger["channel:a"].m.receivedVia).toBe("post_office");
+});
+
+it("restores only valid persisted reception sources and keeps imported unknown", () => {
+  saveReceptionLedger("owner", "account", {
+    "channel:a": {
+      known: { seen: false, late: false, receivedVia: "member" },
+      old: { seen: true, late: false },
+    },
+  });
+  const ledger = loadReceptionLedger("owner", "account");
+  expect(ledger["channel:a"].known.receivedVia).toBe("member");
+  expect(ledger["channel:a"].old.receivedVia).toBeUndefined();
+});
+
+it("preserves the earliest alias ingress source while merging a file card", () => {
+  let state = receiveIdentity(emptyReception(), "channel:a", {
+    event_id: "alias",
+    received_at: 10,
+    received_via: "member",
+  });
+  state = receiveIdentity(state, "channel:a", {
+    event_id: "card",
+    received_at: 20,
+    received_via: "sender",
+  });
+  const merged = reconcileHistory(
+    state,
+    "channel:a",
+    [
+      {
+        id: "card",
+        fromMe: false,
+        fileMessageAliases: ["alias"],
+        receivedVia: "post_office",
+      },
+    ],
+    false,
+  );
+  expect(merged.ledger["channel:a"].card.receivedVia).toBe("member");
+});
+
+it("does not fill an earliest unknown alias source from a later known alias", () => {
+  let state = receiveIdentity(emptyReception(), "channel:a", {
+    event_id: "first",
+    received_at: 10,
+  });
+  state = receiveIdentity(state, "channel:a", {
+    event_id: "later",
+    received_at: 20,
+    received_via: "sender",
+  });
+  const merged = reconcileHistory(
+    state,
+    "channel:a",
+    [{ id: "card", fromMe: false, fileMessageAliases: ["first", "later"] }],
+    false,
+  );
+  expect(merged.ledger["channel:a"].card.receivedVia).toBeUndefined();
+});
+
+it("prefers authoritative native history when aliases have no reception timestamps", () => {
+  let state = receiveIdentity(emptyReception(), "channel:a", {
+    event_id: "first",
+  });
+  state = receiveIdentity(state, "channel:a", {
+    event_id: "later",
+    received_via: "sender",
+  });
+  const rows = [
+    {
+      id: "card",
+      fromMe: false,
+      fileMessageAliases: ["first", "later"],
+      receivedVia: "post_office" as const,
+    },
+  ];
+  const merged = reconcileHistory(state, "channel:a", rows, false);
+  expect(merged.ledger["channel:a"].card.receivedVia).toBe("post_office");
+});
+
+it("does not guess first ingress from unordered aliases without native evidence", () => {
+  const state = receiveIdentity(emptyReception(), "channel:a", {
+    event_id: "alias",
+    received_via: "sender",
+  });
+  const merged = reconcileHistory(
+    state,
+    "channel:a",
+    [
+      {
+        id: "card",
+        fromMe: false,
+        fileMessageAliases: ["alias"],
+      },
+    ],
+    false,
+  );
+  expect(merged.ledger["channel:a"].card.receivedVia).toBeUndefined();
+});
+
+it("keeps durable source evidence through startup merge and recovers missing metadata", () => {
+  const key = "account:peer";
+  const disk = emptyReception({
+    [key]: {
+      known: { seen: true, late: false, receivedVia: "post_office" },
+      missing: { seen: false, late: false },
+    },
+  });
+  let live = receiveIdentity(emptyReception(), key, {
+    event_id: "known",
+    received_via: "sender",
+  });
+  live = receiveIdentity(live, key, {
+    event_id: "missing",
+    received_via: "linked_device",
+  });
+  const merged = mergeReception(
+    { ...disk, unread: {} },
+    { ...live, unread: {} },
+  );
+  expect(merged.ledger[key].known.receivedVia).toBe("post_office");
+  expect(merged.ledger[key].missing.receivedVia).toBe("linked_device");
+  expect(merged.ledger[key].known.seen).toBe(true);
+});
+
+it("drops malformed persisted source categories without dropping reception identities", () => {
+  localStorage.setItem(
+    "mesh-talk-reception-v2:owner:account",
+    JSON.stringify({
+      "account:peer": {
+        bad: { seen: false, late: false, receivedVia: "guessed-route" },
+      },
+    }),
+  );
+  const ledger = loadReceptionLedger("owner", "account");
+  expect(ledger["account:peer"].bad.receivedVia).toBeUndefined();
+  expect(emptyReception(ledger).unreadIds["account:peer"]).toEqual(["bad"]);
+});
+
+it("enriches a canonical receipt missing source once without recounting it", () => {
+  const key = "account:peer";
+  const unknown = receiveIdentity(emptyReception(), key, {
+    event_id: "message",
+  });
+  const known = receiveIdentity(unknown, key, {
+    event_id: "message",
+    received_via: "linked_device",
+  });
+  expect(known.ledger[key].message.receivedVia).toBe("linked_device");
+  expect(known.unreadIds[key]).toEqual(["message"]);
+  expect(
+    receiveIdentity(known, key, {
+      event_id: "message",
+      received_via: "sender",
+    }),
+  ).toBe(known);
+});

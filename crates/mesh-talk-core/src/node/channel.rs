@@ -160,6 +160,8 @@ pub(in crate::node) const CHANNEL_PENDING_BYTES: usize = 8 * 1024 * 1024;
 /// from the store, not by re-opening the event).
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReceivedChannelMessage {
+    /// Local first-ingress observation; absent for unknown or imported history.
+    pub received_via: Option<super::ReceivedVia>,
     pub channel_id: ConversationId,
     pub channel_name: String,
     pub from: String,
@@ -1190,6 +1192,7 @@ impl ChannelBook {
                     {
                         let body = MessageBody::decode(&plaintext);
                         let msg = ReceivedChannelMessage {
+                            received_via: None,
                             channel_id,
                             channel_name: state.name().to_string(),
                             from: event.author.user_id(),

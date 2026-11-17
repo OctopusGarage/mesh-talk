@@ -426,6 +426,15 @@ round cannot earn it. Preserve existing callers' result meaning through an
 additive internal observation, and keep delivery/custody proof independent. The
 same profile publisher controls exercise warm relay publication with unavailable
 direct delivery; mailbox controls retain source-change and relay-reset recovery.
+Do not discard a sync error while returning a successful byte count to the
+distribution owner. Whole-history `NoProgress` can coexist with an exact retained
+message. Preserve the failed control revision and its existing backoff while a
+fresh authenticated exact-have query independently qualifies that copy within the
+original deadline. Retire the old protocol connection and actual reception
+admission before redialing. The [confirming-fanout regression](../crates/mesh-talk-core/src/node/channels.rs)
+and [exact-custody failure-path regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+exercise authenticated closure, incomplete reconciliation and positive/negative
+answers on the replacement connection.
 
 When replacing fast polling with sparse recovery, preserve the progress that the
 old poll accidentally supplied. A completed record is not active demand, but a
@@ -1115,6 +1124,12 @@ remain unknown; reconcile or retry according to the owning idempotency contract.
 Process a late definite refusal without fabricating a protocol terminal state.
 Do not turn failed readback into an empty successful save or resend an accepted
 message because optional roster, preview or notification work failed.
+Preserve independent successful observations in presentation. Member custody and
+post-office custody can both exist; a fallback expression must not hide one when
+the other becomes positive. The [delivery footer regressions](../frontend/src/features/chat/deliveryFooter.test.ts)
+cover simultaneous confirmations and absent relay evidence; the mounted
+[status disclosures](../frontend/src/features/chat/DeliveryDetails.test.ts) cover
+late confirmation, independent explanations and removal of stale relay status.
 Durable local erasure must classify its target from canonical identity, not an
 enumeration of display projections. A ready history observation is not a lease
 on subsequent projection readiness, and a generic mutation retry can repeat work
@@ -1155,6 +1170,15 @@ read is silently treated as empty state; cleanup after a partial failure destroy
 recoverable user data.
 
 Identify the commit point, serialization owner and restart/replay behavior.
+Keep local ingress evidence separate from message authorship and arrival timing.
+Capture it from the authenticated application peer at raw acceptance; transfer
+it with the canonical transcript commit, never infer it from a catch-up flag or
+copy another device's route during history import. Preserve an unknown first
+alias instead of borrowing a later alias's known source. The
+[origin owner regressions](../crates/mesh-talk-core/src/node/reception_effects/origins.rs)
+cover rollback, duplicate stability, canonical DM relocation, reopen, account
+replacement and cascaded reclamation; real receive-loop assertions cover sender,
+member and post-office paths.
 Prepare expensive work separately, then compare expected revision and lifetime
 under the owning commit guard. Preserve operation IDs, ordering, atomic replacement
 and existing compatibility rules. Multi-store changes are not automatically one

@@ -151,6 +151,12 @@ impl Node {
                     .routing_peer(&metadata.from_device)
                     .map_or_else(|| metadata.from_device.clone(), |peer| peer.name);
                 receipts.push(HostReception::DirectMessage(ReceivedDm {
+                    received_via: if metadata.own_device {
+                        None
+                    } else {
+                        self.reception_effects
+                            .received_via(entry.conversation, id)?
+                    },
                     message_id: envelope
                         .as_ref()
                         .map(|envelope| crate::eventlog::EventId::new(envelope.msg_id)),
@@ -188,6 +194,12 @@ impl Node {
                 .state(&fact.source.conversation)
                 .map_or_else(String::new, |state| state.name().to_owned());
             receipts.push(HostReception::ChannelMessage(ReceivedChannelMessage {
+                received_via: if metadata.own_device || metadata.reception_only {
+                    None
+                } else {
+                    self.reception_effects
+                        .received_via(fact.source.conversation, fact.source.event_id)?
+                },
                 channel_id: fact.source.conversation,
                 channel_name,
                 from: metadata.from_device,

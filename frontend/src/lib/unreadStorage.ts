@@ -210,6 +210,11 @@ export function loadReceptionLedger(
           ...(Number.isFinite(e.expiresAtMs)
             ? { expiresAtMs: e.expiresAtMs }
             : {}),
+          ...(["sender", "member", "post_office", "linked_device"].includes(
+            e.receivedVia ?? "",
+          )
+            ? { receivedVia: e.receivedVia }
+            : {}),
           seen: e.seen,
           late: e.late,
           ...(Number.isFinite(e.receivedAt)

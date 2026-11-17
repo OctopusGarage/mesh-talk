@@ -113,6 +113,10 @@
             "account_fixture_health_snapshot_precedes_real_peer_shutdown",
             "recovered_group_beyond_publication_slice_refreshes_before_exact_network_fanout",
             "failed_refresh_retains_original_fanout_revision_for_authenticated_retry",
+            "confirming_fanout_retains_retry_after_authenticated_sync_",
+            "legacy_optional_custody_close_does_not_defer_completed_control_fanout",
+            "channel_exact_custody_survives_unrelated_no_progress_on_fresh_connection",
+            "channel_exact_custody_negative_after_no_progress_stays_unconfirmed",
             "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
             "incoming_request_overtakes_a_naturally_hinted_control_and_repays_its_background_turn",
             "incoming_wake_yields_one_natural_turn_but_protects_replacement_and_resume",
@@ -2957,6 +2961,12 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::reception_effects::tests::",
+            "node::reception_effects::origins::",
+            "node::privacy_sync::causal_export_tests::ingress_source_uses_authenticated_peer_and_verified_account_binding",
+            "node::node::tests::channel_messages_are_forward_secret_and_history_comes_from_stores",
+            "node::node::tests::channel_member_recovers_missed_message_from_peer",
+            "node::node::tests::offline_dm_delivered_via_post_office_over_loopback",
+            "node::node::tests::saved_channel_file_remains_downloadable_from_member_after_author_disconnects",
             "node::runtime_delivery::tests::",
             "node::host_reception::tests::",
             "retired_account_producers_cannot_install_effects_in_the_adopted_namespace",
@@ -2980,7 +2990,7 @@
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
-            "name": "Receipt source identity, first reception provenance and terminal batch metadata commit with transcript processing before existing journal/checkpoint completion; exact installation evidence survives pending-metadata retirement.",
+            "name": "Receipt source identity, first reception provenance and terminal batch metadata commit with transcript processing before existing journal/checkpoint completion; exact installation evidence survives pending-metadata retirement. Authenticated local ingress records atomically with raw admission and transfers to account-fenced transcript children; duplicate, unknown/imported alias and canonical DM relocation paths preserve first-source truth without new polling or payload retention.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

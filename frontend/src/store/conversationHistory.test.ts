@@ -340,6 +340,7 @@ it("commits recovered history with historical arrival metadata while preserving 
         event_id: "live",
         arrival_kind: "live",
         received_at: 42,
+        received_via: "member",
       }),
     ),
   );
@@ -352,18 +353,28 @@ it("commits recovered history with historical arrival metadata while preserving 
   });
   invoke.mockImplementation((command: string) =>
     Promise.resolve(
-      command === "channel_history" ? [row("recovered"), row("live")] : [],
+      command === "channel_history"
+        ? [
+            { ...row("recovered"), received_via: "post_office" },
+            { ...row("live"), received_via: "sender" },
+          ]
+        : [],
     ),
   );
   try {
     await reloadConversation(store.setState, store.getState);
     expect(committed).toHaveLength(1);
     expect(committed[0]).toEqual([
-      expect.objectContaining({ id: "recovered", arrivalKind: "history_sync" }),
+      expect.objectContaining({
+        id: "recovered",
+        arrivalKind: "history_sync",
+        receivedVia: "post_office",
+      }),
       expect.objectContaining({
         id: "live",
         arrivalKind: "live",
         receivedAt: 42,
+        receivedVia: "member",
       }),
     ]);
     expect(store.getState().unreadIds[channelKey]).toEqual([

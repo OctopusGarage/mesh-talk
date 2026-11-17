@@ -329,6 +329,15 @@
     "source_unscoped": "Descoberta assinada (escopo de rede não especificado)"
   },
   "message": {
+    "source": {
+      "sender": "Recebido do remetente",
+      "member": "Recebido de outro membro",
+      "post_office": "Recebido de uma agência postal",
+      "linked_device": "Recebido de um dispositivo vinculado",
+      "unknown": "Origem da recepção desconhecida",
+      "help": "Como esta mensagem ou cartão de arquivo chegou pela primeira vez a este dispositivo. Não descreve a rota completa, downloads, entrega ou leitura.",
+      "unknownHelp": "Não foi registrado como esta mensagem ou cartão de arquivo chegou pela primeira vez. O histórico antigo ou importado pode não ter origem."
+    },
     "sticker": "[Figurinha]",
     "recalledSummary": "[Mensagem cancelada]",
     "expiresIn": "Expira em {{time}} após o envio; removida dos dois lados",

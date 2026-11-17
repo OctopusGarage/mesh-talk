@@ -138,6 +138,7 @@ mod runtime_work;
 pub use runtime_startup::{RuntimeStartup, StartupCompletion};
 pub(crate) mod received_store;
 pub(crate) mod reception_effects;
+pub use reception_effects::ReceivedVia;
 mod search;
 pub(crate) mod sent_store;
 pub(crate) mod sentlog;

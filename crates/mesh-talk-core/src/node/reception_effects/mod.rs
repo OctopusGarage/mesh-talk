@@ -15,6 +15,9 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+mod origins;
+pub(crate) use origins::IngressOrigin;
+pub use origins::ReceivedVia;
 mod pages;
 mod storage;
 

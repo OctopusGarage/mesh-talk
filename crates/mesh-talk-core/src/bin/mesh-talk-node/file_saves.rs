@@ -281,6 +281,7 @@ mod tests {
     use super::*;
     fn file(n: u8) -> ReceivedFile {
         ReceivedFile {
+            received_via: None,
             protection: None,
             expires_at_ms: None,
             conv: ConversationId::new([1; 32]),

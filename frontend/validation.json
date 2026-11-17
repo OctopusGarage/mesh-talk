@@ -2,6 +2,41 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-message-reception-source",
+      "paths": [
+        "frontend/src/lib/types.ts",
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/features/chat/DeliveryFooter.tsx"
+      ],
+      "frontend": [
+        "src/store/reception.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/conversationHistory.test.ts",
+        "src/features/chat/DeliveryDetails.test.ts",
+        "src/features/chat/deliveryFooter.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Disclose optional local first-ingress source without inventing routes, file-byte provenance, custody or recipient receipts.",
+        "guide": "docs/network-design-reference.md#device-local-reception-source",
+        "invariants": [
+          {
+            "name": "Received cards expose source through accessible inline details; own, pending and recalled cards do not. Duplicate events and history reconciliation preserve first ingress; older or imported unknown metadata stays unknown.",
+            "reference": "docs/ai-coding-reliability.md#r08-durable-state-and-failure-semantics"
+          }
+        ]
+      },
+      "escalation": [
+        "Inspect compact icons, keyboard disclosure and containment in browser/native message rows. Unit tests do not prove native ingress classification or visual fit."
+      ]
+    },
+    {
       "id": "frontend-memory-guardrails",
       "paths": [
         "frontend/e2e/memory.spec.ts",
@@ -256,7 +291,7 @@
             "reference": "docs/help/topics/channels.md#understand-message-copy-status"
           },
           {
-            "name": "Copy signals use distinct icons and explicit inline details, never delivery/read check marks or hover overlays.",
+            "name": "Copy signals use distinct icons and explicit inline details, never delivery/read check marks or hover overlays. Concurrent member and post-office confirmations remain visible and independently inspectable; member copies never imply post-office success.",
             "reference": "docs/help/topics/channels.md#understand-message-copy-status"
           }
         ]
