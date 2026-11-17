@@ -2,11 +2,72 @@
 // One compiled archive, eight serial ASan partitions and exact union evidence.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statfsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { command as runLogged, inventory, verifyPartition, verifyExecution, versions } from "./windows-coverage.mjs";
+
+// Observe only fixed kernel counters, never process arguments or environment dumps.
+// This adds evidence; it cannot qualify an archive or change the compiler result.
+function kernelCounters(file, select) {
+  let descriptor;
+  try {
+    descriptor = openSync(file, "r");
+    const bytes = Buffer.alloc(16384);
+    const count = readSync(descriptor, bytes, 0, bytes.length, 0);
+    return { values: bytes.subarray(0, count).toString("utf8").split("\n").filter(select), truncated: count === bytes.length };
+  } catch (error) { return { error: error.code ?? "unavailable" }; }
+  finally { if (descriptor !== undefined) closeSync(descriptor); }
+}
+export function buildResourceSample() {
+  const disk = statfsSync(process.cwd());
+  return {
+    memory: { totalBytes: os.totalmem(), freeBytes: os.freemem() },
+    loadAverage: os.loadavg(), cpuCount: os.availableParallelism(),
+    diskAvailableBytes: disk.bavail * disk.bsize,
+    ...(process.platform === "linux" ? {
+      meminfo: kernelCounters("/proc/meminfo", line => /^(MemTotal|MemAvailable|SwapTotal|SwapFree|Dirty|Writeback):/u.test(line)),
+      vmstat: kernelCounters("/proc/vmstat", line => /^(oom_kill|pswpin|pswpout) /u.test(line)),
+      pressure: kernelCounters("/proc/pressure/memory", line => /^(some|full) /u.test(line)),
+      rootCgroupEvents: kernelCounters("/sys/fs/cgroup/memory.events", line => /^(low|high|max|oom|oom_kill|oom_group_kill) /u.test(line)),
+      rootCgroupCurrent: kernelCounters("/sys/fs/cgroup/memory.current", line => /^\d+$/u.test(line)),
+      rootCgroupMax: kernelCounters("/sys/fs/cgroup/memory.max", line => /^(max|\d+)$/u.test(line)),
+    } : {}),
+  };
+}
+export async function observeBuild(directory, work, { sample = buildResourceSample, intervalMs = 30000, maxSamples = 720, emit = row => console.log(`ASan build resource: ${JSON.stringify(row)}`) } = {}) {
+  assert.ok(Number.isInteger(intervalMs) && intervalMs > 0, "Invalid ASan sample interval");
+  assert.ok(Number.isInteger(maxSamples) && maxSamples > 0 && maxSamples <= 720, "Invalid ASan sample limit");
+  const started = performance.now();
+  let count = 0, timer, outcome = "failure", file, fileError;
+  try { mkdirSync(directory, { recursive: true }); file = openSync(path.join(directory, "resources.jsonl"), "wx"); } catch (error) { fileError = error.code ?? "unavailable"; }
+  const record = data => {
+    const row = { ...(fileError ? { fileError } : {}), at: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), ...data };
+    // Fixed observations are small; retain an explicit omission if that changes.
+    const bounded = Buffer.byteLength(JSON.stringify(row)) <= 8192 ? row : { at: row.at, event: "diagnostic-error", error: "sample-too-large" };
+    try { if (file !== undefined) appendFileSync(file, JSON.stringify(bounded) + "\n"); } catch (error) { bounded.fileError = fileError = error.code ?? "unavailable"; }
+    try { emit(bounded); } catch { /* A closed diagnostic sink cannot certify or fail compilation. */ }
+  };
+  const tick = () => {
+    count++;
+    try { record({ event: "sample", ...sample() }); }
+    catch (error) { record({ event: "sample", error: error.code ?? "unavailable" }); }
+    if (count >= maxSamples) { clearInterval(timer); record({ event: "limit", samples: count }); }
+  };
+  try {
+    timer = setInterval(tick, intervalMs);
+    timer.unref();
+    tick();
+    const result = await work();
+    outcome = "success";
+    return result;
+  } finally {
+    clearInterval(timer);
+    record({ event: "finished", outcome, samples: count });
+    if (file !== undefined) try { closeSync(file); } catch { /* Best-effort diagnostics only. */ }
+  }
+}
 
 const partitions = [1, 2, 3, 4, 5, 6, 7, 8];
 // Fixed measured outliers, not a timing database. Names must remain exact and
@@ -121,11 +182,11 @@ async function extractArchive(archive, directory, { cargoPrefix = [], env = proc
 
 // The existing ASan owner seals compilation once; consumers retain their own
 // instrumentation controls and complete serial execution receipts.
-export async function produceArchive(directory, { buildArgs, identity, cargoPrefix = [], env = process.env, afterBuild = async () => {} } = {}) {
+export async function produceArchive(directory, { buildArgs, identity, cargoPrefix = [], env = process.env, afterBuild = async () => {}, diagnostics } = {}) {
   const archive = path.join(directory, "core.tar.zst");
   assert.ok(!existsSync(archive) && !existsSync(path.join(directory, "archive.json")), "Prior ASan archive cannot be reused");
   mkdirSync(directory, { recursive: true });
-  await runLogged([...cargoPrefix, "nextest", "archive", ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", "--archive-file", archive], { env, liveStdout: true });
+  await runLogged([...cargoPrefix, "nextest", "archive", ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", "--archive-file", archive], { env, liveStdout: true, ...(diagnostics ? { receipt: path.join(diagnostics, "compile"), progress: path.join(diagnostics, "progress.jsonl"), phase: "compile" } : {}) });
   const probe = path.join(directory, "probe");
   try {
     const reuse = await extractArchive(archive, probe, { cargoPrefix, env });
@@ -301,7 +362,8 @@ async function main([mode, first, second, ...extra]) {
     assert.equal(identity.archive, null, "Producer cannot inherit another ASan archive");
     assert.ok(process.env.GITHUB_OUTPUT, "ASan producer requires GITHUB_OUTPUT");
     await verifyTools(identity);
-    const archive = await produceArchive(path.resolve(first), { buildArgs: ["--locked", "-p", "mesh-talk-core", "--lib", "-Z", "build-std", "--target", target], identity, cargoPrefix: [`+${identity.toolchain}`], afterBuild: async () => { await verifyTools(identity); assert.deepEqual(await expectedIdentity(), identity, "ASan source changed during compilation"); } });
+    const diagnostics = `${path.resolve(first)}-diagnostics`;
+    const archive = await observeBuild(diagnostics, () => produceArchive(path.resolve(first), { diagnostics, buildArgs: ["--locked", "-p", "mesh-talk-core", "--lib", "-Z", "build-std", "--target", target], identity, cargoPrefix: [`+${identity.toolchain}`], afterBuild: async () => { await verifyTools(identity); assert.deepEqual(await expectedIdentity(), identity, "ASan source changed during compilation"); } }));
     appendFileSync(process.env.GITHUB_OUTPUT, `archive_sha256=${archive.sha256}\nmanifest_sha256=${archive.manifestSha256}\n`);
     return archive;
   }

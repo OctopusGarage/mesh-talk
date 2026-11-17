@@ -623,6 +623,15 @@ rejection after real extraction and interrupted partial writes while preserving
 unrelated native build outputs. Record image
 rollout metadata separately from actual compiler/runtime compatibility; incidental
 image version changes must not reject otherwise identical compatible inputs.
+The ASan producer keeps bounded compile stdout/stderr and command lifecycle
+receipts in a separate diagnostic artifact. Its resource observer samples fixed
+kernel memory, swap, OOM and pressure counters, system load and workspace free
+space every thirty seconds, at most 720 times. It retires its timer when work
+settles, including cancellation; diagnostic read/write/transport failures never
+replace the compiler outcome or qualify an archive. Live samples supplement the
+artifact, but total runner loss can prevent both log finalization and upload.
+Missing observations do not prove resource exhaustion or exclude it. Compare
+actual observations before changing compiler concurrency or instrumentation.
 Attempt-bound archives and receipts require a complete sanitizer-workflow rerun
 when recovering a failed attempt; do not mix a previous producer with new shards.
 
