@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7MGHE2W2XJFG406CVYR9G3B",
+  "strategy": "manual-commit",
+  "branch": "integrate/pr376-asan-diagnostics-20261117",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "docs/settings.md",
+    "scripts/ci/notification-native.mjs",
+    "scripts/ci/notification-native.test.mjs",
+    "scripts/validation/validation.json",
+    "src-tauri/src/events.rs",
+    "src-tauri/src/notifications.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 64063,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 25764736,
+    "output_tokens": 91605,
+    "api_call_count": 82
+  },
+  "redaction": {
+    "replacements": 80530,
+    "layers": {
+      "betterleaks": 68,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 53,
+      "credentialed_uri": 0,
+      "entropy": 80442,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
