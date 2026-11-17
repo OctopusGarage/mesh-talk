@@ -1,0 +1,13 @@
+分析一下window10上的meshtalk怎么磁盘读写那么高了，什么问题？analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+那你自己定位排查清楚，并修复一下，analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+我只是发了几张图片到群里，好像就飚起来了，analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+if all finish . create pr and merge to main
