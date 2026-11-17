@@ -361,6 +361,7 @@ async function main([mode, first, second, ...extra]) {
   if (mode === "build" && first && !second) {
     assert.equal(identity.archive, null, "Producer cannot inherit another ASan archive");
     assert.ok(process.env.GITHUB_OUTPUT, "ASan producer requires GITHUB_OUTPUT");
+    assert.equal(process.env.CARGO_BUILD_JOBS, "2", "ASan archive producer requires two compiler jobs");
     await verifyTools(identity);
     const diagnostics = `${path.resolve(first)}-diagnostics`;
     const archive = await observeBuild(diagnostics, () => produceArchive(path.resolve(first), { diagnostics, buildArgs: ["--locked", "-p", "mesh-talk-core", "--lib", "-Z", "build-std", "--target", target], identity, cargoPrefix: [`+${identity.toolchain}`], afterBuild: async () => { await verifyTools(identity); assert.deepEqual(await expectedIdentity(), identity, "ASan source changed during compilation"); } }));

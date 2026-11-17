@@ -378,3 +378,14 @@ test("ASan observation retires after actual command failure and cancellation wit
     assert.ok(existsSync(path.join(directory, "compile.log")));
   }
 });
+
+test("ASan bounds compiler concurrency after cache restoration while preserving eight serial consumers", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/sanitizers.yml", import.meta.url), "utf8");
+  const producer = workflow.split("  cohort:\n")[1].split("  shards:\n")[0];
+  const build = producer.split(/^      - /mu).find(step => step.startsWith("name: Compile and seal the ASan core archive once\n"));
+  assert.match(build, /^          CARGO_BUILD_JOBS: "2"$/mu, "ASan compiler work must leave memory headroom on the hosted producer");
+  assert.equal(workflow.match(/CARGO_BUILD_JOBS:/gu)?.length, 1, "compiler bound belongs only to archive production, after cache restoration");
+  assert.ok(producer.indexOf("Swatinem/rust-cache") < producer.indexOf("CARGO_BUILD_JOBS:"));
+  assert.match(workflow, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/u);
+  assert.match(workflow, /RUST_TEST_THREADS: "1"/u);
+});

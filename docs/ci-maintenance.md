@@ -592,6 +592,13 @@ Upgrade this CI toolchain dependency through a reviewed PR with the full native
 Linux union and real clean/use-after-free controls on all eight runners; a local
 stable archive-protocol fixture does not qualify instrumentation or a cache hit.
 
+ASan's archive producer admits two Cargo compiler jobs, including LLVM jobserver
+work, on the hosted Linux runner. Apply this bound only at the compile step after
+cache restoration to retain the compatible dependency cohort. The CLI rejects an
+unbounded producer; consumer execution remains serial and every instrumentation
+control and inventory requirement stays intact. Compare actual peak available
+memory, swap and compilation time before revisiting this bound. Memory pressure
+is an observed resource risk, not proof of an earlier runner-disconnection cause.
 ASan compiles its core library once into an official Nextest archive, then runs
 eight serial partitions. Runners 1–6 use Nextest `hash:ID/6`, excluding the
 four exact reserved test names owned by `scripts/ci/asan.mjs`. Runner 7 executes

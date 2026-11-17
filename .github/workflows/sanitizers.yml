@@ -102,6 +102,8 @@ jobs:
       - name: Compile and seal the ASan core archive once
         id: build
         env:
+          # Bound compiler and LLVM jobserver work after restoring the same cache.
+          CARGO_BUILD_JOBS: "2"
           MESH_ASAN_TOOLCHAIN: ${{ steps.cohort.outputs.toolchain }}
           MESH_ASAN_RUSTC: ${{ steps.cohort.outputs.rustc }}
           MESH_ASAN_CARGO: ${{ steps.cohort.outputs.cargo }}
