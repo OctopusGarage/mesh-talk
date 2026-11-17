@@ -1886,7 +1886,12 @@ metadata and archive-only missing-symbol controls in
 this boundary. Portable filesystem fixtures must construct native paths with the
 platform path owner while retaining exact identity and escape checks; the
 [archive diagnostics](../scripts/diagnostics/windows-coverage.test.mjs) own those
-controls. Local execution does not replace actual Windows qualification.
+controls. Executable selectors must reuse that owner's supported Cargo layouts
+instead of reimplementing a `debug/deps` assumption. The
+[native notification protocol regression](../scripts/ci/notification-native.test.mjs)
+qualifies Cargo v2 metadata, signed Mach-O execution and genuine counters from the
+relocated binary, with malformed and escaping paths rejected. Local execution
+does not replace actual Windows qualification.
 
 Read transient browser state with one nonwaiting DOM snapshot when an outer
 assertion already owns readiness. Attachment waits nested inside that assertion

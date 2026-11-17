@@ -177,10 +177,11 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     1,
   );
   assert.equal(
-    commands.filter(
-      (line) => line === "cargo llvm-cov report --lcov --output-path lcov.info",
+    helperSource.split("\n").map(line => line.trim().replace(/^run_phase report /u, "")).filter(
+      line => line === "cargo llvm-cov report --lcov --output-path lcov.info",
     ).length,
     1,
+    "the shared default-cohort owner still emits one report; post-native workflow wiring belongs to ci-latency",
   );
   assert.match(workflow, /NEXTEST_TEST_THREADS: 4/u);
   const config = readFileSync(

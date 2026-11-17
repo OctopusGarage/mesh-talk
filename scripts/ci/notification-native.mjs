@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { command } from "./windows-coverage.mjs";
+import { command, verifyLayout } from "./windows-coverage.mjs";
 import { readVersion } from "../release/version.mjs";
 
 export const nativeCase = "notifications::tests::mac_packaged_permission_and_delivery";
@@ -16,8 +16,8 @@ export function selectNotificationBinary(metadata, { target, packageDirectory, v
   assert.equal(binary.kind, "lib");
   assert.equal(binary["binary-name"], "mesh_talk");
   assert.equal(binary["package-id"], `path+${pathToFileURL(packageDirectory).href}#mesh-talk@${version}`);
-  const relative = path.relative(path.join(target, "debug/deps"), binary["binary-path"]);
-  assert.ok(path.isAbsolute(binary["binary-path"]) && /^mesh_talk-[a-zA-Z0-9]+$/u.test(relative), "Binary escaped the current coverage target");
+  verifyLayout(metadata);
+  assert.match(path.basename(binary["binary-path"]), /^mesh_talk-[a-zA-Z0-9]+$/u, "Wrong native Host executable");
   return binary["binary-path"];
 }
 export function verifyNotificationExecution(output) {

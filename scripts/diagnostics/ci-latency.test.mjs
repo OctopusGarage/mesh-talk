@@ -935,3 +935,18 @@ test("reduced UI acceptance still requires source and health checks", () => {
     assert.equal(run.status === 0, result === "success");
   }
 });
+
+test("macOS native notification coverage is appended once after defaults and before upload", () => {
+  const source = read("ci.yml");
+  const native = source.split("  macos-native:\n")[1].split("  macos-remaining-build:\n")[0];
+  const control = step(native, "Verify native notification submission without prompting");
+  assert.ok(control);
+  assert.match(control, /steps\.scope\.outputs\.full == 'true'/u);
+  assert.doesNotMatch(control, /continue-on-error/u);
+  assert.match(control, /coverage_environment="\$\(cargo llvm-cov show-env --sh\)"/u);
+  assert.ok(control.indexOf("notification-native.mjs") < control.indexOf("cargo llvm-cov report --lcov"));
+  assert.equal(source.split("\n").filter(line => line.trim() === "cargo llvm-cov report --lcov --output-path lcov.info").length, 1);
+  assert.ok(native.indexOf("name: Test + coverage (macOS)") < native.indexOf("name: Verify native notification"));
+  assert.ok(native.indexOf("name: Verify native notification") < native.indexOf("name: Upload coverage to Codecov"));
+  assert.match(native, /--test-concurrency=1 [^\n]*scripts\/ci\/notification-native\.test\.mjs/u);
+});

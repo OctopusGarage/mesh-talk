@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { command } from "./windows-coverage.mjs";
@@ -22,6 +22,19 @@ test("native notification control selects only the exact current instrumented Ho
   }
 });
 
+test("native notification selection accepts Cargo v2 through the shared build layout owner", async () => {
+  const { selectNotificationBinary } = await load();
+  const value = metadata();
+  const binary = value["rust-binaries"]["mesh-talk"];
+  binary["binary-path"] = path.join(target, "debug/build/mesh-talk/18a5cfde97c079fc/out/mesh_talk-18a5cfde97c079fc");
+  const select = () => selectNotificationBinary(value, { target, packageDirectory, version: "0.4.6" });
+  assert.equal(select(), binary["binary-path"]);
+  for (const invalid of ["debug/build/mesh-talk/not-a-hash/out/mesh_talk-abcdef", "debug/build/mesh-talk/18a5cfde97c079fc/out/unrelated-abcdef", "debug/build/mesh-talk/18a5cfde97c079fc/other/mesh_talk-abcdef", "../outside/mesh_talk-abcdef"]) {
+    binary["binary-path"] = path.join(target, invalid);
+    assert.throws(select);
+  }
+});
+
 test("native notification control requires one actual passing case, never an empty selection", async () => {
   const { verifyNotificationExecution, nativeCase } = await load();
   assert.equal(typeof verifyNotificationExecution, "function");
@@ -40,15 +53,6 @@ test("native notification CI never inherits authorization intent or runs on a us
   assert.equal(actual.MESH_NOTIFICATION_NATIVE_DELIVERY, "absent");
   for (const change of [{ GITHUB_ACTIONS: "false" }, { RUNNER_ENVIRONMENT: "self-hosted" }, { RUNNER_OS: "Linux" }]) assert.throws(() => notificationControlEnvironment({ ...env, ...change }, "darwin"));
   assert.throws(() => notificationControlEnvironment(env, "linux"));
-});
-
-test("native Host coverage executes the no-prompt bundle control before its final report and upload", () => {
-  const source = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const step = source.split(/^      - /mu).find(s => s.startsWith("name: Verify native notification submission without prompting\n"));
-  assert.ok(step, "missing native notification coverage owner");
-  assert.doesNotMatch(step, /continue-on-error/u);
-  assert.match(step, /notification-native.mjs/u);
-  assert.ok(step.indexOf("notification-native.mjs") < step.indexOf("cargo llvm-cov report --lcov"));
 });
 
 // This fixture qualifies metadata, signing and Rust harness execution only.
@@ -87,11 +91,15 @@ test("signed relocated control contributes real counters to the original instrum
   const version = await run("rustc", ["-vV"]);
   const host = version.split("\n").find(line => line.startsWith("host: ")).slice(6).trim();
   const tools = path.join(sysroot, "lib/rustlib", host, "bin");
-  if (!existsSync(path.join(tools, "llvm-cov")) || !existsSync(path.join(tools, "llvm-profdata"))) {
+  const llvmCov = process.env.LLVM_COV || path.join(tools, "llvm-cov");
+  const llvmProfdata = process.env.LLVM_PROFDATA || path.join(tools, "llvm-profdata");
+  if (!existsSync(llvmCov) || !existsSync(llvmProfdata)) {
     assert.ok(!process.env.CI && !process.env.GITHUB_ACTIONS, "Hosted counter qualification requires matching LLVM tools");
     t.skip("local matching LLVM tools unavailable; actual hosted native qualification remains mandatory");
     return;
   }
+  const llvmVersion = version.split("\n").find(line => line.startsWith("LLVM version: ")).slice(14).trim();
+  for (const binary of [llvmCov, llvmProfdata]) assert.ok((await run(binary, ["--version"])).includes(`LLVM version ${llvmVersion}`), "Native counter tools must match rustc's LLVM version");
   const { selectNotificationBinary, runBundledNotificationControl } = await import(owner);
   const fixture = mkdtempSync(path.join(os.tmpdir(), "mesh-notification-counters-"));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
@@ -111,8 +119,8 @@ test("signed relocated control contributes real counters to the original instrum
     const raw = readdirSync(directory).filter(file => file.endsWith(".profraw")).map(file => path.join(directory, file));
     assert.ok(raw.length > 0 && raw.length <= 8, "Missing or excessive native profiles");
     const merged = path.join(directory, "control.profdata");
-    await run(path.join(tools, "llvm-profdata"), ["merge", "--sparse", ...raw, "-o", merged]);
-    return run(path.join(tools, "llvm-cov"), ["export", "--format=lcov", `--instr-profile=${merged}`, binary]);
+    await run(llvmProfdata, ["merge", "--sparse", ...raw, "-o", merged]);
+    return run(llvmCov, ["export", "--format=lcov", `--instr-profile=${merged}`, binary]);
   };
   for (const name of ["negative", "positive"]) mkdirSync(path.join(fixture, name));
   await run(binary, ["--list"], { ...env, LLVM_PROFILE_FILE: path.join(fixture, "negative/%p-%m.profraw") });
