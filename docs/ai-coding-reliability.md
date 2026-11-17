@@ -1140,6 +1140,11 @@ Contradictory native fields must remain unknown, not an inferred grant or denial
 The macOS status regression includes enabled alerts alongside denied/undetermined
 authorization, and the opt-in bundled control observes permission and actual
 Notification Center delivery as independent assertions.
+The [hosted notification control](../scripts/ci/notification-native.mjs) runs the
+current instrumented Host test from an isolated bundle without authorization
+requests. Its raw native initial-state and delivery assertions remain separate;
+the prompt guard must reject forbidden intent before invoking the native API.
+A portable metadata/signing fixture is not OS authorization evidence.
 Packaged authorization, revocation and actual alert presentation still require
 native evidence; neither a dismissed banner nor a valid signature proves permission.
 

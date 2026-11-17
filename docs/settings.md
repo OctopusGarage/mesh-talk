@@ -229,6 +229,13 @@ to the expected status and `MESH_NOTIFICATION_NATIVE_DELIVERY` to `present` or
 `absent` independently. Only an operator-set
 `MESH_NOTIFICATION_NATIVE_REQUEST=1` requests authorization. Run the ignored test
 alone after each system-setting transition and after restarting its process.
+The hosted macOS coverage owner also runs this exact instrumented test in a
+fresh temporary bundle with `MESH_NOTIFICATION_NATIVE_EXPECT=unconfigured`,
+`MESH_NOTIFICATION_NATIVE_DELIVERY=absent` and authorization requests forced off.
+It independently requires initial raw native authorization to be not determined;
+observation may be prompt or unknown depending on the native alert setting.
+A test-only guard rejects an attempted authorization call before reaching the OS.
+This baseline does not replace operator-controlled grant/revocation acceptance.
 It verifies real permission and Notification Center delivery without accessing
 account data; it does not certify visible banners under Focus or system suppression.
 

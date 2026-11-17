@@ -684,6 +684,32 @@ fn publish_file_received<R: Runtime>(
 
 #[cfg(test)]
 mod notification_policy_tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unavailable_native_provider_is_best_effort_at_the_unfocused_message_boundary() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        assert!(crate::notifications::send(app.handle(), "Fixture", "Message").is_err());
+        assert!(
+            super::notification_payload(
+                &crate::settings::AppSettings::default(),
+                false,
+                &super::NotificationContext::default(),
+                super::NotificationTarget::File,
+                "Fixture",
+                "Message",
+            )
+            .is_some()
+        );
+        super::notify_if_unfocused(
+            app.handle(),
+            super::NotificationTarget::File,
+            "Fixture",
+            "Message",
+        );
+    }
+
     use super::*;
     use tauri::Listener;
 

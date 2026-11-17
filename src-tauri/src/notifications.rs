@@ -167,6 +167,15 @@ fn mac_center<R: tauri::Runtime>(
     Some(objc2_user_notifications::UNUserNotificationCenter::currentNotificationCenter())
 }
 
+#[cfg(all(test, target_os = "macos"))]
+fn assert_native_prompt_allowed(role: Option<&str>) {
+    assert_ne!(
+        role,
+        Some("unconfigured"),
+        "the unconfigured CI control cannot request authorization"
+    );
+}
+
 #[cfg(target_os = "macos")]
 fn platform_permission<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -218,6 +227,14 @@ fn platform_permission<R: tauri::Runtime>(
         }
         let _ = sender.send(error.is_null());
     });
+    // The hosted coverage control must fail before any OS prompt, even if its
+    // caller accidentally regresses the observation-only admission above.
+    #[cfg(test)]
+    assert_native_prompt_allowed(
+        std::env::var("MESH_NOTIFICATION_NATIVE_EXPECT")
+            .ok()
+            .as_deref(),
+    );
     center.requestAuthorizationWithOptions_completionHandler(
         UNAuthorizationOptions::Alert
             | UNAuthorizationOptions::Sound
@@ -307,8 +324,35 @@ mod tests {
         let app = tauri::test::mock_builder().build(context).unwrap();
         let center = mac_center(app.handle()).expect("run the bundled test executable");
         let request = std::env::var("MESH_NOTIFICATION_NATIVE_REQUEST").as_deref() == Ok("1");
+        if expected == "unconfigured" {
+            assert!(!request, "CI must never request notification authorization");
+        }
         let status = platform_permission(app.handle(), request);
-        assert_eq!(serde_json::to_value(status).unwrap(), expected);
+        if expected == "unconfigured" {
+            let (tx, rx) = mpsc::sync_channel(1);
+            let reply = RcBlock::new(
+                move |settings: NonNull<objc2_user_notifications::UNNotificationSettings>| {
+                    let settings = unsafe { settings.as_ref() };
+                    let _ = tx.send((settings.authorizationStatus().0, settings.alertSetting().0));
+                },
+            );
+            center.getNotificationSettingsWithCompletionHandler(&reply);
+            let (authorization, alerts) = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(
+                authorization, 0,
+                "CI requires a fresh unconfigured fixture identity"
+            );
+            assert_eq!(
+                status,
+                if alerts == 2 {
+                    PermissionStatus::Unknown
+                } else {
+                    PermissionStatus::Prompt
+                }
+            );
+        } else {
+            assert_eq!(serde_json::to_value(status).unwrap(), expected);
+        }
         let title = format!(
             "Mesh-Talk notification validation {:032x}",
             rand::random::<u128>()
@@ -347,6 +391,17 @@ mod tests {
         }
         // The center is bound to the dedicated fixture, never the installed app.
         center.removeAllDeliveredNotifications();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_hosted_control_refuses_prompting_before_the_native_api() {
+        assert!(
+            std::panic::catch_unwind(|| super::assert_native_prompt_allowed(Some("unconfigured")))
+                .is_err()
+        );
+        super::assert_native_prompt_allowed(None);
+        super::assert_native_prompt_allowed(Some("granted"));
     }
 
     #[cfg(target_os = "macos")]

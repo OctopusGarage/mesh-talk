@@ -645,6 +645,17 @@ actual observations before changing compiler concurrency or instrumentation.
 Attempt-bound archives and receipts require a complete sanitizer-workflow rerun
 when recovering a failed attempt; do not mix a previous producer with new shards.
 
+macOS Host coverage additionally executes the existing ignored notification
+control from an ad-hoc signed temporary bundle. The CLI admits only a disposable
+hosted macOS runner, exact current-source instrumented Host-library metadata and
+one actual passing case. It forces authorization requests off, verifies fresh
+native not-determined authorization and absent delivery, preserves the current
+LLVM profile destination and regenerates LCOV before Codecov upload. The shared
+command owner bounds the whole control and retires children before successful
+private-bundle cleanup. Failed controls retain their private bundle for the disposable
+VM to retire rather than delete files under uncertain work. Portable/Mach-O protocol fixtures do not qualify real OS authorization;
+operator grant, revocation and visible alert evidence remain separate.
+
 Retain fresh process/context isolation, owned temporary directories, dynamically
 allocated ports where supported, and deterministic cleanup. Keep compile jobs,
 test workers and network/rendering resource limits explicit. Do not multiply

@@ -389,7 +389,7 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         # These fixtures launch real Cargo/rustc processes and share this job's
         # package cache. Give each compiler contract exclusive execution.
-        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs scripts/ci/macos-remaining-cli.test.mjs
+        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs scripts/ci/macos-remaining-cli.test.mjs scripts/ci/notification-native.test.mjs
 
       - name: Build frontend
         if: ${{ steps.scope.outputs.full == 'true' }}
@@ -426,13 +426,26 @@ jobs:
           # Stable Rust doctests retain their original separate check.
           cargo test --workspace --doc
 
+      - name: Verify native notification submission without prompting
+        id: notification_control
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          coverage_environment="$(cargo llvm-cov show-env --sh)"
+          eval "$coverage_environment"
+          node ../scripts/ci/notification-native.mjs
+          cargo llvm-cov report --lcov --output-path lcov.info
+
       - name: Upload test timing diagnostics
-        if: ${{ steps.scope.outputs.full == 'true' && (always() && env.MESH_TALK_TEST_TIMING == '1') }}
+        if: ${{ steps.scope.outputs.full == 'true' && always() && (env.MESH_TALK_TEST_TIMING == '1' || steps.notification_control.outcome == 'success' || steps.notification_control.outcome == 'failure') }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: test-timing-macos-latest-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/mesh-talk-test-timing.log
+          path: |
+            ${{ runner.temp }}/mesh-talk-test-timing.log
+            ${{ runner.temp }}/notification-native.json
           if-no-files-found: warn
 
       - name: Upload coverage to Codecov
