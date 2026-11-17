@@ -116,10 +116,10 @@ test("signed relocated control contributes real counters to the original instrum
   // the workflow's explicit target. Their defaults intentionally differ.
   await run("cargo", ["llvm-cov", "nextest", "--manifest-path", manifest, "--no-report", "--no-tests", "fail"], env);
   // Keep the fixed shell program separate from the generic executable runner;
-  // positional arguments remain data, including checkout paths with spaces.
+  // paths travel through quoted environment values, never shell program text.
   const sourced = spawnSync("bash", ["-e", "-o", "pipefail", "-c",
-    'coverage_environment="$(cargo llvm-cov show-env --sh --manifest-path "$1")"\neval "$coverage_environment"\n"$2" -e \'process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(?:__)?CARGO_LLVM_COV|^RUSTC_WRAPPER$|^LLVM_PROFILE_FILE$|^CARGO_TARGET_DIR$/.test(key)))))\'',
-    "native-profile-fixture", manifest, process.execPath], { env: { ...env, CARGO_TARGET_DIR: target, CARGO_LLVM_COV_TARGET_DIR: target }, encoding: "utf8", timeout: 10000, maxBuffer: 1024 * 1024 });
+    'coverage_environment="$(cargo llvm-cov show-env --sh --manifest-path "$MESH_NATIVE_MANIFEST")"\neval "$coverage_environment"\n"$MESH_NATIVE_NODE" -e \'process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(?:__)?CARGO_LLVM_COV|^RUSTC_WRAPPER$|^LLVM_PROFILE_FILE$|^CARGO_TARGET_DIR$/.test(key)))))\'',
+    ], { env: { ...env, CARGO_TARGET_DIR: target, CARGO_LLVM_COV_TARGET_DIR: target, MESH_NATIVE_MANIFEST: manifest, MESH_NATIVE_NODE: process.execPath }, encoding: "utf8", timeout: 10000, maxBuffer: 1024 * 1024 });
   assert.ifError(sourced.error);
   assert.equal(sourced.status, 0, sourced.stderr);
   Object.assign(env, JSON.parse(sourced.stdout));
