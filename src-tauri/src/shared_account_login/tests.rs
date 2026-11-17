@@ -53,6 +53,192 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn settled_shared_login_waits_for_sparse_repair_in_actual_worker() {
+    let fixture = Fixture::new("settled-login-owner", "private-password").await;
+    let snapshot = initialize(&fixture).await;
+    {
+        let guard = fixture.node.0.read().await;
+        let runtime = guard.as_ref().unwrap();
+        // Install the exact real source before observing its settled owner.
+        install(
+            fixture.root.path(),
+            &fixture.app,
+            &fixture.admission,
+            runtime,
+            &snapshot,
+        )
+        .unwrap();
+    }
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let (shutdown, stopping) = tokio::sync::oneshot::channel();
+    let (completed, mut completions) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(reconcile_inner(
+        app.handle().clone(),
+        fixture.root.path().to_owned(),
+        fixture.authority.clone(),
+        fixture.app.clone(),
+        fixture.node.clone(),
+        stopping,
+        Some(completed),
+    ));
+    let initial = tokio::time::timeout(Duration::from_secs(3), completions.recv()).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(299)).await;
+    // Let the actual blocking owner finish using real time. Paused Tokio must
+    // not auto-advance through the repair deadline while awaiting filesystem I/O.
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut premature = 0;
+    while completions.try_recv().is_ok() {
+        premature += 1;
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::resume();
+    let repair = tokio::time::timeout(Duration::from_secs(3), completions.recv()).await;
+    let _ = shutdown.send(());
+    task.await.unwrap();
+    fixture.stop().await;
+    assert!(
+        matches!(initial, Ok(Some(()))),
+        "startup must evaluate current login"
+    );
+    assert_eq!(
+        premature, 0,
+        "settled login must not decode/read its applied stamp before sparse repair"
+    );
+    assert!(
+        matches!(repair, Ok(Some(()))),
+        "the integrity deadline must still evaluate the real worker"
+    );
+}
+
+#[tokio::test]
+async fn shared_login_source_changes_while_auth_waits_retain_one_noop_followup() {
+    let fixture = Fixture::new("login-event-owner", "private-password").await;
+    let snapshot = initialize(&fixture).await;
+    let handle = fixture.node.0.read().await.as_ref().unwrap().handle();
+    let held = fixture.app.auth_operation.clone().lock_owned().await;
+    let (captured, entered) = std::sync::mpsc::channel();
+    *fixture.app.owner_command_captured.lock().unwrap() = Some(captured);
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let (shutdown, stopping) = tokio::sync::oneshot::channel();
+    let (completed, mut completions) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(reconcile_inner(
+        app.handle().clone(),
+        fixture.root.path().to_owned(),
+        fixture.authority.clone(),
+        fixture.app.clone(),
+        fixture.node.clone(),
+        stopping,
+        Some(completed),
+    ));
+    // Existing admission instrumentation proves subscription/ack happened and
+    // the initial real application is now waiting for its auth owner.
+    let started = tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(3)))
+        .await
+        .unwrap();
+    let mut newest = snapshot;
+    for _ in 0..3 {
+        newest = handle
+            .publish_account_access_if(newest.payload().to_vec(), |commit| commit())
+            .unwrap();
+    }
+    drop(held);
+    let first = tokio::time::timeout(Duration::from_secs(3), completions.recv()).await;
+    let followup = tokio::time::timeout(Duration::from_secs(1), completions.recv()).await;
+    let applied: Applied = crate::config_store::read_account(
+        &path(
+            fixture.root.path(),
+            fixture.admission.lease().owner(),
+            "account-login-applied.json",
+        )
+        .unwrap(),
+    );
+    let extra = completions.try_recv();
+    let _ = shutdown.send(());
+    task.await.unwrap();
+    *fixture.app.owner_command_captured.lock().unwrap() = None;
+    fixture.stop().await;
+    assert!(
+        started.is_ok(),
+        "initial current admission must run before source replacement"
+    );
+    assert!(matches!(first, Ok(Some(()))));
+    assert!(
+        matches!(followup, Ok(Some(()))),
+        "source changes while auth waits must retain one immediate current/noop follow-up"
+    );
+    assert!(
+        extra.is_err(),
+        "coalesced source events must not manufacture extra applications"
+    );
+    assert_eq!(applied.revision, newest.revision());
+}
+
+#[tokio::test]
+async fn shared_login_locked_source_retries_after_unlock_without_another_event() {
+    let fixture = Fixture::new("locked-login-owner", "private-password").await;
+    let previous = initialize(&fixture).await;
+    let app = tauri::test::mock_builder()
+        .manage(fixture.app.clone())
+        .manage(fixture.app.app_lock().clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    crate::app_lock::lock_app(
+        app.state::<AppState>(),
+        app.state::<crate::app_lock::AppLock>(),
+    )
+    .unwrap();
+    let handle = fixture.node.0.read().await.as_ref().unwrap().handle();
+    let newest = handle
+        .publish_account_access_if(previous.payload().to_vec(), |commit| commit())
+        .unwrap();
+    let (shutdown, stopping) = tokio::sync::oneshot::channel();
+    let (completed, mut completions) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(reconcile_inner(
+        app.handle().clone(),
+        fixture.root.path().to_owned(),
+        fixture.authority.clone(),
+        fixture.app.clone(),
+        fixture.node.clone(),
+        stopping,
+        Some(completed),
+    ));
+    let denied = tokio::time::timeout(Duration::from_secs(3), completions.recv()).await;
+    let stamp_path = path(
+        fixture.root.path(),
+        fixture.admission.lease().owner(),
+        "account-login-applied.json",
+    )
+    .unwrap();
+    let locked: Applied = crate::config_store::read_account(&stamp_path);
+    // Same production revision-changing unlock state used by existing stale
+    // credential tests; no new source event accompanies this recovery.
+    fixture.app.app_lock().clear();
+    let recovered = tokio::time::timeout(Duration::from_secs(3), completions.recv()).await;
+    let applied: Applied = crate::config_store::read_account(&stamp_path);
+    let _ = shutdown.send(());
+    task.await.unwrap();
+    fixture.stop().await;
+    assert!(matches!(denied, Ok(Some(()))));
+    assert_eq!(
+        locked.revision,
+        previous.revision(),
+        "locked admission must not apply credentials"
+    );
+    assert!(
+        matches!(recovered, Ok(Some(()))),
+        "acknowledged locked work must retain its short recovery deadline"
+    );
+    assert_eq!(applied.revision, newest.revision());
+}
+
+#[tokio::test]
 async fn native_login_persistence_does_not_hold_runtime_retirement_or_publish_after_stop() {
     use tauri::Listener;
 

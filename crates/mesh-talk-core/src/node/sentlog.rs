@@ -232,7 +232,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn durable_duplicate_retries_sync_even_if_record_already_exists() {
+    fn durable_duplicate_retries_unconfirmed_prefix_and_skips_confirmed_sync() {
+        use crate::storage::record_log::sync_observations;
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().join("profile");
         let moved = dir.path().join("moved");
@@ -245,13 +246,46 @@ mod tests {
         };
         log.record_durable(&entry).unwrap();
         std::fs::rename(&parent, &moved).unwrap();
-        assert!(
-            log.record_durable(&entry).is_err(),
-            "an existing record must still cross the durable boundary"
+        sync_observations::reset();
+        log.record_durable(&entry).unwrap();
+        assert_eq!(
+            sync_observations::counts(),
+            (0, 0),
+            "an already confirmed prefix needs no additional file or parent sync"
         );
         std::fs::rename(&moved, &parent).unwrap();
+        let pending = SentEntry {
+            conversation: conv(1),
+            seq: 2,
+            wall_clock: 11,
+            plaintext: b"pending".to_vec(),
+        };
+        log.record(
+            pending.conversation,
+            pending.seq,
+            pending.wall_clock,
+            &pending.plaintext,
+        )
+        .unwrap();
+        std::fs::rename(&parent, &moved).unwrap();
+        sync_observations::reset();
+        assert!(
+            log.record_durable(&entry).is_err(),
+            "a duplicate must still confirm an unconfirmed prefix"
+        );
+        assert_eq!(sync_observations::counts(), (1, 1));
+        std::fs::rename(&moved, &parent).unwrap();
         log.record_durable(&entry).unwrap();
-        assert_eq!(log.entries(&conv(1)), vec![entry]);
+        assert_eq!(
+            sync_observations::counts(),
+            (2, 2),
+            "failed parent confirmation must remain pending for retry"
+        );
+        let expected = vec![entry, pending];
+        assert_eq!(log.entries(&conv(1)), expected);
+        drop(log);
+        let reopened = SentLog::open(&parent.join("sent"), "pw").unwrap();
+        assert_eq!(reopened.entries(&conv(1)), expected);
     }
 
     #[test]

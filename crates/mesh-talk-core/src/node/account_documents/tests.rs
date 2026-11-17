@@ -980,6 +980,10 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
             holder.log.lock().unwrap().get(&event).unwrap().is_some(),
             "the real holder must retain the exact original encrypted event"
         );
+        // Only inbound serving runs in this fixture. Complete the ordinary
+        // bounded projection owner before asserting received plaintext.
+        crate::node::test_support::settle_group_metadata(&holder, channel);
+        holder.process_channel(channel);
         assert!(
             holder
                 .channel_history(channel, 10)
@@ -987,9 +991,15 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
                 .iter()
                 .any(|row| row.id == event)
         );
+        let reads = source.account_documents.lock().unwrap().body_read_count();
         assert_eq!(
             source.channel_custody_count(channel, event).unwrap(),
             Some(1)
+        );
+        assert_eq!(
+            source.account_documents.lock().unwrap().body_read_count() - reads,
+            1,
+            "one custody decision must read each signed holder witness only once"
         );
         let key = AccountDocumentKey::ChannelCustody {
             channel: hex::encode(channel.as_bytes()),
@@ -1360,6 +1370,70 @@ impl Drop for CustodyTransferHold<'_> {
     }
 }
 
+// A successful public send does not lease a ready history projection. Observe
+// its exact outgoing body without resending or changing the caller's deadline.
+async fn wait_custody_source_event(
+    source: &Node,
+    channel: crate::eventlog::ConversationId,
+    text: &[u8],
+    deadline: tokio::time::Instant,
+) -> Result<crate::eventlog::EventId, tokio::time::error::Elapsed> {
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            if let Some(history) = ready_history(source.channel_history(channel, 10))
+                && let Some(row) = history
+                    .into_iter()
+                    .find(|row| row.from_me && row.text.as_slice() == text)
+            {
+                break row.id;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn custody_source_history_observation_keeps_identity_and_original_deadline() {
+    use std::time::Duration;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(directory.path(), &account);
+    let channel = source
+        .create_channel("source observation", vec![])
+        .await
+        .unwrap();
+    let text = b"the exact outgoing custody message";
+    source.send_channel_message(channel, text).await.unwrap();
+    // No autonomous hosts run in this controlled source fixture.
+    let event = source.channel_history(channel, 10).unwrap()[0].id;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let missing = tokio::time::timeout(
+        Duration::from_secs(9),
+        wait_custody_source_event(&source, channel, b"another message", deadline),
+    )
+    .await;
+    let missing_finished_at = tokio::time::Instant::now();
+    let observed = wait_custody_source_event(
+        &source,
+        channel,
+        text,
+        tokio::time::Instant::now() + Duration::from_secs(8),
+    )
+    .await;
+    source.runtime_work.close();
+    source.runtime_work.drain().await;
+    assert!(
+        matches!(missing, Ok(Err(_))),
+        "an unrelated ready row cannot satisfy source readiness"
+    );
+    assert_eq!(
+        missing_finished_at, deadline,
+        "missing identity retains its original absolute deadline"
+    );
+    assert_eq!(observed.unwrap(), event);
+}
+
 // Observes the real owner's durable confirmation without driving network work.
 // Register before the read: a publication between the read and await must wake us.
 async fn wait_custody_source_count(
@@ -1630,13 +1704,28 @@ async fn channel_custody_converges_while_directory_is_held() {
         assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0);
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "the sibling must have no route for an independent external-holder query");
         let mut custody_hold = CustodyTransferHold::new(&source, &sibling);
-        source.send_channel_message(channel, b"independent custody progress").await.unwrap();
+        let text = b"independent custody progress";
+        source.send_channel_message(channel, text).await.unwrap();
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "public send must not teach the sibling an external-holder route");
-        let event = source.channel_history(channel, 10).unwrap()[0].id;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let event = wait_custody_source_event(&source, channel, text, deadline).await.expect("the exact outgoing source event must become readable within the shared custody setup deadline");
         wait_custody_source_count(&source, channel, event, 1, deadline).await.expect("the real external holder must confirm while the independent directory remains held");
         assert_eq!(source.channel_custody_count(channel, event).unwrap(), Some(1));
-        assert!(external.channel_history(channel, 10).unwrap().iter().any(|row| row.id == event));
+        // Durable ciphertext custody precedes the independent plaintext
+        // projection. Observe its actual owner within the same functional
+        // budget while the unrelated Directory handler remains held.
+        let external_history = tokio::time::timeout_at(deadline, async {
+            loop {
+                if let Some(history) = ready_history(external.channel_history(channel, 10))
+                    && history.iter().any(|row| row.id == event) {
+                    break history;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the exact external plaintext must project while the independent directory remains held");
+        assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(!release.is_closed());
+        assert!(external_history.iter().any(|row| row.id == event));
         let external_head = source.channel_custody_observations(channel, event).into_iter().find(|meta| {
             meta.writer_device == source.user_id()
                 && matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if *holder == external.user_id())
@@ -1830,22 +1919,35 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     });
     let mut required_source_observation = None;
     a.trace_account_client(&sibling.identity.public(), || "fixture_before_send".into());
-    a.send_channel_message(channel, b"synthetic custody fixture")
+    let text = b"synthetic custody fixture";
+    a.send_channel_message(channel, text)
         .await
         .unwrap();
     a.trace_account_client(&sibling.identity.public(), || "fixture_after_send".into());
-    let event = a.channel_history(channel, 10).unwrap()[0].id;
+    let source_deadline = tokio::time::Instant::now()
+        + Duration::from_secs(if external_online { 30 } else { 8 });
+    let event = wait_custody_source_event(&a, channel, text, source_deadline)
+        .await.expect("the exact outgoing source event must become readable within the existing preparation or delivery budget");
     if external_online {
-        assert!(
-            bob.channel_history(channel, 10)
-                .unwrap()
-                .iter()
-                .any(|row| row.id == event)
-        );
+        // Sender acceptance is not receiver projection completion. Its actual
+        // independent host owns reception; share the existing cold setup bound
+        // with the exact durable-have observation before withdrawing the holder.
+        let deadline = source_deadline;
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                match bob.channel_history(channel, 10) {
+                    Ok(rows) if rows.iter().any(|row| row.id == event) => break,
+                    Ok(_) | Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                    Err(error) => panic!("holder history preparation failed: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the live holder must project the exact sent event before going offline");
         // A successful send does not promise a completed durable-have probe.
         // Establish the exact receipt while its real holder is still online;
         // the independent post-stop eight-second observations start afterward.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let confirmed = wait_custody_source_count(&a, channel, event, 1, deadline).await;
         if confirmed.is_err() {
             eprintln!(
@@ -1899,7 +2001,14 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     a.trace_account_client(&sibling.identity.public(), || {
         "fixture_holder_offline".into()
     });
-    tokio::time::timeout(Duration::from_secs(8), async {
+    // The already-offline branch shares its existing first delivery budget
+    // with source identification; the post-stop branch starts its original clock.
+    let history_deadline = if external_online {
+        tokio::time::Instant::now() + Duration::from_secs(8)
+    } else {
+        source_deadline
+    };
+    tokio::time::timeout_at(history_deadline, async {
         while !ready_history(sibling.channel_history(channel, 10))
             .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me))
         {
@@ -2128,7 +2237,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .unwrap()
             .confirm(event, &bob.user_id())
             .unwrap();
-        a.migrate_channel_custody(&mut None);
+        a.migrate_channel_custody(&mut None).unwrap();
         assert_eq!(
             a.channel_custody_count(channel, event).unwrap(),
             Some(0),
@@ -2151,6 +2260,28 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             Some(0),
             "the negative survives a fresh encrypted-store open"
         );
+        // A retry turn can return without completing a transfer. Hold the
+        // existing exact-endpoint authentication owner to exercise that real
+        // deferral; no reception may be inferred from its None report.
+        a.sessions.clear();
+        let authentication = a.sessions.authentication_admission(
+            a.peer_endpoint_key(bob_peer.addr, &bob_peer.public),
+        ).await.unwrap();
+        let (received, received_event) = tokio::sync::oneshot::channel();
+        let received = std::sync::Mutex::new(Some(received));
+        let expected_phase = format!(
+            "gossip_diag_ciphertext_applied channel={} event={}",
+            hex::encode(channel.as_bytes()), event.to_hex(),
+        );
+        *lost.account_client_test_hook.lock().unwrap() = Some(std::sync::Arc::new(move |_, phase| {
+            if phase == expected_phase
+                && let Some(received) = received.lock().unwrap().take()
+            {
+                let _ = received.send(());
+            }
+        }));
+        let repair_deadline = tokio::time::Instant::now()
+            + crate::node::account_group::FUNCTIONAL_ACCOUNT_CONVERGENCE_BUDGET;
         // Only now expose the repaired holder as a normal delivery route.
         a.roster.lock().unwrap().update(
             &Announce::new_with_account(&lost.identity, &other, "Bob", bob_peer.addr.port()),
@@ -2167,6 +2298,19 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .is_none()
         );
         assert!(
+            lost.log.lock().unwrap().get(&event).unwrap().is_none(),
+            "a deferred retry turn cannot certify remote reception while authentication is held"
+        );
+        assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(0));
+        drop(authentication);
+        // Roster publication wakes the existing custody recovery owner. Observe
+        // its exact accepted payload without resetting its cursor or backoff.
+        tokio::time::timeout_at(repair_deadline, received_event)
+            .await
+            .expect("the shared negative must permit recovery after authentication capacity returns")
+            .expect("the exact raw-reception observer must remain live");
+        *lost.account_client_test_hook.lock().unwrap() = None;
+        assert!(
             lost.log.lock().unwrap().get(&event).unwrap().is_some(),
             "a shared negative must allow retry despite an old local journal positive"
         );
@@ -2182,6 +2326,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .await
             .is_none()
         );
+        wait_custody_source_count(&a, channel, event, 1, repair_deadline)
+            .await
+            .expect("the recovery owner must confirm the repaired external copy");
         assert_eq!(
             a.channel_custody_count(channel, event).unwrap(),
             Some(1),
@@ -2261,6 +2408,33 @@ async fn account_worker_retries_local_authentication_contention_without_a_false_
     let account = Account::generate();
     let source = node(&dir.path().join("source"), &account);
     let target = node(&dir.path().join("target"), &account);
+    let trace = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let started = Instant::now();
+    let draft_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let trace = trace.clone();
+        let draft_attempts = draft_attempts.clone();
+        *target.account_client_test_hook.lock().unwrap() =
+            Some(std::sync::Arc::new(move |_, event| {
+                if event.starts_with("page_begin domain=Draft ") {
+                    draft_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                if event.starts_with("channel_recovery")
+                    || event.starts_with("control_queue")
+                    || event.starts_with("control_refresh")
+                {
+                    return;
+                }
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 128 {
+                    trace.pop_front();
+                }
+                trace.push_back(format!(
+                    "target {}ms {event}",
+                    started.elapsed().as_millis()
+                ));
+            }));
+    }
     for (owner, sibling) in [(&source, &target), (&target, &source)] {
         owner
             .account_devices
@@ -2301,20 +2475,42 @@ async fn account_worker_retries_local_authentication_contention_without_a_false_
     }
     assert!(!target.device_sync_status().is_empty());
     assert!(target.account_document(&key()).unwrap().is_none());
+    let attempts_while_held = draft_attempts.load(std::sync::atomic::Ordering::SeqCst);
     drop(held);
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let recovered = tokio::time::timeout(Duration::from_secs(15), async {
         while target.account_document(&key()).unwrap().is_none() {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
+    .await;
+    let statuses = target.device_sync_status();
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    source.runtime_work.close();
+    target.runtime_work.close();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        source.runtime_work.drain().await;
+        target.runtime_work.drain().await;
+    })
     .await
-    .unwrap();
+    .expect("contention fixture must retire its actual work");
+    *source.account_client_test_hook.lock().unwrap() = None;
+    *target.account_client_test_hook.lock().unwrap() = None;
+    assert!(
+        recovered.is_ok(),
+        "statuses={statuses:?}; trace={:?}",
+        trace.lock().unwrap()
+    );
+    assert_eq!(
+        attempts_while_held, 1,
+        "repeated local wakes must not spin before the admission retry deadline"
+    );
     assert_eq!(
         target.account_document(&key()).unwrap().unwrap().payload(),
         b"automatic retry"
     );
-    worker.abort();
-    server.abort();
 }
 
 #[tokio::test]
@@ -4572,6 +4768,10 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         let source_peer = sibling.routing_peer(&source.user_id()).unwrap();
         let mut cursor =
             sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        // This fixture serves inbound protocols without a recovery producer.
+        // Received originals and private documents do not finish the separate
+        // bounded physical-membership projection by themselves.
+        crate::node::test_support::settle_group_metadata(&sibling, channel);
         eprintln!("certificate custody phase=legacy_import");
         pull_custody_page(&sibling, &source_peer, &mut cursor).await;
         assert!(
@@ -5337,7 +5537,7 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     }
 }
 
-fn group_inventory_legacy_fixture(
+pub(super) fn group_inventory_legacy_fixture(
     owner: &Node,
     source: &Node,
     name: &str,
@@ -5372,6 +5572,14 @@ pub(super) fn group_inventory_source_document(
     source: &Node,
     id: crate::eventlog::ConversationId,
 ) -> AccountDocument {
+    try_group_inventory_source_document(source, id)
+        .unwrap_or_else(|error| panic!("directory fixture publication failed: {error}"))
+}
+
+pub(super) fn try_group_inventory_source_document(
+    source: &Node,
+    id: crate::eventlog::ConversationId,
+) -> Result<AccountDocument, NodeError> {
     let count = source
         .log
         .lock()
@@ -5406,7 +5614,7 @@ pub(super) fn group_inventory_source_document(
             Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
             Err(NodeError::Log(crate::eventlog::LogError::Io(error)))
                 if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => panic!("directory fixture publication failed: {error}"),
+            Err(error) => return Err(error),
         }
         assert!(
             turn + 1 < count.saturating_mul(16).saturating_add(1024),
@@ -5417,9 +5625,10 @@ pub(super) fn group_inventory_source_document(
         .account_document(&AccountDocumentKey::GroupInventory {
             channel: hex::encode(id.as_bytes()),
             source_device: source.user_id(),
+        })?
+        .ok_or_else(|| {
+            NodeError::InvalidInput("directory fixture did not publish a document".into())
         })
-        .unwrap()
-        .unwrap()
 }
 
 fn copy_public_group(source: &Node, target: &Node, group: crate::eventlog::ConversationId) {
@@ -5659,6 +5868,13 @@ async fn group_control_current_account_binding_replacement_revokes_old_owner_obs
     let member = node(&dir.path().join("member"), &account);
     let group = group_inventory_legacy_fixture(&owner, &member, "Binding replacement");
     copy_public_group(&member, &owner, group);
+    let inventory = group_inventory_source_document(&owner, group);
+    member
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(inventory.meta.clone(), inventory.payload())
+        .unwrap();
     let document = group_control_source_document(&owner, group);
     member
         .account_documents
@@ -5687,6 +5903,16 @@ async fn group_control_current_account_binding_replacement_revokes_old_owner_obs
         member.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner
     );
+    let warm_inventory = member.group_inventory_references();
+    assert!(
+        warm_inventory
+            .values()
+            .any(|reference| reference.source_device == owner.user_id())
+    );
+    assert_eq!(member.group_inventory_references(), warm_inventory);
+    let live_before_replacement = member
+        .inventory_live_binding_checks
+        .load(std::sync::atomic::Ordering::Relaxed);
     let replacement = Account::generate();
     let secret = owner.identity.secret_bytes();
     let replacement_path = dir.path().join("replacement");
@@ -5726,6 +5952,19 @@ async fn group_control_current_account_binding_replacement_revokes_old_owner_obs
         .accept_account_binding_change_guarded(&change, |commit| commit())
         .await
         .unwrap();
+    let after_replacement = member.group_inventory_references();
+    assert!(
+        after_replacement
+            .values()
+            .all(|reference| reference.source_device != owner.user_id()),
+        "warm intrinsic inventory validation must not preserve replaced account binding"
+    );
+    assert!(
+        member
+            .inventory_live_binding_checks
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > live_before_replacement
+    );
     server.abort();
     let _ = server.await;
     assert_eq!(
@@ -9436,4 +9675,241 @@ async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restore
             |commit| commit(),
         )
         .unwrap();
+}
+
+#[test]
+fn group_inventory_repeated_queries_reuse_intrinsic_validation_but_check_live_binding() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let id = group_inventory_legacy_fixture(&owner, &source, "Repeated inventory");
+    let document = group_inventory_source_document(&source, id);
+    let before = source.inventory_body_validations.load(Ordering::Relaxed);
+    let live_before = source.inventory_live_binding_checks.load(Ordering::Relaxed);
+    let first = source.group_inventory_references();
+    assert!(first.contains_key(&hex::encode(id.as_bytes())));
+    for _ in 0..8 {
+        assert_eq!(source.group_inventory_references(), first);
+        assert_eq!(source.group_inventory_references(), first);
+    }
+    assert_eq!(
+        source.inventory_body_validations.load(Ordering::Relaxed) - before,
+        1,
+        "unchanged document bodies must be decoded and cryptographically validated once"
+    );
+    assert_eq!(
+        source.inventory_live_binding_checks.load(Ordering::Relaxed) - live_before,
+        17,
+        "every direct inventory query must still check current source binding"
+    );
+    source
+        .account_documents
+        .lock()
+        .unwrap()
+        .remove_blob_for_test(document.meta.content_hash);
+    assert!(
+        source.group_inventory_references().is_empty(),
+        "validated body must not mask a missing or corrupt durable blob"
+    );
+    let healed = group_inventory_source_document(&source, id);
+    assert_eq!(healed.meta, document.meta);
+    assert_eq!(source.group_inventory_references(), first);
+    let mut forged_value: serde_json::Value = serde_json::from_slice(document.payload()).unwrap();
+    forged_value["name"] = serde_json::json!("Forged replacement");
+    let forged_payload = serde_json::to_vec(&forged_value).unwrap();
+    let forged_meta = AccountDocumentMeta::new(
+        &account,
+        source.user_id(),
+        document.meta.key.clone(),
+        document.meta.revision + 1,
+        &forged_payload,
+        false,
+    );
+    assert!(
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(forged_meta, &forged_payload)
+            .is_err(),
+        "warm memo must not accept changed payload with stale directory signature"
+    );
+    assert_eq!(source.group_inventory_references(), first);
+    let tombstone = AccountDocumentMeta::new(
+        &account,
+        source.user_id(),
+        document.meta.key.clone(),
+        document.meta.revision + 1,
+        &[],
+        true,
+    );
+    source
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(tombstone, &[])
+        .unwrap();
+    assert!(
+        source.group_inventory_references().is_empty(),
+        "warm memo must honor signed retraction"
+    );
+    assert!(
+        !source
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(document.meta.clone(), document.payload())
+            .unwrap(),
+        "older live body must not resurrect retracted inventory"
+    );
+    assert!(source.group_inventory_references().is_empty());
+    let foreign = node(&dir.path().join("foreign"), &Account::generate());
+    assert!(
+        foreign
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(document.meta.clone(), document.payload())
+            .is_err()
+    );
+    assert!(foreign.group_inventory_references().is_empty());
+}
+
+#[test]
+fn group_control_repeated_access_reuses_intrinsic_validation() {
+    use crate::node::account_group::wire::control_head_body_validations;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let group = crate::eventlog::ConversationId::new([24; 32]);
+    let identity = source.identity.public();
+    let genesis = crate::eventlog::Event::new(
+        &source.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        crate::eventlog::EventKind::MembershipChange,
+        crate::channel::ChannelMeta {
+            name: "Repeated control head".into(),
+            members: vec![identity.clone()],
+            epoch: 0,
+            owner: identity.user_id(),
+        }
+        .encode(),
+    );
+    source.log.lock().unwrap().append_durable(genesis).unwrap();
+    source.process_channel(group);
+    settle_group_metadata(&source, group);
+    source.publish_account_group_access_for(group);
+    assert_eq!(
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .group_control_rows(&hex::encode(group.as_bytes()))
+            .len(),
+        1
+    );
+    let before = control_head_body_validations();
+    let first = source.account_group_access(group).unwrap();
+    for _ in 0..8 {
+        let current = source.account_group_access(group).unwrap();
+        assert_eq!(current.role, first.role);
+        assert_eq!(current.execution, first.execution);
+        assert_eq!(current.sources.len(), first.sources.len());
+    }
+    assert_eq!(
+        control_head_body_validations() - before,
+        1,
+        "unchanged signed control head must cross the full-body decode/crypto path once"
+    );
+}
+
+#[tokio::test]
+async fn idle_resource_physical_channel_listing_skips_unused_inventory_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = node(&dir.path().join("source"), &Account::generate());
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let id = group_inventory_legacy_fixture(&owner, &source, "Physical inventory");
+    group_inventory_source_document(&source, id);
+    let before = source.test_group_inventory_body_read_count();
+    assert!(
+        source
+            .group_inventory_references()
+            .contains_key(&hex::encode(id.as_bytes()))
+    );
+    assert!(
+        source.test_group_inventory_body_read_count() > before,
+        "fixture must contain a real inventory body"
+    );
+    let before = source.test_group_inventory_body_read_count();
+    for _ in 0..8 {
+        assert!(
+            source
+                .list_channels()
+                .unwrap()
+                .iter()
+                .any(|channel| channel.id == id)
+        );
+    }
+    assert_eq!(source.test_group_inventory_body_read_count(), before);
+    let mut maintenance =
+        crate::node::channel_account_maintenance::ChannelAccountMaintenance::default();
+    for _ in 0..8 {
+        source.maintain_account_channels(&mut maintenance).await;
+    }
+    assert_eq!(source.test_group_inventory_body_read_count(), before);
+}
+
+#[test]
+fn idle_resource_nonlocal_inventory_listing_reads_and_checks_live_sources() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let id = group_inventory_legacy_fixture(&owner, &source, "Reference only");
+    let document = group_inventory_source_document(&source, id);
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(document.meta.clone(), document.payload())
+        .unwrap();
+    assert!(!target.channels.lock().unwrap().channel_ids().contains(&id));
+    let reads = target.test_group_inventory_body_read_count();
+    let checks = target.inventory_live_binding_checks.load(Ordering::Relaxed);
+    for _ in 0..8 {
+        let summary = target
+            .list_channels()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == id)
+            .unwrap();
+        assert!(summary.archived);
+        assert_eq!(summary.name, "Reference only");
+    }
+    assert_eq!(target.test_group_inventory_body_read_count() - reads, 8);
+    assert_eq!(
+        target.inventory_live_binding_checks.load(Ordering::Relaxed) - checks,
+        8
+    );
+    assert!(
+        !target.channels.lock().unwrap().channel_ids().contains(&id),
+        "inventory must not install membership"
+    );
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .remove_blob_for_test(document.meta.content_hash);
+    assert!(
+        !target.list_channels().unwrap().iter().any(|c| c.id == id),
+        "warm validation must not hide missing durable inventory"
+    );
 }

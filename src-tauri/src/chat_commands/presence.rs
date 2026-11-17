@@ -260,32 +260,37 @@ fn add_self(out: &mut HashMap<String, PresenceInfo>, account_id: String, user_id
     });
 }
 
-/// One shared snapshot. No per-member dials, retained connections or transitive gossip.
-#[tauri::command]
-pub async fn get_presence(
-    state: tauri::State<'_, NodeState>,
-) -> Result<HashMap<String, PresenceInfo>, CommandError> {
-    let node = {
-        let guard = state.0.read().await;
-        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        if !rt.discovery_available() {
-            return Err(CommandError::Internal("discovery unavailable".into()));
-        }
-        rt.handle()
-    };
-    let peers = node
-        .cached_peer_snapshot_async()
-        .await
-        .map_err(|e| CommandError::Io(e.to_string()))?;
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    if !rt.discovery_available() || !std::sync::Arc::ptr_eq(&rt.handle(), &node) {
-        return Err(CommandError::not_started());
+type PresenceMap = HashMap<String, PresenceInfo>;
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum PresenceResponse {
+    Legacy(PresenceMap),
+    Incremental {
+        people: PresenceMap,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        groups: Option<PresenceMap>,
+        groups_revision: String,
+    },
+}
+
+pub(crate) fn validate_group_revision(revision: Option<&str>) -> Result<(), CommandError> {
+    if revision.is_some_and(|value| {
+        !value.is_empty() && (value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()))
+    }) {
+        return Err(CommandError::Internal("invalid group revision".into()));
     }
+    Ok(())
+}
+
+pub(crate) fn project_people(
+    rt: &mesh_talk_core::node::NodeRuntime,
+    peers: &[PeerRecord],
+) -> HashMap<String, PresenceInfo> {
     let now = Instant::now();
     let mut out = HashMap::new();
-    let offices = post_office_sources(&peers);
-    for peer in &peers {
+    let offices = post_office_sources(peers);
+    for peer in peers {
         // Cached snapshots already reject invalid/retired certificates. Resolve the
         // current binding again rather than assigning evidence to an obsolete account.
         add_current_peer(
@@ -316,6 +321,58 @@ pub async fn get_presence(
             });
         }
     }
+    out
+}
+
+/// One shared snapshot. No per-member dials, retained connections or transitive gossip.
+#[tauri::command]
+pub async fn get_presence(
+    state: tauri::State<'_, NodeState>,
+    known_group_revision: Option<String>,
+) -> Result<PresenceResponse, CommandError> {
+    get_presence_for_state(&state, known_group_revision).await
+}
+
+pub(crate) async fn get_presence_for_state(
+    state: &NodeState,
+    known_group_revision: Option<String>,
+) -> Result<PresenceResponse, CommandError> {
+    validate_group_revision(known_group_revision.as_deref())?;
+    let node = {
+        let guard = state.0.read().await;
+        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        if !rt.discovery_available() {
+            return Err(CommandError::Internal("discovery unavailable".into()));
+        }
+        rt.handle()
+    };
+    let peers = node
+        .cached_peer_snapshot_async()
+        .await
+        .map_err(|e| CommandError::Io(e.to_string()))?;
+    let guard = state.0.read().await;
+    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+    if !rt.discovery_available() || !std::sync::Arc::ptr_eq(&rt.handle(), &node) {
+        return Err(CommandError::not_started());
+    }
+    let mut out = project_people(rt, &peers);
+    // Capture before projection so concurrent commits remain dirty for the next read.
+    let revision = if known_group_revision.is_some() {
+        hex::encode(
+            node.group_projection_revision()
+                .map_err(|e| CommandError::Io(e.to_string()))?,
+        )
+    } else {
+        String::new()
+    };
+    if known_group_revision.as_deref() == Some(revision.as_str()) {
+        return Ok(PresenceResponse::Incremental {
+            people: out,
+            groups: None,
+            groups_revision: revision,
+        });
+    }
+    let people_keys: HashSet<_> = out.keys().cloned().collect();
     for channel in rt.list_channels()? {
         if let Some(reference) = node.channel_shared_reference(channel.id) {
             // Account-shared display facts do not create a device membership.
@@ -335,11 +392,55 @@ pub async fn get_presence(
             unbound.into_iter().collect(),
         );
     }
-    Ok(out)
+    if known_group_revision.is_some() {
+        let (groups, people) = out
+            .into_iter()
+            .partition(|(key, _)| !people_keys.contains(key));
+        Ok(PresenceResponse::Incremental {
+            people,
+            groups: Some(groups),
+            groups_revision: revision,
+        })
+    } else {
+        Ok(PresenceResponse::Legacy(out))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn incremental_wire_distinguishes_retention_withdrawal_and_legacy() {
+        use super::*;
+        let omitted = serde_json::to_value(PresenceResponse::Incremental {
+            people: HashMap::new(),
+            groups: None,
+            groups_revision: "a".repeat(64),
+        })
+        .unwrap();
+        assert!(omitted.get("groups").is_none());
+        let empty = serde_json::to_value(PresenceResponse::Incremental {
+            people: HashMap::new(),
+            groups: Some(HashMap::new()),
+            groups_revision: "a".repeat(64),
+        })
+        .unwrap();
+        assert_eq!(empty["groups"], serde_json::json!({}));
+        assert_eq!(
+            serde_json::to_value(PresenceResponse::Legacy(HashMap::new())).unwrap(),
+            serde_json::json!({})
+        );
+        for valid in [
+            None,
+            Some(""),
+            Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+        ] {
+            assert!(validate_group_revision(valid).is_ok());
+        }
+        for invalid in ["x", &"a".repeat(65), &"z".repeat(64)] {
+            assert!(validate_group_revision(Some(invalid)).is_err());
+        }
+    }
+
     #[test]
     fn shared_reference_presence_counts_accounts_and_keeps_incomplete_rosters_unknown() {
         use super::*;

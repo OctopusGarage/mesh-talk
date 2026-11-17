@@ -1,7 +1,8 @@
 # Settings
 
 Settings opens on **App behavior**. Choose a category to display its page; only that
-page is mounted, and scrolling never changes the selected category. Routine
+page is loaded and mounted, and scrolling never changes the selected category.
+A page load failure offers Retry without closing Settings. Routine
 changes save automatically after the backend acknowledges them. The status line
 shows saving and successful completion; failures appear with the affected
 category. If a write succeeds but reloading its canonical value fails, reload

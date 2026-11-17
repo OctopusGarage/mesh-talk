@@ -1,5 +1,24 @@
 import i18n from "./i18n";
 
+// Display strings only: no message timestamps, identity, or default-timezone
+// formatter is retained. Fresh local fields below qualify every lookup.
+const displayStrings = new Map<string, string>();
+const MAX_DISPLAY_STRINGS = 256;
+function displayString(key: string | null, render: () => string): string {
+  if (key === null) return render();
+  const previous = displayStrings.get(key);
+  if (previous !== undefined) {
+    displayStrings.delete(key);
+    displayStrings.set(key, previous);
+    return previous;
+  }
+  const value = render();
+  displayStrings.set(key, value);
+  if (displayStrings.size > MAX_DISPLAY_STRINGS)
+    displayStrings.delete(displayStrings.keys().next().value!);
+  return value;
+}
+
 const relativeFormats = new Map<string, Intl.RelativeTimeFormat>();
 function relativeTime() {
   const language = i18n.resolvedLanguage ?? "en";
@@ -26,10 +45,17 @@ function toMillis(wall: number): number {
 
 export function formatTime(wall: number): string {
   const d = new Date(toMillis(wall));
-  return d.toLocaleTimeString(i18n.resolvedLanguage, {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const language = i18n.resolvedLanguage;
+  const key =
+    language && Number.isFinite(d.getTime())
+      ? JSON.stringify(["time", language, d.getHours(), d.getMinutes()])
+      : null;
+  return displayString(key, () =>
+    d.toLocaleTimeString(language, {
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+  );
 }
 
 export function formatDay(wall: number): string {
@@ -49,10 +75,23 @@ export function formatDay(wall: number): string {
       initial.toLocaleUpperCase(i18n.resolvedLanguage),
     );
   }
-  return d.toLocaleDateString(i18n.resolvedLanguage, {
-    month: "short",
-    day: "numeric",
-  });
+  const language = i18n.resolvedLanguage;
+  const key =
+    language && Number.isFinite(d.getTime())
+      ? JSON.stringify([
+          "day",
+          language,
+          d.getFullYear(),
+          d.getMonth(),
+          d.getDate(),
+        ])
+      : null;
+  return displayString(key, () =>
+    d.toLocaleDateString(language, {
+      month: "short",
+      day: "numeric",
+    }),
+  );
 }
 
 /** Compact "Ns ago" / "Nm ago" for a whole-seconds elapsed value. */

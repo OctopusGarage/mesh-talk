@@ -390,12 +390,12 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
         .with_runtime(move |runtime| {
             let node = runtime.handle();
             let mut counts = Vec::new();
-            for id in ids {
-                let Some(replicas) = node.channel_custody_count(channel, id)? else {
+            let batch = node.channel_custody_counts(channel, &ids)?;
+            for (id, (replicas, post_offices)) in ids.into_iter().zip(batch) {
+                let Some(replicas) = replicas else {
                     continue;
                 };
-                let Some(post_offices) = node.channel_post_office_custody_count(channel, id)?
-                else {
+                let Some(post_offices) = post_offices else {
                     continue;
                 };
                 counts.push(ChannelCustodyInfo {

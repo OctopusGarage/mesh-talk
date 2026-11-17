@@ -76,6 +76,10 @@ impl EventRepository {
         c: &Connection,
         conv: &ConversationId,
     ) -> Result<Option<Scope>, LogError> {
+        // Count actual scope query executions, including warm prepared statements.
+        #[cfg(test)]
+        self.scope_queries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let scope = c.prepare_cached("SELECT lifecycle,destructive_epoch,revision,event_count FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok(Scope{lifecycle:r.get(0)?,epoch:r.get(1)?,revision:r.get(2)?,count:r.get(3)?})).optional()?;
         let job = self.retirement_job_on(c, conv, scope.as_ref())?;
         if let Some(s) = &scope {
@@ -166,8 +170,8 @@ impl EventRepository {
         id: &EventId,
     ) -> Result<(), LogError> {
         let conv: Option<Vec<u8>> = c
+            .prepare_cached("SELECT conversation FROM retained_events WHERE domain=?1 AND id=?2")?
             .query_row(
-                "SELECT conversation FROM retained_events WHERE domain=?1 AND id=?2",
                 params![self.domain.0.as_slice(), id.as_bytes().as_slice()],
                 |r| r.get(0),
             )

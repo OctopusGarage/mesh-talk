@@ -79,6 +79,24 @@ pub(crate) struct PreparedAccountWrite {
 }
 
 impl PreparedAccountWrite {
+    /// Policy transitions that revoke another recovery source also synchronize
+    /// the containing directory before acknowledging the replacement.
+    pub(crate) fn commit_durable(self) -> Result<(), CommandError> {
+        #[cfg(unix)]
+        let directory = std::fs::File::open(
+            self.destination
+                .parent()
+                .ok_or_else(|| CommandError::Io("invalid account path".into()))?,
+        )
+        .map_err(|e| CommandError::Io(e.to_string()))?;
+        self.commit()?;
+        #[cfg(unix)]
+        directory
+            .sync_all()
+            .map_err(|e| CommandError::Io(e.to_string()))?;
+        Ok(())
+    }
+
     pub(crate) fn commit(self) -> Result<(), CommandError> {
         self.temporary
             .persist(self.destination)

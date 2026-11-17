@@ -346,6 +346,15 @@ impl IndexedFileMessageIdentities {
             .filter(|(_, identity)| identity.host() == host)
             .map_or_else(Vec::new, |(_, identity)| identity.aliases))
     }
+    pub(super) fn verified_bundle(
+        &self,
+        event: EventId,
+    ) -> Result<Option<VerifiedIdentity>, LogError> {
+        Ok(self
+            .identity_for(event)?
+            .map(|(event, identity)| VerifiedIdentity { event, identity }))
+    }
+    #[cfg(test)]
     pub(crate) fn bundle(&self, event: EventId) -> Result<Option<Event>, LogError> {
         Ok(self.identity_for(event)?.map(|(event, _)| event))
     }

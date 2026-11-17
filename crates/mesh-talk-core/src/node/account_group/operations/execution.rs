@@ -86,7 +86,7 @@ impl Node {
     /// message on that same bounded sync exchange, without a second fanout.
     /// Coalesced earlier messages remain eligible for ordinary custody repair.
     pub(in crate::node) async fn distribute_account_group_effects(
-        &self,
+        self: &std::sync::Arc<Self>,
         group: ConversationId,
         members: &[crate::identity::device::PublicIdentity],
     ) -> bool {

@@ -15,6 +15,7 @@ export function draftSnapshot(release, tag, nightly = false) {
   assert.equal(release?.prerelease === true, nightly, "release prerelease state must match publication mode");
   assert.ok(release?.draft === true, "release must still be a draft");
   assert.equal(release.tag_name, tag, "release tag changed");
+  if (!nightly) assert.equal(release.name, tag, "Stable release title must equal its version tag");
   assert.ok(Number.isSafeInteger(release.id), "invalid release ID");
   assert.ok(Array.isArray(release.assets), "missing release assets");
   if (nightly) assert.match(release.target_commitish ?? "", /^[a-f\d]{40}$/, "Nightly release must target an exact source commit");

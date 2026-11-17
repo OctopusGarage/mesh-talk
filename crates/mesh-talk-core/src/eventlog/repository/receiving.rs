@@ -20,6 +20,14 @@ CREATE INDEX participant_receive_turn ON participant_receive_pending(domain,acco
 CREATE TABLE participant_receive_bootstrap(domain BLOB NOT NULL CHECK(length(domain)=16),account TEXT NOT NULL CHECK(length(account)=32),controls_after INTEGER NOT NULL CHECK(controls_after>=-1),controls_through INTEGER NOT NULL CHECK(controls_through>=-1),PRIMARY KEY(domain,account)) WITHOUT ROWID;
 ";
 const PROCESSED_SCHEMA: &str = "CREATE TABLE participant_control_processed(domain BLOB NOT NULL CHECK(length(domain)=16),id BLOB NOT NULL CHECK(length(id)=32),PRIMARY KEY(domain,id),FOREIGN KEY(domain,id) REFERENCES retained_events(domain,id) ON DELETE CASCADE) WITHOUT ROWID;";
+#[cfg(test)]
+std::thread_local! {
+    static RECEIVE_SELECTION_WORK: std::cell::Cell<(i32, i32)> = const { std::cell::Cell::new((0, 0)) };
+}
+#[cfg(test)]
+pub(super) fn receive_selection_work() -> (i32, i32) {
+    RECEIVE_SELECTION_WORK.with(|work| work.get())
+}
 impl EventRepository {
     pub(crate) fn receiving_owner(&self) -> Result<ParticipantEventOwner, LogError> {
         self.database.read(|c| self.receive_owner_on(c).cloned())
@@ -149,7 +157,7 @@ impl EventRepository {
                 let kind:i64=row.get(3)?;
                 last=nonnegative(row.get(4)?)?;scanned+=1;
                 if ![0,2,3].contains(&kind) || author.as_slice()==owner.as_slice(){continue;}
-                let seen:bool=if kind==0 {c.query_row("SELECT EXISTS(SELECT 1 FROM transcript_received_evidence WHERE id=?1)",[id.as_slice()],|r|r.get(0))?}else{c.query_row("SELECT EXISTS(SELECT 1 FROM participant_control_processed WHERE domain=?1 AND id=?2)",params![self.domain.0.as_slice(),id.as_slice()],|r|r.get(0))?};
+                let seen:bool=if kind==0 {c.query_row("SELECT EXISTS(SELECT 1 FROM transcript_received_evidence WHERE id=?1 UNION ALL SELECT 1 FROM participant_control_processed WHERE domain=?2 AND id=?1)",params![id.as_slice(),self.domain.0.as_slice()],|r|r.get(0))?}else{c.query_row("SELECT EXISTS(SELECT 1 FROM participant_control_processed WHERE domain=?1 AND id=?2)",params![self.domain.0.as_slice(),id.as_slice()],|r|r.get(0))?};
                 if !seen {
                     let namespace=participant_event_namespace_on(c,last)?;
                     let inserted=c.execute("INSERT OR IGNORE INTO participant_receive_pending VALUES(?1,?2,?3,?4,?5,?6)",params![self.domain.0.as_slice(),id.as_slice(),conversation.as_slice(),namespace,ticket,kind!=0])?;
@@ -206,30 +214,53 @@ impl EventRepository {
         let (ids, required) = self.database.transaction(|c| {
             let owner=self.receive_owner_on(c)?;
             let mut ticket:i64=c.query_row("SELECT next_ticket FROM participant_receive_scan WHERE domain=?1",[self.domain.0.as_slice()],|r|r.get(0))?;
-            let mut statement=c.prepare("SELECT p.id,e.stored_bytes,(s.lifecycle<>0 OR (e.kind=0 AND EXISTS(SELECT 1 FROM transcript_received_evidence d WHERE d.id=p.id)) OR (e.kind<>0 AND EXISTS(SELECT 1 FROM participant_control_processed d WHERE d.domain=p.domain AND d.id=p.id))) FROM participant_receive_pending p JOIN retained_events e ON e.domain=p.domain AND e.id=p.id JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE p.domain=?1 AND p.account=?5 AND p.conversation=?2 AND p.purpose=?4 AND EXISTS(SELECT 1 FROM participant_event_ranges r WHERE r.account_id=?5 AND r.start_commit<=e.commit_ordinal AND (r.end_commit IS NULL OR e.commit_ordinal<r.end_commit)) ORDER BY p.ticket,p.id LIMIT ?3")?;
-            let mut rows=statement.query(params![self.domain.0.as_slice(),conversation.as_bytes().as_slice(),integer(limit)?,controls,owner.namespace()])?;
+            let original_ticket = ticket;
+            // Keep the queue index as the outer driver. Without fixed join
+            // order, cold statistics can scan the entire retained domain and
+            // sort its matches before LIMIT bounds the returned queue page.
+            let mut statement=c.prepare("SELECT p.id,e.stored_bytes,(s.lifecycle<>0 OR (e.kind=0 AND EXISTS(SELECT 1 FROM transcript_received_evidence d WHERE d.id=p.id)) OR EXISTS(SELECT 1 FROM participant_control_processed d WHERE d.domain=p.domain AND d.id=p.id)) FROM participant_receive_pending p INDEXED BY participant_receive_turn CROSS JOIN retained_events e ON e.domain=p.domain AND e.id=p.id CROSS JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE p.domain=?1 AND p.account=?5 AND p.conversation=?2 AND p.purpose=?4 AND EXISTS(SELECT 1 FROM participant_event_ranges r WHERE r.account_id=?5 AND r.start_commit<=e.commit_ordinal AND (r.end_commit IS NULL OR e.commit_ordinal<r.end_commit)) ORDER BY p.ticket,p.id LIMIT ?3")?;
+            let mut rows=statement.query(params![self.domain.0.as_slice(),conversation.as_bytes().as_slice(),integer(limit + 1)?,controls,owner.namespace()])?;
             // Keep only fixed keys before mutating the queue's ordering index.
             let mut selected=Vec::new();let mut charged=0usize;let mut required:Option<usize>=None;
+            let mut complete = true;
             while let Some(row)=rows.next()? {
+                if selected.len() == limit {
+                    complete = false;
+                    break;
+                }
                 let id=blob::<32>(row,0)?;
                 let done:bool=row.get(2)?;
                 let cost=if done {0}else{usize::try_from(nonnegative(row.get(1)?)?).ok().and_then(|n|n.checked_mul(3)).and_then(|n|n.checked_add(std::mem::size_of::<Event>())).ok_or(LogError::RepositoryCounterExhausted)?};
                 let admitted=!done && charged.checked_add(cost).is_some_and(|total|total<=bytes);
                 if admitted {charged+=cost;} else if !done {required=Some(required.map_or(cost,|old|old.min(cost)));}
-                // Even an oversized attempt advances its fair turn. It remains
+                // Even an oversized partial-page attempt advances its fair turn. It remains
                 // eligible and never becomes processing evidence merely because
                 // this caller supplied a smaller byte budget.
                 selected.push((id,done,admitted));
             }
-            drop(rows);drop(statement);
+            drop(rows);
+            #[cfg(test)]
+            RECEIVE_SELECTION_WORK.with(|work|work.set((
+                statement.get_status(rusqlite::StatementStatus::VmStep),
+                statement.get_status(rusqlite::StatementStatus::Sort),
+            )));
+            drop(statement);
             let mut ids=Vec::new();
             for (id,done,admitted) in selected {
                 if done {c.execute("DELETE FROM participant_receive_pending WHERE domain=?1 AND id=?2",params![self.domain.0.as_slice(),id.as_slice()])?;} else {
-                    c.execute("UPDATE participant_receive_pending SET ticket=?3 WHERE domain=?1 AND id=?2",params![self.domain.0.as_slice(),id.as_slice(),ticket])?;
-                    ticket=advance(ticket)?;if admitted {ids.push(EventId::new(id));}
+                    // Rotating the entire scoped queue preserves its order.
+                    // The bounded lookahead proves that no unselected peer can
+                    // be starved; retry-only polls need no durable mutation.
+                    if !complete {
+                        c.execute("UPDATE participant_receive_pending SET ticket=?3 WHERE domain=?1 AND id=?2",params![self.domain.0.as_slice(),id.as_slice(),ticket])?;
+                        ticket=advance(ticket)?;
+                    }
+                    if admitted {ids.push(EventId::new(id));}
                 }
             }
-            c.execute("UPDATE participant_receive_scan SET next_ticket=?2 WHERE domain=?1",params![self.domain.0.as_slice(),ticket])?;
+            if ticket != original_ticket {
+                c.execute("UPDATE participant_receive_scan SET next_ticket=?2 WHERE domain=?1",params![self.domain.0.as_slice(),ticket])?;
+            }
             Ok((ids,required))
         })?;
         if ids.is_empty()

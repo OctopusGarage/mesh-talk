@@ -130,8 +130,23 @@ test("received folder waits until ready and automatically extracts through save-
       () => (window as unknown as { __folderSave: unknown }).__folderSave,
     ),
   ).toBeNull();
-  await page.evaluate(() => {
-    (window as unknown as { __folderReady: boolean }).__folderReady = true;
+  await page.evaluate(async () => {
+    const host = window as unknown as {
+      __folderReady: boolean;
+      __TAURI_INTERNALS__: {
+        invoke(cmd: string, args: Record<string, unknown>): Promise<unknown>;
+      };
+      __mockEmit(event: string, payload: unknown): void;
+    };
+    host.__folderReady = true;
+    const identity = await host.__TAURI_INTERNALS__.invoke(
+      "owner_node_identity",
+      { owner: "u_self" },
+    );
+    host.__mockEmit("node-state-changed", {
+      ...(identity as Record<string, unknown>),
+      kind: "files",
+    });
   });
   await expect
     .poll(() =>

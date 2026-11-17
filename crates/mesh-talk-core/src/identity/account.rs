@@ -171,6 +171,8 @@ pub struct DeviceCertificate {
 impl DeviceCertificate {
     /// True if the signature is a valid account-over-device binding.
     pub fn verify(&self) -> bool {
+        #[cfg(test)]
+        certificate_observations::record();
         let msg = cert_message(&self.account_ed25519_pub, &self.device_ed25519_pub);
         DeviceIdentity::verify(&self.account_ed25519_pub, &msg, &self.signature)
     }
@@ -195,6 +197,22 @@ impl DeviceCertificate {
             .reject_trailing_bytes()
             .deserialize(bytes)
             .ok()
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod certificate_observations {
+    thread_local! {
+        static CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub(super) fn record() {
+        CHECKS.with(|checks| checks.set(checks.get().saturating_add(1)));
+    }
+    pub(crate) fn reset() {
+        CHECKS.with(|checks| checks.set(0));
+    }
+    pub(crate) fn count() -> usize {
+        CHECKS.with(std::cell::Cell::get)
     }
 }
 

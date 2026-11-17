@@ -83,10 +83,10 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: |
           npm ci --prefix frontend
-      - uses: taiki-e/install-action@v2.90.2
+      - uses: taiki-e/install-action@v2.90.3
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
-          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
+          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.9.1
           fallback: none
       - name: Validate archive and coverage contracts
         if: ${{ steps.scope.outputs.full == 'true' }}
@@ -162,10 +162,10 @@ jobs:
         with:
           toolchain: ${{ needs.build.outputs.rust }}
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2.90.2
+      - uses: taiki-e/install-action@v2.90.3
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
-          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
+          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.9.1
           fallback: none
       # No Cargo cache, dependency fetch, frontend rebuild or test compilation.
       - uses: actions/download-artifact@v8

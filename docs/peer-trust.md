@@ -42,13 +42,13 @@ Schemas 1–3 remain readable without inventing a creation timestamp.
 
 ## Private verification
 
-| Information | Meaning |
-| --- | --- |
-| Signed profile | This account authenticated these presentation fields. |
-| Account creation time | The originating client recorded this local-clock time when generating the account. |
-| First observed | This installation first recorded a certified account/device observation at this local time. |
-| Device changes | This installation observed different certified devices for the account; multi-device use can be legitimate. |
-| Verified contact | You explicitly compared the device safety number through an independent trusted channel. |
+| Information           | Meaning                                                                                                     |
+| --------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Signed profile        | This account authenticated these presentation fields.                                                       |
+| Account creation time | The originating client recorded this local-clock time when generating the account.                          |
+| First observed        | This installation first recorded a certified account/device observation at this local time.                 |
+| Device changes        | This installation observed different certified devices for the account; multi-device use can be legitimate. |
+| Verified contact      | You explicitly compared the device safety number through an independent trusted channel.                    |
 
 An account has one signed nickname, avatar and bio (personal signature) across its
 linked devices. Own-account rows use the signed profile. Other contacts retain
@@ -71,6 +71,27 @@ locally. Peer and post-office fanout continues independently; an unavailable
 contact must not hold the profile dialog busy or block unrelated chat commands.
 Local send commits acquire host session authority before the delivery journal so
 concurrent card/legacy-avatar publication cannot reverse that lock order.
+
+Background fanout retains one scheduler and at most two actual in-flight
+publications. Profile/source, roster, network and policy observations trigger
+semantic comparison before storage reads; ordinary heartbeat or UI observations
+do not earn new retry credit. Pending failures retain their completion-based
+retry deadlines. A fixed five-minute repair covers missed legacy observations;
+unrelated notifications cannot postpone it. Names still update when no public
+profile exists or network capacity is occupied. Relayed name-only changes notify
+the same roster observers without changing presence or granting authority.
+An expired retry cannot run while actual capacity is full; completion releases
+that capacity before queued work is admitted. Runtime retirement drops the owned
+network futures, and an older completion cannot settle a replaced publication.
+
+An unchanged history publication may defer profile fanout for five minutes only
+with fresh qualification from every required recipient and mailbox scope. Empty
+results, denied uploads and unknown or unfinished work remain retryable. The
+qualification must retain current source, policy and control-scope checks after
+awaited stages. Direct reconciliation still runs; its completion takes precedence.
+This quiet result does not mark delivery or current relay custody and does not
+permanently complete fanout. Relevant source, scope and recipient-revival events
+still trigger prompt work.
 
 A valid profile signature never establishes a person's identity, honesty or
 verification status. Profiles never grant verified-contact message pulls.
@@ -113,7 +134,6 @@ message can retry after acceptance; it does not need a new logical message ID.
 
 ## Implementation ownership
 
-
 `identity/account.rs` and `identity/account_keystore.rs` own creation metadata.
 `node/account_profile_data.rs` owns bounded `MTP3` profile signatures and encrypted
 current-profile storage. `node/account_profile_io.rs` owns admitted local edits,
@@ -152,9 +172,24 @@ same authenticated projection owner as inbound exchanges.
 The runtime tracks successful profile revisions per present peer. Failed direct
 or relay attempts retry accepted events rather than appending duplicates. At most
 two profile deliveries run concurrently, with untouched peers ahead of retries.
+Reconnect and ordinary reopen redeliver the retained events for an unchanged
+publication. A local sender fingerprint binds the account, both complete device
+identities, exact signed payload and required Profile parent; it commits in the
+same transaction as the canonical event. The encrypted repository retains at
+most 1,024 fixed-width references, never plaintext profile copies. Each reuse
+reads and validates the retained original; missing or evicted evidence takes the
+normal publication path and storage failures remain errors. Legacy standalone
+logs retain their existing append behavior.
 Existing bounded control deadlines and runtime cancellation apply. A new revision,
 including an avatar clear, is eligible without a reconnect; disappearing peers
 lose their publication cache and receive the current profile when they return.
+Unchanged failed publications, including preparation failures, back off from five
+seconds to five minutes after completion. Profile revisions, full peer identity,
+effective recipient and eligible-relay routes, genuine availability revival and applicable policy/network
+changes allow prompt attempts; identical presence heartbeats do not reset the
+wait. Completion belongs to the exact selected target instance, so an older
+attempt cannot settle replacement work. The existing three-second metadata poll
+still discovers changes; it does not authorize repeated expensive exchanges.
 
 See [account and device identity](ARCHITECTURE.md), [module ownership](module-boundaries.md),
 [backup recovery](backup-recovery.md) and [contact verification](help/topics/verify-contact.md).

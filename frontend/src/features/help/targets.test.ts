@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+vi.mock("./content", () => {
+  throw new Error("Navigation metadata must not load help article bodies");
+});
 import { resolveHelpTarget } from "./targets";
 
 describe("controlled help navigation", () => {

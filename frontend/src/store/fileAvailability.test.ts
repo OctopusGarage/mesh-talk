@@ -220,3 +220,114 @@ it("restarts watched reads after a generation reset during an active read", asyn
     vi.useRealTimers();
   }
 });
+
+it("keeps ready file reads quiet between semantic invalidations on a modern host", async () => {
+  vi.useFakeTimers();
+  const { notifySyncInvalidation, setPushStateSupport } =
+    await import("@/lib/syncInvalidation");
+  const { watchFileAvailability } = await import("./fileAvailability");
+  vi.mocked(chat.fileStatuses).mockResolvedValue([
+    { file_conv: "quiet", done: 1, total: 1, ready: true },
+  ]);
+  setPushStateSupport("host");
+  const stop = watchFileAvailability("quiet");
+  try {
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(chat.fileStatuses).toHaveBeenCalledOnce();
+    notifySyncInvalidation({ owner: "host", kind: "files" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(chat.fileStatuses).toHaveBeenCalledTimes(2);
+  } finally {
+    stop();
+    setPushStateSupport(null);
+    vi.useRealTimers();
+  }
+});
+
+it("retains bounded file-progress observation when a legacy host has no pushes", async () => {
+  vi.useFakeTimers();
+  const { setPushStateSupport } = await import("@/lib/syncInvalidation");
+  const { watchFileAvailability } = await import("./fileAvailability");
+  setPushStateSupport(null);
+  vi.mocked(chat.fileStatuses)
+    .mockResolvedValueOnce([
+      { file_conv: "legacy", done: 0, total: 1, ready: false },
+    ])
+    .mockResolvedValue([
+      { file_conv: "legacy", done: 1, total: 1, ready: true },
+    ]);
+  const stop = watchFileAvailability("legacy");
+  try {
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(chat.fileStatuses).toHaveBeenCalledOnce();
+    expect(useFileAvailability.getState().statuses.legacy.ready).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(chat.fileStatuses).toHaveBeenCalledTimes(2);
+    expect(useFileAvailability.getState().statuses.legacy.ready).toBe(true);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("repairs a missed modern file event at the sparse fallback deadline", async () => {
+  vi.useFakeTimers();
+  const { setPushStateSupport } = await import("@/lib/syncInvalidation");
+  const { watchFileAvailability } = await import("./fileAvailability");
+  setPushStateSupport("host");
+  vi.mocked(chat.fileStatuses)
+    .mockResolvedValueOnce([
+      { file_conv: "missed", done: 0, total: 1, ready: false },
+    ])
+    .mockResolvedValue([
+      { file_conv: "missed", done: 1, total: 1, ready: true },
+    ]);
+  const stop = watchFileAvailability("missed");
+  try {
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+    expect(chat.fileStatuses).toHaveBeenCalledOnce();
+    expect(useFileAvailability.getState().statuses.missed.ready).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(chat.fileStatuses).toHaveBeenCalledTimes(2);
+    expect(useFileAvailability.getState().statuses.missed.ready).toBe(true);
+  } finally {
+    stop();
+    setPushStateSupport(null);
+    vi.useRealTimers();
+  }
+});
+
+it("ignores pure sync status but retains actual file and document availability wakes", async () => {
+  const { watchFileAvailability } = await import("./fileAvailability");
+  const { notifySyncInvalidation, setPushStateSupport } =
+    await import("@/lib/syncInvalidation");
+  vi.mocked(chat.fileStatuses).mockResolvedValue([]);
+  setPushStateSupport("alice");
+  const stop = watchFileAvailability("a");
+  const settle = async () => {
+    for (let n = 0; n < 12; n++) await Promise.resolve();
+  };
+  try {
+    await settle();
+    const baseline = vi.mocked(chat.fileStatuses).mock.calls.length;
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "sync_status",
+    });
+    await settle();
+    expect(chat.fileStatuses).toHaveBeenCalledTimes(baseline);
+    for (const change of [
+      { owner: "alice", kind: "files" as const },
+      { owner: "alice", kind: "state" as const, scope: "documents" as const },
+      { owner: "alice", kind: "state" as const },
+    ]) {
+      notifySyncInvalidation(change);
+      await settle();
+    }
+    expect(chat.fileStatuses).toHaveBeenCalledTimes(baseline + 3);
+  } finally {
+    stop();
+    setPushStateSupport(null);
+  }
+});

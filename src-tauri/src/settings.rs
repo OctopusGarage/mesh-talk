@@ -6,6 +6,7 @@
 //! frontend reads/writes it through the plugin's own enable/disable/is-enabled.
 
 mod shared;
+mod startup;
 
 use crate::config_store;
 use crate::screenshot_shortcuts::ScreenshotShortcuts;
@@ -51,6 +52,9 @@ pub struct AppSettings {
     /// `#[serde(default = ...)]` for forward-compat with older `settings.json`.
     #[serde(default = "default_true")]
     pub stay_signed_in: bool,
+    /// Installation-local policy for cold saved-session restoration on macOS.
+    #[serde(default = "default_true")]
+    pub startup_verification: bool,
     /// The username to auto-login on next launch (the keychain account to read). Only set
     /// while `stay_signed_in` and a successful login has happened; cleared on sign-out.
     #[serde(default)]
@@ -121,6 +125,7 @@ impl Default for AppSettings {
             notifications: true,
             download_dir: String::new(),
             stay_signed_in: true,
+            startup_verification: true,
             last_user: None,
             retention_days: 0,
             calls_enabled: false,
@@ -149,6 +154,7 @@ impl Default for AppSettings {
 struct GlobalSettings {
     minimize_to_tray: bool,
     stay_signed_in: bool,
+    startup_verification: bool,
     last_user: Option<String>,
 }
 
@@ -157,6 +163,7 @@ impl Default for GlobalSettings {
         Self {
             minimize_to_tray: true,
             stay_signed_in: true,
+            startup_verification: true,
             last_user: None,
         }
     }
@@ -167,6 +174,7 @@ impl From<&AppSettings> for GlobalSettings {
         Self {
             minimize_to_tray: value.minimize_to_tray,
             stay_signed_in: value.stay_signed_in,
+            startup_verification: value.startup_verification,
             last_user: value.last_user.clone(),
         }
     }
@@ -236,6 +244,7 @@ impl AccountSettings {
             notifications: self.notifications,
             download_dir: self.download_dir.clone(),
             stay_signed_in: global.stay_signed_in,
+            startup_verification: global.startup_verification,
             last_user: global.last_user.clone(),
             retention_days: self.retention_days,
             calls_enabled: self.calls_enabled,
@@ -473,6 +482,7 @@ impl SettingsState {
         inner.revision += 1;
         inner.global.minimize_to_tray = settings.minimize_to_tray;
         inner.global.stay_signed_in = settings.stay_signed_in;
+        inner.global.startup_verification = settings.startup_verification;
         inner.global.last_user = settings.last_user.clone();
         inner.current = AccountSettings::from(&settings).with_global(&inner.global);
         Ok(inner.global.clone())
@@ -488,6 +498,7 @@ impl SettingsState {
         inner.revision += 1;
         inner.global.minimize_to_tray = settings.minimize_to_tray;
         inner.global.stay_signed_in = settings.stay_signed_in;
+        inner.global.startup_verification = settings.startup_verification;
         inner.global.last_user = settings.last_user;
         inner.current = AccountSettings::default().with_global(&inner.global);
         Ok(inner.global.clone())
@@ -591,6 +602,8 @@ fn preserve_login_bookkeeping(
     mut settings: AppSettings,
     previous: &AppSettings,
 ) -> (AppSettings, Option<String>) {
+    // Policy transitions have their own credential transaction.
+    settings.startup_verification = previous.startup_verification;
     let clear_user = if previous.stay_signed_in && !settings.stay_signed_in {
         previous.last_user.clone()
     } else {
@@ -958,6 +971,22 @@ pub async fn set_app_settings<R: tauri::Runtime>(
     expected_account: Option<String>,
     password: Option<String>,
 ) -> Result<(), CommandError> {
+    let previous = state.get();
+    let proposed = match patch.as_ref() {
+        Some(patch) => shared::patch(&previous, patch)?,
+        None => settings.clone(),
+    };
+    if proposed.startup_verification != previous.startup_verification {
+        return startup::change(
+            app,
+            app_state.inner().clone(),
+            state.inner().clone(),
+            owner,
+            proposed,
+            password,
+        )
+        .await;
+    }
     let entry_generation = app_state.session().generation();
     let mut admission = owner
         .as_deref()
@@ -1221,6 +1250,26 @@ mod tests {
             state.get().screenshot_shortcuts,
             changed.screenshot_shortcuts
         );
+    }
+
+    #[test]
+    fn startup_verification_defaults_protected_and_stays_installation_local() {
+        let old: GlobalSettings = serde_json::from_str("{}").unwrap();
+        let value = serde_json::to_value(old).unwrap();
+        assert_eq!(value["startup_verification"], true);
+        let mut settings = serde_json::to_value(AppSettings::default()).unwrap();
+        settings["startup_verification"] = serde_json::json!(false);
+        let settings: AppSettings = serde_json::from_value(settings).unwrap();
+        let global = GlobalSettings::from(&settings);
+        assert_eq!(
+            serde_json::to_value(&global).unwrap()["startup_verification"],
+            false
+        );
+        assert_eq!(
+            serde_json::to_value(AccountSettings::default().with_global(&global)).unwrap()["startup_verification"],
+            false
+        );
+        assert!(!shared::values(&settings).contains_key("settings.startup_verification"));
     }
 
     #[tokio::test]
@@ -1982,6 +2031,7 @@ mod tests {
         let global = GlobalSettings {
             minimize_to_tray: false,
             stay_signed_in: true,
+            startup_verification: true,
             last_user: Some("alice".into()),
         };
         let alice_view = alice.with_global(&global);

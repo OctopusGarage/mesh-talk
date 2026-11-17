@@ -87,7 +87,7 @@ impl Node {
         }
         .encode();
         let mut channel = self
-            .privacy_dial(peer.addr, &peer.public)
+            .privacy_dial_interactive(peer.addr, &peer.public)
             .await
             .map_err(SessionError::Transport)
             .map_err(NodeError::Session)?;

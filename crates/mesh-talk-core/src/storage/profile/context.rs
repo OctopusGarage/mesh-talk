@@ -164,6 +164,9 @@ impl ProfileStorage {
     pub(crate) fn maintain_participant_events(&self) -> Result<(), LogError> {
         super::participant_events::maintenance(self)
     }
+    pub(crate) fn participant_event_maintenance_pending(&self) -> Result<(bool, bool), LogError> {
+        super::participant_events::maintenance_pending(self)
+    }
     pub(crate) fn participant_events(
         self: &Arc<Self>,
         password: &str,

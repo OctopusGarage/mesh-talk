@@ -7,10 +7,15 @@ test("replaces reaction pages and removes an owned reaction outside the inline p
   await enterChat(page, "reaction-pages", "/?data=reactions-paged");
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   await expect(page.getByTestId("reaction-chip")).toHaveCount(128);
+  await expect(
+    page.getByRole("button", { name: "More reactions", exact: true }),
+  ).toHaveCount(0);
   await page
-    .getByRole("button", { name: "More reactions", exact: true })
-    .first()
-    .click();
+    .getByTestId("message-bubble")
+    .filter({ hasText: "hey, welcome to the mesh" })
+    .locator("[data-context-menu]")
+    .click({ button: "right" });
+  await page.getByTestId("msg-more-reactions").click();
   const dialog = page.getByTestId("reaction-summary-dialog");
   await expect(
     dialog.getByRole("button", { name: /Add reaction-/ }),
@@ -79,10 +84,10 @@ test("exact search context permits reaction inspection and paging without mutati
     "data-disabled",
     "",
   );
-  await page.keyboard.press("Escape");
-  await bubble
-    .getByRole("button", { name: "More reactions", exact: true })
-    .click();
+  await expect(page.getByTestId("msg-more-reactions")).not.toHaveAttribute(
+    "data-disabled",
+  );
+  await page.getByTestId("msg-more-reactions").click();
   const dialog = page.getByTestId("reaction-summary-dialog");
   const additions = dialog.getByRole("button", { name: /Add reaction-/ });
   await expect(additions).toHaveCount(128);

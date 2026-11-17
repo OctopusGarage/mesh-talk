@@ -16,7 +16,7 @@ beforeEach(() => {
 });
 
 describe("media read IPC bytes", () => {
-  it.each(["readMedia", "readFile"] as const)(
+  it.each(["readMedia", "readFile", "readMediaPreview"] as const)(
     "%s turns a fallback JSON byte array into binary image data",
     async (method) => {
       const pngHeader = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -28,6 +28,15 @@ describe("media read IPC bytes", () => {
       expect(blobBytes).toEqual(new Uint8Array(pngHeader));
     },
   );
+
+  it("requests the bounded preview as a binary command", async () => {
+    const bytes = new Uint8Array([137, 80, 78, 71]).buffer;
+    invoke.mockResolvedValueOnce(bytes);
+    expect(await chat.readMediaPreview("file-conv")).toBe(bytes);
+    expect(invoke).toHaveBeenCalledWith("read_media_preview", {
+      fileConv: "file-conv",
+    });
+  });
 
   it("preserves the normal ArrayBuffer response", async () => {
     const original = new Uint8Array([137, 80, 78, 71]).buffer;

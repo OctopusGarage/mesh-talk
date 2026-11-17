@@ -128,6 +128,7 @@ mod relay_policy;
 mod route_timing;
 pub(crate) mod runtime;
 mod runtime_delivery;
+mod work_observation;
 pub use host_reception::{
     CurrentProfilePage, HostReception, HostReceptionPage, ReceptionConsumer, ReceptionCursor,
     ReceptionLimit,
@@ -209,6 +210,7 @@ pub use runtime::{
 };
 pub use search::{RecentSearchResults, ReferencedSearchHit, SearchContext, SearchReference};
 pub use session::request_round;
+pub use ui_state::DesktopUiRevisions;
 
 mod outgoing_message;
 pub use outgoing_message::{MessageAcceptance, MessageDestination, OutgoingMessageRequest};

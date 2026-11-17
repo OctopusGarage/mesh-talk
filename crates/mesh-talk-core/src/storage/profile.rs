@@ -542,6 +542,7 @@ pub(crate) mod context;
 pub(crate) mod manifest;
 pub(crate) mod participant;
 mod participant_events;
+pub(crate) mod profile_receive;
 pub(crate) mod publication;
 #[cfg(test)]
 mod publication_acceptance_tests;

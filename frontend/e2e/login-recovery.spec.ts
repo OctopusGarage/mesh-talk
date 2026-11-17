@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./tauri-mock";
-import { enterChat } from "./helpers/session";
+import { enterChat, waitForChatShell } from "./helpers/session";
 
 test("login settings wait for the native session to finish signing out", async ({
   page,
@@ -138,7 +138,7 @@ test("created accounts retry entry without registering or typing their password 
   );
   await expect(page.getByTestId("login-password")).toHaveValue("password123");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expect(page.getByTestId("account-protection")).toContainText(
     "saved securely",
   );
@@ -177,7 +177,7 @@ test("failed credential saving does not block entry and can be retried", async (
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expect(page.getByTestId("account-protection")).toContainText(
     "Your login could not be saved",
   );
@@ -193,6 +193,7 @@ test("new accounts can open the existing encrypted backup flow or defer it", asy
   await page.getByTestId("login-username").fill("backup-user");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
+  await waitForChatShell(page);
   const notice = page.getByTestId("account-protection");
   await expect(notice).toContainText("recovery key separately");
   await notice.getByRole("button", { name: "Create encrypted backup" }).click();
@@ -255,6 +256,7 @@ test("creation respects declining saved login and explains the next password req
   await page.getByTestId("login-username").fill("manual-login");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
+  await waitForChatShell(page);
   const notice = page.getByTestId("account-protection");
   await expect(notice).toContainText("Your login is not saved");
   await expect(notice).toContainText("you will need it next time");
@@ -293,6 +295,7 @@ test("unconfirmed saved-login status never claims that credentials were saved", 
   await page.getByTestId("login-username").fill("unconfirmed-login");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
+  await waitForChatShell(page);
   await expect(page.getByTestId("account-protection")).toContainText(
     "Saved-login status could not be confirmed",
   );
@@ -330,6 +333,7 @@ test("failed and rejected credential retries stay actionable until saving succee
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
+  await waitForChatShell(page);
   const notice = page.getByTestId("account-protection");
   const retry = notice.getByRole("button", { name: "Retry saving login" });
   for (let attempt = 0; attempt < 2; attempt++) {

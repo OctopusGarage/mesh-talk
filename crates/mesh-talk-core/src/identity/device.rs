@@ -9,6 +9,16 @@ use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 
 use super::random_signing_key;
 
+#[cfg(test)]
+thread_local! {
+    static PUBLIC_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+fn derive_x_public(secret: &StaticSecret) -> [u8; 32] {
+    #[cfg(test)]
+    PUBLIC_DERIVATIONS.with(|calls| calls.set(calls.get() + 1));
+    X25519Public::from(secret).to_bytes()
+}
+
 /// The public half of a device identity — safe to share on the network.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicIdentity {
@@ -38,6 +48,7 @@ impl PublicIdentity {
 pub struct DeviceIdentity {
     signing_key: SigningKey,
     dh_secret: StaticSecret,
+    public: PublicIdentity,
 }
 
 impl DeviceIdentity {
@@ -45,17 +56,29 @@ impl DeviceIdentity {
     pub fn generate() -> Self {
         let signing_key = random_signing_key();
         let dh_secret = StaticSecret::random();
+        let public = PublicIdentity {
+            ed25519_pub: signing_key.verifying_key().to_bytes(),
+            x25519_pub: derive_x_public(&dh_secret),
+        };
         Self {
             signing_key,
             dh_secret,
+            public,
         }
     }
 
     /// Reconstruct from raw secret-key bytes (used by the keystore on load).
     pub fn from_secret_bytes(ed25519_secret: [u8; 32], x25519_secret: [u8; 32]) -> Self {
+        let signing_key = SigningKey::from_bytes(&ed25519_secret);
+        let dh_secret = StaticSecret::from(x25519_secret);
+        let public = PublicIdentity {
+            ed25519_pub: signing_key.verifying_key().to_bytes(),
+            x25519_pub: derive_x_public(&dh_secret),
+        };
         Self {
-            signing_key: SigningKey::from_bytes(&ed25519_secret),
-            dh_secret: StaticSecret::from(x25519_secret),
+            signing_key,
+            dh_secret,
+            public,
         }
     }
 
@@ -66,10 +89,7 @@ impl DeviceIdentity {
 
     /// The shareable public identity.
     pub fn public(&self) -> PublicIdentity {
-        PublicIdentity {
-            ed25519_pub: self.signing_key.verifying_key().to_bytes(),
-            x25519_pub: X25519Public::from(&self.dh_secret).to_bytes(),
-        }
+        self.public.clone()
     }
 
     pub fn user_id(&self) -> String {
@@ -166,5 +186,74 @@ mod tests {
             x25519_pub: [9u8; 32],
         };
         assert_ne!(id, pid3.user_id());
+    }
+
+    fn assert_public_reads_are_derived_once(identity: DeviceIdentity) {
+        let (ed, x) = identity.secret_bytes();
+        let expected = PublicIdentity {
+            ed25519_pub: SigningKey::from_bytes(&ed).verifying_key().to_bytes(),
+            x25519_pub: X25519Public::from(&StaticSecret::from(x)).to_bytes(),
+        };
+        let expected_id = expected.user_id();
+        let message = b"immutable public identity fixture";
+        let signature = identity.sign(message);
+        assert!(DeviceIdentity::verify(
+            &expected.ed25519_pub,
+            message,
+            &signature
+        ));
+        let other = StaticSecret::from([31; 32]);
+        let expected_shared = identity
+            .dh_secret
+            .diffie_hellman(&X25519Public::from(&other));
+        let actual_shared = other.diffie_hellman(&X25519Public::from(identity.public().x25519_pub));
+        assert!(expected_shared.as_bytes() == actual_shared.as_bytes());
+        let mut observed = Vec::new();
+        for count in [32, 128] {
+            PUBLIC_DERIVATIONS.with(|calls| calls.set(0));
+            for _ in 0..count {
+                assert!(identity.public() == expected);
+                assert!(identity.user_id() == expected_id);
+            }
+            observed.push(PUBLIC_DERIVATIONS.with(|calls| calls.get()));
+        }
+        assert_eq!(
+            observed,
+            [0, 0],
+            "immutable public and device-ID reads must not repeat X25519 derivation"
+        );
+    }
+
+    #[test]
+    fn generated_public_reads_reuse_constructor_derivation() {
+        assert_public_reads_are_derived_once(DeviceIdentity::generate());
+    }
+
+    #[test]
+    fn restored_public_reads_reuse_constructor_derivation() {
+        assert_public_reads_are_derived_once(DeviceIdentity::from_secret_bytes([7; 32], [8; 32]));
+    }
+
+    #[test]
+    fn public_clone_mutation_cannot_change_identity_or_its_signatures() {
+        for identity in [
+            DeviceIdentity::generate(),
+            DeviceIdentity::from_secret_bytes([7; 32], [8; 32]),
+        ] {
+            let original = identity.public();
+            let mut returned = original.clone();
+            returned.ed25519_pub[0] ^= 1;
+            returned.x25519_pub[0] ^= 1;
+            assert!(returned != original);
+            assert!(identity.public() == original);
+            let message = b"public clone isolation";
+            assert!(DeviceIdentity::verify(
+                &original.ed25519_pub,
+                message,
+                &identity.sign(message)
+            ));
+        }
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DeviceIdentity>();
     }
 }

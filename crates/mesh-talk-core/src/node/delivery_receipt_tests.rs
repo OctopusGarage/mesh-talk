@@ -772,3 +772,132 @@ fn valid_signature_does_not_override_canonical_parents_or_raw_logical_id() {
     assert!(!noncanonical.is_canonical());
     assert!(f.authenticate(&noncanonical).is_none());
 }
+
+#[test]
+fn receipt_retirement_scope_is_modern_completed_account_message_only() {
+    let f = Fixture::new(true);
+    let receipt = f.event_for(&f.payload());
+    let opened = open_receipt(
+        &f.alice,
+        &f.alice_account.account_id(),
+        &f.bob_proof,
+        &receipt,
+    )
+    .unwrap();
+    let mut completed = CompletedDelivery::from(&f.message);
+    assert!(
+        !opened.irrelevant_to_completed(&completed),
+        "a remaining original must still authenticate through its immutable destination"
+    );
+    completed.remaining.clear();
+    completed.recipient_account = None;
+    assert!(opened.irrelevant_to_completed(&completed));
+    let mut wrong = completed.clone();
+    wrong.logical_id = EventId::new([99; 32]);
+    assert!(!opened.irrelevant_to_completed(&wrong));
+    let mut wrong = completed.clone();
+    wrong.wall_clock += 1;
+    assert!(!opened.irrelevant_to_completed(&wrong));
+    let mut wrong = completed.clone();
+    wrong.conversation = dm_conversation_id(&f.alice.public(), &f.bob.public());
+    assert!(
+        !opened.irrelevant_to_completed(&wrong),
+        "legacy raw DM scope cannot use account scheduling irrelevance"
+    );
+}
+
+#[tokio::test]
+async fn authenticated_receipt_retirement_irrelevance_preserves_status_and_remaining() {
+    use crate::node::delivery_runtime_tests::ReceiptRetirementFixture;
+    for case in [
+        "unknown_original",
+        "still_remaining",
+        "unknown_logical",
+        "wrong_account",
+        "wrong_time",
+        "file_manifest",
+        "malformed",
+    ] {
+        let f = ReceiptRetirementFixture::new(true).await;
+        f.process(&f.receipt);
+        assert_eq!(
+            f.sender.delivery_status(f.logical),
+            Some(crate::node::DeliveryStatus::Delivered)
+        );
+        let before = f
+            .sender
+            .delivery
+            .lock()
+            .unwrap()
+            .completed_delivery(f.logical)
+            .unwrap()
+            .clone();
+        assert!(
+            !before.remaining.is_empty(),
+            "the fixture must retain genuine offline own-device fanout"
+        );
+        let mut payload = open_receipt(
+            &f.sender.identity,
+            &f.sender.account_id(),
+            &f.recipient_proof,
+            &f.receipt,
+        )
+        .unwrap()
+        .payload;
+        match case {
+            "unknown_original" => payload.original_event_id = EventId::new([91; 32]),
+            "still_remaining" => payload.original_event_id = before.remaining[0].event_id,
+            "unknown_logical" => payload.logical_id = EventId::new([92; 32]),
+            "wrong_account" => {
+                payload.sender_account = crate::identity::account::Account::generate().account_id()
+            }
+            "wrong_time" => payload.original_wall_clock += 1,
+            "file_manifest" => {
+                payload.original_kind = EventKind::FileManifest;
+                payload.original_event_id = payload.logical_id;
+            }
+            _ => {}
+        }
+        let wire = if case == "malformed" {
+            vec![0; 40]
+        } else {
+            payload.seal(&f.recipient.identity).unwrap()
+        };
+        let control = Event::new(
+            &f.recipient.identity,
+            f.receipt.conversation_id,
+            2,
+            vec![f.receipt.id],
+            2,
+            payload.confirmed_at,
+            EventKind::Message,
+            wire,
+        );
+        f.sender
+            .log
+            .lock()
+            .unwrap()
+            .append_durable(control.clone())
+            .unwrap();
+        f.process(&control);
+        let pending = f.pending();
+        assert_eq!(
+            !pending.contains(&control.id),
+            case == "unknown_original",
+            "{case}: only known-completed irrelevant controls may retire scheduling"
+        );
+        assert_eq!(
+            f.sender.delivery_status(f.logical),
+            Some(crate::node::DeliveryStatus::Delivered)
+        );
+        assert!(
+            f.sender
+                .delivery
+                .lock()
+                .unwrap()
+                .completed_delivery(f.logical)
+                == Some(&before),
+            "{case}: terminal scheduling must not grant status or retire remaining fanout"
+        );
+    }
+}

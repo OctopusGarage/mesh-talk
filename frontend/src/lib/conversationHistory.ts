@@ -5,7 +5,7 @@ import type { ChatMessage } from "@/store/chat";
 import { messageSegments } from "@/lib/mentions";
 import { isImage, isVideo } from "@/lib/mediaTypes";
 import { messageSticker } from "./messagePresentation";
-import type { CustomizationPack } from "./pack";
+import type { PackCatalogEntry } from "@/store/packs";
 
 export type HistoryCategory = "media" | "files" | "links" | "other";
 
@@ -33,7 +33,7 @@ export function categorize(m: ChatMessage): HistoryCategory {
 export function matchesQuery(
   m: ChatMessage,
   term: string,
-  packs: CustomizationPack[] = [],
+  packs: PackCatalogEntry[] = [],
 ): boolean {
   const q = term.trim().toLowerCase();
   if (!q) return true;

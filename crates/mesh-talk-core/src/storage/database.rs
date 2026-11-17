@@ -13,6 +13,17 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+mod observation;
+pub(crate) use observation::ReadinessReason;
+#[cfg(test)]
+pub(crate) use observation::with_work_observation_for_test;
+mod query_scratch;
+mod selection_work;
+mod work_clock;
+pub(crate) use work_clock::WorkStamp;
+mod page_observation;
+pub(crate) use page_observation::snapshot as observe_page_writes;
+
 // Part of the on-disk key format; prevents SQLCipher raw-key syntax bypass.
 const PASSPHRASE_DOMAIN: &str = "mesh-talk:profile-indexed-database:v1:";
 const APPLICATION_ID: i64 = 0x4d544442;
@@ -113,7 +124,7 @@ pub(crate) struct PhysicalStats {
     pub freelist_count: u64,
 }
 impl PhysicalStats {
-    fn read_on(c: &Connection) -> Result<Self, LogError> {
+    pub(crate) fn read_on(c: &Connection) -> Result<Self, LogError> {
         require_incremental_vacuum(c)?;
         let scalar = |name| -> Result<u64, LogError> {
             let value: i64 = c.pragma_query_value(None, name, |r| r.get(0))?;
@@ -172,10 +183,38 @@ impl PassiveCheckpointProgress {
     }
 }
 
+/// Runtime evidence for the profile's one leased writer connection. A MAIN
+/// no-op transaction can advance its file version without writing any page.
+/// This is not a multi-writer change detector or persistent revision.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MainWriteStamp {
+    version: u32,
+    writes: i32,
+}
+impl MainWriteStamp {
+    pub(crate) fn unchanged_since(&self, current: &Self) -> bool {
+        self.version == current.version || self.writes == current.writes
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct MaintenanceWake(tokio::sync::watch::Sender<u64>);
+impl MaintenanceWake {
+    pub(crate) fn notify(&self) {
+        self.0
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+}
+
 pub(crate) struct EncryptedDatabase {
-    connection: Mutex<Connection>,
+    connection: Mutex<work_clock::OwnedConnection>,
     path: PathBuf,
     faulted: AtomicBool,
+    source_changes: tokio::sync::watch::Sender<u64>,
+    maintenance_changes: tokio::sync::watch::Sender<u64>,
+    write_observer: Option<Mutex<observation::Observer>>,
+    #[cfg(test)]
+    successful_write_commits: std::sync::atomic::AtomicUsize,
 }
 impl EncryptedDatabase {
     /// An ambiguous commit or fatal driver failure requires a fresh owner.
@@ -295,12 +334,39 @@ impl EncryptedDatabase {
         }
         connection.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
         connection.pragma_update(None, "journal_size_limit", JOURNAL_BYTES)?;
+        query_scratch::initialize(&connection)?;
+        let write_observer = observation::from_env();
+        if write_observer.is_some() {
+            page_observation::install(&mut connection);
+        }
         Ok(Self {
-            connection: Mutex::new(connection),
+            connection: Mutex::new(work_clock::OwnedConnection::new(connection)),
             path,
             faulted: AtomicBool::new(false),
+            source_changes: tokio::sync::watch::channel(0).0,
+            maintenance_changes: tokio::sync::watch::channel(0).0,
+            write_observer,
+            #[cfg(test)]
+            successful_write_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
+    pub(crate) fn work_observation_enabled(&self) -> bool {
+        self.write_observer.is_some()
+    }
+    pub(crate) fn observe_readiness(&self, mask: u16) {
+        if let Some(observer) = &self.write_observer
+            && let Some(snapshot) = observation::record_readiness(observer, mask)
+        {
+            log::info!("{snapshot}");
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn readiness_counts_for_test(&self) -> Option<[u64; 16]> {
+        self.write_observer
+            .as_ref()
+            .map(|observer| observer.lock().unwrap().readiness_for_test())
+    }
+
     pub(crate) fn physical_stats(&self) -> Result<PhysicalStats, LogError> {
         self.read(PhysicalStats::read_on)
     }
@@ -443,6 +509,7 @@ impl EncryptedDatabase {
             ));
         }
         connection
+            .into_connection()
             .close()
             .map_err(|(_connection, error)| context("close encrypted connection", error))
     }
@@ -452,6 +519,19 @@ impl EncryptedDatabase {
         }
         result
     }
+    /// Coalesced invalidation only, never commit authority or a delivery cursor.
+    /// Restricted derived transactions cannot feed their own receive loop.
+    pub(crate) fn subscribe_source_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.source_changes.subscribe()
+    }
+    /// Retained local maintenance demand, separate from network source evidence.
+    pub(crate) fn maintenance_waker(&self) -> MaintenanceWake {
+        MaintenanceWake(self.maintenance_changes.clone())
+    }
+    pub(crate) fn subscribe_maintenance_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.maintenance_changes.subscribe()
+    }
+
     pub(crate) fn read<T>(
         &self,
         operation: impl FnOnce(&Connection) -> Result<T, LogError>,
@@ -463,10 +543,139 @@ impl EncryptedDatabase {
         if self.faulted.load(Ordering::Acquire) {
             return Err(invalid("database connection faulted; reopen required"));
         }
-        self.checked_operation(operation(&connection))
+        let before = connection.total_changes();
+        let result = self.checked_operation(operation(&connection));
+        let changed = connection.total_changes() != before;
+        drop(connection);
+        // Legacy read closures can perform auto-committed writes, even before
+        // returning an error. Conservatively invalidate rather than lose them.
+        if changed {
+            self.source_changes
+                .send_modify(|revision| *revision = revision.wrapping_add(1));
+        }
+        result
     }
+    /// Runtime-only MAIN file version, including this connection's writes but
+    /// excluding unrelated TEMP work. Compare only within this open owner and a
+    /// finite hint lifetime. Unsupported backends supply no unchanged evidence.
+    #[cfg(test)]
+    fn main_data_version(&self) -> Result<Option<u32>, LogError> {
+        self.read(Self::main_data_version_on)
+    }
+    fn main_data_version_on(connection: &Connection) -> Result<Option<u32>, LogError> {
+        let mut version = 0u32;
+        // SAFETY: read holds the connection mutex and its live handle;
+        // "main" is static/NUL-terminated and this opcode writes exactly
+        // one u32 to the valid aligned output pointer. No pointer escapes.
+        let result = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                connection.handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_DATA_VERSION,
+                (&mut version as *mut u32).cast(),
+            )
+        };
+        match result {
+            rusqlite::ffi::SQLITE_OK => Ok(Some(version)),
+            rusqlite::ffi::SQLITE_NOTFOUND => Ok(None),
+            code => Err(context(
+                "read main data version",
+                rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None),
+            )),
+        }
+    }
+
+    /// Raw page/version evidence is retained for storage regression tests.
+    #[cfg(test)]
+    pub(crate) fn main_write_stamp(&self) -> Result<Option<MainWriteStamp>, LogError> {
+        self.read(Self::main_write_stamp_on)
+    }
+    fn main_write_stamp_on(connection: &Connection) -> Result<Option<MainWriteStamp>, LogError> {
+        let Some(version) = Self::main_data_version_on(connection)? else {
+            return Ok(None);
+        };
+        let (mut writes, mut high) = (0, 0);
+        // SAFETY: the guarded handle stays live; this read-only opcode
+        // writes two aligned ints and does not reset either counter.
+        let result = unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                connection.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE,
+                &mut writes,
+                &mut high,
+                0,
+            )
+        };
+        match result {
+            rusqlite::ffi::SQLITE_OK => Ok(Some(MainWriteStamp { version, writes })),
+            rusqlite::ffi::SQLITE_ERROR | rusqlite::ffi::SQLITE_NOTFOUND => Ok(None),
+            code => Err(context(
+                "read pager write count",
+                rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None),
+            )),
+        }
+    }
+    /// Exact-owner runtime work evidence. Default writes, including writes made
+    /// through read closures, remain conservative invalidations. Unknown evidence
+    /// disables reuse; the normal database fault fence is never bypassed.
+    pub(crate) fn work_hint_stamp(&self) -> Result<Option<WorkStamp>, LogError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| invalid("database connection mutex poisoned"))?;
+        if self.faulted.load(Ordering::Acquire) {
+            return Err(invalid("database connection faulted; reopen required"));
+        }
+        let stamp = self.checked_operation(Self::main_write_stamp_on(&connection))?;
+        Ok(connection.observe_work(stamp))
+    }
+
+    /// Successful write transactions through this owner, excluding reads and rollbacks.
+    #[cfg(test)]
+    pub(crate) fn successful_write_commits(&self) -> usize {
+        self.successful_write_commits.load(Ordering::Relaxed)
+    }
+
+    #[track_caller]
     pub(crate) fn transaction<T>(
         &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_with_purpose(None, operation)
+    }
+    /// Disposable participant selection tables only. SQLite rejects writes to
+    /// every other table, including trigger/cached-statement writes. This is work
+    /// scheduling evidence, never permission, custody or a business commit token.
+    #[track_caller]
+    pub(crate) fn selection_work_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_with_purpose(Some(selection_work::Purpose::Selection), operation)
+    }
+    /// Optional protocol checkpoints/wrapper hints and their bounded usage only.
+    /// These do not change consent authority, source history or current custody.
+    /// Trigger side effects and writes outside these three tables are denied.
+    #[track_caller]
+    pub(crate) fn transport_hint_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_with_purpose(Some(selection_work::Purpose::TransportHint), operation)
+    }
+    /// Channel queue scheduling only; source, account and generation tables
+    /// remain ordinary conservative work fences. This never grants authority.
+    #[track_caller]
+    pub(crate) fn channel_scheduling_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_with_purpose(Some(selection_work::Purpose::ChannelScheduling), operation)
+    }
+    #[track_caller]
+    fn transaction_with_purpose<T>(
+        &self,
+        purpose: Option<selection_work::Purpose>,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
     ) -> Result<T, LogError> {
         let mut connection = self
@@ -476,14 +685,81 @@ impl EncryptedDatabase {
         if self.faulted.load(Ordering::Acquire) {
             return Err(invalid("database connection faulted; reopen required"));
         }
+        // Observe prior default writes before acknowledging this derived slice.
+        // Both observations and the transaction share this exclusive guard.
+        if purpose.is_some() {
+            let stamp = self.checked_operation(Self::main_write_stamp_on(&connection))?;
+            connection.observe_work(stamp);
+        }
+        let work_guard = purpose
+            .map(|purpose| selection_work::Guard::install(&connection, purpose))
+            .transpose()?;
         let tx = self.checked_operation(
             connection
                 .transaction()
                 .map_err(|e| context("begin database transaction", e)),
         )?;
+        let changes_before = tx.total_changes();
+        let observed_before = self.write_observer.as_ref().map(|_| tx.total_changes());
         match self.checked_operation(operation(&tx)) {
             Ok(value) => match tx.commit() {
-                Ok(()) => Ok(value),
+                Ok(()) => {
+                    if purpose.is_some() {
+                        let stamp =
+                            match self.checked_operation(Self::main_write_stamp_on(&connection)) {
+                                Ok(stamp) => stamp,
+                                Err(error) => {
+                                    connection.acknowledge_derived(None);
+                                    return Err(error);
+                                }
+                            };
+                        connection.acknowledge_derived(stamp);
+                    }
+                    // Restore unrestricted default authority BEFORE unlocking or logging.
+                    drop(work_guard);
+
+                    #[cfg(test)]
+                    if connection.total_changes() != changes_before {
+                        self.successful_write_commits
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    let changed_rows = observed_before
+                        .map(|before| connection.total_changes().saturating_sub(before));
+                    let source_changed =
+                        purpose.is_none() && connection.total_changes() != changes_before;
+                    // Observation/logging never retain the durable connection owner.
+                    drop(connection);
+                    if source_changed {
+                        self.source_changes
+                            .send_modify(|revision| *revision = revision.wrapping_add(1));
+                    }
+                    if let (Some(observer), Some(rows)) = (&self.write_observer, changed_rows)
+                        && let Some(snapshot) = observation::record(
+                            observer,
+                            observation::Site::caller(std::panic::Location::caller()),
+                            rows,
+                        )
+                    {
+                        // Existing native work-observation target remains visible
+                        // in release builds whose general log level is WARN.
+                        // This explicitly requested observer must remain usable
+                        // when release builds compile general INFO macros out.
+                        let metadata = log::Metadata::builder()
+                            .level(log::Level::Info)
+                            .target("mesh_talk_core::node::node")
+                            .build();
+                        let logger = log::logger();
+                        if logger.enabled(&metadata) {
+                            logger.log(
+                                &log::Record::builder()
+                                    .metadata(metadata)
+                                    .args(format_args!("{snapshot}"))
+                                    .build(),
+                            );
+                        }
+                    }
+                    Ok(value)
+                }
                 Err(error) => {
                     self.faulted.store(true, Ordering::Release);
                     Err(error.into())
@@ -687,6 +963,522 @@ mod tests {
         })
         .unwrap()
     }
+    fn selection_fixture(directory: &tempfile::TempDir) -> EncryptedDatabase {
+        let db = create(&directory.path().join("profile.db"));
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE participant_sync_progress(view INTEGER PRIMARY KEY,context TEXT NOT NULL)")?;
+            Ok(())
+        }).unwrap();
+        db
+    }
+    #[test]
+    fn work_hint_stamp_excludes_only_guarded_selection_work_and_catches_prior_default_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        db.transaction(|c| {
+            c.execute_batch("CREATE TEMP TABLE selection_observations(n INTEGER); INSERT INTO selection_observations VALUES(0); CREATE TEMP TRIGGER observe_selection_work AFTER INSERT ON main.participant_sync_progress BEGIN UPDATE selection_observations SET n=n+1; END")?;
+            Ok(())
+        }).unwrap();
+        let before = db.work_hint_stamp().unwrap().unwrap();
+        let raw = db.main_write_stamp().unwrap().unwrap();
+        db.selection_work_transaction(|c| {
+            c.execute(
+                "INSERT INTO participant_sync_progress VALUES(1,'first')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            !raw.unchanged_since(&db.main_write_stamp().unwrap().unwrap()),
+            "fixture must really write MAIN pages"
+        );
+        assert_eq!(db.work_hint_stamp().unwrap(), Some(before));
+        assert_eq!(
+            db.read(|c| Ok(
+                c.query_row("SELECT n FROM selection_observations", [], |r| r
+                    .get::<_, i64>(0))?
+            ))
+            .unwrap(),
+            1,
+            "TEMP-only observation must remain available inside guarded work"
+        );
+        // A default mutation must be observed before acknowledging later query
+        // work, including legacy mutation paths using a read closure.
+        db.read(|c| {
+            c.execute("UPDATE messages SET body='changed'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.selection_work_transaction(|c| {
+            c.execute("UPDATE participant_sync_progress SET context='second'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_ne!(db.work_hint_stamp().unwrap(), Some(before));
+        assert_eq!(body(&db), "changed");
+        let other = tempfile::tempdir().unwrap();
+        assert_ne!(
+            selection_fixture(&other).work_hint_stamp().unwrap(),
+            db.work_hint_stamp().unwrap(),
+            "owner lifetimes cannot reuse work evidence"
+        );
+        db.faulted.store(true, Ordering::Release);
+        assert!(db.work_hint_stamp().is_err());
+    }
+    #[test]
+    fn transport_hint_work_has_a_closed_table_boundary_and_preserves_authority_fences() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE opaque_checkpoints(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE opaque_wrapper_ids(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE opaque_checkpoint_usage(bucket TEXT PRIMARY KEY,records INTEGER,bytes INTEGER)")?;
+            Ok(())
+        }).unwrap();
+        let before = db.work_hint_stamp().unwrap().unwrap();
+        let raw = db.main_write_stamp().unwrap().unwrap();
+        db.transport_hint_transaction(|c| {
+            c.execute(
+                "INSERT INTO opaque_checkpoints VALUES('mailbox','cursor')",
+                [],
+            )?;
+            c.execute("INSERT INTO opaque_wrapper_ids VALUES('inner','outer')", [])?;
+            c.execute(
+                "INSERT INTO opaque_checkpoint_usage VALUES('checkpoint',1,12)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!raw.unchanged_since(&db.main_write_stamp().unwrap().unwrap()));
+        assert_eq!(db.work_hint_stamp().unwrap(), Some(before));
+        // Neither closed purpose may acquire the other's table authority.
+        assert!(
+            db.selection_work_transaction(|c| {
+                c.execute("DELETE FROM opaque_checkpoints", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(
+            db.transport_hint_transaction(|c| {
+                c.execute(
+                    "INSERT INTO participant_sync_progress VALUES(1,'forbidden')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .is_err()
+        );
+        // Cached SQL and trigger side effects retain the business-table fence.
+        db.read(|c| {
+            c.prepare_cached("UPDATE messages SET body=?1")?
+                .execute([SECRET])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            db.transport_hint_transaction(|c| {
+                c.execute("UPDATE opaque_checkpoints SET value='uncommitted'", [])?;
+                c.prepare_cached("UPDATE messages SET body=?1")?
+                    .execute(["forbidden"])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        assert_eq!(
+            db.read(|c| Ok(c
+                .query_row("SELECT value FROM opaque_checkpoints", [], |r| r
+                    .get::<_, String>(0))?))
+                .unwrap(),
+            "cursor"
+        );
+        db.transaction(|c| {
+            c.execute_batch("CREATE TRIGGER hint_cannot_change_authority AFTER UPDATE ON opaque_checkpoints BEGIN UPDATE messages SET body='triggered'; END")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            db.transport_hint_transaction(|c| {
+                c.execute("UPDATE opaque_checkpoints SET value='forbidden'", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        let prior = db.work_hint_stamp().unwrap().unwrap();
+        db.transaction(|c| {
+            c.execute("UPDATE messages SET body='real change'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.transport_hint_transaction(|c| {
+            c.execute("DELETE FROM opaque_wrapper_ids", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_ne!(db.work_hint_stamp().unwrap(), Some(prior));
+        assert_eq!(body(&db), "real change");
+    }
+    #[test]
+    fn channel_scheduling_guard_preserves_business_owner_and_cross_purpose_fences() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE channel_runtime_work(channel TEXT PRIMARY KEY,opened INTEGER,reopening INTEGER); CREATE TABLE channel_runtime_owner(value INTEGER); INSERT INTO channel_runtime_owner VALUES(1)")?;
+            Ok(())
+        }).unwrap();
+        let before = db.work_hint_stamp().unwrap();
+        db.channel_scheduling_transaction(|c| {
+            c.execute("INSERT INTO channel_runtime_work VALUES('a',1,0)", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.work_hint_stamp().unwrap(), before);
+        for sql in [
+            "UPDATE channel_runtime_owner SET value=2",
+            "INSERT INTO participant_sync_progress VALUES(1,'denied')",
+            "CREATE TABLE forbidden(value INTEGER)",
+        ] {
+            assert!(
+                db.channel_scheduling_transaction(|c| {
+                    c.execute_batch(sql)?;
+                    Ok(())
+                })
+                .is_err()
+            );
+        }
+        assert!(
+            db.selection_work_transaction(|c| {
+                c.execute("DELETE FROM channel_runtime_work", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(
+            db.transport_hint_transaction(|c| {
+                c.execute("DELETE FROM channel_runtime_work", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        db.read(|c| {
+            c.prepare_cached("UPDATE messages SET body=?1")?
+                .execute([SECRET])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            db.channel_scheduling_transaction(|c| {
+                c.execute("DELETE FROM channel_runtime_work", [])?;
+                c.prepare_cached("UPDATE messages SET body=?1")?
+                    .execute(["denied"])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        assert_eq!(
+            db.read(|c| Ok(
+                c.query_row("SELECT count(*) FROM channel_runtime_work", [], |r| r
+                    .get::<_, i64>(0))?
+            ))
+            .unwrap(),
+            1
+        );
+        db.transaction(|c| { c.execute_batch("CREATE TRIGGER scheduling_cannot_mutate_owner AFTER DELETE ON channel_runtime_work BEGIN UPDATE channel_runtime_owner SET value=2; END")?; Ok(()) }).unwrap();
+        assert!(
+            db.channel_scheduling_transaction(|c| {
+                c.execute("DELETE FROM channel_runtime_work", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        let prior = db.work_hint_stamp().unwrap();
+        db.transaction(|c| {
+            c.execute("UPDATE channel_runtime_owner SET value=3", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.channel_scheduling_transaction(|_| Ok(())).unwrap();
+        assert_ne!(db.work_hint_stamp().unwrap(), prior);
+    }
+
+    #[test]
+    fn selection_work_guard_rejects_cached_business_writes_and_trigger_side_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        // Warm the exact SQL before installing the guard: statement caches must
+        // not bypass table ownership when SQLite reparses under authorization.
+        db.read(|c| {
+            c.prepare_cached("UPDATE messages SET body=?1")?
+                .execute([SECRET])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            db.selection_work_transaction(|c| {
+                c.execute(
+                    "INSERT INTO participant_sync_progress VALUES(1,'uncommitted')",
+                    [],
+                )?;
+                c.prepare_cached("UPDATE messages SET body=?1")?
+                    .execute(["forbidden"])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        assert_eq!(
+            db.read(|c| Ok(c.query_row(
+                "SELECT count(*) FROM participant_sync_progress",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+            0,
+            "the whole mixed transaction must roll back"
+        );
+        db.transaction(|c| {
+            c.execute_batch("INSERT INTO participant_sync_progress VALUES(1,'original'); CREATE TRIGGER query_cannot_change_authority AFTER UPDATE ON participant_sync_progress BEGIN UPDATE messages SET body='triggered'; END")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            db.selection_work_transaction(|c| {
+                c.execute(
+                    "UPDATE participant_sync_progress SET context='forbidden'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        // Ordinary business authority is restored after both failures.
+        db.transaction(|c| {
+            c.execute("UPDATE participant_sync_progress SET context='allowed'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(body(&db), "triggered");
+        assert!(db.work_hint_stamp().is_ok());
+    }
+    #[test]
+    fn failed_selection_slice_keeps_rollback_and_restores_default_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        assert!(matches!(
+            db.selection_work_transaction::<()>(|c| {
+                c.execute(
+                    "INSERT INTO participant_sync_progress VALUES(1,'uncommitted')",
+                    [],
+                )?;
+                Err(LogError::InvalidPageBudget)
+            }),
+            Err(LogError::InvalidPageBudget)
+        ));
+        assert_eq!(
+            db.read(|c| Ok(c.query_row(
+                "SELECT count(*) FROM participant_sync_progress",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+            0
+        );
+        db.transaction(|c| {
+            c.execute("UPDATE messages SET body='after rollback'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(body(&db), "after rollback");
+    }
+
+    #[test]
+    fn main_data_version_ignores_temp_and_reads_but_detects_owner_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = create(&directory.path().join("profile.db"));
+        let before = db.main_data_version().unwrap().unwrap();
+        let stamp = db.main_write_stamp().unwrap().unwrap();
+        let commits = db.successful_write_commits();
+        assert_eq!(body(&db), SECRET);
+        assert_eq!(db.main_data_version().unwrap(), Some(before));
+        assert_eq!(db.successful_write_commits(), commits);
+        db.transaction(|connection| {
+            connection.execute_batch("CREATE TEMP TABLE version_probe(value INTEGER); INSERT INTO version_probe VALUES(1),(2),(3)")?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(db.main_data_version().unwrap(), Some(before));
+        assert!(stamp.unchanged_since(&db.main_write_stamp().unwrap().unwrap()));
+        for sql in [
+            "UPDATE messages SET body=body WHERE 0",
+            "UPDATE version_probe SET value=value+1; UPDATE messages SET body=body WHERE 0",
+        ] {
+            db.transaction(|connection| {
+                connection.execute_batch(sql)?;
+                Ok(())
+            })
+            .unwrap();
+            assert!(
+                stamp.unchanged_since(&db.main_write_stamp().unwrap().unwrap()),
+                "no-op MAIN and unrelated TEMP work must not invalidate unchanged data: {sql}"
+            );
+        }
+        assert_ne!(
+            db.main_data_version().unwrap(),
+            Some(before),
+            "raw MAIN versions advance even without changed pages"
+        );
+        // An indexed same-value UPDATE can really dirty index pages. Keep
+        // conservative invalidation rather than treating SQL text as no-op evidence.
+        db.transaction(|connection| {
+            connection.execute("UPDATE messages SET body=body", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!stamp.unchanged_since(&db.main_write_stamp().unwrap().unwrap()));
+        let stamp = db.main_write_stamp().unwrap().unwrap();
+        db.transaction(|connection| {
+            connection.execute("UPDATE messages SET body='changed'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_ne!(db.main_data_version().unwrap(), Some(before));
+        assert_eq!(body(&db), "changed");
+        assert!(!stamp.unchanged_since(&db.main_write_stamp().unwrap().unwrap()));
+        db.faulted.store(true, Ordering::Release);
+        assert!(
+            db.main_data_version().is_err() && db.main_write_stamp().is_err(),
+            "a hint read cannot bypass the database fault fence"
+        );
+    }
+    #[test]
+    fn source_notifications_exclude_reads_rollbacks_and_derived_work() {
+        let root = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&root);
+        let mut changes = db.subscribe_source_changes();
+        db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?))
+            .unwrap();
+        db.transaction(|_| Ok(())).unwrap();
+        let failed: Result<(), LogError> = db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES ('rolled back')", [])?;
+            Err(LogError::StaleCursor)
+        });
+        assert!(failed.is_err());
+        db.selection_work_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO participant_sync_progress VALUES (1,'selection')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!changes.has_changed().unwrap());
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES ('committed')", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(changes.has_changed().unwrap());
+        let _ = *changes.borrow_and_update();
+        db.read(|c| {
+            c.execute("UPDATE messages SET body='read closure write'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(changes.has_changed().unwrap());
+    }
+
+    #[test]
+    fn write_commit_observation_excludes_reads_and_rollbacks() {
+        let root = tempfile::tempdir().unwrap();
+        let db = create(&root.path().join("profile.db"));
+        let before = db.successful_write_commits();
+        db.transaction(|tx| {
+            let _: i64 = tx.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?;
+            Ok(())
+        })
+        .unwrap();
+        let failed: Result<(), LogError> = db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES ('rolled back')", [])?;
+            Err(LogError::StaleCursor)
+        });
+        assert!(matches!(failed, Err(LogError::StaleCursor)));
+        assert_eq!(db.successful_write_commits(), before);
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES ('one')", [])?;
+            tx.execute("INSERT INTO messages VALUES ('two')", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.successful_write_commits(), before + 1);
+    }
+
+    #[test]
+    fn opt_in_write_observation_excludes_reads_rollbacks_and_private_values() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = create(&root.path().join("profile.db"));
+        db.write_observer = Some(Mutex::new(observation::Observer::new(
+            std::time::Instant::now(),
+        )));
+        db.transaction(|tx| {
+            let _: i64 = tx.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?;
+            Ok(())
+        })
+        .unwrap();
+        let failed: Result<(), LogError> = db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES (?1)", [SECRET])?;
+            Err(LogError::StaleCursor)
+        });
+        assert!(matches!(failed, Err(LogError::StaleCursor)));
+        assert_eq!(
+            db.write_observer.as_ref().unwrap().lock().unwrap().totals(),
+            (0, 0)
+        );
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES (?1)", [SECRET])?;
+            tx.execute("INSERT INTO messages VALUES (?1)", [PASSWORD])?;
+            Ok(())
+        })
+        .unwrap();
+        let mut observed = db.write_observer.as_ref().unwrap().lock().unwrap();
+        assert_eq!(observed.totals(), (1, 2));
+        let output = observed.snapshot_for_test().to_string();
+        assert!(output.contains("database.rs:"));
+        assert!(!output.contains(SECRET));
+        assert!(!output.contains(PASSWORD));
+    }
+
+    #[test]
+    fn contended_observation_does_not_block_a_durable_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = create(&root.path().join("profile.db"));
+        db.write_observer = Some(Mutex::new(observation::Observer::new(
+            std::time::Instant::now(),
+        )));
+        let db = std::sync::Arc::new(db);
+        let observer = db.write_observer.as_ref().unwrap().lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = db.clone();
+        let task = std::thread::spawn(move || {
+            let result = worker.transaction(|tx| {
+                tx.execute("INSERT INTO messages VALUES ('new')", [])?;
+                Ok(())
+            });
+            send.send(result.is_ok()).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(1));
+        drop(observer);
+        task.join().unwrap();
+        assert_eq!(result, Ok(true));
+        assert_eq!(
+            db.read(|c| Ok(
+                c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?
+            ))
+            .unwrap(),
+            2
+        );
+    }
+
     #[test]
     fn fresh_and_warm_database_require_incremental_vacuum() {
         let root = tempfile::tempdir().unwrap();
@@ -1209,6 +2001,75 @@ mod tests {
             SECRET
         );
     }
+    #[test]
+    fn disposable_selection_scratch_has_file_backing_and_bounded_page_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = create(&directory.path().join("profile.db"));
+        db.read(|connection| {
+            let temporary: i64 =
+                connection.pragma_query_value(None, "temp_store", |row| row.get(0))?;
+            assert_eq!(
+                temporary, 2,
+                "opaque session hints and other TEMP owners must remain memory-only"
+            );
+            let main: String = connection.query_row(
+                "SELECT file FROM pragma_database_list WHERE name='main'",
+                [],
+                |row| row.get(0),
+            )?;
+            let scratch: String = connection.query_row(
+                "SELECT file FROM pragma_database_list WHERE name='participant_work'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                scratch, "",
+                "the native temporary pager has an unnamed attached file"
+            );
+            assert!(
+                !main.is_empty(),
+                "durable MAIN must retain its original named backing"
+            );
+            let cache: i64 =
+                connection.query_row("PRAGMA participant_work.cache_size", [], |row| row.get(0))?;
+            assert_eq!(
+                cache, -8192,
+                "attached scratch page cache has an explicit 8 MiB target"
+            );
+            connection.execute_batch("PRAGMA participant_work.mmap_size=0")?;
+            let mut mmap = connection.prepare("PRAGMA participant_work.mmap_size")?;
+            let mut rows = mmap.query([])?;
+            if let Some(row) = rows.next()? {
+                assert_eq!(
+                    row.get::<_, i64>(0)?,
+                    0,
+                    "an opened scratch pager must not use mmap"
+                );
+            }
+            drop(rows);
+            drop(mmap);
+            let journal: String =
+                connection
+                    .query_row("PRAGMA participant_work.journal_mode", [], |row| row.get(0))?;
+            assert_eq!(
+                journal, "memory",
+                "scratch slices need real rollback; journal OFF is not permitted"
+            );
+            let scratch_sync: i64 =
+                connection
+                    .query_row("PRAGMA participant_work.synchronous", [], |row| row.get(0))?;
+            assert_eq!(
+                scratch_sync, 0,
+                "discardable scratch must not force durable syncs"
+            );
+            let durability: i64 =
+                connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+            assert_eq!(durability, 2, "business MAIN durability must remain FULL");
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn connection_has_explicit_operational_budgets() {
         let dir = tempfile::tempdir().unwrap();

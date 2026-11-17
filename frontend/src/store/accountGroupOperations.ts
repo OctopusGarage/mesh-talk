@@ -161,9 +161,12 @@ function sameTerminal(
 
 /** Shared IPC coordination only. The aggregate store owns tickets, message bodies
  * and effects; core owns admission, permission, cancellation and durable recovery. */
+const PENDING_OPERATION_PAGE_SIZE = 64;
+
 export function createGroupOperationCoordinator(
   context: GroupOperationContext,
 ) {
+  const observationListeners = new Set<() => void>();
   let observation = 0;
   const invoking = new Set<string>();
   const invocationKey = (lease: GroupOperationLease, id: string) =>
@@ -171,6 +174,8 @@ export function createGroupOperationCoordinator(
   let scan = {
     scope: "",
     busy: false,
+    failed: false,
+    dirty: false,
     knownAfter: "",
     after: undefined as string | undefined,
   };
@@ -389,6 +394,28 @@ export function createGroupOperationCoordinator(
   }
 
   return {
+    needsFastObservation() {
+      const lease = context.capture();
+      if (!lease?.current()) return false;
+      return (
+        (scan.scope === lease.scope &&
+          (scan.after !== undefined || scan.failed || scan.dirty)) ||
+        context
+          .tickets()
+          .some(
+            (ticket) =>
+              ticket.account_id === lease.accountId &&
+              !ticket.admissionFailure &&
+              !isTerminal(ticket.status),
+          )
+      );
+    },
+    subscribeObservation(listener: () => void) {
+      observationListeners.add(listener);
+      return () => {
+        observationListeners.delete(listener);
+      };
+    },
     isInvoking(accountId: string, id: string): boolean {
       return invoking.has(`${accountId}:${id}`);
     },
@@ -490,7 +517,7 @@ export function createGroupOperationCoordinator(
       if (!lease.current()) return { kind: "stale" };
       return requestCancellation(lease, id);
     },
-    async refresh(): Promise<void> {
+    async refresh(invalidated = true): Promise<void> {
       const capturedLease = context.capture();
       if (!capturedLease?.current()) return;
       const lease: GroupOperationLease = capturedLease;
@@ -498,12 +525,19 @@ export function createGroupOperationCoordinator(
         scan = {
           scope: lease.scope,
           busy: false,
+          failed: false,
+          dirty: false,
           knownAfter: "",
           after: undefined,
         };
       const run = scan;
+      if (invalidated) run.dirty = true;
       if (run.busy) return;
       run.busy = true;
+      run.failed = false;
+      // A continuation cannot acknowledge an invalidation for an earlier ID.
+      // Finish its bounded walk, then recheck the head before declaring quiet.
+      if (run.after === undefined) run.dirty = false;
       const known = context
         .tickets()
         .filter(
@@ -519,17 +553,19 @@ export function createGroupOperationCoordinator(
       ].slice(0, 8);
       const pageToken = ++observation;
       async function pendingPage() {
+        const pageStart = run.after;
+        let deferred = false;
         try {
           const rows = await readWithDeadline(() =>
             context.commands.list(lease.owner, lease.accountId, {
               pendingOnly: true,
               after: run.after,
-              limit: 100,
+              limit: PENDING_OPERATION_PAGE_SIZE,
             }),
           );
           if (!lease.current()) return;
           if (
-            rows.length > 100 ||
+            rows.length > PENDING_OPERATION_PAGE_SIZE ||
             rows.some(
               (row, index) =>
                 row.account_id !== lease.accountId ||
@@ -538,13 +574,21 @@ export function createGroupOperationCoordinator(
             )
           ) {
             context.report("invalid_response");
+            run.failed = true;
             run.after = undefined;
             return;
           }
           for (const status of rows) {
             if (!lease.current()) return;
             const existing = context.get(status.id);
-            if (existing && existing.account_id !== lease.accountId) {
+            if (
+              existing &&
+              (existing.account_id !== lease.accountId ||
+                existing.group !== status.group ||
+                existing.kind !== status.kind)
+            ) {
+              run.failed = true;
+              deferred = true;
               context.report("invalid_response");
               continue;
             }
@@ -559,15 +603,26 @@ export function createGroupOperationCoordinator(
                 observation: 0,
               })
             ) {
+              // The native journal still has work even when local presentation
+              // capacity cannot reserve its ticket yet.
+              run.failed = true;
+              deferred = true;
               context.report("capacity");
               continue;
             }
             apply(lease, status.id, status, pageToken);
           }
-          run.after =
-            rows.length === 100 ? rows[rows.length - 1].id : undefined;
+          // Do not advance past work local presentation could not retain.
+          run.after = deferred
+            ? pageStart
+            : rows.length === PENDING_OPERATION_PAGE_SIZE
+              ? rows[rows.length - 1].id
+              : undefined;
         } catch {
-          if (lease.current()) context.report("observation_failed");
+          if (lease.current()) {
+            run.failed = true;
+            context.report("observation_failed");
+          }
         }
       }
       async function knownStatuses() {
@@ -602,6 +657,7 @@ export function createGroupOperationCoordinator(
                   );
               } catch {
                 failed = true;
+                run.failed = true;
                 if (lease.current()) context.report("observation_failed");
               }
             }),
@@ -612,6 +668,7 @@ export function createGroupOperationCoordinator(
         await Promise.all([pendingPage(), knownStatuses()]);
       } finally {
         run.busy = false;
+        for (const listener of observationListeners) listener();
       }
     },
   };

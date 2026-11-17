@@ -508,3 +508,44 @@ it("does not admit text or protection edits before initial draft loading complet
   expect(store.getState().texts["account:a"]).toBe("saved");
   expect(store.getState().protections).toEqual({});
 });
+
+it("does not reload draft documents for qualified sync-status invalidations", async () => {
+  const {
+    notifySyncInvalidation,
+    subscribeDocumentInvalidation,
+    subscribeSyncInvalidation,
+  } = await import("@/lib/syncInvalidation");
+  const { api, store } = fixture();
+  const legacy = vi.fn();
+  const stopLegacy = subscribeSyncInvalidation(legacy);
+  await store.getState().start("alice", 1, "account-one");
+  const stop = subscribeDocumentInvalidation("alice", () => {
+    void store.getState().refresh();
+  });
+  try {
+    api.load.mockClear();
+    notifySyncInvalidation({
+      owner: "alice",
+      kind: "state",
+      scope: "sync_status",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.load).not.toHaveBeenCalled();
+    expect(legacy).toHaveBeenCalledOnce();
+    expect(legacy).toHaveBeenCalledWith({
+      owner: "alice",
+      kind: "state",
+      scope: "sync_status",
+    });
+    for (const scope of ["documents", "future-unknown", undefined]) {
+      api.load.mockClear();
+      notifySyncInvalidation({ owner: "alice", kind: "state", scope } as never);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.load).toHaveBeenCalledOnce();
+    }
+  } finally {
+    stop();
+    stopLegacy();
+    store.getState().reset();
+  }
+});

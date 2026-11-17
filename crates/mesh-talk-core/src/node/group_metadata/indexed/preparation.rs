@@ -84,7 +84,14 @@ impl PreparationCache {
                 let mut selected = self.active.remove(position);
                 let verdict = selected.step(index, budget)?;
                 if let Some(verdict) = verdict {
+                    let rank = selected.rank;
                     selected.commit(index, verdict)?;
+                    // The commit checked the captured source and durably
+                    // advanced this final selected rank. Report completion in
+                    // its paid turn even when that turn exhausted its budget.
+                    if rank >= index.stamp.metadata {
+                        return Ok(true);
+                    }
                 } else {
                     self.active.push(selected);
                 }
@@ -147,6 +154,9 @@ impl PreparationCache {
                     )?;
                     Ok(())
                 })?;
+                if rank >= index.stamp.metadata {
+                    return Ok(true);
+                }
             }
         }
     }
@@ -365,5 +375,208 @@ impl SelectedControl {
                 params![self.source.channel.as_bytes().as_slice(), self.rank])?;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod owner_boundary_tests {
+    use super::*;
+    #[tokio::test]
+    async fn final_rejected_metadata_rank_is_ready_in_its_exhausted_paid_turn() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+            node::test_support::node_with_files,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("metadata boundary", Vec::new())
+            .await
+            .unwrap();
+        node.append_event(channel, EventKind::ChannelMetadata, vec![0])
+            .unwrap();
+        node.process_channel(channel);
+        for _ in 0..128 {
+            node.retry_channel_plaintext();
+        }
+        let log = node.log.lock().unwrap();
+        let repository = log.repository().unwrap();
+        let mut opening = Budget::default();
+        let Progress::Ready(index) = Index::open(&node, repository, channel, &mut opening).unwrap()
+        else {
+            panic!("small fixture index opens in one bounded turn");
+        };
+        let mut budget = Budget::default();
+        budget.limit_rows_for_test(2);
+        let ready = index.advance(&mut budget).unwrap();
+        assert!(
+            budget.exhausted(),
+            "fixture consumes its exact final row allowance"
+        );
+        assert!(
+            ready,
+            "final durable rejected rank is ready before a zero-work followup"
+        );
+        index.check_source().unwrap();
+    }
+    #[tokio::test]
+    async fn final_selected_metadata_rank_is_ready_in_its_exhausted_paid_turn() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+            node::test_support::node_with_files,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("selected metadata boundary", Vec::new())
+            .await
+            .unwrap();
+        node.set_channel_announcement_if(channel, Some("current publication"), None, |commit| {
+            commit()
+        })
+        .await
+        .unwrap();
+        node.process_channel(channel);
+        for _ in 0..128 {
+            node.retry_channel_plaintext();
+        }
+        let publication = node
+            .metadata_events(channel)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == EventKind::ChannelMetadata)
+            .unwrap();
+        let mut changes = node.subscribe_channel_changes();
+        let log = node.log.lock().unwrap();
+        let repository = log.repository().unwrap();
+        let mut opening = Budget::default();
+        let Progress::Ready(index) = Index::open(&node, repository, channel, &mut opening).unwrap()
+        else {
+            panic!("small fixture index opens in one bounded turn");
+        };
+        let header = repository.header(&publication.id).unwrap().unwrap();
+        let control = decode(&publication).unwrap();
+        let mut selected = SelectedControl::start(&index, index.stamp.metadata, header, control)
+            .unwrap()
+            .unwrap();
+        for _ in 0..128 {
+            if matches!(&selected.phase, Phase::Canonical(_)) {
+                break;
+            }
+            assert!(
+                selected
+                    .step(&index, &mut Budget::default())
+                    .unwrap()
+                    .is_none(),
+                "real owner authorization reaches canonical phase"
+            );
+        }
+        assert!(matches!(&selected.phase, Phase::Canonical(_)));
+        node.group_metadata_cache
+            .lock()
+            .unwrap()
+            .preparations
+            .active
+            .push(selected);
+        let mut budget = Budget::default();
+        budget.limit_rows_for_test(2);
+        assert!(
+            index.advance(&mut budget).unwrap(),
+            "the real final authorized commit completes in its paid turn"
+        );
+        assert!(budget.exhausted());
+        assert_eq!(
+            changes.try_recv().unwrap(),
+            channel,
+            "actual durable not-ready to ready transition publishes once"
+        );
+        assert!(index.advance(&mut Budget::default()).unwrap());
+        assert!(
+            changes.try_recv().is_err(),
+            "an unchanged ready index emits no producer notification"
+        );
+        assert!(
+            !index
+                .publications(Field::Announcement, 1)
+                .unwrap()
+                .is_empty(),
+            "actual current authorized publication was selected"
+        );
+        index.check_source().unwrap();
+    }
+    #[tokio::test]
+    async fn empty_metadata_index_initialization_publishes_ready_once() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+            node::test_support::node_with_files,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("empty ready boundary", Vec::new())
+            .await
+            .unwrap();
+        for _ in 0..128 {
+            node.retry_channel_plaintext();
+        }
+        let mut changes = node.subscribe_channel_changes();
+        let log = node.log.lock().unwrap();
+        let repository = log.repository().unwrap();
+        let Progress::Ready(index) =
+            Index::open(&node, repository, channel, &mut Budget::default()).unwrap()
+        else {
+            panic!("small empty index opens");
+        };
+        assert!(index.stamp.metadata < 0);
+        assert_eq!(
+            changes.try_recv().unwrap(),
+            channel,
+            "new empty initialization publishes readiness"
+        );
+        assert!(index.advance(&mut Budget::default()).unwrap());
+        assert!(matches!(
+            Index::open(&node, repository, channel, &mut Budget::default()).unwrap(),
+            Progress::Ready(_)
+        ));
+        assert!(
+            changes.try_recv().is_err(),
+            "unchanged empty index remains quiet"
+        );
     }
 }

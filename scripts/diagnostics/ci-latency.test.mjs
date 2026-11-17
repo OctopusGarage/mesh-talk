@@ -15,6 +15,47 @@ const step = (source, name) => source.split(/^      - /m).find(value => value.st
 
 const workflowJob = (source, id) => source.split(`  ${id}:\n`)[1]?.split(/^  [a-z][\w-]*:\n/m)[0];
 
+test("nextest security minimum and every CI installer follow the version owner", () => {
+  // GHSA-vc25-qg58-w57c: portable recording parsing is patched in 0.9.150.
+  const minimum = [0, 9, 150];
+  const current = versions.nextest.split(".").map(Number);
+  assert.equal(current.length, minimum.length);
+  assert(current.every(Number.isSafeInteger));
+  const changed = current.findIndex((part, index) => part !== minimum[index]);
+  assert(
+    changed < 0 || current[changed] > minimum[changed],
+    "nextest must include the recording parser security fix",
+  );
+  const config = readFileSync(
+    new URL("../../.config/nextest.toml", import.meta.url),
+    "utf8",
+  );
+  assert.equal(
+    config.match(/^nextest-version = "([^"]+)"$/mu)?.[1],
+    versions.nextest,
+  );
+  for (const file of ["ci.yml", "windows-workspace.yml", "linux-workspace-consumer.yml", "sanitizers.yml", "mutants.yml"]) {
+    const source = read(file);
+    const pins = [...source.matchAll(/cargo-nextest@([0-9.]+)/gu)].map(
+      (match) => match[1],
+    );
+    assert(pins.length > 0, `${file} must install the owned nextest version`);
+    assert(
+      pins.every((pin) => pin === versions.nextest),
+      `${file} nextest installer drift`,
+    );
+    const installers = source.split(/^      - /mu).filter((block) =>
+      /uses: taiki-e\/install-action@/u.test(block) && /tool: .*cargo-nextest@/u.test(block));
+    assert.equal(installers.length, pins.length, `${file} must retain managed prebuilt installers`);
+    for (const installer of installers) {
+      assert.match(installer, /uses: taiki-e\/install-action@v2\.90\.3\b/u,
+        `${file} installer must support the owned tool version`);
+      assert.match(installer, /^          fallback: none$/mu,
+        `${file} must not compile host tools under test instrumentation`);
+    }
+  }
+});
+
 test("documentation scope retains every required matrix identity and guards expensive steps", () => {
   const required = {
     "ci.yml": ["checks", "checks-linux", "checks-macos"],
@@ -663,7 +704,9 @@ test("macOS archives start independently and retain the complete native Host own
   const fixture = step(native, "Verify coverage accumulation with the actual tool");
   for (const file of ["backend-coverage", "native-host-coverage", "rust-profile", "linux-crash-diagnostics", "macos-remaining-cli"]) assert.ok(fixture.includes(`scripts/ci/${file}.test.mjs`), file);
   assert.match(fixture, /--test-concurrency=1/u);
-  assert.ok(native.indexOf("tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150") < native.indexOf("scripts/ci/macos-remaining-cli.test.mjs"));
+  const toolInstall = native.indexOf(`tool: cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`);
+  assert.ok(toolInstall >= 0, "native coverage fixture requires the canonical pinned tools");
+  assert.ok(toolInstall < native.indexOf("scripts/ci/macos-remaining-cli.test.mjs"));
   assert.equal((ci.match(/scripts\/ci\/macos-remaining-cli.test.mjs/gu) ?? []).length, 1);
   assert.match(consumers, /^    needs: \[scope, macos-remaining-build\]$/mu);
   assert.match(consumers, /fail-fast: false[\s\S]*shard: \[1, 2\]/u);
@@ -856,28 +899,29 @@ test("scoped acceptance revalidates exact source and executes real npm/browser o
   assert.doesNotMatch(source, /pull_request_target|secrets: inherit|continue-on-error/u);
 });
 
-test("auto-merge admits only known npm minor/patch metadata", async (t) => {
-  const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
-  const root = mkdtempSync(join(tmpdir(), "auto-merge-policy-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const valid = { TARGET: "dev", ECOSYSTEM: "npm_and_yarn", DIRECTORY: "/frontend", UPDATE: "version-update:semver-patch", NAMES: "jsdom", MAINTAINER_CHANGES: "false" };
-  for (const [i, override] of [{}, { DIRECTORY: "/tools/help" }, { UPDATE: "version-update:semver-major" }, { ECOSYSTEM: "cargo" }, { NAMES: "@tauri-apps/api" }, { NAMES: "" }, { MAINTAINER_CHANGES: "true" }, { DIRECTORY: "/unknown" }, { TARGET: "main" }, { ECOSYSTEM: "", UPDATE: "", MAINTAINER_CHANGES: "" }].entries()) {
-    const file = join(root, String(i));
-    const result = runGate("dependabot-auto-merge.yml", "Classify auto-merge eligibility", { ...valid, ...override, GITHUB_OUTPUT: file });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(readFileSync(file, "utf8"), `eligible=${i < 2}\n`);
+test("dependency updates cannot generate or automatically merge PRs", async () => {
+  const { existsSync } = await import("node:fs");
+  for (const path of [
+    ".github/dependabot.yml",
+    ".github/dependabot.yaml",
+    ".github/workflows/dependabot-auto-merge.yml",
+  ]) {
+    assert.equal(
+      existsSync(new URL(`../../${path}`, import.meta.url)),
+      false,
+      path,
+    );
   }
-  const source = read("dependabot-auto-merge.yml");
-  assert.doesNotMatch(source, /actions\/checkout|skip-verification: true/u);
-  assert.match(source, /gh pr merge --disable-auto/u);
-  const revoke = step(source, "Retain manual review for other updates");
-  assert.match(revoke, /if: \$\{\{ always\(\) && steps\.policy\.outputs\.eligible != 'true' \}\}/u);
-  const job = workflowJob(source, "dependabot");
-  assert.doesNotMatch(job.match(/^    if:.*$/mu)?.[0] ?? "", /base\.ref/u);
-
-  assert.match(source, /--match-head-commit "\$EVENT_HEAD"/u);
+  const advisory = read("glib-0.20-watch.yml");
+  assert.match(advisory, /contents: read/u);
+  assert.doesNotMatch(
+    advisory,
+    /contents: write|pull-requests:|create-pull-request|gh pr (?:create|merge)/u,
+  );
+  assert.match(advisory, /cargo update -p tauri/u);
+  assert.match(advisory, /python3 -B scripts\/ci\/glib-migration\.py/u);
+  assert.match(advisory, /cargo build --lib --bins/u);
+  assert.match(advisory, /cargo test --lib/u);
 });
 
 test("reduced UI acceptance still requires source and health checks", () => {

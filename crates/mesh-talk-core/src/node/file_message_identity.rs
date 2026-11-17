@@ -46,6 +46,50 @@ impl Identity {
     }
 }
 
+/// One verified immutable bundle, retained only by the current decision.
+/// This carries no permission or current-row authority.
+pub(super) struct VerifiedIdentity {
+    event: Event,
+    identity: Identity,
+}
+
+impl VerifiedIdentity {
+    pub(super) fn covers(&self, file: ConversationId, manifest: EventId) -> bool {
+        self.identity.file == file && self.identity.aliases.contains(&manifest)
+    }
+
+    pub(super) fn accounts(&self) -> (String, String) {
+        (
+            self.identity.source.account_id(),
+            self.identity.recipient_account.clone(),
+        )
+    }
+
+    pub(super) fn references(&self) -> Vec<(ConversationId, EventId)> {
+        self.identity
+            .aliases
+            .iter()
+            .map(|alias| (self.identity.file, *alias))
+            .collect()
+    }
+
+    pub(super) fn matches_row(&self, row: &ReceivedEntry) -> bool {
+        self.identity.matches(row)
+            && super::files::validated_manifest(&row.plaintext)
+                .is_some_and(|manifest| manifest.file_conv() == self.identity.file)
+    }
+
+    pub(super) fn matches_source_row(&self, row: &ReceivedEntry) -> bool {
+        self.identity.matches_content(row)
+            && super::files::validated_manifest(&row.plaintext)
+                .is_some_and(|manifest| manifest.file_conv() == self.identity.file)
+    }
+
+    pub(super) fn into_event(self) -> Event {
+        self.event
+    }
+}
+
 fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -56,7 +100,19 @@ fn scope(logical: EventId) -> ConversationId {
     ConversationId::new(hasher.finalize().into())
 }
 
+#[cfg(test)]
+thread_local! {
+    static VERIFICATION_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn verification_count() -> u64 {
+    VERIFICATION_COUNT.get()
+}
+
 fn decode(bundle: &Event) -> Option<Identity> {
+    #[cfg(test)]
+    VERIFICATION_COUNT.set(VERIFICATION_COUNT.get() + 1);
     let body = bundle.ciphertext.strip_prefix(PREFIX)?;
     if body.len() > 8192
         || !bundle.is_canonical()
@@ -120,22 +176,6 @@ pub(super) fn bundle_references(bundle: &Event) -> Vec<(ConversationId, EventId)
 pub(super) fn bundle_accounts(bundle: &Event) -> Option<(String, String)> {
     let identity = decode(bundle)?;
     Some((identity.source.account_id(), identity.recipient_account))
-}
-
-pub(super) fn bundle_matches_row(bundle: &Event, row: &ReceivedEntry) -> bool {
-    decode(bundle).is_some_and(|identity| {
-        identity.matches(row)
-            && super::files::validated_manifest(&row.plaintext)
-                .is_some_and(|manifest| manifest.file_conv() == identity.file)
-    })
-}
-
-pub(super) fn bundle_matches_source_row(bundle: &Event, row: &ReceivedEntry) -> bool {
-    decode(bundle).is_some_and(|identity| {
-        identity.matches_content(row)
-            && super::files::validated_manifest(&row.plaintext)
-                .is_some_and(|manifest| manifest.file_conv() == identity.file)
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,11 +437,20 @@ impl Node {
         &self,
         manifest: EventId,
     ) -> Result<Option<Event>, LogError> {
+        Ok(self
+            .verified_file_message_identity_bundle(manifest)?
+            .map(VerifiedIdentity::into_event))
+    }
+
+    pub(super) fn verified_file_message_identity_bundle(
+        &self,
+        manifest: EventId,
+    ) -> Result<Option<VerifiedIdentity>, LogError> {
         if let Some(bundle) = self
             .file_message_identities
             .lock()
             .expect("file identity lock")
-            .bundle(manifest)?
+            .verified_bundle(manifest)?
         {
             return Ok(Some(bundle));
         }
@@ -512,8 +561,11 @@ impl Node {
         self.file_message_identities
             .lock()
             .expect("file identity lock")
-            .insert(bundle.clone(), identity)?;
-        Ok(Some(bundle))
+            .insert(bundle.clone(), identity.clone())?;
+        Ok(Some(VerifiedIdentity {
+            event: bundle,
+            identity,
+        }))
     }
     pub(in crate::node) fn import_file_message_identity(
         &self,

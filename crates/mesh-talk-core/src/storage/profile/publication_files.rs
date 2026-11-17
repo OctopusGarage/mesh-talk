@@ -171,6 +171,11 @@ pub(crate) fn matches_stub(path: &Path, stub: &[u8]) -> Result<bool, LogError> {
 }
 
 pub(crate) fn sync_parent(path: &Path) -> Result<(), LogError> {
+    #[cfg(test)]
+    {
+        observe("parent_sync");
+        super::publication::cut("parent-sync")?;
+    }
     #[cfg(unix)]
     File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
     #[cfg(not(unix))]

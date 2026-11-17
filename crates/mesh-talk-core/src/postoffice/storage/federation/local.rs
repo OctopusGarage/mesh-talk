@@ -100,11 +100,15 @@ impl SessionLease {
                 ])?;
             }
         }
-        c.execute("UPDATE relay_federation_sessions SET local_entries=?2,row_charge=?3,byte_charge=?4 WHERE session_id=?1",params![self.session_id,selected,session_rows,session_bytes])?;
-        c.execute(
-            "UPDATE relay_federation_runtime SET staged_rows=?1,staged_bytes=?2 WHERE singleton=1",
-            params![rows, bytes],
-        )?;
+        // Empty raw slices still validate the snapshot and charges above, but
+        // cannot change selection counts or staging ownership.
+        if !entries.is_empty() {
+            c.execute("UPDATE relay_federation_sessions SET local_entries=?2,row_charge=?3,byte_charge=?4 WHERE session_id=?1",params![self.session_id,selected,session_rows,session_bytes])?;
+            c.execute(
+                "UPDATE relay_federation_runtime SET staged_rows=?1,staged_bytes=?2 WHERE singleton=1",
+                params![rows, bytes],
+            )?;
+        }
         self.validate_on(c, false)
     }
     pub(crate) fn finish_local_frame_on(
@@ -248,18 +252,20 @@ fn peek(
 ) -> Result<Option<InventoryDigestEntry>, LogError> {
     let sql = match (side, upper.is_some()) {
         ("local", false) => {
-            "SELECT conversation,digest FROM relay_federation_local_entries WHERE session_id=?1 AND conversation>?2 ORDER BY conversation LIMIT 1"
+            "SELECT conversation,digest FROM relay_federation_local_entries WHERE session_id=CAST(?1 AS INTEGER) AND conversation>CAST(?2 AS BLOB) ORDER BY conversation LIMIT 1"
         }
         ("local", true) => {
-            "SELECT conversation,digest FROM relay_federation_local_entries WHERE session_id=?1 AND conversation>?2 AND conversation<=?3 ORDER BY conversation LIMIT 1"
+            "SELECT conversation,digest FROM relay_federation_local_entries WHERE session_id=CAST(?1 AS INTEGER) AND conversation>CAST(?2 AS BLOB) AND conversation<=CAST(?3 AS BLOB) ORDER BY conversation LIMIT 1"
         }
         (_, false) => {
-            "SELECT conversation,digest FROM relay_federation_entries WHERE session_id=?1 AND conversation>?2 ORDER BY conversation LIMIT 1"
+            "SELECT conversation,digest FROM relay_federation_entries WHERE session_id=CAST(?1 AS INTEGER) AND conversation>CAST(?2 AS BLOB) ORDER BY conversation LIMIT 1"
         }
         (_, true) => {
-            "SELECT conversation,digest FROM relay_federation_entries WHERE session_id=?1 AND conversation>?2 AND conversation<=?3 ORDER BY conversation LIMIT 1"
+            "SELECT conversation,digest FROM relay_federation_entries WHERE session_id=CAST(?1 AS INTEGER) AND conversation>CAST(?2 AS BLOB) AND conversation<=CAST(?3 AS BLOB) ORDER BY conversation LIMIT 1"
         }
     };
+    // Typed expressions avoid STAT4 bind-sensitive recompilation; indexed
+    // comparisons retain their INTEGER session and BLOB cursor semantics.
     // Four fixed query shapes share the connection's bounded VM cache; every
     // lookup still reads the current transaction with fresh cursor bindings.
     let mut statement = c.prepare_cached(sql)?;

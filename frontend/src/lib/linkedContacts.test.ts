@@ -1,3 +1,4 @@
+import { RECOVERY_REFRESH_MS } from "./recoveryRefresh";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuth } from "@/store/auth";
 
@@ -194,7 +195,7 @@ it("applies a linked favorite only when this device enables contact sync", async
   const stop = startLinkedContacts("owner");
   await vi.waitFor(() => expect(mocks.preferences).toHaveBeenCalledTimes(1));
   expect(mocks.setFavorite).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   expect(mocks.applyFavorites).toHaveBeenCalledWith(
     "owner",
     "source-crypto-account",
@@ -265,7 +266,7 @@ it("does not seed a joining device's saved aliases or hidden defaults before sou
         device_id: "cd".repeat(16),
       },
     ]);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(mocks.applyFavorites).toHaveBeenCalledWith(
       "owner",
       "source-crypto-account",
@@ -296,7 +297,7 @@ it("does not turn saved pre-opt-in defaults into edits, but publishes an actual 
     await vi.advanceTimersByTimeAsync(0);
     expect(mocks.publish).not.toHaveBeenCalled();
     mocks.policy.mockResolvedValue({ contacts: true });
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(mocks.publish).not.toHaveBeenCalled();
     mocks.favorites.mockResolvedValue([
       { id: contactId, pinned: true, custom_alias: "Ronaldo", hidden: false },
@@ -385,7 +386,7 @@ it("does not turn unsupported remote contact preferences into local deletions", 
   ]);
   const stop = startLinkedContacts("owner");
   try {
-    await vi.advanceTimersByTimeAsync(20000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS * 2);
     expect(mocks.publish).not.toHaveBeenCalled();
     expect(mocks.applyFavorites).not.toHaveBeenCalled();
     expect(mocks.applyHidden).not.toHaveBeenCalled();
@@ -645,7 +646,7 @@ it("does not echo an imported legacy favorite encoding over a newer sibling rema
         device_id: "cd".repeat(16),
       },
     ]);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(mocks.publish).not.toHaveBeenCalled();
     expect(mocks.applyFavorites).toHaveBeenLastCalledWith(
       "owner",
@@ -689,7 +690,7 @@ it("does not echo a pruned imported empty record as a deletion over a new siblin
         device_id: "cd".repeat(16),
       },
     ]);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(mocks.publish).not.toHaveBeenCalled();
     expect(mocks.applyFavorites).toHaveBeenLastCalledWith(
       "owner",
@@ -737,7 +738,7 @@ it("uses the native committed hidden-name projection instead of echoing its nonc
         device_id: "cd".repeat(16),
       },
     ]);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(mocks.publish).not.toHaveBeenCalled();
     expect(mocks.applyHidden).toHaveBeenLastCalledWith(
       "owner",

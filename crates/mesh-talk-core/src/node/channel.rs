@@ -14,7 +14,7 @@ use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::message::MessageBody;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub(in crate::node) mod checkpoint;
 pub(in crate::node) mod graph;
@@ -216,6 +216,8 @@ pub struct ChannelActivity {
 #[derive(Default)]
 pub struct ChannelBook {
     states: HashMap<ConversationId, ChannelState>,
+    // Scheduling index only; current state still owns replay eligibility.
+    ordered_ids: BTreeSet<[u8; 32]>,
     #[cfg(test)]
     emitted: HashSet<EventId>,
     #[cfg(test)]
@@ -315,6 +317,15 @@ pub(super) struct ChannelMembershipProjection {
 }
 
 impl ChannelMembershipProjection {
+    /// Only the network selection owner may use this under its unchanged
+    /// control/destructive fences and captured canonical rank upper bound.
+    pub(in crate::node) fn allow_network_prefix(&mut self) {
+        if let Some(history) = self.historical.as_mut() {
+            std::sync::Arc::make_mut(history).allow_network_prefix();
+        }
+        self.authority.allow_network_prefix();
+    }
+
     pub(in crate::node) fn empty(channel: ConversationId) -> Self {
         projection::MembershipReducer::new(channel).finish()
     }
@@ -556,6 +567,7 @@ impl ChannelBook {
     /// Channel metadata from the validated event DAG. This intentionally creates
     /// no sender/receiver chains and can project a recovery archive for a device
     /// which is not itself a member.
+    #[cfg(test)]
     pub(super) fn projected_metadata<E: std::borrow::Borrow<Event>>(
         channel_id: ConversationId,
         events: &[E],
@@ -564,7 +576,8 @@ impl ChannelBook {
     }
 
     /// Current members from the validated event DAG, without decrypting or
-    /// surfacing message content. Used for connection admission decisions.
+    /// surfacing message content. Reference for indexed admission regressions.
+    #[cfg(test)]
     pub fn projected_members<E: std::borrow::Borrow<Event>>(
         channel_id: ConversationId,
         events: &[E],
@@ -578,6 +591,7 @@ impl ChannelBook {
 
     pub(in crate::node) fn install_indexed_state(&mut self, mut state: ChannelState) {
         let channel = state.id();
+        self.ordered_ids.insert(*channel.as_bytes());
         if let Some(current) = self.states.get_mut(&channel) {
             current.install_indexed_membership_projection(state);
             current.use_indexed_receivers();
@@ -617,6 +631,58 @@ impl ChannelBook {
                 && state.is_member(peer)
                 && self.departed.contains(&(*id, own.to_string()))
         })
+    }
+
+    pub(super) fn control_replay_upper(&self) -> Option<[u8; 32]> {
+        self.ordered_ids.last().copied()
+    }
+
+    /// Visit bounded book rows, including non-pending rows, without rescanning
+    /// previous pages or retaining recipient/authority snapshots across awaits.
+    pub(super) fn control_replay_page(
+        &self,
+        after: Option<[u8; 32]>,
+        upper: [u8; 32],
+    ) -> (Vec<ConversationId>, Option<[u8; 32]>, bool) {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let mut rows = self
+            .ordered_ids
+            .range((after.map_or(Unbounded, Excluded), Included(upper)));
+        let ids: Vec<_> = rows.by_ref().take(32).copied().collect();
+        let more = rows.next().is_some();
+        let last = ids.last().copied().or(after);
+        (
+            ids.into_iter().map(ConversationId::new).collect(),
+            last,
+            more,
+        )
+    }
+
+    pub(super) fn pending_control_state(
+        &self,
+        channel: ConversationId,
+        own: &str,
+    ) -> Option<&ChannelState> {
+        let state = self.states.get(&channel)?;
+        let pending = (!state.is_member(own) && self.departed.contains(&(channel, own.to_owned())))
+            || (state.is_accepted_member(own)
+                && (state.accepted_event_id().is_some()
+                    || self
+                        .replica_preferences
+                        .contains_key(&(channel, own.to_owned()))))
+            || (state.is_member(own)
+                && state.owner() != own
+                && self.transferred.contains(&(channel, own.to_owned())));
+        pending.then_some(state)
+    }
+
+    pub(super) fn pending_control_members(
+        &self,
+        channel: ConversationId,
+        own: &str,
+    ) -> Option<Vec<PublicIdentity>> {
+        self.pending_control_state(channel, own)
+            .map(|state| state.members().to_vec())
     }
 
     pub fn pending_departures(&self, own: &str) -> Vec<(ConversationId, Vec<PublicIdentity>)> {
@@ -820,6 +886,7 @@ impl ChannelBook {
                         state.install_membership_projection(projected);
                     } else {
                         projected.set_identity(me.public().user_id());
+                        self.ordered_ids.insert(*channel_id.as_bytes());
                         self.states.insert(channel_id, projected);
                     }
                     if let Some(state) = self.states.get_mut(&channel_id) {
@@ -969,6 +1036,7 @@ impl ChannelBook {
                                             }
                                         }
                                     }
+                                    self.ordered_ids.insert(*channel_id.as_bytes());
                                     self.states.insert(channel_id, state);
                                     if let Some((_, leaves)) = &prior_view {
                                         for (uid, leave_id) in leaves {

@@ -275,6 +275,10 @@ impl TranscriptRepository {
     pub(super) fn check_publication(&self) -> Result<(), LogError> {
         self.source.check_write()
     }
+    /// Read preflight retains exact barrier validation without publishing data.
+    pub(super) fn check_read_publication(&self) -> Result<(), LogError> {
+        self.source.check_barrier()
+    }
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
@@ -372,6 +376,18 @@ impl TranscriptRepository {
             h.map(|h| self.load_on(c, h)).transpose()
         })
     }
+    /// A point observation never fetches plaintext; the existing revision and
+    /// digest still qualify later body materialization, not its authorization.
+    pub(super) fn lookup_header(
+        &self,
+        conversation: &ConversationId,
+        key: &[u8],
+    ) -> Result<Option<TranscriptHeader>, LogError> {
+        self.check_read_publication()?;
+        self.profile
+            .database()
+            .read(|c| Self::find_header_on(c, self.kind, Some(conversation), key))
+    }
     fn find_header_on(
         c: &Connection,
         kind: i64,
@@ -386,7 +402,7 @@ impl TranscriptRepository {
         let query = format!(
             "SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND row_key=?2{host} ORDER BY ordinal LIMIT 1"
         );
-        let mut statement = c.prepare(&query)?;
+        let mut statement = c.prepare_cached(&query)?;
         let mut rows = statement.query(params![
             kind,
             key,

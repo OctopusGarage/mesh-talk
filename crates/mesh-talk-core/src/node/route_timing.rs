@@ -7,6 +7,40 @@ use std::{
 };
 
 const MAX_ROUTES: usize = 256;
+
+/// Successful authenticated endpoints are advisory, just like route timings.
+/// Retain the most recently successful devices within the same hint budget.
+#[derive(Default)]
+pub(super) struct PreferredRoutes {
+    entries: HashMap<String, (SocketAddr, u64)>,
+    sequence: u64,
+}
+
+impl PreferredRoutes {
+    pub(super) fn insert(&mut self, device: String, address: SocketAddr) {
+        self.sequence = self.sequence.wrapping_add(1);
+        if !self.entries.contains_key(&device) && self.entries.len() >= MAX_ROUTES {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, updated))| *updated)
+                .map(|(device, _)| device.clone());
+            if let Some(oldest) = oldest {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(device, (address, self.sequence));
+    }
+
+    pub(super) fn get(&self, device: &str) -> Option<&SocketAddr> {
+        self.entries.get(device).map(|(address, _)| address)
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
 const MIN_DEADLINE: Duration = Duration::from_secs(3);
 const COLD_DEADLINE: Duration = Duration::from_secs(10);
 pub(super) const MAX_AUTHENTICATION_DEADLINE: Duration = Duration::from_secs(20);

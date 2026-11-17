@@ -1,4 +1,5 @@
 //! Dedicated relay facade. All history access is bounded and policy qualified.
+pub(crate) use super::storage::role::delta::{MailboxCursor, MailboxDeltaPage, MailboxWatchToken};
 pub use super::storage::role::network::{
     IndexedRelayExportCursor, IndexedRelayHaveCursor, IndexedRelayView,
 };
@@ -13,11 +14,37 @@ use crate::{
 };
 use std::{collections::HashSet, path::Path, sync::Arc};
 
+/// Read-only scalar relay storage state; excludes identities and message data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelayStorageObservation {
+    pub retained_count: u64,
+    pub retained_bytes: u64,
+    pub drain_requested: bool,
+    pub source_revision: u64,
+    pub next_commit: u64,
+    pub visibility: u64,
+    pub database_changes: u64,
+    pub page_size: u64,
+    pub page_count: u64,
+    pub free_pages: u64,
+    pub write_observer_enabled: bool,
+}
+
 #[derive(Clone)]
 pub struct IndexedPostOffice {
     pub(crate) state: Arc<IndexedRelayState>,
 }
 impl IndexedPostOffice {
+    /// Optional cumulative ingest outcomes in fixed order: appended, duplicate,
+    /// peer-classified rejection, locally unavailable, authoritative failure.
+    /// Peer classification includes admission revocation; it does not assign blame.
+    pub fn ingest_observation(&self) -> Option<[u64; 5]> {
+        self.state.ingest_observation()
+    }
+    /// Samples durable metadata without advancing expiry or committing changes.
+    pub fn storage_observation(&self) -> Result<RelayStorageObservation, LogError> {
+        self.state.storage_observation()
+    }
     /// Consumes the caller's existing profile lease; never reacquires node.lock.
     pub fn open_with_lease(
         lease: ProfileStorageLease,
@@ -41,6 +68,32 @@ impl IndexedPostOffice {
     }
     pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.state.subscribe_changes()
+    }
+    pub(crate) fn mailbox_watch_snapshot(
+        &self,
+        scopes: &[ConversationId],
+    ) -> Result<Vec<MailboxWatchToken>, LogError> {
+        self.state
+            .mailbox_watch_snapshot_at(scopes, super::network::unix_now())
+    }
+    pub(crate) fn mailbox_delta_page(
+        &self,
+        conv: &ConversationId,
+        prior: Option<&MailboxCursor>,
+        limit: usize,
+    ) -> Result<MailboxDeltaPage, LogError> {
+        self.state
+            .mailbox_delta_page_at(conv, prior, limit, super::network::unix_now())
+    }
+    pub(crate) fn mailbox_delta_events(
+        &self,
+        conv: &ConversationId,
+        cursor: &MailboxCursor,
+        ids: &[EventId],
+        max_bytes: usize,
+    ) -> Result<Vec<Event>, LogError> {
+        self.state
+            .mailbox_delta_events_at(conv, cursor, ids, max_bytes, super::network::unix_now())
     }
 }
 impl NetworkSyncStore for IndexedPostOffice {
@@ -196,6 +249,118 @@ impl NetworkSyncStore for IndexedFederationStore {
 mod tests {
     use super::*;
     #[test]
+    fn relay_storage_observation_is_read_only() {
+        let root = tempfile::tempdir().unwrap();
+        let office = IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(root.path()).unwrap(),
+            &root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let db = office.state.profile().database();
+        let before = db.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = db.successful_write_commits();
+        let first = office.storage_observation().unwrap();
+        for _ in 0..8 {
+            assert_eq!(office.storage_observation().unwrap(), first);
+        }
+        assert_eq!(first.retained_count, 0);
+        assert!(!first.drain_requested);
+        assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), before);
+        assert_eq!(db.successful_write_commits(), commits);
+    }
+    #[test]
+    fn relay_ingest_observation_counts_real_outcomes_without_changing_business_state() {
+        let mut business = Vec::new();
+        for enabled in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut office = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap();
+            Arc::get_mut(&mut office.state)
+                .unwrap()
+                .set_ingest_observation_for_test(enabled);
+            let author = DeviceIdentity::generate();
+            let recipient = DeviceIdentity::generate();
+            let inner = Event::new(
+                &author,
+                ConversationId::new([186; 32]),
+                1,
+                vec![],
+                1,
+                1,
+                crate::eventlog::EventKind::Message,
+                vec![42],
+            );
+            let mailbox =
+                crate::postoffice::opaque::RelayMailbox::federated(&author, &recipient.public())
+                    .unwrap();
+            let event = mailbox.wrap(&inner).unwrap();
+            let profile = office.state.profile().clone();
+            let database = profile.database();
+            let before = database.read(|c| Ok(c.total_changes())).unwrap();
+            assert!(matches!(
+                office.ingest(event.clone()).unwrap(),
+                AppendOutcome::Appended
+            ));
+            assert!(matches!(
+                office.ingest(event.clone()).unwrap(),
+                AppendOutcome::Duplicate
+            ));
+            assert!(matches!(
+                office.ingest(inner),
+                Err(LogError::AdmissionRejected(_))
+            ));
+            database.transaction(|c| {
+                c.execute_batch("CREATE TEMP TRIGGER fail_observed_ingest BEFORE INSERT ON retained_events BEGIN SELECT RAISE(ABORT,'ingest fixture failure'); END;")?;
+                Ok(())
+            }).unwrap();
+            let next = Event::new(
+                &author,
+                ConversationId::new([186; 32]),
+                2,
+                vec![],
+                2,
+                1,
+                crate::eventlog::EventKind::Message,
+                vec![43],
+            );
+            assert!(matches!(
+                office.ingest(mailbox.wrap(&next).unwrap()),
+                Err(LogError::Database(_))
+            ));
+            assert!(
+                office
+                    .durable_have(&event.conversation_id, &event.id)
+                    .unwrap()
+            );
+            let after = database.read(|c| Ok(c.total_changes())).unwrap();
+            let reads = office.state.body_read_counts();
+            for _ in 0..8 {
+                assert_eq!(
+                    office.ingest_observation(),
+                    enabled.then_some([1, 1, 1, 0, 1])
+                );
+            }
+            assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), after);
+            assert_eq!(office.state.body_read_counts(), reads);
+            business.push((
+                after - before,
+                office.state.physical_charge().unwrap().event_count,
+            ));
+        }
+        assert_eq!(
+            business[0], business[1],
+            "observation must preserve SQL/business outcomes"
+        );
+    }
+
+    #[test]
     fn federation_store_cancellation_revokes_every_network_endpoint() {
         use crate::postoffice::storage::federation::{Direction, SessionOwner};
         use std::time::Instant;
@@ -274,6 +439,138 @@ mod tests {
         );
         assert!(store.ingest(event).is_err());
     }
+    #[test]
+    fn relay_session_ingest_observation_counts_only_final_transaction_outcomes() {
+        use crate::postoffice::storage::federation::{Direction, SessionOwner};
+        let mut business = Vec::new();
+        for enabled in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut office = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap();
+            Arc::get_mut(&mut office.state)
+                .unwrap()
+                .set_ingest_observation_for_test(enabled);
+            let profile = office.state.profile().clone();
+            let database = profile.database();
+            let now = super::super::network::unix_now();
+            let owner = SessionOwner::begin(
+                profile.clone(),
+                Direction::Outbound,
+                now,
+                std::time::Instant::now(),
+            )
+            .unwrap();
+            let lease = owner.lease();
+            lease.receive_page(&[], true, now).unwrap();
+            let author = DeviceIdentity::generate();
+            let recipient = DeviceIdentity::generate();
+            let mailbox =
+                crate::postoffice::opaque::RelayMailbox::federated(&author, &recipient.public())
+                    .unwrap();
+            let event = mailbox
+                .wrap(&Event::new(
+                    &author,
+                    ConversationId::new([187; 32]),
+                    1,
+                    vec![],
+                    1,
+                    1,
+                    crate::eventlog::EventKind::Message,
+                    vec![42],
+                ))
+                .unwrap();
+            let next = mailbox
+                .wrap(&Event::new(
+                    &author,
+                    ConversationId::new([187; 32]),
+                    2,
+                    vec![],
+                    2,
+                    1,
+                    crate::eventlog::EventKind::Message,
+                    vec![43],
+                ))
+                .unwrap();
+            let before = database.read(|c| Ok(c.total_changes())).unwrap();
+            let mut store = IndexedFederationStore::new(&office, lease.clone());
+            assert!(matches!(
+                store.ingest(event.clone()).unwrap(),
+                AppendOutcome::Appended
+            ));
+            assert!(matches!(
+                store.ingest(event.clone()).unwrap(),
+                AppendOutcome::Duplicate
+            ));
+            database.transaction(|c| {
+                c.execute_batch("CREATE TEMP TRIGGER fail_observed_session AFTER INSERT ON retained_events BEGIN UPDATE relay_federation_sessions SET live=0; SELECT RAISE(FAIL,'observed authoritative failure'); END;")?;
+                Ok(())
+            }).unwrap();
+            assert!(matches!(
+                store.ingest(next.clone()),
+                Err(LogError::Database(_))
+            ));
+            database.read(|c| lease.validate_on(c, true)).unwrap();
+            assert!(
+                office
+                    .durable_have(&event.conversation_id, &event.id)
+                    .unwrap()
+            );
+            assert!(
+                !office
+                    .durable_have(&next.conversation_id, &next.id)
+                    .unwrap(),
+                "rolled-back insert must not grant custody"
+            );
+            owner.cancel().unwrap();
+            assert!(matches!(
+                store.ingest(next.clone()),
+                Err(LogError::AdmissionRejected(_))
+            ));
+            // A session from another actual profile fails before policy can
+            // classify admission revocation as a peer-facing rejection.
+            let foreign_root = tempfile::tempdir().unwrap();
+            let foreign = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(foreign_root.path()).unwrap(),
+                &foreign_root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap();
+            let foreign_owner = SessionOwner::begin(
+                foreign.state.profile().clone(),
+                Direction::Outbound,
+                now,
+                std::time::Instant::now(),
+            )
+            .unwrap();
+            let mut mismatched = IndexedFederationStore::new(&office, foreign_owner.lease());
+            assert!(matches!(
+                mismatched.ingest(next),
+                Err(LogError::StaleCursor)
+            ));
+            let after = database.read(|c| Ok(c.total_changes())).unwrap();
+            let reads = office.state.body_read_counts();
+            for _ in 0..8 {
+                assert_eq!(
+                    office.ingest_observation(),
+                    enabled.then_some([1, 1, 1, 1, 1])
+                );
+            }
+            assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), after);
+            assert_eq!(office.state.body_read_counts(), reads);
+            business.push((
+                after - before,
+                office.state.physical_charge().unwrap().event_count,
+            ));
+        }
+        assert_eq!(business[0], business[1]);
+    }
+
     #[test]
     fn authoritative_write_error_survives_simultaneous_session_authority_loss() {
         use crate::postoffice::storage::federation::{Direction, SessionOwner};

@@ -128,16 +128,25 @@ struct GroupProofSnapshot {
     historical: Vec<crate::discovery::Announce>,
     owners: Vec<crate::discovery::Announce>,
 }
+#[cfg(test)]
+thread_local! {
+    static BINDING_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+fn verify_binding_proof(proof: &crate::discovery::Announce) -> bool {
+    #[cfg(test)]
+    BINDING_VERIFICATIONS.with(|calls| calls.set(calls.get() + 1));
+    proof.verify()
+}
 impl GroupProofSnapshot {
     fn binding_current(&self, proof: &crate::discovery::Announce) -> bool {
-        proof.verify()
-            && proof
-                .account_cert
-                .as_ref()
-                .is_some_and(|certificate| certificate.account_ed25519_pub == self.account_public)
+        proof
+            .account_cert
+            .as_ref()
+            .is_some_and(|certificate| certificate.account_ed25519_pub == self.account_public)
             && self.current.get(&proof.ed25519_pub).is_none_or(|current| {
                 current.public() == proof.public() && current.account_id() == proof.account_id()
             })
+            && verify_binding_proof(proof)
     }
 }
 
@@ -818,10 +827,9 @@ impl Node {
         &self,
         proof: &crate::discovery::Announce,
     ) -> bool {
-        if !proof.verify()
-            || proof.account_cert.as_ref().is_none_or(|certificate| {
-                certificate.account_ed25519_pub != self.account.public().ed25519_pub
-            })
+        if proof.account_cert.as_ref().is_none_or(|certificate| {
+            certificate.account_ed25519_pub != self.account.public().ed25519_pub
+        }) || !verify_binding_proof(proof)
         {
             return false;
         }
@@ -1037,7 +1045,7 @@ impl Node {
                 group,
                 projection,
                 device,
-                proof.as_ref().unwrap_or(&self.own_group_proof()),
+                proof.as_ref().unwrap_or(&own_proof),
             ) {
                 members.insert(source.device.user_id(), source);
             }
@@ -1177,6 +1185,49 @@ mod raw_view_tests {
     use super::*;
     use crate::{discovery::Roster, eventlog::Event, identity::device::DeviceIdentity};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn own_group_proof_is_signed_once_per_runtime_and_isolated_across_accounts() {
+        use crate::identity::account::Account;
+        use crate::node::channel_account_bootstrap::OWN_GROUP_PROOF_BUILDS;
+        let device = DeviceIdentity::generate();
+        let accounts = [Account::generate(), Account::generate()];
+        let mut proofs = Vec::new();
+        for account in accounts {
+            let root = tempfile::tempdir().unwrap();
+            let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+            let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+            let (file, _) = tokio::sync::mpsc::unbounded_channel();
+            let node = Node::open_with_account(
+                DeviceIdentity::from_secret_bytes(device.secret_bytes().0, device.secret_bytes().1),
+                account,
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                channel,
+                file,
+                &root.path().join("events.log"),
+                &root.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap();
+            OWN_GROUP_PROOF_BUILDS.with(|calls| calls.set(0));
+            let first = node.own_group_proof();
+            for _ in 0..32 {
+                assert_eq!(node.own_group_proof(), first);
+            }
+            assert!(first.verify());
+            assert_eq!(first.public(), device.public());
+            assert_eq!(first.account_id(), Some(node.account_id()));
+            proofs.push(first);
+            let builds = OWN_GROUP_PROOF_BUILDS.with(std::cell::Cell::get);
+            assert!(
+                builds <= 1,
+                "unchanged own account proof was signed {builds} times in one runtime"
+            );
+        }
+        assert_ne!(proofs[0].account_id(), proofs[1].account_id());
+        assert_ne!(proofs[0].sig, proofs[1].sig);
+    }
 
     #[tokio::test]
     async fn raw_authorization_cache_rechecks_noncontrol_reordering() {
@@ -1530,6 +1581,159 @@ mod raw_view_tests {
         assert_eq!(view.frontier.len(), 1);
         for group in groups.iter().take(64) {
             assert_eq!(finish_directory(&node, &log, *group).count, 1);
+        }
+    }
+
+    fn binding_snapshot(
+        account: &crate::identity::account::Account,
+        current: impl IntoIterator<Item = crate::discovery::Announce>,
+    ) -> GroupProofSnapshot {
+        GroupProofSnapshot {
+            account_public: account.public().ed25519_pub,
+            current: current
+                .into_iter()
+                .map(|proof| (proof.ed25519_pub, proof))
+                .collect(),
+            historical: Vec::new(),
+            owners: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn binding_snapshot_foreign_accounts_skip_signature_work() {
+        use crate::{discovery::Announce, identity::account::Account};
+        let account = Account::generate();
+        let foreign = Account::generate();
+        for count in [32, 128] {
+            let proofs: Vec<_> = (0..count)
+                .map(|_| {
+                    Announce::new_with_account(
+                        &DeviceIdentity::generate(),
+                        &foreign,
+                        "Foreign",
+                        47475,
+                    )
+                })
+                .collect();
+            let snapshot = binding_snapshot(&account, proofs.clone());
+            BINDING_VERIFICATIONS.with(|calls| calls.set(0));
+            for proof in &proofs {
+                assert!(!snapshot.binding_current(proof));
+            }
+            assert_eq!(
+                BINDING_VERIFICATIONS.with(|calls| calls.get()),
+                0,
+                "foreign account rejection must precede signature verification"
+            );
+        }
+    }
+
+    #[test]
+    fn binding_snapshot_missing_and_stale_bindings_skip_signature_work() {
+        use crate::{discovery::Announce, identity::account::Account};
+        let account = Account::generate();
+        let identity = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&identity, &account, "Current", 47475);
+        let changed_x = DeviceIdentity::from_secret_bytes(
+            identity.secret_bytes().0,
+            DeviceIdentity::generate().secret_bytes().1,
+        );
+        let cases = [
+            (
+                binding_snapshot(&account, Vec::new()),
+                Announce::new(&identity, "Legacy", 47475),
+            ),
+            (
+                binding_snapshot(&account, [proof.clone()]),
+                Announce::new_with_account(&changed_x, &account, "Changed X", 47475),
+            ),
+            (
+                binding_snapshot(
+                    &account,
+                    [Announce::new_with_account(
+                        &identity,
+                        &Account::generate(),
+                        "Rehomed",
+                        47475,
+                    )],
+                ),
+                proof,
+            ),
+        ];
+        for (snapshot, candidate) in cases {
+            BINDING_VERIFICATIONS.with(|calls| calls.set(0));
+            assert!(!snapshot.binding_current(&candidate));
+            assert_eq!(
+                BINDING_VERIFICATIONS.with(|calls| calls.get()),
+                0,
+                "missing certificate or stale exact binding must reject before crypto"
+            );
+        }
+    }
+
+    #[test]
+    fn binding_snapshot_matching_candidates_still_verify_both_signatures() {
+        use crate::{discovery::Announce, identity::account::Account};
+        let account = Account::generate();
+        let proof =
+            Announce::new_with_account(&DeviceIdentity::generate(), &account, "Current", 47475);
+        let snapshot = binding_snapshot(&account, [proof.clone()]);
+        let mut forged_announce = proof.clone();
+        forged_announce.sig[0] ^= 1;
+        let mut forged_certificate = proof.clone();
+        forged_certificate.account_cert.as_mut().unwrap().signature[0] ^= 1;
+        for (candidate, expected) in [
+            (proof, true),
+            (forged_announce, false),
+            (forged_certificate, false),
+        ] {
+            BINDING_VERIFICATIONS.with(|calls| calls.set(0));
+            assert_eq!(snapshot.binding_current(&candidate), expected);
+            assert_eq!(
+                BINDING_VERIFICATIONS.with(|calls| calls.get()),
+                1,
+                "same-root binding candidates must pass through the real verifier"
+            );
+        }
+    }
+
+    #[test]
+    fn binding_node_foreign_accounts_skip_signature_work() {
+        use crate::{discovery::Announce, identity::account::Account};
+        let (_directory, node) = directory_test_node();
+        let foreign = Account::generate();
+        for count in [32, 128] {
+            let proofs: Vec<_> = (0..count)
+                .map(|_| {
+                    Announce::new_with_account(
+                        &DeviceIdentity::generate(),
+                        &foreign,
+                        "Foreign",
+                        47475,
+                    )
+                })
+                .collect();
+            BINDING_VERIFICATIONS.with(|calls| calls.set(0));
+            for proof in &proofs {
+                assert!(!node.account_group_binding_current(proof));
+            }
+            assert_eq!(
+                BINDING_VERIFICATIONS.with(|calls| calls.get()),
+                0,
+                "node foreign account rejection must precede signature verification"
+            );
+        }
+        let missing = Announce::new(&DeviceIdentity::generate(), "Legacy", 47475);
+        BINDING_VERIFICATIONS.with(|calls| calls.set(0));
+        assert!(!node.account_group_binding_current(&missing));
+        assert_eq!(BINDING_VERIFICATIONS.with(|calls| calls.get()), 0);
+        let proof = Announce::new_with_account(&node.identity, &node.account, "Current", 47475);
+        let mut forged = proof.clone();
+        forged.sig[0] ^= 1;
+        for (candidate, expected) in [(proof, true), (forged, false)] {
+            BINDING_VERIFICATIONS.with(|calls| calls.set(0));
+            assert_eq!(node.account_group_binding_current(&candidate), expected);
+            assert_eq!(BINDING_VERIFICATIONS.with(|calls| calls.get()), 1);
         }
     }
 }

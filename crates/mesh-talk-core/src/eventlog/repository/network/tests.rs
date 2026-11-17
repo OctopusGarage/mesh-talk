@@ -518,6 +518,7 @@ fn first_capability_append_invalidates_captured_network_view() {
         EventKind::ChannelReplica,
         EventKind::ChannelHistoryPolicy,
         EventKind::ChannelAccountAuthority,
+        EventKind::ChannelMetadata,
     ] {
         let (_dir, repository) = repo();
         let signer = DeviceIdentity::generate();
@@ -577,5 +578,86 @@ fn first_capability_append_invalidates_captured_network_view() {
     assert!(
         repository.validate_view(&view).is_ok(),
         "v4 already supports lower protocol controls"
+    );
+}
+
+#[test]
+fn repeated_network_validation_reads_scope_once_without_headers_or_bodies() {
+    use std::sync::atomic::Ordering;
+    let (_dir, repository) = repo();
+    let signer = DeviceIdentity::generate();
+    let root = event(&signer, 1, vec![], 1, EventKind::Message);
+    repository.append(&root).unwrap();
+    let view = repository.open_view(&root.conversation_id).unwrap();
+    repository.scope_queries.store(0, Ordering::Relaxed);
+    for _ in 0..16 {
+        repository.validate_view(&view).unwrap();
+    }
+    assert_eq!(repository.scope_queries.load(Ordering::Relaxed), 16);
+    assert_eq!(repository.network_header_fetches.load(Ordering::Relaxed), 0);
+    assert_eq!(repository.body_fetches.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn network_validation_preserves_retirement_corruption_and_stale_precedence() {
+    let (_dir, repository) = repo();
+    let signer = DeviceIdentity::generate();
+    let root = event(&signer, 1, vec![], 1, EventKind::Message);
+    repository.append(&root).unwrap();
+    let mut view = repository.open_view(&root.conversation_id).unwrap();
+    repository.begin_retirement(&root.conversation_id).unwrap();
+    assert!(matches!(
+        repository.validate_view(&view),
+        Err(LogError::StaleCursor)
+    ));
+    // Exercise lifecycle and corrupt progress with the current epoch too.
+    view.binding.epoch = repository
+        .conversation_destructive_epoch(&root.conversation_id)
+        .unwrap();
+    assert!(matches!(
+        repository.validate_view(&view),
+        Err(LogError::StaleCursor)
+    ));
+    repository
+        .database
+        .transaction(|c| {
+            c.execute("DELETE FROM event_retirement_jobs", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        repository.validate_view(&view),
+        Err(LogError::CorruptFile(_))
+    ));
+    view.binding.epoch -= 1;
+    assert!(matches!(
+        repository.validate_view(&view),
+        Err(LogError::StaleCursor)
+    ));
+}
+
+#[test]
+fn network_validation_rechecks_metadata_corruption_without_body_reads() {
+    let (_dir, repository) = repo();
+    let signer = DeviceIdentity::generate();
+    let root = event(&signer, 1, vec![], 1, EventKind::Message);
+    repository.append(&root).unwrap();
+    let view = repository.open_view(&root.conversation_id).unwrap();
+    repository
+        .database
+        .transaction(|c| {
+            c.execute("UPDATE event_conversations SET v2_count=event_count+1", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        repository.validate_view(&view),
+        Err(LogError::CorruptFile(_))
+    ));
+    assert_eq!(
+        repository
+            .body_fetches
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
     );
 }

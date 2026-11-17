@@ -387,8 +387,10 @@ export interface AppSettings {
   notifications: boolean;
   /** Remembered default folder received files save into ("" = always prompt). */
   download_dir: string;
-  /** "Stay signed in": persist the password in the OS keychain to auto-unlock next launch. */
+  /** Save credentials for automatic sign-in using this installation’s storage policy. */
   stay_signed_in: boolean;
+  /** macOS: verify identity before restoring a saved login; defaults to true. */
+  startup_verification: boolean;
   /** The username to auto-login next launch (backend-managed; not set from the UI). */
   last_user: string | null;
   /** Keep chat history for at most this many days (0 = forever); older messages are erased. */
@@ -628,5 +630,36 @@ export interface NodeStateChangedEvent {
   owner: string;
   account_id: string;
   device_id: string;
-  kind: "state" | "roster" | "delivery" | "files";
+  kind: "state" | "roster" | "delivery" | "files" | "documents" | "sync_status";
+}
+
+export interface PresenceDelta {
+  people: PresenceMap;
+  groups?: PresenceMap;
+  groups_revision: string;
+}
+
+/** Existing pending download metadata; candidates confer no delivery authority. */
+export interface PendingStickerSource {
+  file_conv: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+export interface PendingStickerSourcesPage {
+  items: PendingStickerSource[];
+  /** Continue even when items is empty. Null ends this traversal. */
+  next_cursor: string | null;
+}
+
+/** Authorized source identity accompanying a single roster observation. */
+export interface RosterObservation {
+  identity: {
+    owner: string;
+    account_id: string;
+    device_id: string;
+    runtime_id?: string | null;
+  };
+  peers: PeerInfo[];
+  people: PresenceMap;
 }

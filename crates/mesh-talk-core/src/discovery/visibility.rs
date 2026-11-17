@@ -18,6 +18,7 @@ pub struct DiscoveryVisibility {
     public: RwLock<bool>,
     physical_lan_only: AtomicBool,
     inventory: Arc<dyn Fn() -> Vec<LanInterface> + Send + Sync>,
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl DiscoveryVisibility {
@@ -37,6 +38,7 @@ impl DiscoveryVisibility {
             public: RwLock::new(public),
             physical_lan_only: AtomicBool::new(false),
             inventory: Arc::new(inventory),
+            changes: tokio::sync::watch::channel(0).0,
         }
     }
 
@@ -57,7 +59,10 @@ impl DiscoveryVisibility {
     ) -> io::Result<()> {
         let _send_guard = self.public.write().await;
         authorize(&mut || {
-            self.physical_lan_only.store(enabled, Ordering::Release);
+            if self.physical_lan_only.swap(enabled, Ordering::AcqRel) != enabled {
+                self.changes
+                    .send_modify(|generation| *generation = generation.wrapping_add(1));
+            }
             Ok(())
         })
     }
@@ -126,7 +131,16 @@ impl DiscoveryVisibility {
     /// disabling returns, subsequent sends cannot start until enabled again;
     /// packets already handed to the OS may still arrive afterward.
     pub async fn set_public(&self, public: bool) {
-        *self.public.write().await = public;
+        let mut current = self.public.write().await;
+        if *current != public {
+            *current = public;
+            self.changes
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
+    }
+
+    pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// Initialize only before discovery tasks start. A live send means the host

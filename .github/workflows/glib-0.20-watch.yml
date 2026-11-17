@@ -4,7 +4,7 @@ name: glib 0.20 bump watch
 # RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g is patched in glib >=0.20.0.
 # A parallel newer glib branch does not remove the old branch. This monthly job
 # probes whether every resolved glib branch migrated; if so it builds + tests
-# with glib bumped and opens a PR. While the
+# with glib bumped for advisory evidence only; updates require manual review. While the
 # gate holds it is a cheap no-op (just dependency resolution — no system deps, no build).
 on:
   schedule:
@@ -12,8 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -74,23 +73,3 @@ jobs:
         run: |
           cargo build --lib --bins
           cargo test --lib -- --test-threads=2
-
-      - name: Open a PR with the bump
-        if: steps.probe.outputs.lifted == 'true'
-        uses: peter-evans/create-pull-request@v8
-        with:
-          add-paths: Cargo.lock
-          branch: chore/glib-0.20
-          delete-branch: true
-          commit-message: "chore(deps): bump glib to ${{ steps.probe.outputs.glib_version }} (gtk stack now supports it)"
-          title: "chore(deps): bump glib to 0.20 (gtk stack now supports it)"
-          body: |
-            All resolved glib branches are now `${{ steps.probe.outputs.glib_version }}`, lifting the
-            `tauri -> gtk ^0.18 -> glib 0.18` pin that held glib at 0.18.5.
-
-            This closes the glib unsoundness advisory **GHSA-wrw7-89jp-8q8g**.
-            `cargo build --lib --bins` and `cargo test --lib` passed on the workflow runner.
-
-            Auto-opened by `.github/workflows/glib-0.20-watch.yml`. Review before merging
-            (GITHUB_TOKEN-authored PRs don't trigger `ci.yml` automatically — close/reopen
-            or push an empty commit to run the full CI suite).

@@ -4,6 +4,7 @@ import type {
   DiagPeerInfo,
   EnvInfo,
   PresenceMap,
+  PresenceDelta,
   UpdateCheck,
   UpdateInstallPhase,
   UpdateChannel,
@@ -21,8 +22,18 @@ export const diag = {
 };
 
 export const presence = {
+  observeRoster: (owner: string) =>
+    invoke<import("../types").RosterObservation>("owner_roster_observation", {
+      owner,
+    }),
+  groupsIfChanged: (owner: string, knownGroupRevision: string) =>
+    invoke<PresenceDelta | { unchanged: true }>(
+      "owner_presence_if_groups_changed",
+      { owner, knownGroupRevision },
+    ),
   /** Shared person/device observations and accepted-account group count summaries. */
-  get: () => invoke<PresenceMap>("get_presence"),
+  get: (knownGroupRevision?: string) =>
+    invoke<PresenceMap | PresenceDelta>("get_presence", { knownGroupRevision }),
 };
 
 /** Observability: logs + static environment facts for the Diagnostics dialog. */

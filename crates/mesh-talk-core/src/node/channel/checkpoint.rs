@@ -75,6 +75,7 @@ pub(in crate::node) struct ChannelCheckpointStore {
     generation: i64,
     owner: Option<ParticipantEventOwner>,
     causal_query: std::sync::Mutex<()>,
+    causal_completed: std::sync::Mutex<causal::CompletedProjections>,
     presentation_query:
         std::sync::Mutex<std::collections::HashMap<ConversationId, presentation::PolicyCandidate>>,
 }
@@ -171,6 +172,7 @@ impl ChannelCheckpointStore {
             generation,
             owner,
             causal_query: std::sync::Mutex::new(()),
+            causal_completed: std::sync::Mutex::new(Default::default()),
             presentation_query: std::sync::Mutex::new(Default::default()),
         })
     }

@@ -22,7 +22,7 @@ pub struct SecureChannel<S> {
     peer: VerifiedPeer,
     io_admission: Option<IoAdmission>,
     sent_frame_bytes: u64,
-    connection_permits: Vec<tokio::sync::OwnedSemaphorePermit>,
+    connection_permits: Vec<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
     host_generation: Option<u64>,
     pairing_only: bool,
 }
@@ -34,6 +34,20 @@ struct IoAdmission {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
+    /// Cancellation-safe terminal read for a dedicated outstanding watch. Any
+    /// byte or EOF terminates the connection; framing must never resume after it.
+    pub(crate) async fn watch_disconnect(&mut self) -> Result<(), TransportError> {
+        let mut byte = [0u8; 1];
+        match self.stream.read(&mut byte).await? {
+            0 => Ok(()),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected input during mailbox change wait",
+            )
+            .into()),
+        }
+    }
+
     /// Dial: perform the XX handshake as initiator, then authenticate.
     /// If `expected_peer` is set, the authenticated identity must match it.
     pub async fn connect(
@@ -247,7 +261,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
         &mut self,
         permits: Vec<tokio::sync::OwnedSemaphorePermit>,
     ) {
-        self.connection_permits = permits;
+        self.connection_permits = permits.into_iter().map(std::sync::Arc::new).collect();
+    }
+
+    pub(crate) fn reception_capacity(
+        &self,
+    ) -> Vec<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>> {
+        self.connection_permits.clone()
     }
 
     pub(crate) fn set_host_generation(&mut self, generation: u64) {

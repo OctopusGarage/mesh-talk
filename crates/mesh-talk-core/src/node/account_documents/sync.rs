@@ -104,7 +104,16 @@ pub(in crate::node) fn publish_legacy_control_page_for_test(
     node: &Node,
     count: u8,
 ) -> Vec<AccountDocumentKey> {
-    let keys = (1..=count)
+    publish_legacy_control_page_before_notify_for_test(node, count, |_| {})
+}
+
+#[cfg(test)]
+pub(in crate::node) fn publish_legacy_control_page_before_notify_for_test(
+    node: &Node,
+    count: u8,
+    before_notify: impl FnOnce(&[AccountDocumentKey]),
+) -> Vec<AccountDocumentKey> {
+    let keys: Vec<_> = (1..=count)
         .map(|value| {
             seed_legacy_control_page_for_test(
                 node,
@@ -112,6 +121,7 @@ pub(in crate::node) fn publish_legacy_control_page_for_test(
             )
         })
         .collect();
+    before_notify(&keys);
     node.documents_changed();
     keys
 }
@@ -255,14 +265,22 @@ impl DocumentSyncCursor {
     #[cfg(test)]
     fn client_trace_state(&self) -> String {
         format!(
-            "domain={:?} pending={} after={} deferred={} retry_ms={}",
+            "domain={:?} pending={} after={} deferred={} retry_ms={} scope={:?} completed={} up_to_date={} visited={:x} settled={:x} remote_disabled={:x} group_retry={} group_upgrade={}",
             DOMAINS[self.domain],
             self.pending,
             self.after.is_some(),
             self.admission_deferred,
             self.retry_at.map_or(0, |retry| retry
                 .saturating_duration_since(Instant::now())
-                .as_millis())
+                .as_millis()),
+            self.scope,
+            self.page_completed,
+            self.up_to_date,
+            self.visited,
+            self.settled,
+            self.remotely_disabled,
+            self.group_retry_at.is_some(),
+            self.group_upgrade,
         )
     }
 
@@ -1736,7 +1754,8 @@ impl Node {
             {
                 return Ok(());
             }
-            let public_profile = meta.key.domain() == AccountDocumentDomain::PublicProfile;
+            let domain = meta.key.domain();
+            let public_profile = domain == AccountDocumentDomain::PublicProfile;
             let private_control = meta.key.is_private_control();
             let changed = node
                 .account_documents
@@ -1751,7 +1770,7 @@ impl Node {
                 }
             }
             if changed {
-                node.documents_imported();
+                node.documents_imported_domain(Some(domain));
                 if private_control {
                     node.delivery_status_notify.notify_waiters();
                     node.note_account_history_change();
@@ -3007,7 +3026,9 @@ mod group_control_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows() {
         use crate::node::{AccountGroupOperationPhase, AccountGroupTextInput, SyncCategory};
-        let mut fixture = UpgradeFixture::new().await;
+        // This page experiment owns each publication epoch, including the
+        // final exact comparison after normal and legacy rows are repaired.
+        let mut fixture = UpgradeFixture::inbound_only().await;
         for node in [&fixture.source, &fixture.target] {
             node.set_device_sync_category(SyncCategory::History, false)
                 .unwrap();
@@ -3305,8 +3326,9 @@ mod group_control_tests {
             cursor.personal_upgrade,
             control_scope_differences(source, target),
         );
-        assert!(
-            control_scope_metadata(source) == control_scope_metadata(target),
+        assert_eq!(
+            control_scope_metadata(source),
+            control_scope_metadata(target),
             "settled repair must retain the complete exact source metadata set"
         );
     }
@@ -3429,7 +3451,10 @@ mod group_control_tests {
         use crate::node::account_group::operations::legacy_wire::{
             LegacyOperationFrame, LegacyOperationProjection,
         };
-        let mut fixture = UpgradeFixture::new().await;
+        // Mutate source roles only at the explicit between-page boundary;
+        // autonomous publication would make the final exact comparison race
+        // with a newer, independently valid source epoch.
+        let mut fixture = UpgradeFixture::inbound_only().await;
         let group = fixture
             .source
             .create_channel("known page prefix", vec![])

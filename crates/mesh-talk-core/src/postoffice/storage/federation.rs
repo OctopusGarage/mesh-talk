@@ -180,7 +180,7 @@ impl SessionLease {
     }
     pub(crate) fn validate_on(&self, c: &Connection, complete: bool) -> Result<(), LogError> {
         self.check_live()?;
-        let state:Option<(i64,i64,i64,i64,i64)>=c.prepare_cached("SELECT r.owner_epoch,s.owner_epoch,s.session_epoch,s.live,s.complete FROM relay_federation_runtime r JOIN relay_federation_sessions s ON s.session_id=?1 WHERE r.singleton=1")?.query_row([self.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+        let state:Option<(i64,i64,i64,i64,i64)>=c.prepare_cached("SELECT r.owner_epoch,s.owner_epoch,s.session_epoch,s.live,s.complete FROM relay_federation_runtime r JOIN relay_federation_sessions s ON s.session_id=CAST(?1 AS INTEGER) WHERE r.singleton=1")?.query_row([self.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
         if state.is_none_or(|(runtime, owner, epoch, live, done)| {
             runtime != self.owner_epoch
                 || owner != self.owner_epoch

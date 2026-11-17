@@ -38,7 +38,7 @@ async function seedImages(
       win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         const probe = win.__mediaScroll;
         if (
-          cmd === "read_media" &&
+          (cmd === "read_media" || cmd === "read_media_preview") &&
           String(args.fileConv).startsWith("scroll-image-")
         ) {
           const id = String(args.fileConv);
@@ -182,8 +182,16 @@ test("scrolling away and returning to latest reuses media without changing row h
       ),
     )
     .toBeLessThanOrEqual(1);
-  const initialHeight = (await readMediaRow(page, "scroll-message-59"))?.height;
-  expect(initialHeight).toBeGreaterThan(0);
+  // Initial layout can retire the row after the separate live-edge samples.
+  // Capture a positive baseline through the same nonwaiting geometry observer.
+  let initialHeight = 0;
+  await expect
+    .poll(async () => {
+      initialHeight =
+        (await readMediaRow(page, "scroll-message-59"))?.height ?? 0;
+      return initialHeight;
+    })
+    .toBeGreaterThan(0);
   const readsBefore = await page.evaluate(
     () =>
       (window as unknown as ProbeWindow).__mediaScroll.reads["scroll-image-59"],

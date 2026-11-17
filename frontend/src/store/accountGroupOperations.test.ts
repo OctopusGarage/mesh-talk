@@ -85,6 +85,9 @@ function fixture(capacity = 256) {
     terminal,
     report,
     commands,
+    setCapacity: (next: number) => {
+      capacity = next;
+    },
     retire: () => {
       generation++;
     },
@@ -431,7 +434,7 @@ it("discovers pending work after relaunch without retrieving its body", async ()
   expect(f.commands.list).toHaveBeenCalledWith("local-owner", account, {
     pendingOnly: true,
     after: undefined,
-    limit: 100,
+    limit: 64,
   });
 });
 it("does not release observations into a replacement session", async () => {
@@ -808,4 +811,216 @@ it("cannot turn an explicitly kept history into a later deletion", async () => {
   expect(f.tickets.get(id)?.status?.delete_history).toBe(false);
   expect(f.report).toHaveBeenCalledWith("conflicting_terminal");
   expect(f.terminal).toHaveBeenCalledOnce();
+});
+
+it("retains fast observation for unfinished pages and failed reads, not terminal receipts", async () => {
+  const f = fixture();
+  const completed = status({ kind: "committed" });
+  f.tickets.set(id, {
+    id,
+    account_id: account,
+    group,
+    kind: "rename",
+    stage: "observed",
+    observation: 1,
+    status: completed,
+  });
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+  f.commands.list.mockResolvedValueOnce(
+    Array.from({ length: 64 }, (_, i) => ({
+      ...completed,
+      id: String(i).padStart(64, "0"),
+    })),
+  );
+  await f.coordinator.refresh(false);
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  await f.coordinator.refresh(false);
+  expect(f.commands.list.mock.calls[1][2].after).toBe(
+    String(63).padStart(64, "0"),
+  );
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+  f.commands.list.mockRejectedValueOnce(new Error("unavailable"));
+  await f.coordinator.refresh(false);
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  f.retire();
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+  await f.coordinator.refresh(false);
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+});
+
+it("keeps unknown admission and unfinished committed history cleanup observable", () => {
+  const f = fixture();
+  const ticket: GroupOperationTicket = {
+    id,
+    account_id: account,
+    group,
+    kind: "leave_account",
+    stage: "unconfirmed",
+    observation: 1,
+  };
+  f.tickets.set(id, ticket);
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  ticket.status = {
+    ...status({ kind: "committed" }),
+    kind: "leave_account",
+    delete_history: true,
+    history_cleanup_complete: false,
+  };
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  ticket.status.history_cleanup_complete = true;
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+  ticket.status = undefined;
+  ticket.admissionFailure = { error: new Error("not admitted") };
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+});
+
+it("retains invalidation arriving behind a held empty scan", async () => {
+  const f = fixture();
+  const held = deferred<AccountGroupOperationStatus[]>();
+  f.commands.list.mockReturnValueOnce(held.promise);
+  const first = f.coordinator.refresh(false);
+  await f.coordinator.refresh();
+  expect(f.commands.list).toHaveBeenCalledTimes(1);
+  held.resolve([]);
+  await first;
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  await f.coordinator.refresh(false);
+  expect(f.commands.list).toHaveBeenCalledTimes(2);
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+});
+
+it("does not certify an invalid pending response as quiet", async () => {
+  const f = fixture();
+  f.tickets.set(id, {
+    id,
+    account_id: account,
+    group,
+    kind: "rename",
+    stage: "observed",
+    observation: 1,
+    status: status({ kind: "committed" }),
+  });
+  f.commands.list.mockResolvedValueOnce([
+    { ...status({ kind: "committed" }), group: "wrong-group" },
+  ]);
+  await f.coordinator.refresh(false);
+  expect(f.report).toHaveBeenCalledWith("invalid_response");
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+});
+
+it("retains capacity-deferred native pending work until it can be observed", async () => {
+  const f = fixture(0);
+  const pending = status({ kind: "accepted" });
+  f.commands.list.mockResolvedValue([pending]);
+  await f.coordinator.refresh(false);
+  expect(f.report).toHaveBeenCalledWith("capacity");
+  expect(f.report).not.toHaveBeenCalledWith("invalid_response");
+  expect(f.tickets.size).toBe(0);
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  // Capacity release does not publish an unrelated invalidation or ticket change.
+  f.setCapacity(1);
+  await f.coordinator.refresh(false);
+  expect(f.tickets.get(id)?.status).toEqual(pending);
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  f.commands.status.mockResolvedValue(status({ kind: "committed" }));
+  f.commands.list.mockResolvedValue([]);
+  await f.coordinator.refresh(false);
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+});
+
+it("retries a full capacity-deferred page from its original cursor", async () => {
+  const f = fixture(0);
+  const pending = Array.from({ length: 64 }, (_, i) => ({
+    ...status({ kind: "accepted" }),
+    id: String(i + 1).padStart(64, "0"),
+  }));
+  f.commands.list.mockImplementation(async (_owner, _account, query) =>
+    pending
+      .filter((row) => query.after === undefined || row.id > query.after)
+      .slice(0, 64),
+  );
+  await f.coordinator.refresh(false);
+  expect(f.report).toHaveBeenCalledWith("capacity");
+  expect(f.tickets.size).toBe(0);
+  f.setCapacity(256);
+  await f.coordinator.refresh(false);
+  expect(f.commands.list.mock.calls[1][2].after).toBeUndefined();
+  expect(f.tickets.size).toBe(64);
+  expect(
+    [...f.tickets.values()].every(
+      (ticket) => ticket.status?.phase.kind === "accepted",
+    ),
+  ).toBe(true);
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  f.commands.list.mockResolvedValue([]);
+  f.commands.status.mockImplementation(async (_owner, _account, operation) => ({
+    ...status({ kind: "committed" }),
+    id: operation,
+  }));
+  for (let turn = 0; turn < 8; turn++) await f.coordinator.refresh(false);
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+});
+
+it("finishes continuation before consuming retained invalidation in a fresh head scan", async () => {
+  const f = fixture();
+  const completed = Array.from({ length: 64 }, (_, i) => ({
+    ...status({ kind: "committed" }),
+    id: String(i + 1).padStart(64, "0"),
+  }));
+  const held = deferred<AccountGroupOperationStatus[]>();
+  f.commands.list.mockReturnValueOnce(held.promise);
+  const first = f.coordinator.refresh(false);
+  await f.coordinator.refresh();
+  held.resolve(completed);
+  await first;
+  const earlier = { ...status({ kind: "accepted" }), id: "0".repeat(64) };
+  f.commands.list.mockImplementation(async (_owner, _account, query) =>
+    [earlier, ...completed]
+      .filter((row) => query.after === undefined || row.id > query.after)
+      .slice(0, 64),
+  );
+  await f.coordinator.refresh(false);
+  expect(f.commands.list.mock.calls[1][2].after).toBe(completed[63].id);
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  await f.coordinator.refresh(false);
+  expect(f.commands.list.mock.calls[2][2].after).toBeUndefined();
+  expect(f.tickets.get(earlier.id)?.status).toEqual(earlier);
+});
+
+it("does not manufacture invalidation from periodic attempts behind a held read", async () => {
+  const f = fixture();
+  const held = deferred<AccountGroupOperationStatus[]>();
+  f.commands.list.mockReturnValueOnce(held.promise);
+  const first = f.coordinator.refresh(false);
+  await f.coordinator.refresh(false);
+  await f.coordinator.refresh(false);
+  expect(f.commands.list).toHaveBeenCalledTimes(1);
+  held.resolve([]);
+  await first;
+  expect(f.coordinator.needsFastObservation()).toBe(false);
+});
+
+it("retains between-page invalidations without starving the suffix", async () => {
+  const f = fixture();
+  const rows = Array.from({ length: 128 }, (_, i) => ({
+    ...status({ kind: "committed" }),
+    id: String(i + 1).padStart(64, "0"),
+  }));
+  let earlier: AccountGroupOperationStatus[] = [];
+  f.commands.list.mockImplementation(async (_owner, _account, query) =>
+    [...earlier, ...rows]
+      .filter((row) => query.after === undefined || row.id > query.after)
+      .slice(0, query.limit),
+  );
+  await f.coordinator.refresh(false);
+  expect(f.commands.list.mock.calls[0][2].limit).toBe(64);
+  earlier = [{ ...status({ kind: "accepted" }), id: "0".repeat(64) }];
+  await f.coordinator.refresh();
+  expect(f.commands.list.mock.calls[1][2].after).toBe(rows[63].id);
+  await f.coordinator.refresh();
+  expect(f.commands.list.mock.calls[2][2].after).toBe(rows[127].id);
+  expect(f.coordinator.needsFastObservation()).toBe(true);
+  await f.coordinator.refresh(false);
+  expect(f.commands.list.mock.calls[3][2].after).toBeUndefined();
+  expect(f.tickets.get(earlier[0].id)?.status).toEqual(earlier[0]);
 });

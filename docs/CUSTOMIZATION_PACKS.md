@@ -6,6 +6,46 @@ Mesh-Talk includes basic light, dark, and OLED themes and starts without optiona
 
 `cd frontend && npm run build` makes the frontend without optional pack ZIPs or a separate Noto artwork directory. Tauri builds use the same behavior. The release workflow publishes one desktop package per platform and CPU architecture, with no edition flag or filename suffix. Upgrading preserves packs already installed on the device.
 
+## Runtime loading
+
+The renderer keeps an image-free library catalog. Startup prepares that catalog
+and the selected theme; opening a gallery or sticker picker reads its selected
+library. Compact conversation labels use catalog metadata. A visible legacy
+sticker retains its selected artwork rather than the entire library. Closing or
+replacing the view releases its payload; transient read failures offer retry and
+must not persist a replacement theme.
+
+The local IndexedDB version-three catalog is stored beside unchanged pack and
+archive rows. Upgrade backfill uses a cursor; catalog, payload and pending-index
+updates commit together. Private tombstones continue to hide bundled entries.
+Scope, content revision and request lifetime qualify completed payload reads;
+identical reads share work and at most two full rows are admitted concurrently.
+Queued distinct reads and shared-flight observers each have a limit of 64; excess
+admission fails retryably. A retired queued reader starts no disk work unless
+another current reader needs the same payload. Admitted work retains its slot
+until actual settlement. Pending publication selects metadata first and reads one
+archive at a time, so an offline backlog does not retain every pending payload.
+Only the active account and public library retain IndexedDB connections. Scope
+replacement/logout, browser version changes and unexpected closure retire those
+connections; already-admitted operations release their retired connection after
+the last lease settles. Legacy reads stay ephemeral and failed opens remain
+retryable. This bounds retained connections, not every in-flight browser request.
+Equal linked versions use fresh compact metadata before read-write admission;
+actual mutations recheck current scope, version and local edits in their atomic
+transaction. Theme selection and remote catalog projection do not trigger local
+publication; committed local edits retain their own invalidation.
+There is no inactive full-pack cache. The selected theme and open library still
+use a full legal pack in this stage: the 24 MiB extracted-content limit can expand
+to roughly 32 MiB of base64 characters, with further string/runtime overhead.
+This is not a global renderer-memory guarantee.
+
+Optional native sticker sources are prepared sequentially from transient pack
+reads. The registration coordinator retains small content tokens and completed
+identities, not artwork URLs or archives. This preserves the existing native
+128-entry/32 MiB cache and its exact content/proof checks; it does not guarantee
+that every installed sticker remains cached. A durable demand-only native source
+index is a separate capability. Wire pack and sticker formats are unchanged.
+
 ## Create a pack
 
 Place `manifest.json` at the ZIP root and image files under `images/`. The ZIP must be at most 12 MiB, contain at most 256 entries, have at most 24 MiB of extracted content, and use images of at most 3 MiB each. Avatar and theme images must be PNG, JPEG, or WebP; sticker images may also be GIF. Animated WebP, APNG, and GIF stickers work in browsers that support those formats. SVG, CSS, JavaScript, remote image URLs, executables, and unrelated files are not accepted. `credits.json` is allowed for attribution. Names and IDs are plain text. Pack IDs must be 3–80 lowercase letters, digits, dots, underscores, or hyphens. Use a stable ID and increment `version` in `major.minor.patch` form when publishing an update; installing a pack with the same ID and library type replaces it. An avatar pack cannot replace a pack with the same ID in another avatar category.
@@ -33,9 +73,7 @@ An avatar library:
   "kind": "avatar",
   "category": "personal",
   "fit": "cover",
-  "avatars": [
-    { "label": "Ada", "file": "images/ada.webp" }
-  ]
+  "avatars": [{ "label": "Ada", "file": "images/ada.webp" }]
 }
 ```
 
@@ -74,7 +112,12 @@ A sticker library:
   "name": "Reactions",
   "kind": "sticker",
   "stickers": [
-    { "id": "wave", "label": "Wave", "fallback": "👋", "file": "images/wave.webp" }
+    {
+      "id": "wave",
+      "label": "Wave",
+      "fallback": "👋",
+      "file": "images/wave.webp"
+    }
   ]
 }
 ```
@@ -111,9 +154,19 @@ installed-pack lookup and fallback behavior; their original images cannot be
 reconstructed reliably from an ID alone.
 
 For direct messaging, matching installed artwork can supply the image locally.
-The desktop registers validated installed snapshots with the current account's
-node; the optional in-memory cache is bounded to 128 images and 32 MiB and is
-rebuilt for each runtime. A pack ID or sticker ID alone never establishes a match:
+The desktop prepares only artwork requested by the current account's existing
+pending downloads. Startup, file invalidations and sparse recovery read bounded
+metadata pages; they must not preload installed packs without matching demand.
+The serial source worker reads one matching pack transiently and registers only
+the selected image. Current owner, account and pack-content checks fence awaited
+work. Finish paged suffixes before one coalesced fresh-head sweep. Further changes
+wait for the next file/catalog event, activation or existing five-minute repair;
+registration-triggered notifications must not create an endless preparation loop.
+Invalid artwork retains only bounded metadata until its content changes or the
+negative entry is evicted; transient failures remain retryable. The optional
+in-memory cache is bounded to 128 images and 32 MiB and is
+rebuilt for each runtime. Cache eviction permits later preparation; a prior
+registration is not permanent completion. A pack ID or sticker ID alone never establishes a match:
 the incoming authenticated manifest must match the exact checksum and byte size.
 
 Compatible direct peers exchange only the original signed chunk headers when
@@ -239,8 +292,8 @@ sending remains unavailable for stickers.
 ## Account-scoped startup appearance
 
 Installed private packs are cached under both the local user and the verified
-cryptographic account. Startup restores the selected theme from that cache before
-enumerating unrelated gallery assets. This does not require a network download or
+cryptographic account. Startup restores the selected theme from that cache without
+hydrating unrelated gallery assets. This does not require a network download or
 completion of account synchronization.
 
 The desktop can expose public account/device IDs after its existing keystore
@@ -259,8 +312,9 @@ and runtime session.
 Normal native launches keep the initial window hidden until that authorized
 surface and selected local wallpaper are ready for display. The pack owner
 records when the selected-theme lookup has settled for the current scope; this
-permits display while unrelated gallery enumeration continues. Storage without
-that lookup retains full-library completion as a fallback.
+permits display while the lightweight catalog is still loading. Catalog completion
+alone does not qualify selected images; transient reads retain the selected ID
+without persisting a replacement theme.
 Signed-out and locked launches prepare their public entry surfaces. A one-shot
 native fallback preserves startup liveness; hidden autostart and explicit user
 visibility choices remain authoritative. Full message-store readiness and remote

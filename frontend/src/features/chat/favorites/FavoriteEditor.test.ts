@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
-import { act, createElement } from "react";
+import { act, createElement, Profiler } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import "@/lib/i18n";
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
+const owner = vi.hoisted(() => ({ current: true }));
+beforeEach(() => {
+  owner.current = true;
+});
 vi.mock("@/store/ownership", () => ({
-  captureRuntimeOwner: () => ({ owner: "alice", current: () => true }),
+  captureRuntimeOwner: () => ({ owner: "alice", current: () => owner.current }),
 }));
 vi.mock("@/store/packs", () => ({
   usePacks: (select: (state: { packs: never[] }) => unknown) =>
@@ -128,5 +132,134 @@ it("prefills overall and per-message remarks when editing an existing exact sele
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+it("does not commit one-second renders for a mounted non-expiring editor", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(2026, 0, 2, 12));
+  const root = createRoot(document.createElement("div"));
+  const commits = vi.fn();
+  try {
+    await act(async () =>
+      root.render(
+        createElement(
+          Profiler,
+          { id: "editor", onRender: commits },
+          createElement(FavoriteEditor, { draft, onClose: () => {} }),
+        ),
+      ),
+    );
+    await act(async () => vi.advanceTimersByTime(0));
+    commits.mockClear();
+    await act(async () => vi.advanceTimersByTime(5_000));
+    expect(commits).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+it("withholds editor content exactly at its fractional-second expiry", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(10_000);
+  const root = createRoot(document.createElement("div"));
+  try {
+    await act(async () =>
+      root.render(
+        createElement(FavoriteEditor, {
+          draft: {
+            ...draft,
+            messages: [{ ...draft.messages[0], expiresAtMs: 10_500 }],
+          },
+          onClose: () => {},
+        }),
+      ),
+    );
+    await act(async () => vi.advanceTimersByTime(499));
+    expect(document.body.textContent).toContain("short-lived secret");
+    await act(async () => vi.advanceTimersByTime(1));
+    expect(document.body.textContent).not.toContain("short-lived secret");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+it("never resurrects expired editor text after wall-clock rollback", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(10_000);
+  const root = createRoot(document.createElement("div"));
+  try {
+    await act(async () =>
+      root.render(
+        createElement(FavoriteEditor, {
+          draft: {
+            ...draft,
+            messages: [{ ...draft.messages[0], expiresAtMs: 10_500 }],
+          },
+          onClose: () => {},
+        }),
+      ),
+    );
+    await act(async () => vi.advanceTimersByTime(1_000));
+    expect(document.body.textContent).not.toContain("short-lived secret");
+    vi.setSystemTime(8_000);
+    await act(async () => vi.advanceTimersByTime(1_000));
+    expect(document.body.textContent).not.toContain("short-lived secret");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+it("updates the local calendar label at midnight without a one-second delay", async () => {
+  vi.useFakeTimers();
+  const wall = new Date(2026, 0, 2, 23, 59, 59, 500).getTime();
+  vi.setSystemTime(wall);
+  const root = createRoot(document.createElement("div"));
+  try {
+    await act(async () =>
+      root.render(
+        createElement(FavoriteEditor, {
+          draft: {
+            ...draft,
+            messages: [{ ...draft.messages[0], wallClock: wall }],
+          },
+          onClose: () => {},
+        }),
+      ),
+    );
+    const before = document.querySelector("time")?.textContent;
+    await act(async () => vi.advanceTimersByTime(500));
+    expect(document.querySelector("time")?.textContent).not.toBe(before);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+it("refreshes editor expiry on focus while refusing retired-owner clock publications", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(10_000);
+  const root = createRoot(document.createElement("div"));
+  const commits = vi.fn();
+  try {
+    await act(async () =>
+      root.render(
+        createElement(
+          Profiler,
+          { id: "editor", onRender: commits },
+          createElement(FavoriteEditor, {
+            draft: {
+              ...draft,
+              messages: [{ ...draft.messages[0], expiresAtMs: 20_000 }],
+            },
+            onClose: () => {},
+          }),
+        ),
+      ),
+    );
+    vi.setSystemTime(21_000);
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(document.body.textContent).not.toContain("short-lived secret");
+    owner.current = false;
+    commits.mockClear();
+    await act(async () => vi.advanceTimersByTime(1_000));
+    expect(commits).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
   }
 });

@@ -422,19 +422,27 @@ impl Node {
             .expect("documents mutex")
             .personal_archive_digest
     }
-    pub fn personal_account_ids(&self) -> Vec<String> {
-        let store = self.account_documents.lock().expect("documents mutex");
-        let mut ids: Vec<_> = store
+    /// Sorted distinct conversations from the authenticated in-memory control index.
+    /// Enumerating personal choices does not hydrate unrelated group inventory.
+    pub fn personal_conversation_ids(&self) -> Vec<DocumentConversation> {
+        self.account_documents
+            .lock()
+            .expect("documents mutex")
             .personal
             .values()
-            .filter_map(|(_, c)| match &c.conversation {
-                DocumentConversation::Account(id) => Some(id.clone()),
-                _ => None,
+            .map(|(_, control)| control.conversation.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+    pub fn personal_account_ids(&self) -> Vec<String> {
+        self.personal_conversation_ids()
+            .into_iter()
+            .filter_map(|conversation| match conversation {
+                DocumentConversation::Account(id) => Some(id),
+                DocumentConversation::Channel(_) => None,
             })
-            .collect();
-        ids.sort();
-        ids.dedup();
-        ids
+            .collect()
     }
     pub fn conversation_personal_state(
         &self,

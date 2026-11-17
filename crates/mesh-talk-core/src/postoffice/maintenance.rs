@@ -18,7 +18,8 @@ use tokio::sync::watch;
 thread_local! {
 static PHYSICAL_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 static SLICE_TIMES: std::cell::RefCell<Vec<(Instant,Instant)>> = const { std::cell::RefCell::new(Vec::new()) };
-static LAST_DUTY_DEADLINE: std::cell::Cell<Option<tokio::time::Instant>> = const { std::cell::Cell::new(None) };}
+static LAST_DUTY_DEADLINE: std::cell::Cell<Option<tokio::time::Instant>> = const { std::cell::Cell::new(None) };
+static LAST_PHYSICAL_DEADLINE: std::cell::Cell<Option<tokio::time::Instant>> = const { std::cell::Cell::new(None) };}
 
 const MIN_SPACING: Duration = Duration::from_millis(10);
 fn pause_for(elapsed: Duration, failures: u32) -> Duration {
@@ -33,11 +34,39 @@ fn pause_for(elapsed: Duration, failures: u32) -> Duration {
     }
 }
 
-// Hysteresis amortizes tiny session deletes. Each eligible physical slice
-// returns to all other maintenance classes and the measured-duty pacing gate.
-const PHYSICAL_START_PAGES: u64 = 256;
-const PHYSICAL_STOP_PAGES: u64 = 64;
-const PHYSICAL_COOLDOWN: Duration = Duration::from_millis(100);
+// Retain reusable staging capacity. Reclamation is storage maintenance, not
+// message delivery: only a substantial unused fraction starts a physical drain.
+const PHYSICAL_START_BYTES: u64 = 8 * 1024 * 1024;
+const PHYSICAL_STOP_BYTES: u64 = 4 * 1024 * 1024;
+#[cfg(test)]
+const PHYSICAL_START_PAGES: u64 = PHYSICAL_START_BYTES / 4096;
+#[cfg(test)]
+const PHYSICAL_STOP_PAGES: u64 = PHYSICAL_STOP_BYTES / 4096;
+const PHYSICAL_COOLDOWN: Duration = Duration::from_secs(5);
+
+fn physical_reclamation_active(active: bool, page_size: u64, page_count: u64, free: u64) -> bool {
+    if page_size == 0 || page_count == 0 || free > page_count {
+        return false;
+    }
+    let bytes = u128::from(page_size) * u128::from(free);
+    if active {
+        bytes > u128::from(PHYSICAL_STOP_BYTES) && u128::from(free) * 10 > u128::from(page_count)
+    } else {
+        bytes >= u128::from(PHYSICAL_START_BYTES) && u128::from(free) * 4 >= u128::from(page_count)
+    }
+}
+
+fn physical_success_pause(elapsed: Duration) -> Duration {
+    elapsed.saturating_mul(99).max(PHYSICAL_COOLDOWN)
+}
+
+fn physical_retry_pause(elapsed: Duration, failures: u32) -> Duration {
+    physical_success_pause(elapsed).max(
+        PHYSICAL_COOLDOWN
+            .saturating_mul(1u32 << failures.saturating_sub(1).min(6))
+            .min(Duration::from_secs(300)),
+    )
+}
 #[derive(Default)]
 struct PhysicalCleanup {
     active: bool,
@@ -56,17 +85,19 @@ impl PhysicalCleanup {
         }
         #[cfg(test)]
         PHYSICAL_INSPECTIONS.with(|v| v.set(v.get() + 1));
+        let physical_started = Instant::now();
         let result = (|| {
             if !self.inspected_main {
                 self.checkpoint_pending = database.main_file_exceeds_page_estimate()?;
                 self.inspected_main = true;
             }
             let stats = database.physical_stats()?;
-            if stats.freelist_count <= PHYSICAL_STOP_PAGES {
-                self.active = false;
-            } else if stats.freelist_count >= PHYSICAL_START_PAGES {
-                self.active = true;
-            }
+            self.active = physical_reclamation_active(
+                self.active,
+                stats.page_size,
+                stats.page_count,
+                stats.freelist_count,
+            );
             if !self.active && !self.checkpoint_pending {
                 self.failures = 0;
                 self.next_eligible = None;
@@ -83,7 +114,12 @@ impl PhysicalCleanup {
                     progress.after.page_count
                 );
                 self.active = progress.yielded_steps > 0
-                    && progress.after.freelist_count > PHYSICAL_STOP_PAGES;
+                    && physical_reclamation_active(
+                        true,
+                        progress.after.page_size,
+                        progress.after.page_count,
+                        progress.after.freelist_count,
+                    );
                 self.checkpoint_pending |= progress.yielded_steps > 0;
             }
             if self.checkpoint_pending {
@@ -94,23 +130,26 @@ impl PhysicalCleanup {
                 if self.checkpoint_pending {
                     self.failures = self.failures.saturating_add(1);
                     self.next_eligible = Some(
-                        tokio::time::Instant::now() + pause_for(Duration::ZERO, self.failures),
+                        tokio::time::Instant::now()
+                            + physical_retry_pause(physical_started.elapsed(), self.failures),
                     );
                     log::debug!("indexed relay physical checkpoint deferred: {progress:?}");
                     return Ok(());
                 }
             }
             self.failures = 0;
-            self.next_eligible = self
-                .active
-                .then(|| tokio::time::Instant::now() + PHYSICAL_COOLDOWN);
+            self.next_eligible = self.active.then(|| {
+                tokio::time::Instant::now() + physical_success_pause(physical_started.elapsed())
+            });
             Ok(())
         })();
         match result {
             Err(error) if !database.requires_reopen() && database_busy(&error) => {
                 self.failures = self.failures.saturating_add(1);
-                self.next_eligible =
-                    Some(tokio::time::Instant::now() + pause_for(Duration::ZERO, self.failures));
+                self.next_eligible = Some(
+                    tokio::time::Instant::now()
+                        + physical_retry_pause(physical_started.elapsed(), self.failures),
+                );
                 log::warn!("indexed relay physical cleanup deferred: {error}");
                 Ok(())
             }
@@ -247,7 +286,10 @@ impl IndexedPostOffice {
             // interrupt the spacing/duty/error-backoff gate.
             let duty = tokio::time::sleep(pause_for(started.elapsed(), failures));
             #[cfg(test)]
-            LAST_DUTY_DEADLINE.with(|deadline| deadline.set(Some(duty.deadline())));
+            {
+                LAST_DUTY_DEADLINE.with(|deadline| deadline.set(Some(duty.deadline())));
+                LAST_PHYSICAL_DEADLINE.with(|deadline| deadline.set(physical.next_eligible));
+            }
             tokio::pin!(duty);
             tokio::select! {
                 biased;
@@ -282,6 +324,38 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn small_temporary_allocations_reuse_pages_without_physical_writes() {
+        use crate::storage::database::observations::VACUUM_STATEMENTS;
+        let root = tempfile::tempdir().unwrap();
+        let db = EncryptedDatabase::open(&root.path().join("profile.db"), "pw", b"owner").unwrap();
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE scratch(body BLOB)")?;
+            c.execute("INSERT INTO scratch VALUES(zeroblob(2097152))", [])?;
+            c.execute("DELETE FROM scratch", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let before = db.physical_stats().unwrap();
+        assert!(before.freelist_count >= 256);
+        VACUUM_STATEMENTS.with(|v| v.set(0));
+        let mut cleanup = PhysicalCleanup::default();
+        for _ in 0..8 {
+            cleanup.step(&db).unwrap();
+        }
+        assert_eq!(VACUUM_STATEMENTS.with(|v| v.get()), 0);
+        assert!(!cleanup.active && cleanup.next_eligible.is_none());
+        assert_eq!(db.physical_stats().unwrap(), before);
+        db.transaction(|c| {
+            c.execute("INSERT INTO scratch VALUES(zeroblob(2097152))", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let reused = db.physical_stats().unwrap();
+        assert_eq!(reused.page_count, before.page_count);
+        assert!(reused.freelist_count < before.freelist_count);
+    }
+
     #[test]
     fn physical_zero_frame_completion_does_not_retry_main_padding() {
         use crate::storage::database::observations::PASSIVE_ATTEMPTS;
@@ -342,7 +416,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        while db.physical_stats().unwrap().freelist_count > PHYSICAL_STOP_PAGES {
+        while db.physical_stats().unwrap().freelist_count > 64 {
             db.reclaim_pages(PhysicalReclaimBudget::default()).unwrap();
         }
         drop(db); // A second live reader prevents last-connection checkpoint.
@@ -404,7 +478,10 @@ mod tests {
             let db = office.state.profile().database();
             db.transaction(|c| {
                 c.execute_batch("CREATE TABLE disposable_pages(body BLOB)")?;
-                c.execute("INSERT INTO disposable_pages VALUES(zeroblob(2097152))", [])?;
+                c.execute(
+                    "INSERT INTO disposable_pages VALUES(zeroblob(16777216))",
+                    [],
+                )?;
                 c.execute("DELETE FROM disposable_pages", [])?;
                 Ok(())
             })
@@ -416,11 +493,8 @@ mod tests {
             let (stop, rx) = watch::channel(false);
             let worker = office.run_maintenance(rx);
             tokio::pin!(worker);
-            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_secs(2))=>{}}
+            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(1))=>{}}
             let stats = db.physical_stats().unwrap();
-            if !pinned {
-                assert!(stats.freelist_count <= PHYSICAL_STOP_PAGES);
-            }
             if let Some(reader) = reader {
                 assert_eq!(
                     std::fs::metadata(&main_path).unwrap().len(),
@@ -434,7 +508,17 @@ mod tests {
                     })
                     .unwrap();
                 drop(reader);
-                tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_secs(6))=>{}}
+            }
+            // The pinned reader owns checkpoint progress, not a promise that
+            // physical draining completes while that reader is still present.
+            // After it retires, follow actual low-duty slices to final release.
+            for _ in 0..128 {
+                tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(PHYSICAL_COOLDOWN)=>{}}
+                if db.physical_stats().unwrap().freelist_count <= PHYSICAL_STOP_PAGES
+                    && std::fs::metadata(&main_path).unwrap().len() < main_before
+                {
+                    break;
+                }
             }
             assert!(db.physical_stats().unwrap().freelist_count <= PHYSICAL_STOP_PAGES);
             let main_after = std::fs::metadata(&main_path).unwrap().len();
@@ -465,7 +549,10 @@ mod tests {
         let db = office.state.profile().database();
         db.transaction(|c| {
             c.execute_batch("CREATE TABLE disposable_pages(body BLOB)")?;
-            c.execute("INSERT INTO disposable_pages VALUES(zeroblob(2097152))", [])?;
+            c.execute(
+                "INSERT INTO disposable_pages VALUES(zeroblob(16777216))",
+                [],
+            )?;
             c.execute("DELETE FROM disposable_pages", [])?;
             Ok(())
         })
@@ -507,12 +594,46 @@ mod tests {
             1,
             "healthy watch wakes must not inspect physical scalars before success eligibility"
         );
-        let limit = first + Duration::from_secs(2);
-        while VACUUM_ATTEMPTS.with(|v| v.borrow().len()) < 2 {
-            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(10))=>{}}
-            assert!(tokio::time::Instant::now() < limit);
+        let eligible = LAST_PHYSICAL_DEADLINE
+            .with(|deadline| deadline.get())
+            .expect("the first physical slice must retain its measured eligibility deadline");
+        assert!(eligible >= first + PHYSICAL_COOLDOWN);
+        tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep_until(eligible - MIN_SPACING)=>{}}
+        assert_eq!(VACUUM_ATTEMPTS.with(|v| v.borrow().len()), 1);
+        assert_eq!(
+            PHYSICAL_INSPECTIONS.with(|v| v.get()),
+            1,
+            "watch work must not inspect physical state before the actual measured deadline"
+        );
+        // Follow the real owner's independent physical and whole-slice duty
+        // gates. Real SQL elapsed time can legitimately place either beyond a
+        // fixed multiple of the minimum cooldown, even with Tokio time paused.
+        for _ in 0..64 {
+            if VACUUM_ATTEMPTS.with(|v| v.borrow().len()) >= 2 {
+                break;
+            }
+            let physical = LAST_PHYSICAL_DEADLINE
+                .with(|deadline| deadline.get())
+                .expect("pending physical cleanup must retain eligibility");
+            let duty = LAST_DUTY_DEADLINE
+                .with(|deadline| deadline.get())
+                .expect("a completed slice must arm its measured duty gate");
+            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep_until(physical.max(duty))=>{}}
+            std::future::poll_fn(|cx| match std::future::Future::poll(worker.as_mut(), cx) {
+                std::task::Poll::Ready(result) => panic!("worker stopped: {result:?}"),
+                std::task::Poll::Pending => std::task::Poll::Ready(()),
+            })
+            .await;
         }
         let attempts = VACUUM_ATTEMPTS.with(|v| v.borrow().clone());
+        assert!(
+            attempts.len() >= 2,
+            "physical work must resume within bounded owned slices"
+        );
+        assert!(
+            attempts[1] >= eligible,
+            "the second attempt must honor actual success eligibility"
+        );
         assert!(attempts[1] - attempts[0] >= PHYSICAL_COOLDOWN);
         assert!(PHYSICAL_INSPECTIONS.with(|v| v.get()) >= 2);
         // Real SQL duration controls the duty pause even while Tokio time is
@@ -545,13 +666,16 @@ mod tests {
         let db = office.state.profile().database();
         db.transaction(|c| {
             c.execute_batch("CREATE TABLE disposable_pages(body BLOB)")?;
-            c.execute("INSERT INTO disposable_pages VALUES(zeroblob(2097152))", [])?;
+            c.execute(
+                "INSERT INTO disposable_pages VALUES(zeroblob(16777216))",
+                [],
+            )?;
             c.execute("DELETE FROM disposable_pages", [])?;
             Ok(())
         })
         .unwrap();
         let before = db.physical_stats().unwrap();
-        assert!(before.freelist_count >= 256);
+        assert!(before.freelist_count >= PHYSICAL_START_PAGES);
         VACUUM_STATEMENTS.with(|v| v.set(0));
         PHYSICAL_INSPECTIONS.with(|v| v.set(0));
         let (stop, rx) = watch::channel(false);
@@ -572,7 +696,10 @@ mod tests {
             1,
             "successful cooldown must sleep instead of polling every10ms"
         );
-        assert!(after.freelist_count > 64, "stop need not drain backlog");
+        assert!(
+            after.freelist_count > PHYSICAL_STOP_PAGES,
+            "stop need not drain backlog"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -586,10 +713,10 @@ mod tests {
         let mailbox =
             crate::postoffice::opaque::RelayMailbox::federated(&author, &recipient.public())
                 .unwrap();
-        // Garbage must exceed the maintained 256-page physical-GC activation
+        // Garbage must exceed the production 8 MiB physical-GC activation
         // threshold; smaller inventories intentionally retain their free pages.
         let mut expired_body_sizes = Vec::new();
-        for seq in 1..=24 {
+        for seq in 1..=256 {
             let event = mailbox
                 .wrap(&Event::new(
                     &author,
@@ -643,11 +770,14 @@ mod tests {
         let worker = office.run_maintenance(rx);
         tokio::pin!(worker);
         // This is functional GC completion, not a wall-clock SQL throughput
-        // SLA. Use the existing maintenance 10s virtual watchdog: real SQL cost
+        // SLA. Include the admitted low-duty physical waits in the functional
+        // watchdog; real SQL cost
         // does not itself advance it, while each actual measured-duty Sleep is
         // still obeyed before another bounded production slice is polled.
         let mut completed_slices = 0;
-        let functional_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let functional_deadline = tokio::time::Instant::now()
+            + Duration::from_secs(10)
+            + PHYSICAL_COOLDOWN.saturating_mul(3);
         let completion = tokio::time::timeout_at(functional_deadline, async {
             loop {
                 if tokio::time::Instant::now() >= functional_deadline {
@@ -762,7 +892,10 @@ mod tests {
         let db = office.state.profile().database();
         db.transaction(|c| {
             c.execute_batch("CREATE TABLE disposable_pages(body BLOB)")?;
-            c.execute("INSERT INTO disposable_pages VALUES(zeroblob(2097152))", [])?;
+            c.execute(
+                "INSERT INTO disposable_pages VALUES(zeroblob(16777216))",
+                [],
+            )?;
             c.execute("DELETE FROM disposable_pages", [])?;
             Ok(())
         })
@@ -796,7 +929,7 @@ mod tests {
             // The measured duty gate includes real database execution time.
             // A fixed virtual 350 ms window cannot predict its slice count on
             // a slower filesystem. Wait for actual retries, then check spacing.
-            let until = tokio::time::Instant::now() + Duration::from_secs(10);
+            let until = tokio::time::Instant::now() + PHYSICAL_COOLDOWN.saturating_mul(6);
             while VACUUM_ATTEMPTS.with(|v| v.borrow().len()) < 3 {
                 tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(10))=>{}}
                 assert!(tokio::time::Instant::now() < until);
@@ -815,10 +948,12 @@ mod tests {
             let attempts = VACUUM_ATTEMPTS.with(|v| v.borrow().clone());
             assert_eq!(attempts.len(), 3);
             for (index, pair) in attempts.windows(2).enumerate() {
-                assert!(pair[1] - pair[0] >= Duration::from_millis(100u64 << index));
+                assert!(
+                    pair[1] - pair[0] >= physical_retry_pause(Duration::ZERO, (index + 1) as u32)
+                );
             }
-            let next =
-                VACUUM_ATTEMPTS.with(|v| *v.borrow().last().unwrap()) + Duration::from_millis(400);
+            let next = VACUUM_ATTEMPTS.with(|v| *v.borrow().last().unwrap())
+                + physical_retry_pause(Duration::ZERO, 3);
             FORCE_BUSY.with(|v| v.set(false));
             office
                 .state
@@ -1565,5 +1700,50 @@ mod tests {
         drop(reader);
         drop(office);
         assert!(ProfileStorageLease::acquire(root.path()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod physical_idle_policy_tests {
+    use super::*;
+    #[test]
+    fn reusable_free_pages_do_not_start_or_keep_a_compaction_cycle() {
+        let pages = |mib: u64| mib * 1024 * 1024 / 4096;
+        assert!(!physical_reclamation_active(
+            false,
+            4096,
+            pages(64),
+            pages(2)
+        ));
+        assert!(!physical_reclamation_active(
+            false,
+            4096,
+            pages(512),
+            pages(64)
+        ));
+        assert!(physical_reclamation_active(
+            false,
+            4096,
+            pages(64),
+            pages(20)
+        ));
+        assert!(physical_reclamation_active(true, 4096, pages(64), pages(8)));
+        assert!(!physical_reclamation_active(
+            true,
+            4096,
+            pages(64),
+            pages(4)
+        ));
+        assert!(!physical_reclamation_active(
+            true,
+            4096,
+            pages(512),
+            pages(40)
+        ));
+    }
+    #[test]
+    fn physical_reclamation_has_its_own_low_duty_deadline() {
+        assert!(physical_success_pause(Duration::ZERO) >= Duration::from_secs(5));
+        assert!(physical_success_pause(Duration::from_millis(200)) >= Duration::from_millis(19800));
     }
 }

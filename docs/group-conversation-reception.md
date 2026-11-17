@@ -52,6 +52,11 @@ batch. Own-device/history replication is silent. Notification settings, focused
 conversation suppression, preview privacy and application lock rules still apply
 to summaries. Separate recovery passes can produce separate summaries; the app
 does not promise a single alert for an arbitrarily long disconnection.
+Focused-conversation notification context follows the active channel or the
+canonical device set of the active account. Freshness, display names and
+unrelated roster changes do not clear and republish unchanged context. Actual
+conversation/device-set changes and desktop-session replacement still update it;
+unmount clears it, and native monotonic revisions reject stale completions.
 
 Unread tracking uses identities rather than a timestamp watermark. Receiving a
 late message before a previously read timestamp does not mark it read. Visible

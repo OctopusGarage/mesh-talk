@@ -194,16 +194,7 @@ pub async fn owner_personal_conversation_states(
                 return Err(CommandError::Authorization("account changed".into()));
             }
             let handle = runtime.handle();
-            let conversations: std::collections::BTreeSet<_> = handle
-                .personal_account_ids()
-                .into_iter()
-                .map(mesh_talk_core::node::DocumentConversation::Account)
-                .chain(handle.list_channels()?.into_iter().map(|channel| {
-                    mesh_talk_core::node::DocumentConversation::Channel(hex::encode(
-                        channel.id.as_bytes(),
-                    ))
-                }))
-                .collect();
+            let conversations = handle.personal_conversation_ids();
             Ok(conversations
                 .into_iter()
                 .filter_map(|conversation| {

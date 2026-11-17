@@ -146,8 +146,9 @@ export async function submitGroupControlIntent(
 export async function refreshGroupOperationIntents(
   set: Set,
   get: Get,
+  invalidated = true,
 ): Promise<void> {
-  await coordinator(set, get).refresh();
+  await coordinator(set, get).refresh(invalidated);
 }
 export async function cancelGroupOperationIntent(
   set: Set,
@@ -168,4 +169,14 @@ export async function submitGroupMessageIntent(
   return existingId
     ? operations.resume(existingId, request.invoke)
     : operations.submit(request);
+}
+
+/** Scheduling observation only; the coordinator retains pagination and failure ownership. */
+export function groupOperationObservation(set: Set, get: Get) {
+  const operations = coordinator(set, get);
+  return {
+    pending: () => operations.needsFastObservation(),
+    subscribe: (listener: () => void) =>
+      operations.subscribeObservation(listener),
+  };
 }

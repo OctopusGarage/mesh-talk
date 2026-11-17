@@ -207,7 +207,11 @@ test("protected pasted image reveals through a local revocable URL and expires w
     target.__protectedReadCalls = [];
     const invoke = target.__TAURI_INTERNALS__.invoke;
     target.__TAURI_INTERNALS__.invoke = (command, args) => {
-      if (command === "read_media" || command === "read_file")
+      if (
+        command === "read_media" ||
+        command === "read_media_preview" ||
+        command === "read_file"
+      )
         target.__protectedReadCalls.push(command);
       return invoke(command, args);
     };

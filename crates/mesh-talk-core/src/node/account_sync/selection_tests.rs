@@ -933,7 +933,8 @@ async fn account_sync_attachment_selection_does_not_park_document_scheduler() {
         .set_device_hostname(Some("during-selection"))
         .unwrap();
     requested.store(true, Ordering::SeqCst);
-    receiver.account_sync_notify.notify_one();
+    // Model the changed source's authenticated hint while local selection is held.
+    receiver.request_sibling_pull(&source.identity.public());
     let progressed = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if refreshed.load(Ordering::SeqCst)
@@ -2957,7 +2958,11 @@ async fn legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_re
         }
     });
     let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
-    let legacy_worker = tokio::spawn(legacy.clone().run_account_history_loop());
+    assert!(RECONCILE_INTERVAL >= Duration::from_secs(300));
+    let legacy_worker =
+        tokio::spawn(legacy.clone().run_account_history_loop_with_tick(Some(
+            tokio::time::interval(Duration::from_secs(1)),
+        )));
     let outcome = tokio::time::timeout(Duration::from_secs(13), async {
         loop {
             if attempts.load(Ordering::SeqCst) == 1
@@ -3004,7 +3009,7 @@ async fn legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_re
     let _ = legacy_server.await;
     let _ = legacy_worker.await;
     outcome.expect(
-        "a legacy sibling keeps its ten-second history fallback after rejecting optional hints",
+        "a legacy sibling retains sparse online history repair after rejecting optional hints",
     );
 }
 
@@ -4355,6 +4360,14 @@ enum HistoryAfterFavorites {
     Wake,
     Continuation,
     Idle,
+    FailedHistory,
+    TimedOutHistory,
+}
+
+impl HistoryAfterFavorites {
+    fn fails_history(self) -> bool {
+        matches!(self, Self::FailedHistory | Self::TimedOutHistory)
+    }
 }
 
 async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail_favorites: bool) {
@@ -4362,11 +4375,20 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::TcpListener;
 
-    let (_dir, source, receiver) = sibling_nodes();
+    let (dir, source, receiver) = sibling_nodes();
     let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let wake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let wake_peer = sibling_peer(&source, &receiver, wake_listener.local_addr().unwrap());
-    sibling_peer(&receiver, &source, source_listener.local_addr().unwrap());
+    if case == HistoryAfterFavorites::TimedOutHistory {
+        reusable_sibling_peer(
+            dir.path(),
+            &receiver,
+            &source,
+            source_listener.local_addr().unwrap(),
+        );
+    } else {
+        sibling_peer(&receiver, &source, source_listener.local_addr().unwrap());
+    }
     let history_requests = Arc::new(AtomicUsize::new(0));
     let (favorite_started, favorite_waiting) = tokio::sync::oneshot::channel();
     let (release_favorite, favorite_released) = tokio::sync::oneshot::channel();
@@ -4378,8 +4400,51 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
         let mut favorites = 0;
         let mut held = tokio::task::JoinSet::new();
         loop {
-            let (mut io, version, frame) =
-                accept_account_test_request(&source_listener, &serving).await;
+            let (mut io, version, frame) = if case == HistoryAfterFavorites::TimedOutHistory {
+                let (stream, _) = source_listener.accept().await.unwrap();
+                let mut io = serving.privacy_accept(stream).await.unwrap();
+                let bytes = io.recv().await.unwrap();
+                let (version, frame) = AccountHistoryFrame::decode_versioned(&bytes).unwrap();
+                let (request_id, frame) = match frame {
+                    AccountHistoryFrame::SessionRequest {
+                        request_id,
+                        request,
+                    } => (Some(request_id), request.into_frame()),
+                    frame => (None, frame),
+                };
+                if matches!(frame, AccountHistoryFrame::Request { .. })
+                    && requests.load(Ordering::SeqCst) == 2
+                {
+                    assert!(
+                        request_id.is_some(),
+                        "third history must own a negotiated request"
+                    );
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    // Own the actual stalled negotiation until the client's
+                    // five-second deadline retires its transport. Other lanes
+                    // remain served by the listener throughout the hold.
+                    held.spawn(async move {
+                        let closed = tokio::time::timeout(Duration::from_secs(8), io.recv()).await;
+                        assert!(
+                            matches!(closed, Ok(Err(_))),
+                            "timed-out negotiation must close its channel"
+                        );
+                    });
+                    continue;
+                }
+                if let Some(request_id) = request_id {
+                    send_frame(
+                        &mut io,
+                        version,
+                        &AccountHistoryFrame::SessionReady { request_id },
+                    )
+                    .await
+                    .unwrap();
+                }
+                (io, version, frame)
+            } else {
+                accept_account_test_request(&source_listener, &serving).await
+            };
             while let Some(result) = held.try_join_next() {
                 result.unwrap();
             }
@@ -4406,6 +4471,9 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
                         )
                         .await
                         .unwrap();
+                    } else if request == 3 && case == HistoryAfterFavorites::FailedHistory {
+                        // Real authenticated EOF after supported favorites failed.
+                        // The next request will recover through the same listener.
                     } else {
                         assert!(
                             serving
@@ -4461,6 +4529,9 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
         }
     });
 
+    let (history_failed, history_failure) = tokio::sync::oneshot::channel();
+    let history_failed = std::sync::Mutex::new(Some(history_failed));
+    let failed_requests = history_requests.clone();
     let wake_seen = Arc::new(AtomicBool::new(false));
     let (refresh_observed, refresh_ready) = tokio::sync::oneshot::channel();
     let refresh_observed = Arc::new(std::sync::Mutex::new(Some(refresh_observed)));
@@ -4469,6 +4540,23 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
     *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
         if peer != expected_source {
             return;
+        }
+        if case.fails_history()
+            && phase.starts_with("history_end outcome=")
+            && phase != "history_end outcome=ok"
+            && failed_requests.load(Ordering::SeqCst) == 3
+            && let Some(failed) = history_failed.lock().unwrap().take()
+        {
+            let expected = if case == HistoryAfterFavorites::TimedOutHistory {
+                "history_end outcome=negotiation_timeout"
+            } else {
+                "history_end outcome=transport"
+            };
+            assert_eq!(
+                phase, expected,
+                "fixture must witness its exact remote failure"
+            );
+            let _ = failed.send(std::time::Instant::now());
         }
         if phase == "wake_received revision=9" {
             wake_seen.store(true, Ordering::SeqCst);
@@ -4531,11 +4619,11 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
         } else {
             1
         };
-        // Start exactly one comparison after the warmup has fully completed.
-        receiver.account_sync_notify.notify_one();
+        // This is an explicit source hint, distinct from a local publication.
+        receiver.request_sibling_pull(&source.identity.public());
         favorite_waiting.await.unwrap();
         assert_eq!(history_requests.load(Ordering::SeqCst), 2);
-        if case == HistoryAfterFavorites::Wake {
+        if case == HistoryAfterFavorites::Wake || case.fails_history() {
             source
                 .enqueue_to_account(
                     &source.account_id(),
@@ -4563,7 +4651,41 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
         Ok(expected_messages) => {
             release_favorite.send(()).unwrap();
             let progress = async {
-                if case == HistoryAfterFavorites::Idle {
+                if case.fails_history() {
+                    let failed_at = history_failure.await.expect("third history must fail");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    assert_eq!(
+                        history_requests.load(Ordering::SeqCst),
+                        3,
+                        "favorites demand must not immediately repeat failed history"
+                    );
+                    // Ordinary demand cannot convert an unchanged failed page
+                    // into immediate work. Periodic repair remains disabled.
+                    for _ in 0..5 {
+                        receiver.account_sync_notify.notify_one();
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                    }
+                    assert_eq!(
+                        history_requests.load(Ordering::SeqCst),
+                        3,
+                        "failed history must not self-retry or bypass backoff on notifications"
+                    );
+                    loop {
+                        if receiver
+                            .account_history(&receiver.account_id(), 100)
+                            .unwrap()
+                            .len()
+                            == expected_messages
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    assert!(
+                        failed_at.elapsed() >= Duration::from_millis(4900),
+                        "recovery must retain the failure deadline"
+                    );
+                } else if case == HistoryAfterFavorites::Idle {
                     loop {
                         if receiver.device_sync_status().iter().any(|status| {
                             status.device_id == source.user_id() && status.phase == SyncPhase::Error
@@ -4593,7 +4715,12 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
                     assert!(history_requests.load(Ordering::SeqCst) >= 3);
                 }
             };
-            tokio::time::timeout(RETRY_INTERVAL / 2, progress)
+            let progress_bound = if case.fails_history() {
+                RETRY_INTERVAL + Duration::from_secs(5)
+            } else {
+                RETRY_INTERVAL / 2
+            };
+            tokio::time::timeout(progress_bound, progress)
                 .await
                 .map_err(|_| "retained history work did not resume after favorites without periodic repair")
         }
@@ -4606,6 +4733,16 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
     let _ = source_server.await;
     let _ = wake_server.await;
     outcome.expect("history/favorites progress contract");
+}
+
+#[tokio::test]
+async fn account_history_failure_after_favorites_failure_retains_backoff() {
+    history_progress_after_held_favorites(HistoryAfterFavorites::FailedHistory, true).await;
+}
+
+#[tokio::test]
+async fn account_history_negotiation_timeout_after_favorites_failure_retains_backoff() {
+    history_progress_after_held_favorites(HistoryAfterFavorites::TimedOutHistory, true).await;
 }
 
 #[tokio::test]
@@ -4727,16 +4864,23 @@ async fn manifest_only_attachment_fixture(
             .unwrap();
         files.push((file, path));
     }
-    let (cards, _, _) = original.export_sync_records(
-        &source.identity.public(),
-        None,
-        true,
-        true,
-        AccountSyncVersion::V2,
-    );
-    source
-        .apply_account_history_page(&cards, AccountSyncVersion::V2)
-        .unwrap();
+    let mut after = None;
+    loop {
+        let (cards, next, _) = original.export_sync_records(
+            &source.identity.public(),
+            after,
+            true,
+            true,
+            AccountSyncVersion::V2,
+        );
+        source
+            .apply_account_history_page(&cards, AccountSyncVersion::V2)
+            .unwrap();
+        if next.is_none() {
+            break;
+        }
+        after = next;
+    }
     let receiver = open_sibling(&dir.path().join("third"), &source.account);
     for (owner, other) in [(&source, &receiver), (&receiver, &source)] {
         owner
@@ -4826,7 +4970,7 @@ async fn checked_attachment_late_source_bytes_retry_after_bounded_cooldown() {
     tokio::time::pause();
     tokio::time::advance(ATTACHMENT_AVAILABILITY_TTL + RETRY_INTERVAL).await;
     tokio::time::resume();
-    receiver.account_sync_notify.notify_one();
+    receiver.request_sibling_pull(&source.identity.public());
     let result = tokio::time::timeout(Duration::from_secs(4), async {
         while !receiver.media.contains(*file) {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -6435,4 +6579,548 @@ fn indexed_file_eligibility_waits_for_late_signed_proof_after_warm_reopen() {
         1,
         "late authenticated proof must install eligibility for the existing ordinal"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_notifications_do_not_restart_sibling_history() {
+    let (_dir, source, receiver) = sibling_nodes();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let count = count.clone();
+        move |_, phase| {
+            if phase.starts_with("history_begin ") {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }));
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    receiver.account_sync_notify.notify_one();
+    let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while count.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before = count.load(std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..4 {
+        receiver.account_sync_notify.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "local publication must not manufacture remote history demand"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_sibling_route_is_parked_until_private_authentication() {
+    let (dir, source, receiver) = sibling_nodes();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let own = receiver.signed_announce("receiver", 12345);
+    std::fs::create_dir_all(dir.path().join("receiver-privacy")).unwrap();
+    receiver
+        .configure_privacy(
+            &dir.path().join("receiver-privacy"),
+            "pw",
+            &own,
+            Arc::new(crate::discovery::visibility::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    sibling_peer(&receiver, &source, address);
+    receiver.cache_discovered_peers().unwrap();
+    receiver
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&source.identity.public());
+    assert!(
+        receiver.routing_peer(&source.user_id()).is_some(),
+        "fixture retains historical route"
+    );
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let attempts = attempts.clone();
+        move |_, phase| {
+            if phase.starts_with("history_begin ")
+                || phase.starts_with("page_begin ")
+                || phase.starts_with("wake_send_begin")
+                || phase == "attachment_selection_begin"
+            {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }));
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let history = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
+    let wake = tokio::spawn(receiver.clone().run_account_wake_loop());
+    for _ in 0..4 {
+        receiver.account_sync_notify.notify_one();
+        receiver.note_account_local_change();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let parked = attempts.load(std::sync::atomic::Ordering::SeqCst);
+    let announce = source.signed_announce("invisible source", address.port());
+    receiver
+        .remember_peer_with_visibility(
+            &source.identity.public(),
+            Some(&announce),
+            address.ip(),
+            false,
+        )
+        .unwrap();
+    assert!(
+        receiver.roster.lock().unwrap().peers().is_empty(),
+        "private evidence must never fabricate public presence"
+    );
+    let resumed = tokio::time::timeout(Duration::from_secs(10), async {
+        while attempts.load(std::sync::atomic::Ordering::SeqCst) == parked {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    history.abort();
+    wake.abort();
+    server.abort();
+    let _ = history.await;
+    let _ = wake.await;
+    let _ = server.await;
+    assert_eq!(
+        parked, 0,
+        "historical-only route must not dispatch bulk or wake work"
+    );
+    resumed.expect("private authentication resumes receiver demand without a periodic tick");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_attachment_selection_failure_retries_locally_without_history_restart() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let (_dir, source, receiver, _) = manifest_only_attachment_fixture(9).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    let mut previous = initial_sync_status(source.user_id());
+    previous.pending_attachments = 9;
+    receiver.set_account_sync_status(source.user_id(), previous);
+    let fail_once = Arc::new(AtomicBool::new(true));
+    let requests = Arc::new(AtomicUsize::new(0));
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let fail_once = fail_once.clone();
+        let requests = requests.clone();
+        move |_, event| {
+            if event.starts_with("history_begin ") {
+                requests.fetch_add(1, Ordering::SeqCst);
+            }
+            if event == "attachment_selection_begin" && fail_once.swap(false, Ordering::SeqCst) {
+                panic!("injected one-shot local selection failure");
+            }
+        }
+    }));
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
+    let result = tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            if receiver.device_sync_status().iter().any(|status| {
+                status.phase == SyncPhase::Error
+                    && status.pending_attachments == 9
+                    && status
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with("local attachment selection"))
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        loop {
+            if receiver.device_sync_status().iter().any(|status| {
+                status.phase == SyncPhase::WaitingForFiles
+                    && status.pending_attachments == 9
+                    && status.error.is_none()
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    result.expect("retained local selection must diagnose and recover on its own deadline");
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "attachment recovery must not restart source history"
+    );
+}
+
+#[tokio::test]
+async fn bounded_attachment_handoff_keeps_exact_total_and_rotates_past_page() {
+    let (_dir, source, _receiver, _) = manifest_only_attachment_fixture(257).await;
+    let first = source
+        .select_sibling_attachment_page(None, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(first.total, 257);
+    assert_eq!(first.files.len(), 256);
+    let next = source
+        .select_sibling_attachment_page(first.after, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(next.total, 257);
+    assert_eq!(next.files.len(), 1);
+    assert!(!first.files.iter().any(|item| next.files.contains(item)));
+}
+
+#[tokio::test]
+async fn attachment_recall_context_is_shared_only_within_one_selection() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (_dir, source, _receiver, files) = manifest_only_attachment_fixture(3).await;
+    let constructions = Arc::new(AtomicUsize::new(0));
+    let observed = constructions.clone();
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+        if phase == "attachment_recall_context_begin" {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    let expected: Vec<_> = files.iter().map(|(file, _)| (*file, false)).collect();
+    let first = source
+        .select_sibling_attachment_page(None, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(first.total, 3);
+    assert_eq!(first.files.into_iter().collect::<Vec<_>>(), expected);
+    let first_count = constructions.swap(0, Ordering::SeqCst);
+    let second = source
+        .select_sibling_attachment_page(None, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(second.total, 3);
+    assert_eq!(second.files.into_iter().collect::<Vec<_>>(), expected);
+    let second_count = constructions.swap(0, Ordering::SeqCst);
+    for (file, path) in &files {
+        restore_attachment_bytes(&source, *file, path);
+    }
+    let ready = source
+        .select_sibling_attachment_page(None, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(ready.total, 0);
+    assert!(ready.files.is_empty());
+    let ready_count = constructions.load(Ordering::SeqCst);
+    *source.account_client_test_hook.lock().unwrap() = None;
+    assert_eq!(
+        ready_count, 0,
+        "managed bytes must avoid recall preparation"
+    );
+    assert_eq!(
+        first_count, 1,
+        "three real media-missing manifests must share one known-account preparation"
+    );
+    assert_eq!(
+        second_count, 1,
+        "the next selection must build fresh context"
+    );
+}
+
+#[tokio::test]
+async fn attachment_recall_context_read_failure_is_not_empty_selection() {
+    let (_dir, source, _receiver, _) = manifest_only_attachment_fixture(1).await;
+    // No host tasks run in this fixture. Fail the actual account-route SELECT,
+    // then restore its table before assessing either outcome.
+    source
+        .storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch(
+                "ALTER TABLE transcript_first_routes RENAME TO attachment_recall_test_routes",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let failed = source.select_sibling_attachment_page(None, HashSet::new(), false);
+    source
+        .storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch(
+                "ALTER TABLE attachment_recall_test_routes RENAME TO transcript_first_routes",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        failed.is_err(),
+        "failed account-route reads cannot mean no missing files"
+    );
+    let recovered = source
+        .select_sibling_attachment_page(None, HashSet::new(), false)
+        .unwrap();
+    assert_eq!(recovered.total, 1);
+    assert_eq!(recovered.files.len(), 1);
+}
+
+#[tokio::test]
+async fn attachment_recall_context_keeps_per_file_recall_and_eligibility_live() {
+    let (_dir, source, _receiver, files) = manifest_only_attachment_fixture(2).await;
+    let context = source.account_file_recall_context().unwrap();
+    let file = files[0].0;
+    let untouched = files[1].0;
+    assert!(!source.account_file_recalled_with(file, &context).unwrap());
+    let header = source
+        .received_files
+        .lock()
+        .unwrap()
+        .file_headers(&file, None, Default::default())
+        .unwrap()
+        .rows
+        .remove(0);
+    let row = source
+        .received_files
+        .lock()
+        .unwrap()
+        .row_by_ordinal(header.ordinal)
+        .unwrap()
+        .unwrap();
+    source
+        .recalls
+        .lock()
+        .unwrap()
+        .record(row.conversation, row.event_id, 42)
+        .unwrap();
+    assert!(
+        source.account_file_recalled_with(file, &context).unwrap(),
+        "a context must not cache the preceding negative recall decision"
+    );
+    assert!(
+        !source
+            .account_file_recalled_with(untouched, &context)
+            .unwrap()
+    );
+    let revision = context.file_book.begin_reconcile().unwrap();
+    context.file_book.stage_revoke(header.ordinal).unwrap();
+    context.file_book.finish_reconcile(revision).unwrap();
+    let before = source.received_files.lock().unwrap().body_reads();
+    assert!(
+        !source.account_file_recalled_with(file, &context).unwrap(),
+        "revoked indexed eligibility must be checked on every per-file lookup"
+    );
+    assert_eq!(
+        source.received_files.lock().unwrap().body_reads(),
+        before,
+        "revoked rows must remain excluded before plaintext hydration"
+    );
+    assert!(
+        !source.account_file_recalled(file).unwrap(),
+        "the standalone final-publication wrapper retains fresh checks"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let (_dir, source, receiver, files) = manifest_only_attachment_fixture(2).await;
+    restore_attachment_bytes(&source, files[0].0, &files[0].1);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let entered = std::sync::Mutex::new(Some(entered));
+    let (release, released) = std::sync::mpsc::channel();
+    let released = std::sync::Mutex::new(released);
+    let held = Arc::new(AtomicBool::new(false));
+    let handoff_generation = Arc::new(AtomicU64::new(0));
+    let terminal_generation = Arc::new(AtomicU64::new(0));
+    let (consumed, consumption) = tokio::sync::oneshot::channel();
+    let consumed = std::sync::Mutex::new(Some(consumed));
+    let terminal_witness = Arc::new(std::sync::Mutex::new(None::<String>));
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let held = held.clone();
+        let handoff_generation = handoff_generation.clone();
+        let terminal_generation = terminal_generation.clone();
+        let terminal_witness = terminal_witness.clone();
+        move |_, event| {
+            if let Some(record) = event.strip_prefix("attachment_stale_terminal ") {
+                let values: std::collections::HashMap<_, _> = record
+                    .split_whitespace()
+                    .map(|value| value.split_once('=').unwrap())
+                    .collect();
+                let generation: u64 = values["generation"].parse().unwrap();
+                if generation == terminal_generation.load(Ordering::SeqCst)
+                    && let Some(sender) = consumed.lock().unwrap().take()
+                {
+                    // Retain one bounded causal record independently of the
+                    // channel, so timeout evidence identifies the missing phase.
+                    *terminal_witness.lock().unwrap() = Some(record.chars().take(512).collect());
+                    sender
+                        .send((
+                            generation,
+                            values["replacement"].parse::<u64>().unwrap(),
+                            values["total_before"].parse::<usize>().unwrap(),
+                            values["total_after"].parse::<usize>().unwrap(),
+                            values["status_before"].to_string(),
+                            values["status_after"].to_string(),
+                        ))
+                        .unwrap();
+                }
+            }
+            if let Some(handoff) = event.strip_prefix("attachment_handoff_published generation=") {
+                let (generation, _) = handoff.split_once(" pending=").unwrap();
+                handoff_generation.store(generation.parse().unwrap(), Ordering::SeqCst);
+            }
+            if let Some(generation) = event.strip_prefix("attachment_terminal_ready generation=")
+                && !held.swap(true, Ordering::SeqCst)
+            {
+                terminal_generation.store(generation.parse().unwrap(), Ordering::SeqCst);
+                entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("release committed attachment terminal");
+            }
+        }
+    }));
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
+    let source_status = || {
+        receiver
+            .device_sync_status()
+            .into_iter()
+            .find(|status| status.device_id == source.user_id())
+    };
+    let preparation = tokio::time::timeout(Duration::from_secs(5), ready).await;
+    let result = if matches!(preparation, Ok(Ok(()))) {
+        let original_generation = terminal_generation.load(Ordering::SeqCst);
+        assert_ne!(
+            original_generation, 0,
+            "the held terminal must own a published handoff"
+        );
+        receiver.request_sibling_pull(&source.identity.public());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // The old handoff can already report one pending item. Observe
+            // the replacement selection's actual publication generation before
+            // releasing its predecessor's terminal result. The old active task
+            // retains this peer's attachment slot until that release.
+            while handoff_generation.load(Ordering::SeqCst) <= original_generation
+                || !source_status().is_some_and(|status| status.pending_attachments == 1)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| "new source comparison did not replace the handoff")
+    } else {
+        Err("attachment did not reach the held terminal")
+    };
+    release.send(()).unwrap();
+    let mut recovery_phase = "terminal consumption";
+    let mut last_status = None;
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        let record = consumption.await?;
+        recovery_phase = "replacement WaitingForFiles";
+        loop {
+            last_status = source_status();
+            if last_status.as_ref().is_some_and(|status| {
+                status.pending_attachments == 1 && status.phase == SyncPhase::WaitingForFiles
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        Ok::<_, tokio::sync::oneshot::error::RecvError>(record)
+    })
+    .await;
+    if recovered.is_err() {
+        eprintln!(
+            "held attachment timeout phase={recovery_phase} old_generation={} published_generation={} witness={:?} last_status={:?} current_status={:?}",
+            terminal_generation.load(Ordering::SeqCst),
+            handoff_generation.load(Ordering::SeqCst),
+            terminal_witness.lock().unwrap(),
+            last_status,
+            source_status(),
+        );
+    }
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    result.expect("new source comparison must replace the handoff while old terminal is held");
+    let (old, replacement, before, after, status_before, status_after) = recovered
+        .expect("one unavailable local file remains visible after stale terminal retires")
+        .expect("the exact old terminal must be consumed against its replacement");
+    assert_eq!(old, terminal_generation.load(Ordering::SeqCst));
+    assert!(
+        replacement > old,
+        "the witness must belong to a newer selection"
+    );
+    assert_eq!(
+        (before, after),
+        (1, 1),
+        "stale terminal consumption must preserve the replacement's exact pending total"
+    );
+    assert_eq!(
+        status_before, status_after,
+        "stale terminal consumption must not mutate aggregate pending status"
+    );
+}
+
+#[tokio::test]
+async fn attachment_refill_observes_other_source_bytes_and_settles_without_history() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let (_dir, source, receiver, files) = manifest_only_attachment_fixture(1).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    let empty_page = Arc::new(AtomicBool::new(false));
+    let history = Arc::new(AtomicUsize::new(0));
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let empty_page = empty_page.clone();
+        let history = history.clone();
+        move |_, event| {
+            if event.starts_with("history_begin ") {
+                history.fetch_add(1, Ordering::SeqCst);
+            }
+            if event == "attachment_refill_ready pending=1 selected=0" {
+                empty_page.store(true, Ordering::SeqCst);
+            }
+        }
+    }));
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
+    let prepared = tokio::time::timeout(Duration::from_secs(5), async {
+        while !empty_page.load(Ordering::SeqCst)
+            || !receiver.device_sync_status().iter().any(|status| {
+                status.document_phase == SyncPhase::UpToDate
+                    && status.phase == SyncPhase::WaitingForFiles
+            })
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    restore_attachment_bytes(&receiver, files[0].0, &files[0].1);
+    tokio::time::pause();
+    tokio::time::advance(ATTACHMENT_AVAILABILITY_TTL + RETRY_INTERVAL).await;
+    tokio::time::resume();
+    let settled =
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while !receiver.device_sync_status().iter().any(|status| {
+                status.pending_attachments == 0 && status.phase == SyncPhase::UpToDate
+            }) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    prepared.expect("unavailable candidate must retain a timed local refill");
+    settled.expect("a current refill with no missing bytes must settle without new history");
+    assert_eq!(history.load(Ordering::SeqCst), 1);
 }

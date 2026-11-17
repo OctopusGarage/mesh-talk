@@ -23,6 +23,45 @@ pub(crate) struct InventoryPage {
     pub after: Option<InventoryCursor>,
 }
 impl IndexedRelayState {
+    /// Read-only invalidation token for a previously completed equal inventory.
+    /// The endpoint supplies its own lifetime nonce and authenticated peer proof;
+    /// this token alone never authorizes custody or skips inventory validation.
+    pub(crate) fn conditional_inventory_stamp_at(
+        &self,
+        now: u64,
+    ) -> Result<Option<[u8; 32]>, LogError> {
+        self.profile.database().read(|c| {
+            require_ready(c)?;
+            type StampRow = (Vec<u8>, i64, i64, i64, Option<Vec<u8>>, i64, i64, i64, i64, i64);
+            let (uuid, commit, source, visibility, cutoff, phase, queued, generation, ready, tail): StampRow = c.prepare_cached(
+                "SELECT m.store_uuid,d.next_commit,d.source_revision,r.inventory_visibility_epoch,r.expired_cutoff,p.phase,p.queued,p.generation,p.ready_generation,p.tail_after FROM mesh_database_metadata m CROSS JOIN relay_runtime r CROSS JOIN relay_digest_preparation p JOIN event_domains d ON d.domain=?1 WHERE m.singleton=1 AND r.singleton=1 AND p.singleton=1"
+            )?.query_row([RELAY_EVENTS.0.as_slice()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?)))?;
+            if uuid.len() != 16 || [commit, source, visibility, generation, ready, tail].iter().any(|value| *value < 0) {
+                return Err(invalid("invalid conditional inventory stamp authority"));
+            }
+            let cutoff = cutoff.map(decode_time).transpose()?;
+            if phase != 2 || queued != 0 || ready != generation || tail != commit {
+                return Ok(None);
+            }
+            // Do not advance expiry here. A due policy transition selects the
+            // ordinary path, whose existing transaction owns its durable cutoff.
+            if self.next_arrival_on(c, cutoff)?.and_then(|first| first.checked_add(crate::postoffice::MAX_RELAY_AGE.as_secs())).is_some_and(|deadline| deadline <= now) {
+                return Ok(None);
+            }
+            let mut hash = Sha256::new();
+            hash.update(b"MeshTalkConditionalRelayInventoryV1\0");
+            hash.update(uuid);
+            for value in [commit, source, visibility, phase, queued, generation, ready, tail] {
+                hash.update(value.to_be_bytes());
+            }
+            match cutoff {
+                Some(value) => { hash.update([1]); hash.update(value.to_be_bytes()); }
+                None => hash.update([0]),
+            }
+            Ok(Some(hash.finalize().into()))
+        })
+    }
+
     pub(crate) fn inventory_view_at(&self, now: u64) -> Result<InventoryView, LogError> {
         self.derived_transaction(now,|c,cutoff|{
             self.start_preparation_on(c)?;

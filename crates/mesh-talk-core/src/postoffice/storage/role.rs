@@ -55,6 +55,7 @@ pub(crate) struct IndexedRelayState {
     work_changes: tokio::sync::watch::Sender<u64>,
     federation_cursors:
         std::sync::Mutex<std::collections::HashMap<FederationPeerKey, ConversationId>>,
+    ingest_observation: Option<[std::sync::atomic::AtomicU64; 5]>,
 }
 impl IndexedRelayState {
     /// Takes the existing shared profile; never opens another connection/KDF/cache.
@@ -74,7 +75,76 @@ impl IndexedRelayState {
             limits: capacity::RelayLimits::default(),
             work_changes: tokio::sync::watch::channel(0).0,
             federation_cursors: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ingest_observation: (std::env::var_os("MESH_TALK_TRACE_WORK").as_deref()
+                == Some(std::ffi::OsStr::new("1")))
+            .then(|| std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0))),
         })
+    }
+    pub(crate) fn storage_observation(
+        &self,
+    ) -> Result<crate::postoffice::indexed::RelayStorageObservation, LogError> {
+        self.profile.database().read(|c| {
+            require_ready(c)?;
+            let values: (i64, i64, bool, i64, i64, i64) = c.prepare_cached(
+                "SELECT d.event_count,d.estimated_bytes,r.drain_requested,d.source_revision,d.next_commit,r.inventory_visibility_epoch FROM event_domains d CROSS JOIN relay_runtime r WHERE d.domain=?1 AND r.singleton=1",
+            )?.query_row([RELAY_EVENTS.0.as_slice()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+            let checked = |value: i64| u64::try_from(value).map_err(|_| invalid("negative relay observation counter"));
+            let physical = crate::storage::database::PhysicalStats::read_on(c)?;
+            Ok(crate::postoffice::indexed::RelayStorageObservation {
+                retained_count: checked(values.0)?,
+                retained_bytes: checked(values.1)?,
+                drain_requested: values.2,
+                source_revision: checked(values.3)?,
+                next_commit: checked(values.4)?,
+                visibility: checked(values.5)?,
+                database_changes: c.total_changes(),
+                page_size: physical.page_size,
+                page_count: physical.page_count,
+                free_pages: physical.freelist_count,
+                write_observer_enabled: self.profile.database().work_observation_enabled(),
+            })
+        })
+    }
+    /// Cumulative committed append, duplicate, peer-classified rejection, local
+    /// unavailability and authoritative failure counts. No storage access.
+    pub(crate) fn ingest_observation(&self) -> Option<[u64; 5]> {
+        // Independent relaxed loads are an approximate concurrent snapshot;
+        // cumulative committed appends are not current retained-store growth.
+        self.ingest_observation.as_ref().map(|counts| {
+            std::array::from_fn(|index| counts[index].load(std::sync::atomic::Ordering::Relaxed))
+        })
+    }
+    fn observe_ingest(&self, result: &Result<AppendOutcome, LogError>) {
+        let Some(counts) = &self.ingest_observation else {
+            return;
+        };
+        let index = match result {
+            Ok(AppendOutcome::Appended) => 0,
+            Ok(AppendOutcome::Duplicate) => 1,
+            Err(error) if error.is_peer_rejection() => 2,
+            Err(
+                LogError::RelayMailboxUnavailable
+                | LogError::ConversationRetiring
+                | LogError::StaleCursor
+                | LogError::RelayCapacityUnavailable
+                | LogError::RelayEventTooLarge,
+            ) => 3,
+            Err(_) => 4,
+        };
+        let mut current = counts[index].load(std::sync::atomic::Ordering::Relaxed);
+        while let Err(observed) = counts[index].compare_exchange_weak(
+            current,
+            current.saturating_add(1),
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            current = observed;
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn set_ingest_observation_for_test(&mut self, enabled: bool) {
+        self.ingest_observation =
+            enabled.then(|| std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)));
     }
     pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changes.subscribe()
@@ -159,6 +229,16 @@ impl IndexedRelayState {
         conversation: &ConversationId,
     ) -> Result<Option<MailboxMetadata>, LogError> {
         let arrival = self.arrival_on(c, conversation)?;
+        self.mailbox_with_arrival_on(c, conversation, arrival)
+    }
+    // Reuse only inside the caller's current connection transaction. This does
+    // not cache arrival state across operations or skip retained-role checks.
+    fn mailbox_with_arrival_on(
+        &self,
+        c: &Connection,
+        conversation: &ConversationId,
+        arrival: Option<ArrivalState>,
+    ) -> Result<Option<MailboxMetadata>, LogError> {
         let retained = self
             .repository
             .conversation_charge_on(c, conversation)?
@@ -201,9 +281,11 @@ impl IndexedRelayState {
         now: u64,
         origin: Option<u64>,
     ) -> Result<AppendOutcome, LogError> {
-        self.policy_transaction(now, |c, cutoff| {
+        let result = self.policy_transaction(now, |c, cutoff| {
             self.record_on(c, cutoff, event, now, origin)
-        })
+        });
+        self.observe_ingest(&result);
+        result
     }
     fn record_on(
         &self,
@@ -343,6 +425,7 @@ pub(super) fn fault_cut(_c: &Connection, _point: &str) -> Result<(), LogError> {
 }
 
 mod capacity;
+pub(crate) mod delta;
 pub(crate) mod maintenance;
 pub(crate) mod network;
 mod policy;

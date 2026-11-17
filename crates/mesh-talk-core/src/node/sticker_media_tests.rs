@@ -930,6 +930,7 @@ async fn installed_sticker_wire_reuse_and_legacy_mismatch_fallback() {
             listener,
             file,
             legacy,
+            false,
             payload_bytes.clone(),
             proofs_seen.clone(),
         );
@@ -995,6 +996,7 @@ fn sticker_wire_server(
     listener: tokio::net::TcpListener,
     file: crate::eventlog::ConversationId,
     legacy: bool,
+    deny_image_body: bool,
     payload_counter: Arc<std::sync::atomic::AtomicUsize>,
     proof_counter: Arc<std::sync::atomic::AtomicUsize>,
 ) -> tokio::task::JoinHandle<()> {
@@ -1016,8 +1018,13 @@ fn sticker_wire_server(
                     payload_counter.fetch_add(payload, Ordering::Relaxed);
                     // A recovery file-round request asks the source for image bytes.
                     // Count it as traffic as well, so zero excludes both directions.
-                    if super::session::round_request_conversation(&frame) == Some(file) {
+                    let requests_body =
+                        super::session::round_request_conversation(&frame) == Some(file);
+                    if requests_body {
                         payload_counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if deny_image_body && (requests_body || payload > 0) {
+                        return;
                     }
                     if proof {
                         proof_counter.fetch_add(1, Ordering::Relaxed);
@@ -1077,17 +1084,27 @@ async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() 
             al,
             file,
             legacy,
+            matching && !legacy,
             payloads.clone(),
             proofs.clone(),
         );
         let receiver = tokio::spawn(b.clone().run_accept_loop(bl));
         a.flush_delivery(id).await;
         assert!(b.read_media(file).is_none());
-        // Registration may follow manifest delivery during startup.
+        let (demand, _) = b.pending_sticker_sources(None, 32).unwrap();
+        assert_eq!(demand.len(), 1, "accepted offscreen manifest owns demand");
+        assert_eq!(demand[0].v2.file_conv, file);
+        // Source preparation follows accepted metadata, without a rendered card
+        // or a source willing to serve image bodies in the exact-match case.
         let _ = b.file_pull_notify.notified().now_or_never();
         b.register_sticker_source(path.file_name().unwrap().to_str().unwrap(), &installed)
             .unwrap();
         assert!(b.file_pull_notify.notified().now_or_never().is_some());
+        assert_eq!(
+            b.pending_sticker_sources(None, 32).unwrap().0.is_empty(),
+            matching,
+            "only exact cached bytes suppress preparation before completion"
+        );
         let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
         let manifest = card.destinations[0].binding.event_id;
         assert!(
@@ -1110,6 +1127,7 @@ async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() 
             .await
             .unwrap();
         assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
+        assert!(b.pending_sticker_sources(None, 32).unwrap().0.is_empty());
         if matching && !legacy {
             assert!(proofs.load(Ordering::Relaxed) > 0);
             assert_eq!(payloads.load(Ordering::Relaxed), 0);

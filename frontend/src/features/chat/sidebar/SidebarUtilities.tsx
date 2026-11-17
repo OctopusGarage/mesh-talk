@@ -70,6 +70,7 @@ export function SidebarUtilities() {
   const theme = useTheme((s) => s.theme);
   const toggleTheme = useTheme((s) => s.toggle);
   const logout = useAuth((s) => s.logout);
+  const helpOwner = useAuth((s) => `${s.user?.id}:${s.generation}`);
   const lockApp = useAppLock((s) => s.lock);
 
   return (
@@ -200,6 +201,7 @@ export function SidebarUtilities() {
         initialTarget={settingsTarget}
       />
       <HelpDialog
+        key={helpOwner}
         open={helpOpen}
         onOpenChange={setHelpOpen}
         onNavigate={(id) => {

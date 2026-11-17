@@ -1,3 +1,4 @@
+import { useFavoriteClock } from "./useFavoriteClock";
 import { FavoriteMessageText } from "./FavoriteMessageText";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -50,11 +51,11 @@ export function FavoriteEditor({
       mounted.current = false;
     };
   }, []);
-  const [clock, setClock] = useState(Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setClock(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  const clock = useFavoriteClock(
+    draft.messages.map((message) => message.expiresAtMs),
+    draft.messages.length > 0,
+    lease.current,
+  );
   const [existing, setExisting] = useState(draft.existing);
   const [metadata, setMetadata] = useState<FavoriteMetadata>(
     draft.existing?.metadata ?? { title: "", description: "", notes: {} },

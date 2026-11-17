@@ -60,6 +60,7 @@ pub(in crate::node) struct PreparingGraph<'a> {
     budget: PreparationBudget,
     work: Cell<PreparationStep>,
     pending: Cell<bool>,
+    network_prefix: bool,
 }
 impl<'a> PreparingGraph<'a> {
     pub(in crate::node) fn open(
@@ -90,14 +91,38 @@ impl<'a> PreparingGraph<'a> {
             budget,
             work: Cell::new(PreparationStep::default()),
             pending: Cell::new(false),
+            network_prefix: false,
         })
     }
+    /// The network owner separately validates its immutable rank prefix and
+    /// exact control/destructive observations before and after every turn.
+    pub(in crate::node) fn open_network_prefix(
+        profile: Arc<ProfileStorage>,
+        repository: &'a EventRepository,
+        binding: DecisionBinding,
+        budget: PreparationBudget,
+    ) -> Result<Self, LogError> {
+        let mut graph = Self::open(profile, repository, binding, budget)?;
+        graph.network_prefix = true;
+        Ok(graph)
+    }
     fn source_guard(&self, c: &Connection) -> Result<(), LogError> {
+        if self.network_prefix {
+            return super::require_source_prefix_on(
+                c,
+                self.channel,
+                self.source_job,
+                self.revision,
+            );
+        }
         require_source_on(c, self.channel, self.source_job, self.revision)
     }
     fn guard(&self, c: &Connection) -> Result<(), LogError> {
         self.source_guard(c)?;
-        let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM channel_decision_work WHERE job=?1 AND channel=?2 AND event=?3 AND source_job=?4 AND revision=?5 AND retired=0)",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),self.event.as_bytes().as_slice(),self.source_job.as_slice(),self.revision],|r|r.get(0))?;
+        // Scratch answers describe this immutable event at its canonical rank.
+        // Each caller still checks its own exact/prefix source authority above;
+        // another caller's revision must not make the same scratch compete.
+        let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM channel_decision_work w JOIN event_order_current o ON o.domain=?5 AND o.conversation=w.channel AND o.order_kind=0 AND o.job=w.source_job WHERE w.job=?1 AND w.channel=?2 AND w.event=?3 AND w.source_job=?4 AND w.retired=0 AND w.revision>=0 AND w.revision<=o.source_revision)",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),self.event.as_bytes().as_slice(),self.source_job.as_slice(),b"MeshPartEventsV1".as_slice()],|r|r.get(0))?;
         if !valid {
             return Err(LogError::StaleCursor);
         }
@@ -117,10 +142,10 @@ impl<'a> PreparingGraph<'a> {
             self.decision_on(c)
         })?;
         if let Some(old) = old {
-            if old.event != self.event.as_bytes()
-                || old.source_job != self.source_job
-                || old.revision != self.revision
-            {
+            if old.revision < 0 {
+                return Err(invalid("negative decision capture revision"));
+            }
+            if old.event != self.event.as_bytes() || old.source_job != self.source_job {
                 let limit = self.budget.rows.min(self.budget.bytes / 512);
                 if limit == 0 {
                     return Err(LogError::PageBudgetTooSmall { required: 512 });
@@ -230,7 +255,7 @@ impl<'a> PreparingGraph<'a> {
     }
     pub(in crate::node) fn complete_on(&self, c: &Connection) -> Result<(), LogError> {
         self.guard(c)?;
-        c.execute("UPDATE channel_decision_work SET retired=1 WHERE job=?1 AND channel=?2 AND event=?3 AND source_job=?4 AND revision=?5",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),self.event.as_bytes().as_slice(),self.source_job.as_slice(),self.revision])?;
+        c.execute("UPDATE channel_decision_work SET retired=1 WHERE job=?1 AND channel=?2 AND event=?3 AND source_job=?4",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),self.event.as_bytes().as_slice(),self.source_job.as_slice()])?;
         Ok(())
     }
     fn answer(&self, key: &[u8]) -> Result<PredicateAnswer, LogError> {

@@ -36,13 +36,17 @@ impl Node {
             .collect()
     }
 
-    pub async fn send_dm(&self, recipient: &str, text: &[u8]) -> Result<(), NodeError> {
+    pub async fn send_dm(
+        self: &std::sync::Arc<Self>,
+        recipient: &str,
+        text: &[u8],
+    ) -> Result<(), NodeError> {
         self.send_dm_reply(recipient, text, None).await
     }
 
     /// Preserves the SDK return type. Durable acceptance succeeds even offline.
     pub async fn send_dm_reply(
-        &self,
+        self: &std::sync::Arc<Self>,
         recipient: &str,
         text: &[u8],
         reply_to: Option<EventId>,
@@ -53,7 +57,7 @@ impl Node {
 
     /// Capture host authority around local grants and final durable acceptance.
     pub async fn send_dm_reply_if(
-        &self,
+        self: &std::sync::Arc<Self>,
         recipient: &str,
         text: &[u8],
         reply_to: Option<EventId>,
@@ -197,7 +201,7 @@ impl Node {
     }
 
     pub async fn send_to_account(
-        &self,
+        self: &std::sync::Arc<Self>,
         target: &str,
         text: &[u8],
         reply_to: Option<EventId>,
@@ -208,7 +212,7 @@ impl Node {
     }
 
     pub async fn send_sticker_to_account(
-        &self,
+        self: &std::sync::Arc<Self>,
         target: &str,
         sticker_id: &str,
         fallback: &[u8],

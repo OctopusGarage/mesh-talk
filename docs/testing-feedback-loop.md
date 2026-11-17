@@ -18,15 +18,15 @@ directly. Preparation runs affected platform preflight followed by full health,
 including `make test`'s workspace test stage. Run backend or full UI E2E sooner
 when explicitly requested or when the changed behavior needs process/browser evidence.
 
-| Changed boundary            | Fast local command                                                                                          | Broader trigger                                             |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Cheap PR preparation        | `make pr-check` | Only static checks; test/browser/native evidence remains pending |
-| Script / workflow syntax    | `node scripts/validation/syntax.mjs --base origin/main` | Clean committed candidate and required CI remain authoritative |
-| Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` locally or matching CI before merge             |
-| Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` locally or matching CI before merge             |
-| One Rust integration target | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke`                                   | `make e2e` when requested or for release validation         |
-| Frontend state/controller   | `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`                                | `npm run test:coverage` in PR preflight                     |
-| Frontend rendering          | Run the affected component test, for example `cd frontend && npm test -- src/features/chat/Sidebar.test.ts` | Pass relevant Playwright specs to `scripts/pr-preflight.sh` |
+| Changed boundary            | Fast local command                                                                                          | Broader trigger                                                  |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Cheap PR preparation        | `make pr-check`                                                                                             | Only static checks; test/browser/native evidence remains pending |
+| Script / workflow syntax    | `node scripts/validation/syntax.mjs --base origin/main`                                                     | Clean committed candidate and required CI remain authoritative   |
+| Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` locally or matching CI before merge                  |
+| Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` locally or matching CI before merge                  |
+| One Rust integration target | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke`                                   | `make e2e` when requested or for release validation              |
+| Frontend state/controller   | `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`                                | `npm run test:coverage` in PR preflight                          |
+| Frontend rendering          | Run the affected component test, for example `cd frontend && npm test -- src/features/chat/Sidebar.test.ts` | Pass relevant Playwright specs to `scripts/pr-preflight.sh`      |
 
 Use `cargo test -p <package> --lib <module_or_test_name>` directly when a
 filter is easier to spell than a Make variable. `make test-focused` requires a
@@ -1428,7 +1428,7 @@ independent checks run concurrently and heavy suites are not repeated by health.
 
 | Owner                                 | Checks                                                                                                                                                                                                                                                                |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-health.yml` platform jobs      | Help and diagnostic/Python regressions on Linux/macOS/Windows; complete frontend units with coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                |
+| `check-health.yml` platform jobs      | Help and diagnostic/Python regressions on Linux/macOS/Windows; complete frontend units with coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                 |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                                                                 |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
 | `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit/Firefox core and scheduled extended scenarios                                                                 |
@@ -1773,7 +1773,7 @@ does not retry failed product tests or change their acceptance criteria.
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and
-cargo-llvm-cov 0.8.7, then publishes one immutable archive. Four fresh consumers
+cargo-llvm-cov 0.9.1, then publishes one immutable archive. Four fresh consumers
 extract that archive and run independent hash partitions. Each consumer runs
 one test at a time without retries; network/disk fixtures do not compete with
 another test on that machine. Actual CI consumers set `MESH_WINDOWS_FAIL_FAST=0`
@@ -1977,7 +1977,11 @@ store. A later source publication belongs to another epoch; comparing its live
 digest with an earlier completion is not response-integrity evidence. The v5
 access-only scope fixtures use an inbound-only authenticated provider and retain
 positive-role and operation-exclusion checks. Separate live-provider tests retain
-mid-page mutation, retry and re-comparison coverage. Provider teardown closes
+mid-page mutation, retry and re-comparison coverage. Controlled operation-prefix
+and known-role page fixtures likewise own their explicit between-page publication
+epochs; their final exact metadata comparison cannot race an autonomous publisher.
+Keep the real authenticated provider, 64-row pages, changed-role repair and full
+metadata equality assertions. Provider teardown closes
 admission, aborts its owned connections and drains actual work under one watchdog.
 Preparation of the queued-source fixture uses an instance-scoped test-only
 client gate after the genuine authenticated acknowledgement and before read
@@ -2404,7 +2408,6 @@ pipeline, variants, boundary percentages and unrelated mixes; it runs with
 For compatibility changes, inspect computed backgrounds and SVG strokes in light
 and dark modes using the affected native WKWebView and built CSS. An installed
 Safari version is not evidence of the embedded engine's feature support.
-
 
 React hooks and the renderer must resolve to one production runtime. The
 `react-singleton.test.mjs` diagnostic builds with the real Vite configuration

@@ -1,5 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { useTranslation } from "react-i18next";
+import { useChat } from "@/store/chat";
+
+/** Recovery observations update this small surface, not the message viewport. */
+export function ConversationReceptionStatus(
+  props: Omit<ComponentProps<typeof ReceptionStatus>, "recovery">,
+) {
+  const recovery = useChat((state) => state.reception[props.conversation]);
+  return <ReceptionStatus {...props} recovery={recovery} />;
+}
 
 /** One quiet local summary; the virtualized log itself is deliberately not live. */
 export function ReceptionStatus({

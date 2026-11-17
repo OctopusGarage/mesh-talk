@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
+import { finished } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
 const helper = fileURLToPath(new URL("./windows-process-owner.ps1", import.meta.url));
@@ -44,6 +45,14 @@ async function executable(program, cwd, entries) {
   throw Object.assign(Error("Command executable is unavailable"), { code: "ENOENT" });
 }
 
+// Attach settlement before ending: cancellation may already have destroyed the
+// stream. Retirement still waits for its close/error instead of ending it twice.
+async function finishOutput(output, failed) {
+  const settled = finished(output, { cleanup: true }).catch(failed);
+  if (!output.destroyed) output.end();
+  await settled;
+}
+
 export async function executeWindows(command, { cwd = process.cwd(), env = process.env, logPath, signal, createLogStream = createWriteStream, onOutput = chunk => process.stdout.write(chunk), spawnOwner = spawn }) {
   signal?.throwIfAborted();
   // CreateProcessW and environment blocks are NUL-terminated. Reject rather
@@ -62,16 +71,18 @@ export async function executeWindows(command, { cwd = process.cwd(), env = proce
     if (logPath) {
       const output = createLogStream(logPath);
       const cancelLog = () => {
-        if (!output.writableFinished && !output.destroyed) output.destroy(Error("Command log finalization cancelled"));
+        if (!output.writableFinished && !output.destroyed) {
+          result.error = String(signal?.reason?.message ?? signal?.reason ?? "Command log finalization cancelled");
+          result.failureKind = "failed";
+          output.destroy(Error(result.error));
+        }
       };
       signal?.addEventListener("abort", cancelLog, { once: true });
       try {
-        await new Promise(resolve => {
-          const failed = failure => { result.error = failure.message; result.failureKind = "failed"; resolve(); };
-          output.on("error", failed);
-          if (signal?.aborted) cancelLog();
-          output.end(failure => { if (failure) failed(failure); else resolve(); });
-        });
+        const failed = failure => { result.error = failure.message; result.failureKind = "failed"; };
+        output.on("error", failed);
+        if (signal?.aborted) cancelLog();
+        await finishOutput(output, failed);
       } finally { signal?.removeEventListener("abort", cancelLog); }
     }
     return result;
@@ -104,10 +115,12 @@ export async function executeWindows(command, { cwd = process.cwd(), env = proce
     child.stdin.write(`${JSON.stringify({ app, args: command.slice(1).map(String), environment: entries.map(([name, value]) => `${name}=${value}`), cwd, receipt, nonce })}\n`);
     let finalizingOutput = false;
     const cancelLog = () => {
-      if (finalizingOutput && !output.writableFinished && !output.destroyed)
-        output.destroy(Error("Command log finalization cancelled"));
+      if (finalizingOutput && !output.writableFinished && !output.destroyed) {
+        failure ||= String(signal?.reason?.message ?? signal?.reason ?? "Command log finalization cancelled");
+        output.destroy(Error(failure));
+      }
     };
-    const cancel = () => { cancelLog(); abort(); };
+    const cancel = () => { failure ||= String(signal?.reason?.message ?? signal?.reason ?? "Command cancelled"); cancelLog(); abort(); };
     signal?.addEventListener("abort", cancel, { once: true });
     if (signal?.aborted) cancel();
     const status = await closed;
@@ -115,7 +128,7 @@ export async function executeWindows(command, { cwd = process.cwd(), env = proce
     clearTimeout(abortTimer);
     finalizingOutput = true;
     if (signal?.aborted) cancelLog();
-    try { await new Promise(resolve => output.end(error => { failure ||= error?.message; resolve(); })); }
+    try { await finishOutput(output, error => { failure ||= error.message; }); }
     finally { signal?.removeEventListener("abort", cancel); }
     let record;
     try { record = JSON.parse(await readFile(receipt, "utf8")); } catch { /* Unknown retirement retains the owner's leases. */ }

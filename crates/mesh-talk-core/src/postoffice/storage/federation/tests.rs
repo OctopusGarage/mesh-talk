@@ -1101,11 +1101,19 @@ fn local_raw_selection_continuations_do_not_consume_wire_page_budget() {
     let p = profile(&root, &DeviceIdentity::generate());
     let owner = SessionOwner::begin(p.clone(), Direction::Outbound, 100, Instant::now()).unwrap();
     let lease = owner.lease();
+    let changes = p.database().read(|c| Ok(c.total_changes())).unwrap();
+    let commits = p.database().successful_write_commits();
     for _ in 0..300 {
         p.database()
             .transaction(|c| lease.stage_local_batch_on(c, &[], 100))
             .unwrap();
     }
+    assert_eq!(
+        p.database().read(|c| Ok(c.total_changes())).unwrap(),
+        changes,
+        "empty raw selection must not rewrite session or global charges"
+    );
+    assert_eq!(p.database().successful_write_commits(), commits);
     p.database()
         .transaction(|c| lease.stage_local_batch_on(c, &[entry(1, 90)], 100))
         .unwrap();
@@ -1129,4 +1137,17 @@ fn local_raw_selection_continuations_do_not_consume_wire_page_budget() {
         })
         .unwrap();
     assert_eq!(pages, 1);
+    assert!(
+        p.database()
+            .transaction(|c| lease.stage_local_batch_on(c, &[], 100))
+            .is_err(),
+        "empty selection must still reject an already completed local snapshot"
+    );
+    drop(owner);
+    assert!(
+        p.database()
+            .transaction(|c| lease.stage_local_batch_on(c, &[], 100))
+            .is_err(),
+        "empty selection must still reject revoked session authority"
+    );
 }

@@ -120,6 +120,7 @@ impl super::Node {
         };
         if changed {
             self.clear_bridge_introductions();
+            self.storage.database().maintenance_waker().notify();
         }
         self.bridge_notify.notify_one();
         self.delivery_notify.notify_one();

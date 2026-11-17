@@ -49,6 +49,154 @@ fn finish(state: &IndexedRelayState) -> (usize, usize) {
     }
     panic!("preparation did not finish")
 }
+
+#[test]
+fn conditional_inventory_stamp_is_read_only_and_requires_preparation() {
+    let (_root, identity, state) = fixture();
+    assert_eq!(state.conditional_inventory_stamp_at(100).unwrap(), None);
+    state
+        .record(&event(&identity, conversation(1), 1), 100, None)
+        .unwrap();
+    state.request_preparation_at(100).unwrap();
+    assert_eq!(state.conditional_inventory_stamp_at(100).unwrap(), None);
+    finish(&state);
+    let stamp = state.conditional_inventory_stamp_at(100).unwrap().unwrap();
+    let before = state
+        .profile
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    let page_writes = || {
+        state
+            .profile
+            .database()
+            .read(|c| {
+                let mut current = 0;
+                let mut highwater = 0;
+                // SAFETY: SQLite owns the live handle and the database read closure
+                // retains the connection lock while SQLite writes these stack outputs.
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_db_status(
+                        c.handle(),
+                        rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE,
+                        &mut current,
+                        &mut highwater,
+                        0,
+                    )
+                };
+                assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                Ok(current)
+            })
+            .unwrap()
+    };
+    let pages_before = page_writes();
+    for _ in 0..32 {
+        assert_eq!(
+            state.conditional_inventory_stamp_at(100).unwrap(),
+            Some(stamp)
+        );
+    }
+    assert_eq!(
+        state
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        before
+    );
+    assert_eq!(page_writes(), pages_before);
+    state
+        .record(&event(&identity, conversation(1), 2), 100, None)
+        .unwrap();
+    assert_eq!(state.conditional_inventory_stamp_at(100).unwrap(), None);
+    finish(&state);
+    assert_ne!(
+        state.conditional_inventory_stamp_at(100).unwrap(),
+        Some(stamp)
+    );
+}
+
+#[test]
+fn conditional_inventory_stamp_tracks_origin_and_rejects_due_expiry_without_writes() {
+    let (_root, identity, state) = fixture();
+    let e = event(&identity, conversation(1), 1);
+    state.record(&e, 100, None).unwrap();
+    state.request_preparation_at(100).unwrap();
+    finish(&state);
+    let original = state.conditional_inventory_stamp_at(100).unwrap().unwrap();
+    state.record(&e, 100, None).unwrap();
+    assert_eq!(
+        state.conditional_inventory_stamp_at(100).unwrap(),
+        Some(original)
+    );
+    state.record(&e, 100, Some(90)).unwrap();
+    let lowered = state.conditional_inventory_stamp_at(100).unwrap().unwrap();
+    assert_ne!(lowered, original);
+    let before = state
+        .profile
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    assert_eq!(
+        state
+            .conditional_inventory_stamp_at(90 + crate::postoffice::MAX_RELAY_AGE.as_secs())
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        state
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        before
+    );
+    // Ordinary policy advancement persists the cutoff; a rolled-back wall clock
+    // cannot restore the previously cached token.
+    state
+        .inventory_view_at(90 + crate::postoffice::MAX_RELAY_AGE.as_secs())
+        .unwrap();
+    assert_ne!(
+        state.conditional_inventory_stamp_at(100).unwrap(),
+        Some(lowered)
+    );
+}
+
+#[test]
+fn conditional_inventory_stamp_tracks_repository_retirement_without_new_commits() {
+    let (_root, identity, state) = fixture();
+    let conv = conversation(1);
+    state.record(&event(&identity, conv, 1), 100, None).unwrap();
+    state.request_preparation_at(100).unwrap();
+    finish(&state);
+    let original = state.conditional_inventory_stamp_at(100).unwrap().unwrap();
+    state
+        .profile
+        .database()
+        .transaction(|c| {
+            state.repository.begin_retirement_on(c, &conv)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_ne!(
+        state.conditional_inventory_stamp_at(100).unwrap(),
+        Some(original)
+    );
+}
+
+#[test]
+fn conditional_inventory_stamp_preserves_storage_errors() {
+    let (_root, _identity, state) = fixture();
+    state
+        .profile
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TABLE relay_digest_preparation")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(state.conditional_inventory_stamp_at(100).is_err());
+}
 // Observe actual SQLite compilation without enabling a production hooks feature.
 struct MetadataCompiles<'a> {
     database: &'a crate::storage::database::EncryptedDatabase,

@@ -172,10 +172,13 @@ async function holdRememberedChat(
             (
               window as unknown as { __selectedThemeRequested: boolean }
             ).__selectedThemeRequested = true;
-            Object.defineProperty(request, "onsuccess", {
+            // Point reads settle on transaction completion, so hold that
+            // boundary after the real readonly transaction has completed.
+            const transaction = this.transaction;
+            Object.defineProperty(transaction, "oncomplete", {
               set(handler) {
-                request.addEventListener("success", (event) => {
-                  void assets.then(() => handler.call(request, event));
+                transaction.addEventListener("complete", (event) => {
+                  void assets.then(() => handler.call(transaction, event));
                 });
               },
             });

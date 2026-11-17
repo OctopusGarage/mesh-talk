@@ -254,7 +254,7 @@ impl MediaIndex {
     }
     pub(super) fn advance_gc(&self, after: Option<&str>) -> std::io::Result<()> {
         self.profile.database().transaction(|c|{
-  if let Some(after)=after{c.execute("UPDATE media_namespaces SET gc_after=?2 WHERE id=?1 AND gc_active=1",params![self.namespace,after])?;}else{c.execute("UPDATE media_namespaces SET gc_active=(gc_requested>gc_through),gc_through=gc_requested,gc_after=NULL WHERE id=?1",[self.namespace])?;}Ok(())
+  if let Some(after)=after{c.execute("UPDATE media_namespaces SET gc_after=?2 WHERE id=?1 AND gc_active=1",params![self.namespace,after])?;}else{c.execute("UPDATE media_namespaces SET gc_active=(gc_requested>gc_through),gc_through=gc_requested,gc_after=NULL WHERE id=?1 AND gc_active=1",[self.namespace])?;}Ok(())
  }).map_err(io)
     }
     pub(super) fn gc_pending(&self) -> std::io::Result<bool> {

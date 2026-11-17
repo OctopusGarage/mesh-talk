@@ -1521,12 +1521,19 @@ async fn reference_message_action(recall: bool) {
                     );
                 });
             let store = observing.pull_sync_store(connection.peer_identity());
+            // This fixture owns the requester just like the production pull:
+            // a received channel control needs reception dispatch even when
+            // this round wins the race against the executor's public fanout.
+            let reception = observing
+                .request_reception_scope(&store, &connection)
+                .expect("the external runtime must admit its public action reception");
             super::super::super::session::request_round(&mut connection, &store, group)
                 .await
                 .expect("the normal authorized public sync must deliver the original event");
+            reception.dispatch();
+            drop(reception);
             drop(store);
             observing.recycle_sync_channel(connection);
-            observing.emit_new_messages(group);
         };
         external_runtime.spawn(public_receipt).await.unwrap();
         effect_ids.push(effect_id);

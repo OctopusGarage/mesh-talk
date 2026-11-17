@@ -81,7 +81,7 @@ impl IndexedRelayState {
     /// Scalar readiness only: ordinary scoped demands do not start global work.
     pub(crate) fn digest_work_pending(&self) -> Result<bool, LogError> {
         self.profile.database().read(|c| {
-            Ok(c.prepare_cached("SELECT p.queued>0 OR (p.phase<>0 AND (p.phase=1 OR p.tail_after<d.next_commit OR p.ready_generation<>p.generation)) FROM relay_digest_preparation p JOIN event_domains d ON d.domain=?1 WHERE p.singleton=1")?.query_row( [RELAY_EVENTS.0.as_slice()], |r| r.get(0))?)
+            Ok(c.prepare_cached("SELECT p.queued>0 OR (p.phase<>0 AND (p.phase=1 OR p.tail_after<d.next_commit OR p.ready_generation<>p.generation)) FROM relay_digest_preparation p JOIN event_domains d ON d.domain=CAST(?1 AS BLOB) WHERE p.singleton=1")?.query_row( [RELAY_EVENTS.0.as_slice()], |r| r.get(0))?)
         })
     }
     /// Called by an actual inventory request. Constructor and ordinary idle never
@@ -91,7 +91,7 @@ impl IndexedRelayState {
     }
     pub(crate) fn preparation_ready_at(&self, now: u64) -> Result<bool, LogError> {
         self.policy_transaction(now,|c,_|{
-            Ok(c.prepare_cached("SELECT p.phase=2 AND p.queued=0 AND p.ready_generation=p.generation AND p.tail_after=d.next_commit FROM relay_digest_preparation p JOIN event_domains d ON d.domain=?1 WHERE p.singleton=1")?.query_row([RELAY_EVENTS.0.as_slice()],|r|r.get(0))?)
+            Ok(c.prepare_cached("SELECT p.phase=2 AND p.queued=0 AND p.ready_generation=p.generation AND p.tail_after=d.next_commit FROM relay_digest_preparation p JOIN event_domains d ON d.domain=CAST(?1 AS BLOB) WHERE p.singleton=1")?.query_row([RELAY_EVENTS.0.as_slice()],|r|r.get(0))?)
         })
     }
     pub(super) fn produce_on(

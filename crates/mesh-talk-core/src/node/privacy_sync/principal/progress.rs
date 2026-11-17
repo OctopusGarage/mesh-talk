@@ -1,6 +1,6 @@
 //! Current preparation checkpoint only. No historical event bodies or ID sets
-//! are encoded here. SQL decisions may commit before this cursor; replay is
-//! idempotent and never advances the in-memory cursor after a failed save.
+//! are encoded here. Selected rows and this cursor commit atomically per bounded
+//! turn. Other derived control work remains idempotent across a failed save.
 use super::*;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,8 @@ struct Progress {
     policy_local_channel: bool,
     policy_started: bool,
     policy_examined: usize,
+    history_only: bool,
+    history_refresh: bool,
 }
 impl Preparation {
     fn encode_progress(&self) -> Result<Vec<u8>, LogError> {
@@ -86,6 +88,8 @@ impl Preparation {
             policy_local_channel: self.policy_local_channel,
             policy_started: self.policy_started,
             policy_examined: self.policy_examined,
+            history_only: self.history_only,
+            history_refresh: self.history_refresh,
         };
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
@@ -143,6 +147,8 @@ impl Preparation {
         self.policy_local_channel = progress.policy_local_channel;
         self.policy_started = progress.policy_started;
         self.policy_examined = progress.policy_examined;
+        self.history_only = progress.history_only;
+        self.history_refresh = progress.history_refresh;
         self.policy_skip = if self.phase == Phase::Policy {
             progress.policy_examined
         } else {
@@ -154,10 +160,19 @@ impl Preparation {
             None
         };
         self.principal = if progress.classified {
-            Some(store.principal(view.conversation, self.replica_shared)?)
+            Some(store.principal_with_prefix(
+                view.conversation,
+                self.replica_shared,
+                self.generation.filter(|_| self.history_only),
+            )?)
         } else {
             None
         };
+        if self.history_only
+            && let Some(Principal::Modern { projection, .. }) = self.principal.as_mut()
+        {
+            projection.allow_network_prefix();
+        }
         match (
             &mut self.principal,
             progress.legacy,
@@ -223,6 +238,7 @@ impl Preparation {
         }
         let result = (|| {
             let mut step = PreparationStep::default();
+            let mut pending = Vec::new();
             // A turn admits multiple small transitions, not one durable commit
             // per historical header. Its row, edge and byte caps still include
             // rejected work, and the session yields after this finite turn.
@@ -236,6 +252,11 @@ impl Preparation {
                 {
                     break;
                 }
+                // Hash/erasure read the persisted selection. Publish the bounded
+                // row batch and cursor before either can consume it.
+                if !pending.is_empty() && self.phase != Phase::Rows {
+                    break;
+                }
                 let phase = self.phase;
                 let separate_turn = matches!(phase, Phase::Authority | Phase::Order);
                 let remaining = PreparationBudget {
@@ -243,7 +264,7 @@ impl Preparation {
                     edges: budget.edges - step.edges,
                     bytes: budget.bytes - step.bytes,
                 };
-                let next = match self.step_inner(store, view, remaining) {
+                let next = match self.step_inner(store, view, remaining, &mut pending) {
                     Ok(next) => next,
                     Err(LogError::PageBudgetTooSmall { required })
                         if transition > 0 && required <= budget.bytes =>
@@ -278,12 +299,30 @@ impl Preparation {
                     .lock()
                     .expect("log lock")
                     .repository()?
-                    .save_selection_progress(selection, &view.repository, &bytes)?;
+                    .save_selection_batch(selection, &view.repository, &pending, &bytes)?;
             }
             Ok(step)
         })();
         if result.is_err() {
             self.reload = self.selection.is_some();
+        }
+        result
+    }
+    pub(in crate::node::privacy_sync) fn save_history_progress(
+        &mut self,
+        store: &GuardedSyncStore<'_>,
+        view: &ParticipantView,
+    ) -> Result<(), LogError> {
+        let bytes = self.encode_progress()?;
+        let result = store
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .save_selection_progress(self.selection()?, &view.repository, &bytes);
+        if result.is_err() {
+            self.reload = true;
         }
         result
     }

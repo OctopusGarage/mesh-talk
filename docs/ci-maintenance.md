@@ -18,12 +18,22 @@ introduce another workflow, command catalog or acceptance policy.
 Keep tool versions, matrix sizes, deadlines, cache keys and required-check names
 in their existing executable owners. Keep run histories and investigation output
 in ignored `tmp/` or PR/CI artifacts; durable decisions belong in the owning guide.
+For producer/consumer artifact handoffs, pass the successful upload's immutable
+artifact ID instead of rediscovering it by name. Keep source, run, attempt and
+content-digest validation at the consumer; an artifact ID alone is not acceptance.
 
 ## Make the cost of a change explicit
 
 Before adding a suite, fixture, dependency, platform or workflow, identify the
 existing owner and the observable failure it must detect. Inspect the affected
 plan and consumers through the [validation protocol](testing-feedback-loop.md#validation-stages-and-agent-responsibilities).
+
+Budget hosted job envelopes for cold source builds, scenario execution, evidence
+publication and cache cleanup together. Keep build-command and business-scenario
+watchdogs independent; successful assertions can still leave an unsuccessful job
+when post-actions exceed its envelope. Inspect the timed-out phase and its
+measurements before changing a deadline.
+
 Answer four questions in the change when they are material:
 
 - What requirement needs new evidence, and why is existing evidence insufficient?
@@ -745,6 +755,13 @@ or invent LCOV for uninstrumented tests.
 Archive qualification must remove producer build outputs and inspect actual
 application stack frame file:line evidence separately from panic-header source
 locations. Successful binary execution alone does not prove diagnostics survived.
+Accept only bounded Cargo debug layouts under the recorded target directory.
+For the v2 layout, include the selected binaries' real sibling `fingerprint`
+directories through official archive extras: coverage object discovery needs
+them even after executable extraction succeeds. Never synthesize build markers
+or accept an empty report. The pinned-tool CLI fixtures qualify actual counters
+after producer outputs are removed; retain v1 compatibility and rejection of
+other profiles and separate build directories.
 Darwin unpacked line tables depend on compiler objects that official archives do
 not retain. The macOS profile generates only metadata-selected executable dSYM
 bundles with Apple `dsymutil` and includes them through official Nextest archive
@@ -1131,16 +1148,24 @@ branch name, SemVer label or PR title alone. The existing real-Git scope control
 and CI policy fixtures own positive profiles, source/identity rejection and
 failed/cancelled/missing selected-check evidence.
 
-Automatic merge additionally requires verified Dependabot metadata for npm
-minor/patch updates in these two directories, no Tauri dependency and no reported
-maintainer change. Other updates have automatic merge disabled and require manual
-review. The privileged metadata workflow never executes PR source; merge enablement
-is bound to the event head. Coverage uploads requiring unavailable Dependabot
-credentials remain excluded; tests and retained local artifacts are independent
-of external coverage publication.
+Dependency upgrades require manual reviewed PRs. The repository has no Dependabot
+version-update configuration or dependency auto-merge workflow. GitHub's automated
+security fixes setting must remain disabled independently of the removed version
+configuration; verify it with `GET /repos/{owner}/{repo}/automated-security-fixes`.
+Disabling PR generation must preserve Dependabot vulnerability alerts, dependency
+review, CodeQL, secret scanning and their existing acceptance gates. Coverage
+uploads requiring unavailable Dependabot credentials remain excluded; tests and
+retained local artifacts are independent of external coverage publication.
+
+The scheduled/manual glib migration watcher retains its resolution probe and
+conditional build/test checks as advisory evidence with read-only repository
+permissions. It never creates a dependency PR. Its all-resolved-branches migration
+check remains authoritative; a successful probe does not authorize an upgrade or
+claim native acceptance. Release maintenance retains its separately reviewed
+next-development-version PR contract.
 
 Deploy this policy through a reviewed main change, then align `dev` through a
-reviewed integration before refreshing its dependency PRs. Existing `dev`
+reviewed integration. Existing `dev`
 workflows cannot acquire fixes from main automatically. Preserve current required
 checks; any protection migration uses its existing owner. Measure selected hosted
 jobs after rollout, recording source, first failures, runner/setup/test time and

@@ -11,7 +11,7 @@ import {
 import { presetToAvatarDataUrl } from "@/lib/avatarImage";
 import { usePacks } from "@/store/packs";
 import { PackManager } from "@/components/PackManager";
-import type { AvatarPack } from "@/lib/pack";
+import { usePackRequest } from "@/lib/usePack";
 
 export type AvatarGalleryCategory = "personal" | "group";
 
@@ -51,16 +51,22 @@ export function AvatarGallery({
   const [busy, setBusy] = useState<string | null>(null);
 
   const tabs = usePacks((state) => state.packs).filter(
-    (pack): pack is AvatarPack =>
-      pack.kind === "avatar" && pack.category === category,
+    (pack) => pack.kind === "avatar" && pack.category === category,
   );
   const currentTab = tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
-  const presets = currentTab?.avatars ?? [];
+  const request = usePackRequest(currentTab?.id, open);
+  const hydrated = request.pack;
+  const presets = hydrated?.kind === "avatar" ? hydrated.avatars : [];
 
   const choose = async (url: string) => {
     setBusy(url);
     try {
-      onPick(await presetToAvatarDataUrl(url, currentTab.fit));
+      onPick(
+        await presetToAvatarDataUrl(
+          url,
+          hydrated?.kind === "avatar" ? hydrated.fit : "cover",
+        ),
+      );
     } finally {
       setBusy(null);
     }
@@ -110,9 +116,23 @@ export function AvatarGallery({
               data-testid="avatar-gallery"
               className="grid max-h-[min(54vh,480px)] grid-cols-3 content-start gap-2 overflow-y-auto p-3 sm:max-h-[min(60vh,520px)] sm:grid-cols-4 sm:gap-3 sm:p-5"
             >
-              {presets.length === 0 && (
+              {request.error && (
+                <div role="alert" className="col-span-full p-4 text-sm">
+                  {t("common.loadFailed")}{" "}
+                  <button
+                    type="button"
+                    onClick={request.retry}
+                    className="underline"
+                  >
+                    {t("common.retry")}
+                  </button>
+                </div>
+              )}
+              {presets.length === 0 && !request.error && (
                 <p className="col-span-full p-4 text-center text-sm text-muted-foreground">
-                  {t("packs.noAvatars")}
+                  {currentTab && !hydrated
+                    ? t("common.loading")
+                    : t("packs.noAvatars")}
                 </p>
               )}
               {presets.map((p) => (
@@ -133,7 +153,8 @@ export function AvatarGallery({
                       decoding="async"
                       className="h-full w-full rounded-[28%] bg-secondary object-cover"
                       style={
-                        currentTab?.fit === "contain"
+                        hydrated?.kind === "avatar" &&
+                        hydrated.fit === "contain"
                           ? { objectFit: "contain" }
                           : undefined
                       }
