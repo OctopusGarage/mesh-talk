@@ -118,6 +118,7 @@ export function assertDraftBuild(tag, sha, release, tagSha) {
   assert.ok(tag.startsWith("v"), "Stable tag must start with v");
   assert.match(sha, /^[a-f\d]{40}$/, "exact release source required");
   assert.equal(release?.tag_name, tag, "draft tag changed");
+  assert.equal(release?.name, tag, "Stable release title must equal its version tag");
   assert.equal(release?.draft, true, "release must remain a draft");
   assert.equal(release?.prerelease, false, "release must be stable");
   assert.equal(tagSha, sha, "release tag source changed");
@@ -281,7 +282,7 @@ function prepareDraft(repo, tag) {
             "--target",
             sha,
             "--title",
-            `Mesh-Talk ${tag}`,
+            tag,
             "--notes-file",
             notesFile(notes),
           ]),

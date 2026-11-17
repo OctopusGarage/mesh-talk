@@ -8,7 +8,7 @@ import { delimiter, join, resolve } from "node:path";
 import { draftSnapshot, requireSameDraft } from "../release/release-state.mjs";
 import { releaseFromPages } from "../release/release-api.mjs";
 
-const release = { id: 100, tag_name: "v0.1.6", draft: true, assets: [{ id: 1, name: "package.zip", size: 10, digest: `sha256:${"a".repeat(64)}` }] };
+const release = { id: 100, tag_name: "v0.1.6", name: "v0.1.6", draft: true, assets: [{ id: 1, name: "package.zip", size: 10, digest: `sha256:${"a".repeat(64)}` }] };
 
 test("release listing finds drafts across pages and rejects duplicate tags", () => {
   assert.equal(releaseFromPages([[{ tag_name: "v0.1.5" }], [release]], "v0.1.6"), release);
@@ -41,6 +41,16 @@ test("release-state CLI binds downloaded bytes and refuses changed publication e
   const verified = run("verify");
   assert.equal(verified.status, 0, verified.stderr);
   assert.equal(existsSync(env.PATCH_LOG), false);
+  for (const name of [undefined, "Mesh-Talk v0.1.6", "0.1.6", "v0.1.5"]) {
+    writeFileSync(api, JSON.stringify({ ...current, name }));
+    for (const mode of ["guard", "record", "verify", "publish"]) {
+      const result = run(mode);
+      assert.notEqual(result.status, 0, `${mode} accepted noncanonical title ${name}`);
+      assert.match(result.stderr, /title/);
+      assert.equal(existsSync(env.PATCH_LOG), false);
+    }
+  }
+  writeFileSync(api, JSON.stringify(current));
   writeFileSync(join(root, "draft", "package.zip"), "tampered");
   assert.notEqual(run("verify").status, 0);
   writeFileSync(join(root, "draft", "package.zip"), bytes);
@@ -72,6 +82,7 @@ test("publication rejects release state or asset replacement after verification"
   requireSameDraft(release, snapshot);
   for (const replacement of [
     { ...release, draft: false }, { ...release, id: 101 },
+    { ...release, name: "Mesh-Talk v0.1.6" },
     { ...release, assets: [] },
     { ...release, assets: [{ ...release.assets[0], id: 2 }] },
     { ...release, assets: [{ ...release.assets[0], digest: `sha256:${"b".repeat(64)}` }] },
