@@ -4,6 +4,9 @@ use crate::commands::CommandError;
 use serde::Serialize;
 use tauri_plugin_opener::OpenerExt;
 
+#[cfg(target_os = "macos")]
+mod mac_callbacks;
+
 // Some statuses are observable only on macOS; retain one stable IPC vocabulary.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -112,15 +115,7 @@ pub(crate) fn send<R: tauri::Runtime>(
     {
         let center = mac_center(app).ok_or("Notification application identity unavailable")?;
         let request = mac_request(title, body);
-        let reply = block2::RcBlock::new(|error: *mut objc2_foundation::NSError| {
-            if let Some(error) = unsafe { error.as_ref() } {
-                // Do not log native descriptions: they can contain message content.
-                log::warn!(
-                    "Native notification submission failed (code {})",
-                    error.code()
-                );
-            }
-        });
+        let reply = mac_callbacks::submission();
         center.addNotificationRequest_withCompletionHandler(&request, Some(&reply));
         Ok(())
     }
@@ -182,8 +177,6 @@ fn platform_permission<R: tauri::Runtime>(
     request: bool,
 ) -> PermissionStatus {
     use block2::RcBlock;
-    use objc2::runtime::Bool;
-    use objc2_foundation::NSError;
     use objc2_user_notifications::{UNAuthorizationOptions, UNNotificationSettings};
     use std::{ptr::NonNull, sync::mpsc, time::Duration};
 
@@ -217,16 +210,7 @@ fn platform_permission<R: tauri::Runtime>(
         return status;
     }
     let (sender, receiver) = mpsc::sync_channel(1);
-    let reply = RcBlock::new(move |_granted: Bool, error: *mut NSError| {
-        if let Some(error) = unsafe { error.as_ref() } {
-            log::warn!(
-                "Native notification authorization failed (domain {}, code {})",
-                error.domain(),
-                error.code()
-            );
-        }
-        let _ = sender.send(error.is_null());
-    });
+    let reply = mac_callbacks::authorization(sender);
     // The hosted coverage control must fail before any OS prompt, even if its
     // caller accidentally regresses the observation-only admission above.
     #[cfg(test)]

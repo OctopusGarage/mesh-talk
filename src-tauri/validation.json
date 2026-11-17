@@ -1164,11 +1164,18 @@
     },
     {
       "id": "desktop-notification-permission",
-      "paths": ["src-tauri/src/notifications.rs", "src-tauri/src/events.rs"],
+      "paths": [
+        "src-tauri/src/notifications.rs",
+        "src-tauri/src/notifications/",
+        "src-tauri/src/events.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["notifications::tests::"]
+          "filters": [
+            "notifications::tests::",
+            "notifications::mac_callbacks::tests::"
+          ]
         }
       ],
       "frontend": [
@@ -1553,7 +1560,11 @@
     },
     {
       "id": "desktop-notification-permission-acceptance",
-      "paths": ["src-tauri/src/notifications.rs", "src-tauri/src/events.rs"],
+      "paths": [
+        "src-tauri/src/notifications.rs",
+        "src-tauri/src/notifications/",
+        "src-tauri/src/events.rs"
+      ],
       "browser": ["e2e/notification-permission.spec.ts"],
       "native": ["host"]
     },

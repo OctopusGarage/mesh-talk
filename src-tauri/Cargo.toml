@@ -105,7 +105,7 @@ mesh-talk-core = { path = "../crates/mesh-talk-core", features = ["fast-test-kdf
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSButton", "NSEvent", "NSGraphicsContext", "NSResponder", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSGeometry"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSGeometry", "NSDictionary"] }
 
 [lints]
 workspace = true

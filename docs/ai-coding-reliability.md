@@ -1145,6 +1145,11 @@ current instrumented Host test from an isolated bundle without authorization
 requests. Its raw native initial-state and delivery assertions remain separate;
 the prompt guard must reject forbidden intent before invoking the native API.
 A portable metadata/signing fixture is not OS authorization evidence.
+The [native completion adapters](../src-tauri/src/notifications/mac_callbacks.rs)
+keep callback completion separate from permission grants and retain only their
+reply sender. Real block invocations cover native errors and successful completion,
+plus late replies after observer retirement and release of the captured sender;
+these unit tests never request OS permission or submit an OS notification.
 Packaged authorization, revocation and actual alert presentation still require
 native evidence; neither a dismissed banner nor a valid signature proves permission.
 
