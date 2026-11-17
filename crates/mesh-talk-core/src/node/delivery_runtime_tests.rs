@@ -545,6 +545,333 @@ async fn durable_account_dm_recovers_after_a_fresh_handshake_failure() {
 }
 
 #[tokio::test]
+async fn immediate_delivery_budget_covers_the_entire_account_fanout() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let source = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let mut peers = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    let (entered, mut admitted) = tokio::sync::mpsc::unbounded_channel();
+    let closed = Arc::new(AtomicUsize::new(0));
+    for name in ["First device", "Second device"] {
+        let identity = DeviceIdentity::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proof = Announce::new_with_account(&identity, &account, name, address.port());
+        peers.push((proof, address));
+        let entered = entered.clone();
+        let closed = closed.clone();
+        tasks.spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // The aggregate deadline can cancel a later device during Noise.
+            let Ok(mut channel) = super::transport::secure_accept(stream, &identity).await else {
+                return;
+            };
+            if channel.recv().await.is_ok() {
+                let _ = entered.send(());
+                if channel.recv().await.is_err() {
+                    closed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+    }
+    drop(entered);
+    let (sender, _) = node(
+        source.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &peers[0].0,
+    );
+    for (proof, address) in &peers {
+        sender
+            .roster
+            .lock()
+            .unwrap()
+            .update(proof, address.ip(), &sender.user_id());
+        // Each device individually requires the full allowed control window.
+        // Resetting that window for the second would double the public wait.
+        sender
+            .sessions
+            .control_succeeded(&proof.public(), *address, Duration::from_secs(30));
+        assert_eq!(
+            sender.sessions.control_timeout(&proof.public(), *address),
+            super::route_timing::MAX_CONTROL_DEADLINE
+        );
+    }
+    let id = sender
+        .enqueue_to_account(&account.account_id(), b"one multi-device intent", None)
+        .await
+        .unwrap();
+    let originals = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations
+        .iter()
+        .map(|d| d.event.id)
+        .collect::<Vec<_>>();
+    assert_eq!(originals.len(), 2);
+    let flushing = sender.clone();
+    let mut flush = tokio::spawn(async move { flushing.flush_delivery(id).await });
+    let admission = tokio::time::timeout(Duration::from_secs(3), admitted.recv()).await;
+    tokio::time::pause();
+    tokio::time::advance(super::route_timing::MAX_CONTROL_DEADLINE + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    let completion = tokio::time::timeout(Duration::from_secs(1), &mut flush).await;
+    let returned = matches!(completion, Ok(Ok(())));
+    let retired = tokio::time::timeout(Duration::from_secs(1), async {
+        while closed.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if completion.is_err() {
+        flush.abort();
+        let _ = flush.await;
+    }
+    tasks.abort_all();
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            assert!(error.is_cancelled());
+        }
+    }
+    sender.sessions.clear();
+    assert!(
+        matches!(admission, Ok(Some(()))),
+        "a real authenticated request must precede deadline advancement"
+    );
+    assert!(
+        returned,
+        "a later device reset the immediate delivery budget"
+    );
+    assert!(
+        retired.is_ok(),
+        "deadline expiry must close the admitted stalled connection before cleanup"
+    );
+    assert_eq!(
+        sender.sessions.test_capacity_snapshot().0,
+        super::session_pool::MAX_TCP_CONNECTIONS
+    );
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    assert_eq!(
+        sender
+            .delivery
+            .lock()
+            .unwrap()
+            .message(id)
+            .unwrap()
+            .destinations
+            .iter()
+            .map(|d| d.event.id)
+            .collect::<Vec<_>>(),
+        originals
+    );
+}
+
+#[tokio::test]
+async fn immediate_delivery_uploads_while_authenticated_direct_sync_is_stalled() {
+    immediate_delivery_with_stalled_exchanges(true).await;
+}
+
+#[tokio::test]
+async fn immediate_delivery_retires_stalled_exchanges_within_one_network_budget() {
+    immediate_delivery_with_stalled_exchanges(false).await;
+}
+
+async fn immediate_delivery_with_stalled_exchanges(live_relay: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    async fn hold_authenticated_request(
+        listener: TcpListener,
+        identity: DeviceIdentity,
+        entered: oneshot::Sender<()>,
+        closed: Arc<AtomicBool>,
+        release: oneshot::Receiver<()>,
+    ) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut channel = super::transport::secure_accept(stream, &identity)
+            .await
+            .unwrap();
+        channel.recv().await.unwrap();
+        let _ = entered.send(());
+        tokio::select! {
+            result = channel.recv() => closed.store(result.is_err(), Ordering::SeqCst),
+            _ = release => {}
+        }
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    let relay_dir = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let recipient_account = Account::generate();
+    let direct_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_proof = Announce::new_with_account(
+        &recipient,
+        &recipient_account,
+        "Stalled direct recipient",
+        direct_listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(
+        source.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &recipient_proof,
+    );
+    sender.set_bridge_discovery_enabled(false);
+    let relay_identity = DeviceIdentity::generate();
+    let relay_keys = relay_identity.secret_bytes();
+    let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_proof = Announce::new_post_office_with_account(
+        &relay_identity,
+        &Account::generate(),
+        "Immediate delivery relay",
+        relay_listener.local_addr().unwrap().port(),
+    );
+    sender.roster.lock().unwrap().update(
+        &relay_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let relay = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(&relay_dir.path().join("relay"), "pw", relay_identity)
+            .unwrap(),
+    ));
+    let id = sender
+        .enqueue_to_account(
+            &recipient_account.account_id(),
+            b"one accepted intent",
+            None,
+        )
+        .await
+        .unwrap();
+    let original = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .event
+        .clone();
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &sender.identity,
+        &recipient_proof.public(),
+        &relay_proof.public(),
+    )
+    .unwrap();
+    let outer = mailbox.wrap(&original).unwrap().id;
+    let (direct_entered, direct_started) = oneshot::channel();
+    let (release_direct, direct_release) = oneshot::channel();
+    let direct_closed = Arc::new(AtomicBool::new(false));
+    let direct_task = tokio::spawn(hold_authenticated_request(
+        direct_listener,
+        recipient,
+        direct_entered,
+        direct_closed.clone(),
+        direct_release,
+    ));
+    let (relay_entered, relay_started) = oneshot::channel();
+    let (release_relay, relay_release) = oneshot::channel();
+    let relay_closed = Arc::new(AtomicBool::new(false));
+    let relay_task = if live_relay {
+        tokio::spawn(super::postbox::run_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1),
+            relay_listener,
+            relay.clone(),
+        ))
+    } else {
+        tokio::spawn(hold_authenticated_request(
+            relay_listener,
+            DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1),
+            relay_entered,
+            relay_closed.clone(),
+            relay_release,
+        ))
+    };
+    let flushing = sender.clone();
+    // Deliberately omit background recovery: the public immediate flush must
+    // itself upload despite the held direct exchange, without resending.
+    let mut flush = tokio::spawn(async move { flushing.flush_delivery(id).await });
+    let observed = tokio::time::timeout(Duration::from_secs(3), async {
+        direct_started.await?;
+        if live_relay {
+            while !relay.lock().unwrap().has(&outer) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } else {
+            relay_started.await?;
+        }
+        Ok::<_, oneshot::error::RecvError>(())
+    })
+    .await;
+    // Advance only after real Noise and request admission. Resume the real
+    // clock for kernel EOF observation; a virtual timer cannot prove closure.
+    tokio::time::pause();
+    tokio::time::advance(super::route_timing::MAX_CONTROL_DEADLINE + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    let completion = tokio::time::timeout(Duration::from_secs(1), &mut flush).await;
+    let returned = matches!(completion, Ok(Ok(())));
+    let retired = tokio::time::timeout(Duration::from_secs(1), async {
+        while !direct_closed.load(Ordering::SeqCst)
+            || (!live_relay && !relay_closed.load(Ordering::SeqCst))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if completion.is_err() {
+        flush.abort();
+        let _ = flush.await;
+    }
+    let _ = release_direct.send(());
+    let _ = release_relay.send(());
+    let direct_result = direct_task.await;
+    sender.sessions.clear();
+    relay_task.abort();
+    let relay_result = relay_task.await;
+    assert!(
+        matches!(observed, Ok(Ok(()))),
+        "relay progress was blocked by direct sync: {observed:?}"
+    );
+    assert!(
+        returned,
+        "immediate flush outlived its shared network budget"
+    );
+    assert!(
+        retired.is_ok(),
+        "stalled sockets must close before their fault owners are released"
+    );
+    direct_result.unwrap();
+    if let Err(error) = relay_result {
+        assert!(error.is_cancelled());
+    }
+    assert_eq!(
+        sender.sessions.test_capacity_snapshot().0,
+        super::session_pool::MAX_TCP_CONNECTIONS
+    );
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    assert_eq!(
+        sender
+            .delivery
+            .lock()
+            .unwrap()
+            .message(id)
+            .unwrap()
+            .destinations[0]
+            .event
+            .id,
+        original.id
+    );
+    assert_eq!(relay.lock().unwrap().has(&outer), live_relay);
+}
+
+#[tokio::test]
 async fn confirmed_destination_does_not_open_another_relay_connection() {
     let dir = tempfile::tempdir().unwrap();
     let recipient = DeviceIdentity::generate();

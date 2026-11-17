@@ -718,8 +718,9 @@ sequenceDiagram
   participant B as Recipient B
   participant P as Optional post office P
   A->>Local: Accept immutable outgoing work
-  A->>B: Authenticated direct sync when a route exists
-  opt Relay sending permitted and destination still outstanding
+  par Direct route exists
+    A->>B: Authenticated direct sync
+  and Relay sending permitted and destination still outstanding
     A->>P: Recipient-encrypted opaque custody
   end
   B->>B: Validate and durably install received content
@@ -729,7 +730,7 @@ sequenceDiagram
 
 1. Discovery or an authorized known-contact route supplies a candidate. Transport verifies full identity/account binding.
 2. Account-addressed work can include multiple per-device destinations and own-device copies. A single account conversation in the UI does not collapse their delivery obligations.
-3. Direct transfer is attempted first; a completed TCP/sync exchange is not sufficient to mark the recipient delivered. While exact destination work remains, relay-enabled custody may also be attempted.
+3. When permitted routes exist, direct transfer and post-office custody run concurrently; recipient presence is not a prerequisite for relay upload. Immediate best-effort delivery reuses the background worker's bounded exchange rules, with one maximum control deadline across its entire network fanout. Expiry drops unfinished channels and leaves the immutable destinations queued for recovery; synchronous local recovery and lookup are outside this network deadline. A completed TCP/sync exchange or relay copy is not sufficient to mark the recipient delivered.
 4. The recipient validates cryptographic and conversation authority, installs its receive transition and produces eligible confirmation. The sender validates and durably applies it.
 5. Retries retain immutable event identity. A stale work snapshot must recheck outstanding state before opening another relay connection. A confirmed destination does not retire another device's work.
 

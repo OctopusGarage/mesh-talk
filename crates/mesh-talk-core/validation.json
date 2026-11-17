@@ -583,6 +583,9 @@
             "accountless_cached_sync_preserves_identity_role_and_account_pins",
             "bare_noise_reuse_never_substitutes_for_an_unconfigured_durable_sibling_pin",
             "outbound_handshakes_are_bounded_and_cancellation_releases_capacity",
+            "immediate_delivery_uploads_while_authenticated_direct_sync_is_stalled",
+            "immediate_delivery_retires_stalled_exchanges_within_one_network_budget",
+            "immediate_delivery_budget_covers_the_entire_account_fanout",
             "duplicate_hung_endpoint_handshakes_do_not_starve_healthy_sync",
             "concurrent_live_endpoint_dials_keep_independent_authenticated_channels",
             "sync_pool_does_not_reuse_for_one_shot_or_wrong_identity_and_drops_cancelled_channels",
@@ -655,6 +658,10 @@
           {
             "name": "All background producers share at most two unauthenticated historical-route attempts; fresh exact routes, recent scoped authentication and explicit call/pairing preserve shared capacity. Canceled or capacity-deferred probe turns remain fair and actual socket owners retire before completed rounds publish retry hints. Historical peer failures back off up to 300 seconds; local deferral preserves learned failures and exact reservation authority while success and changed routes recover promptly.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Immediate accepted-message delivery reuses bounded concurrent direct and relay exchanges under one maximum control deadline across network fanout. A silent authenticated direct peer cannot prevent relay custody; expiry closes unfinished sockets, releases capacity and preserves the original Awaiting intent for background recovery. Optional legacy account bindings retain exact device pinning and current policy checks; transport or custody alone never grants recipient confirmation.",
+            "reference": "docs/network-design-reference.md#a-direct-message-acceptance-transfer-and-confirmation"
           },
           {
             "name": "Only actual outbound capacity timeouts contribute to a per-pool fixed-window bounded metadata warning; suppressed counts aggregate without sliding the next report.",

@@ -2196,7 +2196,9 @@ impl Node {
     }
 
     /// Immediate best-effort transfer of an already accepted immutable intent.
-    /// A transport success is never a delivery confirmation.
+    /// Direct and relay alternatives share the recovery worker's exchange rules.
+    /// One network deadline covers the full fanout; expiry leaves durable work
+    /// pending. A transport success is never a delivery confirmation.
     pub async fn flush_delivery(self: &Arc<Self>, id: EventId) {
         let message = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
@@ -2215,34 +2217,12 @@ impl Node {
         let Some(message) = message else {
             return;
         };
-        for destination in message.destinations {
-            if !self.delivery_destination_allowed(&destination) {
-                continue;
+        let transfer = async {
+            for destination in message.destinations {
+                Box::pin(self.retry_one_destination(&destination)).await;
             }
-            let conv = destination.event.conversation_id;
-            if let Some(peer) = self
-                .routing_peer(&destination.device.user_id())
-                .filter(|p| {
-                    p.public == destination.device
-                        && (destination.account.is_none() || p.account_id == destination.account)
-                        && self.known_account_allowed(&p.public)
-                })
-            {
-                self.transfer_delivery_destination(&peer, &destination, conv)
-                    .await;
-                self.emit_new_messages(conv);
-                // The remote serve loop processes plaintext after sync replies;
-                // a second round requests control evidence over its own scope.
-                let control = super::delivery_receipt::delivery_conversation_id(
-                    &self.identity.public(),
-                    &peer.public,
-                );
-                self.transfer_delivery_destination(&peer, &destination, control)
-                    .await;
-                self.emit_new_messages(control);
-            }
-            self.replicate_delivery_destination(&destination).await;
-        }
+        };
+        let _ = tokio::time::timeout(super::route_timing::MAX_CONTROL_DEADLINE, transfer).await;
     }
 
     /// Bounded direct receipt transfer hook. The shared worker separately
@@ -3226,7 +3206,7 @@ impl Node {
             .routing_peer(&destination.device.user_id())
             .filter(|p| {
                 p.public == destination.device
-                    && p.account_id == destination.account
+                    && (destination.account.is_none() || p.account_id == destination.account)
                     && self.known_account_allowed(&p.public)
             });
         // Snapshot only locally known and permitted alternatives. No remote

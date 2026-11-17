@@ -390,6 +390,18 @@ needed. Distinguish observation deadlines, admission refusal and transport failu
 Preserve the owner-defined retry policy and original operation identity. Do not
 reset the overall budget on every attempt or increase it just to hide a hang.
 
+Immediate best-effort sends must reuse the bounded delivery exchange owner;
+wrapping only the background retry leaves the public send waiting indefinitely
+after a peer authenticates but stops replying. Direct and relay alternatives
+must progress independently, with one network deadline across the immediate
+fanout. Deadline cancellation drops unfinished channels without confirming or
+discarding the accepted intent. The `immediate_delivery_` regressions in
+[delivery runtime tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+hold real authenticated requests, require relay custody before releasing the
+direct peer, then qualify socket closure and restored capacity after expiry.
+Their virtual clock advances only the network deadline; synchronous recovery
+and storage lookups remain outside that interruptibility evidence.
+
 Check cancellation cleanup and late completion as well as elapsed time. Async
 timers cannot interrupt a thread blocked in a synchronous mutex, native call or
 filesystem syscall. Such a path also needs R01–R03. Budget values remain in the
