@@ -138,6 +138,10 @@
         "guide": "docs/updates.md",
         "invariants": [
           {
+            "name": "Stable release display titles equal their canonical version tags at draft preparation, artifact verification and final publication.",
+            "reference": "docs/updates.md#manual-release-preparation"
+          },
+          {
             "name": "macOS desktop and headless release producers discard local symbols during linking before native signing, bundling and updater/delta generation; both architectures retain runnable, verifiably signed executables.",
             "reference": "docs/updates.md#release-binary-size"
           },

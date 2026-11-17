@@ -50,8 +50,14 @@ test("post-publication development floor advances without downgrading an existin
 
 test("only the exact draft source can start a stable build", () => {
   const sha = "a".repeat(40);
-  const release = { tag_name: "v0.4.4", draft: true, prerelease: false };
+  const release = { tag_name: "v0.4.4", name: "v0.4.4", draft: true, prerelease: false };
   assert.doesNotThrow(() => assertDraftBuild("v0.4.4", sha, release, sha));
+  for (const name of [undefined, "Mesh-Talk v0.4.4", "0.4.4", "v0.4.3"]) {
+    assert.throws(
+      () => assertDraftBuild("v0.4.4", sha, { ...release, name }, sha),
+      /title/,
+    );
+  }
   assert.throws(
     () => assertDraftBuild("v0.4.4", sha, release, "b".repeat(40)),
     /source/,
@@ -73,7 +79,7 @@ test("only the exact draft source can start a stable build", () => {
 });
 
 const sha = "a".repeat(40);
-const draft = { tag_name: "v0.4.5", draft: true, prerelease: false };
+const draft = { tag_name: "v0.4.5", name: "v0.4.5", draft: true, prerelease: false };
 const input = () => ({
   repo: "owner/repo",
   tag: "v0.4.5",
@@ -167,6 +173,7 @@ test("manual preparation refuses invalid versions, absent notes and published or
     { tagSha: sha, release: { ...draft, draft: false } },
     { tagSha: sha, release: { ...draft, prerelease: true } },
     { tagSha: sha, release: { ...draft, tag_name: "v0.4.6" } },
+    { tagSha: sha, release: { ...draft, name: "Mesh-Talk v0.4.5" } },
   ]) {
     const { io, calls } = effects();
     assert.throws(
