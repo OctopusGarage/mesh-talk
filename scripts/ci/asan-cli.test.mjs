@@ -37,6 +37,10 @@ if (mode === "run") {
   if (existsSync(path.join(root, "target"))) throw Error("consumer compiled instead of reusing archive");
  }
  writeFileSync(path.join(root, "summary.json"), JSON.stringify(verifyAsanUnion(bundles, archiveIdentity())));
+} else if (mode === "invalid-diagnostics") {
+ const diagnostics = path.join(root, "invalid-diagnostics");
+ mkdirSync(path.join(diagnostics, "compile.log"), { recursive: true });
+ await produceArchive(path.join(root, "no-admission"), { buildArgs, identity, diagnostics });
 } else if (mode === "fail") {
  await runPartition(1, path.join(root, "failed"), { ...await reuse("failed"), identity: archiveIdentity() });
 } else if (mode === "changed") {
@@ -109,6 +113,11 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
   assert.equal(progress.at(-1).event, "closed");
   assert.equal(progress.at(-1).failed, false);
   assert.deepEqual(JSON.parse(readFileSync(path.join(root, "summary.json"))), { totalTests: 37, executedTests: 36, ignoredTests: 1, shards: 8 });
+  const noAdmission = run("invalid-diagnostics");
+  assert.equal(noAdmission.status, 1);
+  assert.match(noAdmission.stderr, /EISDIR/u);
+  assert(!existsSync(path.join(root, "no-admission/core.tar.zst")), "missing command receipts must reject before compilation");
+  assert(!existsSync(path.join(root, "no-admission/archive.json")));
   for (const shard of [1, 2, 3, 4, 5, 6, 7, 8]) {
     const evidence = path.join(root, "evidence", String(shard));
     const files = readdirSync(evidence, { withFileTypes: true });

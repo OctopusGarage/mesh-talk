@@ -627,8 +627,11 @@ The ASan producer keeps bounded compile stdout/stderr and command lifecycle
 receipts in a separate diagnostic artifact. Its resource observer samples fixed
 kernel memory, swap, OOM and pressure counters, system load and workspace free
 space every thirty seconds, at most 720 times. It retires its timer when work
-settles, including cancellation; diagnostic read/write/transport failures never
-replace the compiler outcome or qualify an archive. Live samples supplement the
+settles, including cancellation; resource-observer read/write/live-output failures
+never replace the compiler outcome or qualify an archive. Raw command receipts
+retain the process owner's mandatory local write policy; receipt creation failure
+rejects compilation admission. Only auxiliary upload transport is optional.
+Live samples supplement the
 artifact, but total runner loss can prevent both log finalization and upload.
 Missing observations do not prove resource exhaustion or exclude it. Compare
 actual observations before changing compiler concurrency or instrumentation.
