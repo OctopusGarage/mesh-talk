@@ -1,0 +1,35 @@
+[Image #1]  定位一下为什么发给stella的私信一直等待中，对方明明在线的，就算不在线，也应该发送到邮局吧，定位一下，troubleshoot；troubleshoot；troubleshoot；troubleshoot；troubleshoot；troubleshoot；troubleshoot；
+
+---
+
+“Delivery details
+Awaiting receipt
+Retry was scheduled 3 minutes ago.
+Delivery retries automatically; you do not need to resend this message.
+Automatic receipt from the target account. Not a read receipt.
+Open connection diagnostics”
+
+---
+
+continue to troubleshoot ！！！
+
+---
+
+他现在已经离线了。。本来在线的时候是不行的，截图就是，continue；continue；continue；continue；continue；另外现在离线发消息不会也同时发邮局吗？analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+那确定有问题的地方先修掉吧，optimise；optimise；optimise；optimise；optimise；optimise；optimise；
+
+---
+
+将代码提交到https://github.com/OctopusGarage/mesh-talk/pull/381，并且覆盖一下单元测试，continue；continue；continue；continue；
+
+---
+
+将代码提交到https://github.com/OctopusGarage/mesh-talk/pull/381，并且覆盖一下单元测试，continue；continue；continue；continue；continue；continue；continue；
+
+---
+
+将代码提交到 https://github.com/OctopusGarage/mesh-talk/pull/381，
+并且覆盖一下单元测试，continue；continue；continue；continue；continue；continue；continue；
