@@ -259,7 +259,7 @@ test("only auxiliary diagnostic transport is optional; acceptance artifacts stay
     "check-health.yml": ["health-diagnostics-", "frontend-coverage-"],
     "ci.yml": ["runner-storage-", "native-crash-linux-", "test-timing-", "macos-remaining-producer-log-"],
     "linux-workspace-consumer.yml": ["native-crash-linux-", "runner-storage-"],
-    "sanitizers.yml": ["runner-storage-"],
+    "sanitizers.yml": ["runner-storage-", "asan-build-diagnostics-"],
     "mutants.yml": ["runner-storage-"],
     "hidden-contacts-native.yml": ["runner-storage-"],
     "release.yml": ["runner-storage-"],

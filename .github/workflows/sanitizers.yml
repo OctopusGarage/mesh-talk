@@ -106,6 +106,15 @@ jobs:
           MESH_ASAN_RUSTC: ${{ steps.cohort.outputs.rustc }}
           MESH_ASAN_CARGO: ${{ steps.cohort.outputs.cargo }}
         run: node scripts/ci/asan.mjs build tmp/asan-build
+      - name: Preserve ASan build diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: asan-build-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/asan-build-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Upload this attempt's compiled ASan archive
         id: archive
         uses: actions/upload-artifact@v7
