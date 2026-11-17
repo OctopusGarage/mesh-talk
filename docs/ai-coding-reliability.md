@@ -2218,8 +2218,17 @@ departure recovery controls alongside the linked-device reconnect and
 classification tests.
 The source's positive message observation uses the same pending-state owner;
 source readiness and sibling delivery share the original delivery deadline.
+Custody fixtures identify the exact outgoing body and sender through that owner:
+source identification shares the existing holder-setup deadline or the already-offline
+sibling-delivery deadline. A successful read while producers remain live is a
+snapshot; retain its witnessed rows for the immediate assertion rather than
+unwrapping a fresh read. Joined producer retirement is a different boundary.
 Self-control Noise setup likewise waits for the source archive marker through
 `StaleCursor` within its existing shared cold deadline, before measuring the action.
+The [two-parent control fixture](../crates/mesh-talk-core/src/node/channels.rs)
+also preserves the metadata publisher's precommit source guard: only its explicit `StaleCursor` can retry during the original setup
+deadline. Keep revision conflicts, storage and authorization failures fatal, and
+retain the later signed-value and unchanged-source/work assertions.
 An authenticated completion describes its response epoch, not a permanently
 frozen source. Exact metadata comparisons in the
 [control-page fixtures](../crates/mesh-talk-core/src/node/account_documents/sync.rs)
