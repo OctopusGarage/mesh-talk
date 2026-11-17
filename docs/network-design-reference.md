@@ -3099,14 +3099,23 @@ Only after validation rejects retired session-only evidence is durable progress
 attached to the current runtime. Completed finite repair attempts additionally
 retain at most 64 lightweight scheduling fingerprints in the existing upload
 cache: each holds a key of at most 256 bytes, a 32-byte hash, captured privacy
-generation and fixed five-minute expiry. They retain no event, receipt body,
-parent mapping, view or compaction lease. A freshly authenticated receipt from
+generation, the captured local receive-repair/source revisions and fixed five-minute
+expiry. They retain no event, receipt body, parent mapping, view or compaction lease. A freshly authenticated receipt from
 the same runtime may preserve its exact inactive spent bitmap after heavy-owner
 eviction only when this evidence still matches. Restart, changed policy or
 repair state, missing evidence and expiry retain cold normalization: clear spent
 work and drop inactive repair hints. Existing pending-witness, remote-window and
 destructive-epoch checks still precede work. Explicit invalidation of all repair
 owners clears these fingerprints; identical observations never renew their deadline.
+A blocked pending child consults this evidence before another body GET, retaining
+its durable pending ID. Reuse requires its exact pending witness/spent bit, current
+remote mailbox identity and unchanged mailbox revision, nondecreasing remote
+commit cut, current local dependency/source revisions and fresh receive permission.
+Capture local revisions before the attempt and compare them again before recording
+quiet work; a parent arriving during completion cannot become an unchanged baseline.
+Local or remote parent arrival, policy changes, restart, missing evidence and the
+original five-minute deadline restore normal retry. These hints never acknowledge
+admission or delivery and do not retain child or parent payloads.
 Hot repair progress keeps its existing lease and generation checks. Each owner
 also fences cold warming with a reset epoch, including invalidation while its
 receipt is still empty. Recording completed work rechecks the actual lease under

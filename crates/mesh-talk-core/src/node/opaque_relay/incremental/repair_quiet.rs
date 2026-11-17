@@ -14,6 +14,7 @@ const REPAIR_INTERVAL: Duration = Duration::from_secs(300);
 struct Settled {
     key: Vec<u8>,
     generation: u64,
+    local: (i64, i64),
     fingerprint: [u8; 32],
     checked: Instant,
 }
@@ -41,6 +42,7 @@ impl QuietRepairCache {
         &self,
         key: &[u8],
         generation: u64,
+        local: (i64, i64),
         repair: &Repair,
         now: Instant,
     ) -> bool {
@@ -50,11 +52,19 @@ impl QuietRepairCache {
         self.0.iter().any(|entry| {
             entry.key == key
                 && entry.generation == generation
+                && entry.local == local
                 && entry.fingerprint == fingerprint
                 && now.saturating_duration_since(entry.checked) < REPAIR_INTERVAL
         })
     }
-    pub(super) fn remember(&mut self, key: &[u8], generation: u64, repair: &Repair, now: Instant) {
+    pub(super) fn remember(
+        &mut self,
+        key: &[u8],
+        generation: u64,
+        local: (i64, i64),
+        repair: &Repair,
+        now: Instant,
+    ) {
         if key.is_empty() || key.len() > MAX_KEY_BYTES {
             return;
         }
@@ -64,7 +74,10 @@ impl QuietRepairCache {
         self.0
             .retain(|entry| now.saturating_duration_since(entry.checked) < REPAIR_INTERVAL);
         if self.0.iter().any(|entry| {
-            entry.key == key && entry.generation == generation && entry.fingerprint == fingerprint
+            entry.key == key
+                && entry.generation == generation
+                && entry.local == local
+                && entry.fingerprint == fingerprint
         }) {
             // Identical observation cannot postpone the original sparse repair.
             return;
@@ -76,6 +89,7 @@ impl QuietRepairCache {
         self.0.push_back(Settled {
             key: key.to_vec(),
             generation,
+            local,
             fingerprint,
             checked: now,
         });
@@ -121,10 +135,12 @@ mod tests {
         let now = Instant::now();
         let original = repair();
         let mut cache = QuietRepairCache::default();
-        cache.remember(b"scope", 9, &original, now);
-        assert!(cache.contains(b"scope", 9, &original, now));
-        assert!(!cache.contains(b"other", 9, &original, now));
-        assert!(!cache.contains(b"scope", 10, &original, now));
+        cache.remember(b"scope", 9, (1, 2), &original, now);
+        assert!(cache.contains(b"scope", 9, (1, 2), &original, now));
+        assert!(!cache.contains(b"other", 9, (1, 2), &original, now));
+        assert!(!cache.contains(b"scope", 10, (1, 2), &original, now));
+        assert!(!cache.contains(b"scope", 9, (2, 2), &original, now));
+        assert!(!cache.contains(b"scope", 9, (1, 3), &original, now));
         for variant in 0..11 {
             let mut changed = original.clone();
             match variant {
@@ -141,26 +157,29 @@ mod tests {
                 _ => changed.scan.after += 1,
             }
             assert!(
-                !cache.contains(b"scope", 9, &changed, now),
+                !cache.contains(b"scope", 9, (1, 2), &changed, now),
                 "changed input {variant}"
             );
         }
-        assert!(cache.contains(b"scope", 9, &original, now));
+        assert!(cache.contains(b"scope", 9, (1, 2), &original, now));
+        cache.remember(b"scope", 9, (1, 3), &original, now);
+        assert!(cache.contains(b"scope", 9, (1, 3), &original, now));
+        assert!(!cache.contains(b"scope", 9, (1, 2), &original, now));
         cache.clear();
-        assert!(!cache.contains(b"scope", 9, &original, now));
+        assert!(!cache.contains(b"scope", 9, (1, 2), &original, now));
     }
     #[test]
     fn repeated_observation_keeps_original_repair_deadline() {
         let now = Instant::now();
         let repair = repair();
         let mut cache = QuietRepairCache::default();
-        cache.remember(b"scope", 0, &repair, now);
+        cache.remember(b"scope", 0, (1, 2), &repair, now);
         let later = now + REPAIR_INTERVAL - Duration::from_secs(1);
-        assert!(cache.contains(b"scope", 0, &repair, later));
-        cache.remember(b"scope", 0, &repair, later);
-        assert!(!cache.contains(b"scope", 0, &repair, now + REPAIR_INTERVAL));
-        cache.remember(b"scope", 0, &repair, now + REPAIR_INTERVAL);
-        assert!(cache.contains(b"scope", 0, &repair, now + REPAIR_INTERVAL));
+        assert!(cache.contains(b"scope", 0, (1, 2), &repair, later));
+        cache.remember(b"scope", 0, (1, 2), &repair, later);
+        assert!(!cache.contains(b"scope", 0, (1, 2), &repair, now + REPAIR_INTERVAL));
+        cache.remember(b"scope", 0, (1, 2), &repair, now + REPAIR_INTERVAL);
+        assert!(cache.contains(b"scope", 0, (1, 2), &repair, now + REPAIR_INTERVAL));
     }
     #[test]
     fn scope_capacity_and_fingerprint_size_are_bounded() {
@@ -168,17 +187,17 @@ mod tests {
         let repair = repair();
         let mut cache = QuietRepairCache::default();
         for n in 0..=MAX_ENTRIES {
-            cache.remember(&(n as u16).to_be_bytes(), 0, &repair, now);
+            cache.remember(&(n as u16).to_be_bytes(), 0, (1, 2), &repair, now);
         }
         assert_eq!(cache.0.len(), MAX_ENTRIES);
-        assert!(!cache.contains(&0u16.to_be_bytes(), 0, &repair, now));
-        assert!(cache.contains(&(MAX_ENTRIES as u16).to_be_bytes(), 0, &repair, now));
-        cache.remember(&[0; MAX_KEY_BYTES + 1], 0, &repair, now);
+        assert!(!cache.contains(&0u16.to_be_bytes(), 0, (1, 2), &repair, now));
+        assert!(cache.contains(&(MAX_ENTRIES as u16).to_be_bytes(), 0, (1, 2), &repair, now));
+        cache.remember(&[0; MAX_KEY_BYTES + 1], 0, (1, 2), &repair, now);
         assert_eq!(cache.0.len(), MAX_ENTRIES);
         let mut active = repair.clone();
         active.active = true;
-        cache.remember(b"active", 0, &active, now);
-        assert!(!cache.contains(b"active", 0, &active, now));
+        cache.remember(b"active", 0, (1, 2), &active, now);
+        assert!(!cache.contains(b"active", 0, (1, 2), &active, now));
         assert_eq!(cache.0.len(), MAX_ENTRIES);
     }
 }

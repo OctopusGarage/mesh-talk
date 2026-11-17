@@ -1683,6 +1683,15 @@ must recover normally. The [mailbox receipt regression](../crates/mesh-talk-core
 fixed-capacity admission after a completed repair; the adjacent fingerprint tests
 cover changed inputs, capacity and the original deadline. This evidence never
 restores a compaction lease, cached parent body or permission.
+Consult completed negative work before downloading its blocked child again, not
+only before the subsequent historical scan. Bind the hint to local dependency/source
+revisions captured before the attempt and rechecked at publication, as well as
+remote revision, pending witness and current policy. An unrelated checkpoint save
+must not absorb a concurrent parent arrival into a new quiet baseline. The
+`incremental_receive_restart_preserves_child_pending_and_repairs_missing_inner`
+[loopback regression](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
+requires zero unchanged child-body fetches, retained pending recovery across restart,
+and prompt recovery after local or remote parent arrival.
 
 Apply the same rule to terminal preparation: check the live selection, source
 and actual export cursor before entering a write guard. The

@@ -394,6 +394,8 @@ pub(super) struct State {
     remote: Option<RemoteBinding>,
     remote_floor: Option<(i64, i64)>,
     repair_generation: Option<u64>,
+    // Capture before work: later checkpoint saves cannot absorb a dependency arrival.
+    repair_source: Option<(i64, i64)>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RemoteBinding {
@@ -736,6 +738,52 @@ impl Node {
         self.remember_wrapper_id(p.mailbox.id(), id, outer);
         Ok(Some(outer))
     }
+    fn quiet_pending_retry(
+        &self,
+        p: &OpaqueMailboxProgress,
+        id: EventId,
+    ) -> Result<bool, LogError> {
+        let Some(repair) = state(p)
+            .receipt
+            .repair
+            .as_ref()
+            .filter(|repair| !repair.active)
+        else {
+            return Ok(false);
+        };
+        let Some(cursor) = state(p).receipt.cursor.as_ref() else {
+            return Ok(false);
+        };
+        let (witness, pending) = pending_repair_witness(&state(p).receipt.pending);
+        let captured = repair
+            .captured
+            .window
+            .unwrap_or((repair.captured.after, repair.captured.revision));
+        let current = cursor.window.unwrap_or((cursor.after, cursor.revision));
+        if p.required_parent.is_some()
+            || witness != repair.witness
+            || !repair.spent_for(&pending, id)
+            || RemoteBinding::from(&repair.captured) != RemoteBinding::from(cursor)
+            || captured.0 > current.0
+            || captured.1 != current.1
+            || !self.mailbox_repair_scope_valid(repair)?
+        {
+            return Ok(false);
+        }
+        let local = self.mailbox_local_binding()?;
+        Ok(self
+            .opaque_upload_cache
+            .lock()
+            .expect("upload cache")
+            .settled_repairs
+            .contains(
+                &state(p).key,
+                self.privacy.generation.load(Ordering::Acquire),
+                local,
+                repair,
+                std::time::Instant::now(),
+            ))
+    }
     async fn incremental_receive_one<IO: AsyncRead + AsyncWrite + Unpin>(
         &self,
         channel: &mut crate::transport::SecureChannel<IO>,
@@ -749,6 +797,11 @@ impl Node {
             return Err(
                 LogError::AdmissionRejected("mailbox receive permission revoked".into()).into(),
             );
+        }
+        // Keep the durable pending ID, but do not fetch its body merely to
+        // rediscover that the exact unchanged dependency repair was exhausted.
+        if retry && self.quiet_pending_retry(p, id)? {
+            return Ok(());
         }
         let retained = {
             let cache = self.opaque_receive_cache.lock().expect("opaque cache");
@@ -795,6 +848,7 @@ impl Node {
                     },
                     None,
                 );
+                state_mut(p).repair_source = Some(self.mailbox_local_binding()?);
                 let events = mailbox::get(channel, p.mailbox.id(), &cursor, &[id]).await?;
                 // A policy change can arrive while the authenticated GET is in
                 // flight. Keep this ID queued without admitting its response.
@@ -917,8 +971,14 @@ impl Node {
         // A completed finite attempt retains only bounded scheduling evidence,
         // independently of the heavyweight owner and its compaction lease.
         // Tag with the attempt's captured generation, never a newer policy.
-        if let (Some(generation), Some(repair)) =
-            (state(p).repair_generation, state(p).receipt.repair.as_ref())
+        #[cfg(test)]
+        self.trace_account_client(&p.recipient, || "mailbox_repair_before_quiet".into());
+        let current = self.mailbox_local_binding()?;
+        if let (Some(generation), Some(repair), Some(local)) = (
+            state(p).repair_generation,
+            state(p).receipt.repair.as_ref(),
+            state(p).repair_source,
+        ) && local == current
         {
             let mut cache = self.opaque_upload_cache.lock().expect("upload cache");
             // Cache -> entry matches admission/retirement order. Contention
@@ -932,6 +992,7 @@ impl Node {
                     cache.settled_repairs.remember(
                         &state(p).key,
                         generation,
+                        local,
                         repair,
                         std::time::Instant::now(),
                     );
@@ -1580,6 +1641,7 @@ impl Node {
                 remote: None,
                 remote_floor: None,
                 repair_generation: None,
+                repair_source: None,
             }));
             return Ok(Some(false));
         }

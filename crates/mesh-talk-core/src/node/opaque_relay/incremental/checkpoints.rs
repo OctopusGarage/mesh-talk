@@ -469,6 +469,7 @@ impl Node {
                                 .contains(
                                     key,
                                     self.privacy.generation.load(Ordering::Acquire),
+                                    (epoch, source),
                                     repair,
                                     std::time::Instant::now(),
                                 )
@@ -1291,6 +1292,9 @@ mod tests {
                 .unwrap(),
             Some(false)
         );
+        // This fixture completes a synthetic attempt without a child GET;
+        // retain the source observation captured before that attempt too.
+        state_mut(&mut progress).repair_source = Some((epoch, source));
         node.hold_mailbox_repair_lease(&mut progress).unwrap();
         node.finish_mailbox_repair(&mut progress).unwrap();
         let completed = state(&progress).receipt.clone();

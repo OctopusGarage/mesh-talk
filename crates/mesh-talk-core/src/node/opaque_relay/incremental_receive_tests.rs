@@ -2591,7 +2591,7 @@ async fn incremental_receive_restart_preserves_child_pending_and_repairs_missing
         2,
         0,
         EventKind::Message,
-        vec![2; 128],
+        vec![2; crate::file::CHUNK_SIZE],
     );
     let child_outer = mailbox.wrap(&child).unwrap();
     office.ingest(child_outer.clone()).unwrap();
@@ -2639,8 +2639,8 @@ async fn incremental_receive_restart_preserves_child_pending_and_repairs_missing
         let after = office.state.body_read_counts();
         assert_eq!(
             after.0 - before.0,
-            1,
-            "an unchanged unresolved witness may retry its child, but cannot rescan the mailbox"
+            0,
+            "unchanged blocked work must not download the same child again"
         );
     }
     drop(node);
@@ -2662,8 +2662,53 @@ async fn incremental_receive_restart_preserves_child_pending_and_repairs_missing
     exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
     assert_eq!(
         office.state.body_read_counts().0 - before.0,
-        1,
-        "the new hot owner must qualify each unchanged pending child without another scan"
+        0,
+        "the new hot owner must park an unchanged pending child before body reads"
+    );
+    // A parent arriving while the blocked retry finishes cannot be absorbed
+    // into a newer quiet baseline. Its next drain must retry the saved child.
+    node.opaque_upload_cache
+        .lock()
+        .unwrap()
+        .clear_receive_repair_leases();
+    let installed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let did_install = installed.clone();
+    let weak = std::sync::Arc::downgrade(&node);
+    let arriving_parent = parent.clone();
+    *node.account_client_test_hook.lock().unwrap() = Some(std::sync::Arc::new(move |_, phase| {
+        if phase == "mailbox_repair_before_quiet"
+            && !did_install.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            weak.upgrade()
+                .unwrap()
+                .log
+                .lock()
+                .unwrap()
+                .append_durable(arriving_parent.clone())
+                .unwrap();
+        }
+    }));
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    *node.account_client_test_hook.lock().unwrap() = None;
+    assert!(installed.load(std::sync::atomic::Ordering::SeqCst));
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert!(
+        node.log.lock().unwrap().has(&child.id).unwrap(),
+        "local parent arrival during completion must release the blocked child"
+    );
+    node.log
+        .lock()
+        .unwrap()
+        .drop_conversation(&conversation)
+        .unwrap();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert!(!node.log.lock().unwrap().has(&child.id).unwrap());
+    let quiet_before_remote_append = office.state.body_read_counts();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert_eq!(
+        office.state.body_read_counts(),
+        quiet_before_remote_append,
+        "remote parent arrival must be tested against a currently quiet pending child"
     );
     office.ingest(mailbox.wrap(&parent).unwrap()).unwrap();
     exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
@@ -2819,4 +2864,108 @@ async fn incremental_receive_rejects_corrupt_or_unsigned_modified_checkpoint_aft
             "successful reconciliation must replace the rejected optional hint"
         );
     }
+}
+
+#[tokio::test]
+async fn incremental_receive_multi_child_keeps_original_local_repair_baseline() {
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    let directory = tempfile::tempdir().unwrap();
+    let relay_directory = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let remote = DeviceIdentity::generate();
+    let proof = crate::discovery::Announce::new_with_account(
+        &remote,
+        &Account::generate(),
+        "Remote",
+        47475,
+    );
+    let (node, _, _) =
+        super::super::test_support::node_with_files(directory.path(), identity, account, &proof);
+    node.cached_peer_snapshot_async().await.unwrap();
+    node.set_post_office_permissions(false, true);
+    let relay = DeviceIdentity::generate();
+    let mut office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_directory.path()).unwrap(),
+        &relay_directory.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&node.identity.public(), &remote.public());
+    let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+    let parent = Event::new(
+        &remote,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![1; 128],
+    );
+    let other_parent = Event::new(
+        &remote,
+        conversation,
+        2,
+        vec![],
+        2,
+        0,
+        EventKind::Message,
+        vec![2; 128],
+    );
+    let child = Event::new(
+        &remote,
+        conversation,
+        3,
+        vec![parent.id],
+        3,
+        0,
+        EventKind::Message,
+        vec![3; 128],
+    );
+    let other_child = Event::new(
+        &remote,
+        conversation,
+        4,
+        vec![other_parent.id],
+        4,
+        0,
+        EventKind::Message,
+        vec![4; 128],
+    );
+    office.ingest(mailbox.wrap(&child).unwrap()).unwrap();
+    office.ingest(mailbox.wrap(&other_child).unwrap()).unwrap();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert!(!node.log.lock().unwrap().has(&child.id).unwrap());
+    node.opaque_upload_cache
+        .lock()
+        .unwrap()
+        .clear_receive_repair_leases();
+    let installed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let did_install = installed.clone();
+    let weak = std::sync::Arc::downgrade(&node);
+    *node.account_client_test_hook.lock().unwrap() = Some(std::sync::Arc::new(move |_, phase| {
+        if phase == "mailbox_repair_before_quiet"
+            && !did_install.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            weak.upgrade()
+                .unwrap()
+                .log
+                .lock()
+                .unwrap()
+                .append_durable(parent.clone())
+                .unwrap();
+        }
+    }));
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    *node.account_client_test_hook.lock().unwrap() = None;
+    assert!(installed.load(std::sync::atomic::Ordering::SeqCst));
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert!(
+        node.log.lock().unwrap().has(&child.id).unwrap(),
+        "a later blocked child cannot absorb an earlier child's arriving parent into quiet work"
+    );
+    assert!(!node.log.lock().unwrap().has(&other_child.id).unwrap());
 }
