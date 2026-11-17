@@ -681,7 +681,15 @@ test("frontend audits share the lockfile-installed tool and policy", () => {
   for (const source of [audit, local]) assert.doesNotMatch(source, /npx[^\n]*audit-ci|npm (?:exec|install)[^\n]*audit-ci/u);
   assert.deepEqual(frontend("audit-ci.json"), {
     "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
-    high: true, allowlist: [], "report-type": "summary",
+    high: true,
+    allowlist: [{
+      "GHSA-fc5q-39xc-vjpf": {
+        active: true,
+        expiry: "2026-12-18T00:00:00Z",
+        notes: "No patched picomatch release; build/test-only via Vite/Vitest, absent from production dependencies. Globs come from reviewed repository configuration, not messaging input. Upgrade and remove when upstream publishes a fix; review before expiry. See docs/ci-maintenance.md#frontend-dependency-audit-exceptions.",
+      },
+    }],
+    "report-type": "summary",
   });
 });
 

@@ -406,6 +406,30 @@ artifacts. GitHub's download action reports a digest mismatch as a warning;
 the evidence consumer must explicitly reject it. See [artifact validation](https://docs.github.com/en/actions/tutorials/store-and-share-data#validating-artifacts)
 for the platform behavior.
 
+## Frontend dependency audit exceptions
+
+The existing `frontend/audit-ci.json` owner blocks high and critical advisories,
+including development dependencies. An unfixable advisory may have an exact-ID,
+expiring exception only after checking the available upstream release and the
+affected consumer boundary. Record the exposure, mitigation and removal condition;
+do not allowlist a package name, skip development dependencies or lower severity.
+The frontend maintainer must recheck upstream and remove the exception when a
+fixed compatible release is available, or reassess the risk before expiry.
+
+[GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
+affects repeated extglob matching in picomatch through 4.0.7, with no patched
+release currently published. This project uses it only through Vite/Vitest and
+their development tooling; it is absent from the production dependency graph.
+Matcher patterns come from reviewed repository/tool configuration, not received
+messages, user search or file-transfer content. Builds and tests must continue
+using trusted repository configuration; this exception does not authorize passing
+untrusted patterns into these tools. The exact advisory exception expires on
+2026-12-18 UTC. It accepts the remaining build/test denial-of-service risk; it does
+not fix the upstream parser. Requalify with `npm ls picomatch --all`,
+`npm ls picomatch --omit=dev --all`, `npm audit --omit=dev`, and the complete
+`npm run audit:ci` from `frontend/`; the first command identifies all consumers,
+while the production-only audit cannot replace the full gate.
+
 ## Refactor coverage without losing its meaning
 
 Two executions are redundant only when their requirement, inputs, platform and
