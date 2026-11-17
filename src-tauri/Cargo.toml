@@ -70,7 +70,7 @@ libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString", "NSBundle"] }
-objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationSettings"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationSettings", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotification"] }
 objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "LAContext", "block2"] }
 # Read and migrate credentials saved by the earlier Touch ID-only release.
 security-framework = { version = "3.6", features = ["OSX_10_15"] }

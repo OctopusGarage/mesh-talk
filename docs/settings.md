@@ -13,17 +13,17 @@ settings to confirm the value before editing it again.
 Categories follow three navigation groups. Narrow windows retain the same order in
 an accessible horizontal navigation strip.
 
-| Group | Category | Controls |
-| --- | --- | --- |
-| Experience | App behavior | Launch at OS login and close-to-tray behavior. |
-| Experience | Appearance & language | Display language, themes, theme wallpapers and wallpaper visibility. |
-| Experience | Notifications & calls | Notifications, message previews, experimental calling, ringtone and microphone/camera checks. |
-| Experience | Shortcuts | Screenshot bindings, opt-in global registration, registration status and reset. |
-| Privacy & data | Privacy & security | Privacy preset, lock/sign-in, clipboard protection, hidden contacts and related permission summaries. |
-| Privacy & data | Files & downloads | Attachment receiving defaults and download destination; conversation-specific overrides remain available. |
-| Privacy & data | History & backup | Local retention, encrypted backup, last-backup metadata and restore guidance. |
-| Connection & extensions | Network & delivery | Visibility/reply permissions, device and cross-network discovery, offline delivery and preferred post office. |
-| Connection & extensions | Agent access | Scoped local agent access, allowed conversations, grant duration, activity and setup instructions. |
+| Group                   | Category              | Controls                                                                                                      |
+| ----------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Experience              | App behavior          | Launch at OS login and close-to-tray behavior.                                                                |
+| Experience              | Appearance & language | Display language, themes, theme wallpapers and wallpaper visibility.                                          |
+| Experience              | Notifications & calls | Notifications, message previews, experimental calling, ringtone and microphone/camera checks.                 |
+| Experience              | Shortcuts             | Screenshot bindings, opt-in global registration, registration status and reset.                               |
+| Privacy & data          | Privacy & security    | Privacy preset, lock/sign-in, clipboard protection, hidden contacts and related permission summaries.         |
+| Privacy & data          | Files & downloads     | Attachment receiving defaults and download destination; conversation-specific overrides remain available.     |
+| Privacy & data          | History & backup      | Local retention, encrypted backup, last-backup metadata and restore guidance.                                 |
+| Connection & extensions | Network & delivery    | Visibility/reply permissions, device and cross-network discovery, offline delivery and preferred post office. |
+| Connection & extensions | Agent access          | Scoped local agent access, allowed conversations, grant duration, activity and setup instructions.            |
 
 Privacy has separate preset, locking/sign-in and clipboard sections. Notification
 previews and agent grants retain one authoritative editing page, with read-only
@@ -208,13 +208,30 @@ the login generation, including conversation changes. Disabling notifications
 hides guidance without changing the saved preview preference. Messages sent to
 yourself do not trigger a reply-notification reminder.
 
-macOS checks the installed application's UserNotifications authorization and alert
-settings; quiet/provisional access is shown as limited. Windows checks the
+macOS uses the installed application's `UNUserNotificationCenter` for permission
+observation, explicit authorization and delivery. All three operations share the
+same bundle-identity guard; development or mismatched bundles cannot send under
+Terminal's identity. Delivery never requests authorization and asynchronously
+logs native submission errors without blocking message processing. Each notification
+has a distinct request identifier so repeated messages do not replace one another.
+Quiet/provisional access is shown as limited. A macOS snapshot reporting undecided
+or denied authorization alongside enabled alerts is contradictory: it reports
+unknown rather than a grant or a blocked-permission reminder. Windows checks the
 installed application's ToastNotifier setting using the same app identifier as
 notification delivery. Native failures, uninstalled development binaries and
 unsupported desktop queries report **couldn't be verified**, never an assumed
 grant or denial. Linux has no portable per-application permission query or
 notification-settings URI, so the row provides manual desktop instructions.
+The opt-in Rust control `notifications::tests::mac_packaged_permission_and_delivery`
+runs from a bundled test executable with the isolated identifier
+`com.mesh-talk.notification-validation`. Set `MESH_NOTIFICATION_NATIVE_EXPECT`
+to the expected status and `MESH_NOTIFICATION_NATIVE_DELIVERY` to `present` or
+`absent` independently. Only an operator-set
+`MESH_NOTIFICATION_NATIVE_REQUEST=1` requests authorization. Run the ignored test
+alone after each system-setting transition and after restarting its process.
+It verifies real permission and Notification Center delivery without accessing
+account data; it does not certify visible banners under Focus or system suppression.
+
 OS authorization does not prove an alert appeared: Focus, Do Not Disturb, sound,
 badge and presentation choices may independently suppress it.
 

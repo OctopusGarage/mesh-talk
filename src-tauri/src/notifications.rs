@@ -89,12 +89,82 @@ pub async fn open_notification_settings<R: tauri::Runtime>(
 #[cfg(target_os = "macos")]
 fn mac_status(authorization: isize, alerts: isize) -> PermissionStatus {
     match authorization {
+        // macOS can retain enabled legacy presentation settings while reporting
+        // undetermined/denied modern authorization. Neither grant nor denial is
+        // established by that contradictory snapshot; do not nag the user.
+        0 | 1 if alerts == 2 => PermissionStatus::Unknown,
         0 => PermissionStatus::Prompt,
         1 => PermissionStatus::Denied,
         2 | 4 if alerts == 2 => PermissionStatus::Granted,
         2..=4 => PermissionStatus::Limited,
         _ => PermissionStatus::Unknown,
     }
+}
+
+/// Deliver through the same native identity used by permission observation.
+/// Submission is best effort; callbacks never retain message text or session state.
+pub(crate) fn send<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    title: &str,
+    body: &str,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let center = mac_center(app).ok_or("Notification application identity unavailable")?;
+        let request = mac_request(title, body);
+        let reply = block2::RcBlock::new(|error: *mut objc2_foundation::NSError| {
+            if let Some(error) = unsafe { error.as_ref() } {
+                // Do not log native descriptions: they can contain message content.
+                log::warn!(
+                    "Native notification submission failed (code {})",
+                    error.code()
+                );
+            }
+        });
+        center.addNotificationRequest_withCompletionHandler(&request, Some(&reply));
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        app.notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_request(
+    title: &str,
+    body: &str,
+) -> objc2::rc::Retained<objc2_user_notifications::UNNotificationRequest> {
+    use objc2_foundation::NSString;
+    use objc2_user_notifications::{UNMutableNotificationContent, UNNotificationRequest};
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(title));
+    content.setBody(&NSString::from_str(body));
+    let identifier = NSString::from_str(&format!("{:032x}", rand::random::<u128>()));
+    UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_center<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Option<objc2::rc::Retained<objc2_user_notifications::UNUserNotificationCenter>> {
+    // A bare executable can raise an Objective-C exception. Never substitute
+    // Terminal's identity, for either delivery or permission observation.
+    let bundle = objc2_foundation::NSBundle::mainBundle();
+    if tauri::is_dev()
+        || bundle
+            .bundleIdentifier()
+            .is_none_or(|id| id.to_string() != app.config().identifier)
+    {
+        return None;
+    }
+    Some(objc2_user_notifications::UNUserNotificationCenter::currentNotificationCenter())
 }
 
 #[cfg(target_os = "macos")]
@@ -104,29 +174,25 @@ fn platform_permission<R: tauri::Runtime>(
 ) -> PermissionStatus {
     use block2::RcBlock;
     use objc2::runtime::Bool;
-    use objc2_foundation::{NSBundle, NSError};
-    use objc2_user_notifications::{
-        UNAuthorizationOptions, UNNotificationSettings, UNUserNotificationCenter,
-    };
+    use objc2_foundation::NSError;
+    use objc2_user_notifications::{UNAuthorizationOptions, UNNotificationSettings};
     use std::{ptr::NonNull, sync::mpsc, time::Duration};
 
-    // currentNotificationCenter raises an Objective-C exception for a bare
-    // development binary. The delivery plugin also uses Terminal's identity in
-    // dev, so never claim the dev process represents the installed application.
-    let bundle = NSBundle::mainBundle();
-    if tauri::is_dev()
-        || bundle
-            .bundleIdentifier()
-            .is_none_or(|id| id.to_string() != app.config().identifier)
-    {
+    let Some(center) = mac_center(app) else {
         return PermissionStatus::Unknown;
-    }
-    let center = UNUserNotificationCenter::currentNotificationCenter();
+    };
     let read = || {
         let (sender, receiver) = mpsc::sync_channel(1);
         let reply = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
             // Apple's callback owns the settings for the duration of this call.
             let settings = unsafe { settings.as_ref() };
+            #[cfg(test)]
+            eprintln!(
+                "native notification settings: authorization={}, alerts={}, center={}",
+                settings.authorizationStatus().0,
+                settings.alertSetting().0,
+                settings.notificationCenterSetting().0
+            );
             let _ = sender.send(mac_status(
                 settings.authorizationStatus().0,
                 settings.alertSetting().0,
@@ -143,6 +209,13 @@ fn platform_permission<R: tauri::Runtime>(
     }
     let (sender, receiver) = mpsc::sync_channel(1);
     let reply = RcBlock::new(move |_granted: Bool, error: *mut NSError| {
+        if let Some(error) = unsafe { error.as_ref() } {
+            log::warn!(
+                "Native notification authorization failed (domain {}, code {})",
+                error.domain(),
+                error.code()
+            );
+        }
         let _ = sender.send(error.is_null());
     });
     center.requestAuthorizationWithOptions_completionHandler(
@@ -207,6 +280,99 @@ fn platform_permission<R: tauri::Runtime>(
 mod tests {
     use super::*;
 
+    /// Run only from a bundled test executable with this isolated identifier.
+    /// MESH_NOTIFICATION_NATIVE_EXPECT names the expected status; REQUEST=1 is
+    /// an explicit operator action, never part of ordinary tests or startup.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires isolated macOS bundle and operator-controlled system permission"]
+    fn mac_packaged_permission_and_delivery() {
+        use block2::RcBlock;
+        use objc2_foundation::NSArray;
+        use objc2_user_notifications::UNNotification;
+        use std::{
+            ptr::NonNull,
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+        let expected =
+            std::env::var("MESH_NOTIFICATION_NATIVE_EXPECT").expect("explicit expected permission");
+        let expect_delivery = match std::env::var("MESH_NOTIFICATION_NATIVE_DELIVERY").as_deref() {
+            Ok("present") => true,
+            Ok("absent") => false,
+            _ => panic!("explicit expected delivery: present or absent"),
+        };
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = "com.mesh-talk.notification-validation".into();
+        let app = tauri::test::mock_builder().build(context).unwrap();
+        let center = mac_center(app.handle()).expect("run the bundled test executable");
+        let request = std::env::var("MESH_NOTIFICATION_NATIVE_REQUEST").as_deref() == Ok("1");
+        let status = platform_permission(app.handle(), request);
+        assert_eq!(serde_json::to_value(status).unwrap(), expected);
+        let title = format!(
+            "Mesh-Talk notification validation {:032x}",
+            rand::random::<u128>()
+        );
+        send(app.handle(), &title, "Native notification delivery check").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let (tx, rx) = mpsc::sync_channel(1);
+            let title = title.clone();
+            let reply = RcBlock::new(move |items: NonNull<NSArray<UNNotification>>| {
+                let found = unsafe { items.as_ref() }
+                    .iter()
+                    .any(|item| item.request().content().title().to_string() == title);
+                let _ = tx.send(found);
+            });
+            center.getDeliveredNotificationsWithCompletionHandler(&reply);
+            let found = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("native delivery observation");
+            if expect_delivery && found {
+                break;
+            }
+            assert!(
+                !found,
+                "notification unexpectedly delivered: before={status:?}, after={:?}",
+                platform_permission(app.handle(), false)
+            );
+            if Instant::now() >= deadline {
+                assert!(
+                    !expect_delivery,
+                    "notification never reached Notification Center"
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // The center is bound to the dedicated fixture, never the installed app.
+        center.removeAllDeliveredNotifications();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_delivery_rejects_the_same_unavailable_identity_as_observation() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        assert_eq!(
+            platform_permission(app.handle(), false),
+            PermissionStatus::Unknown
+        );
+        assert!(send(app.handle(), "Sender", "Message").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_delivery_preserves_preview_and_uses_distinct_request_identifiers() {
+        let first = mac_request("Sender", "Message 🔒");
+        let second = mac_request("Sender", "Message 🔒");
+        assert_eq!(first.content().title().to_string(), "Sender");
+        assert_eq!(first.content().body().to_string(), "Message 🔒");
+        assert_ne!(first.identifier(), second.identifier());
+        assert!(first.trigger().is_none());
+    }
+
     #[test]
     fn unknown_is_serialized_distinctly_from_denied() {
         assert_eq!(
@@ -231,6 +397,8 @@ mod tests {
     #[test]
     fn mac_permission_distinguishes_prompts_denial_and_quiet_alerts() {
         assert_eq!(mac_status(0, 0), PermissionStatus::Prompt);
+        assert_eq!(mac_status(0, 2), PermissionStatus::Unknown);
+        assert_eq!(mac_status(1, 2), PermissionStatus::Unknown);
         assert_eq!(mac_status(1, 1), PermissionStatus::Denied);
         assert_eq!(mac_status(2, 2), PermissionStatus::Granted);
         assert_eq!(mac_status(2, 1), PermissionStatus::Limited);

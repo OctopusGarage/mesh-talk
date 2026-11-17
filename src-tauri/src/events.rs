@@ -4,7 +4,6 @@
 use crate::settings::SettingsState;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, Runtime};
-use tauri_plugin_notification::NotificationExt;
 
 /// How many characters of a message body we surface in a notification preview.
 const PREVIEW_LEN: usize = 80;
@@ -189,13 +188,7 @@ fn notify_if_unfocused<R: Runtime>(
         return;
     };
 
-    if let Err(e) = app_handle
-        .notification()
-        .builder()
-        .title(&title)
-        .body(&body)
-        .show()
-    {
+    if let Err(e) = crate::notifications::send(app_handle, &title, &body) {
         log::warn!("Failed to show notification: {e}");
     }
 }
