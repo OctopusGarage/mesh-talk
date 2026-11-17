@@ -927,3 +927,78 @@ test("typed channel File stays pending until canonical metadata commits and orig
   expect(result.canonical[0].file?.file_conv).toMatch(/^fc_/);
   await expect(bubble).toHaveCount(1);
 });
+
+for (const viewport of [
+  { width: 390, height: 560 },
+  { width: 1280, height: 720 },
+]) {
+  for (const [source, label] of [
+    ["sender", "Received from the sender"],
+    ["member", "Received from another member"],
+    ["post_office", "Received from a post office"],
+    ["linked_device", "Received from a linked device"],
+    [null, "Reception source unknown"],
+  ] as const) {
+    test(`received-message source ${source ?? "unknown"} stays accessible at ${viewport.width}x${viewport.height}`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(viewport);
+      await enterChat(page);
+      await page.evaluate((received_via) => {
+        const host = window as unknown as {
+          __TAURI_INTERNALS__: {
+            invoke(
+              command: string,
+              args: Record<string, unknown>,
+            ): Promise<unknown>;
+          };
+        };
+        const original = host.__TAURI_INTERNALS__.invoke;
+        host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+          if (command === "channel_history")
+            return [
+              {
+                id: "reception-source-example",
+                from_me: false,
+                who: "bob_bbbb2222",
+                text: "Reception source example",
+                wall_clock: 1_700_000_200_000,
+                reply_to: null,
+                file: null,
+                recalled: false,
+                recalled_text: null,
+                sticker: null,
+                ...(received_via ? { received_via } : {}),
+              },
+            ];
+          return original(command, args);
+        };
+      }, source);
+      await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+      const bubble = page
+        .getByTestId("message-bubble")
+        .filter({ hasText: "Reception source example" });
+      const trigger = bubble.getByTestId("message-source-trigger");
+      await expect(trigger).toHaveAccessibleName(label);
+      await expect(
+        bubble.locator("[data-custody], [data-delivery]"),
+      ).toHaveCount(0);
+      await expect(bubble.getByTestId("message-time")).toBeVisible();
+      await trigger.focus();
+      await trigger.press("Enter");
+      const details = bubble.getByTestId("message-source");
+      await expect(details).toBeVisible();
+      await expect(details).toContainText("first reached this device");
+      await expect(details).toContainText(
+        source ? "file downloads" : "was not recorded",
+      );
+      const box = await details.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      await details.press("Escape");
+      await expect(details).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+    });
+  }
+}

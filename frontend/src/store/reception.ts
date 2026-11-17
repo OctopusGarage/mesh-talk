@@ -11,6 +11,7 @@ export interface ReceptionEntry {
   seen: boolean;
   late: boolean;
   receivedAt?: number;
+  receivedVia?: import("@/lib/types").ReceivedVia;
   arrivalKind?: ArrivalKind;
 }
 export type ReceptionLedger = Record<string, Record<string, ReceptionEntry>>;
@@ -257,6 +258,7 @@ export function mergeReception(
                           : incoming.receivedAt === undefined
                             ? old.receivedAt
                             : Math.min(old.receivedAt, incoming.receivedAt),
+                      receivedVia: old.receivedVia ?? incoming.receivedVia,
                       arrivalKind: old.arrivalKind ?? incoming.arrivalKind,
                     }
                   : (old ?? incoming),
@@ -380,6 +382,7 @@ export function receiveIdentity(
     let next = state;
     if (
       (old.receivedAt === undefined && event.received_at !== undefined) ||
+      (old.receivedVia === undefined && event.received_via !== undefined) ||
       (old.expiresAtMs === undefined && event.expires_at_ms != null) ||
       (mentioned && !old.mentioned && !event.own_device)
     ) {
@@ -394,6 +397,7 @@ export function receiveIdentity(
               expiresAtMs: old.expiresAtMs ?? event.expires_at_ms ?? undefined,
               mentioned: !event.own_device && (old.mentioned || mentioned),
               receivedAt: old.receivedAt ?? event.received_at,
+              receivedVia: old.receivedVia ?? event.received_via,
               arrivalKind: event.arrival_kind ?? old.arrivalKind,
             },
           },
@@ -424,6 +428,7 @@ export function receiveIdentity(
         : {}),
       late: kind !== "live",
       receivedAt: event.received_at,
+      receivedVia: event.received_via,
       arrivalKind: kind,
     },
   };
@@ -498,6 +503,7 @@ export function reconcileHistory(
     fromMe: boolean;
     mentioned?: boolean;
     fileMessageAliases?: string[];
+    receivedVia?: import("@/lib/types").ReceivedVia;
     expiresAtMs?: number | null;
     suppressed?: boolean;
   }[],
@@ -548,6 +554,10 @@ export function reconcileHistory(
         seen: row.fromMe || knownRead || (!related.length && !discover),
         late: related.length ? related.some((entry) => entry.late) : true,
         ...(receivedAt === undefined ? {} : { receivedAt }),
+        // Native history resolves the complete validated alias bundle. Local
+        // receipt timestamps cannot establish its first retained ingress, even
+        // when the known later receipt already uses the logical message ID.
+        receivedVia: row.receivedVia,
         arrivalKind:
           oldest?.arrivalKind ?? related[0]?.arrivalKind ?? "history_sync",
       },

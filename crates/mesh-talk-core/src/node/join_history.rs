@@ -1092,6 +1092,7 @@ pub(super) fn received(
             }
             let body = MessageBody::decode(&row.body);
             batch.push(ReceivedChannelMessage {
+                received_via: None,
                 channel_id: channel,
                 channel_name: current.name().to_string(),
                 from: original.author.user_id(),

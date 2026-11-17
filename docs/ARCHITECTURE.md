@@ -1565,6 +1565,15 @@ still checks account/lifetime ownership and drains pending metadata: an ACK
 committed before a cleanup failure must allow cleanup to resume after reopen
 without requiring another ACK.
 
+Device-local [reception source](network-design-reference.md#device-local-reception-source)
+uses fixed-size metadata alongside newly admitted raw events. Its transactional
+append observer may use only the supplied connection, with no callbacks into
+privacy, identity, runtime or database owners. First transcript reception moves
+that evidence into a child of its exact row, preserving account authority and
+canonical DM event identity. Duplicates do not write or replace source evidence;
+erasure and raw-event reclamation cascade to their respective metadata. Existing
+bincode receipts, signed events and private history payloads remain unchanged.
+
 Encrypted record logs retain a confirmation flag for their exact owned file
 incarnation and successful prefix. Confirmed prefixes make repeated sync calls
 read-only. Nondurable writes, failed write/rollback attempts and reopened existing files

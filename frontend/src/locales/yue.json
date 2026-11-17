@@ -329,6 +329,15 @@
     "source_unscoped": "簽名發現記錄（網絡範圍未確定）"
   },
   "message": {
+    "source": {
+      "sender": "由傳送者接收",
+      "member": "由其他成員接收",
+      "post_office": "由郵局接收",
+      "linked_device": "由已連結裝置接收",
+      "unknown": "接收來源不明",
+      "help": "呢個訊息或檔案卡片第一次到達本裝置嘅來源，唔代表完整轉送路徑、檔案下載來源、送達或者已讀狀態。",
+      "unknownHelp": "冇記錄呢個訊息或檔案卡片第一次到達本裝置嘅來源。舊記錄或者匯入嘅記錄可能冇來源資料。"
+    },
     "sticker": "[表情]",
     "recalledSummary": "[訊息已收回]",
     "expiresIn": "傳送後倒數 {{time}}，到期雙方訊息都會消失",

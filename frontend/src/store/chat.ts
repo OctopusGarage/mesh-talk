@@ -2439,6 +2439,7 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
         state,
         receiveIdentity(state, key, {
           event_id: messageId,
+          received_via: e.received_via,
           arrival_kind: "live",
           own_device: accountId === state.myAccountId || e.from === state.myId,
         }),

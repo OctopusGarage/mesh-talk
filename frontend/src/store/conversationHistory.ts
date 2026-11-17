@@ -345,6 +345,8 @@ async function reloadConversationSnapshot(
             items.map((h) => ({
               ...fromHistoryItem(h),
               receivedAt: ledger[key]?.[h.id ?? ""]?.receivedAt,
+              receivedVia:
+                ledger[key]?.[h.id ?? ""]?.receivedVia ?? h.received_via,
               arrivalKind: ledger[key]?.[h.id ?? ""]?.arrivalKind,
             })),
             s.messages[key] ?? [],
@@ -549,6 +551,7 @@ function receptionRows(key: string, rows: HistoryItem[]) {
     expiresAtMs: row.expires_at_ms,
     suppressed: row.recalled,
     fromMe: row.from_me,
+    receivedVia: row.received_via,
     mentioned:
       key.startsWith("channel:") &&
       !row.from_me &&

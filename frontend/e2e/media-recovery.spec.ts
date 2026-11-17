@@ -194,12 +194,17 @@ test("legacy media availability recovery preserves the stable fileConv and full-
         const thumbnail = await page.getByTestId("file-image").boundingBox();
         return { width: thumbnail?.width, height: thumbnail?.height };
       })
-      .toEqual({ width: 320, height: 240 });
+      // DOMRect subtraction can retain fractional CSS-pixel roundoff in Firefox.
+      // Three decimal places allow <0.0005px error, while rejecting layout shifts.
+      .toEqual({
+        width: expect.closeTo(320, 3),
+        height: expect.closeTo(240, 3),
+      });
     await expect
       .poll(() =>
         messageRow.evaluate((row) => row.getBoundingClientRect().height),
       )
-      .toBe(receivingHeight);
+      .toBeCloseTo(receivingHeight, 3);
     await page.getByRole("button", { name: "View full size" }).click();
     const lightbox = page.getByTestId("file-image-lightbox");
     await expect(lightbox).toBeVisible();

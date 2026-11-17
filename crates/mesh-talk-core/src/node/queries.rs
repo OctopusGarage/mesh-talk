@@ -585,6 +585,7 @@ impl Node {
         let mut authors = Vec::new();
         for (_, selector) in selectors {
             let mut author_account = None;
+            let mut ingress_id = selector.id;
             let (plain, from, file) = match selector.source_kind {
                 SENT => {
                     let row = sent.row_by_ordinal(selector.ordinal)?.ok_or_else(|| {
@@ -607,6 +608,7 @@ impl Node {
                         )
                     })?;
                     if selector.source_kind == FILES {
+                        ingress_id = row.event_id;
                         author_account = identities.row_author_account(&row)?;
                     }
                     (row.plaintext, Some(row.from), selector.source_kind == FILES)
@@ -673,13 +675,25 @@ impl Node {
                 file,
             };
             let mut entry = row.decode();
+            if file {
+                entry.file_message_aliases = identities.aliases(conversation, selector.id)?;
+            }
+            if !from_me {
+                entry.received_via = if file {
+                    self.reception_effects.received_file_via(
+                        conversation,
+                        ingress_id,
+                        &entry.file_message_aliases,
+                    )?
+                } else {
+                    self.reception_effects
+                        .received_via(conversation, ingress_id)?
+                };
+            }
             entry.reply_to = entry
                 .reply_to
                 .map(|target| identities.logical(conversation, target))
                 .transpose()?;
-            if file {
-                entry.file_message_aliases = identities.aliases(conversation, selector.id)?;
-            }
             if matches!(selection,HistorySelection::Protected(id) if id==selector.id)
                 && entry.protection.is_some()
                 && !file
@@ -777,6 +791,7 @@ impl HistoryRow<'_> {
             None
         };
         HistoryEntry {
+            received_via: None,
             id: self.id,
             file_message_aliases: Vec::new(),
             wall_clock: self.wall_clock,

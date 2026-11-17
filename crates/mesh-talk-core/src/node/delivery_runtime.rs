@@ -1845,7 +1845,18 @@ impl Node {
                         {
                             self.file_pull_notify.notify_one();
                             if !self.certified_sibling(&sender) {
+                                let logical = self.file_message_row_logical_id(&entry)?;
+                                let aliases = self
+                                    .file_message_identities
+                                    .lock()
+                                    .expect("file identities lock")
+                                    .aliases(entry.conversation, logical)?;
                                 let _ = self.file_incoming.send(ReceivedFile {
+                                    received_via: self.reception_effects.received_file_via(
+                                        entry.conversation,
+                                        entry.event_id,
+                                        &aliases,
+                                    )?,
                                     protection: manifest.protection(),
                                     expires_at_ms: crate::expiry::deadline(&entry.plaintext),
                                     conv: original_conv,
@@ -1860,7 +1871,7 @@ impl Node {
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
                                     media: super::media_store::manifest_is_media(&manifest),
-                                    event_id: self.file_message_row_logical_id(&entry)?,
+                                    event_id: logical,
                                     authored_at: entry.wall_clock,
                                     received_at: super::node::now_millis(),
                                     arrival_kind: "live",
@@ -1887,6 +1898,12 @@ impl Node {
                         .map_or_else(|| sender.user_id(), |proof| proof.name);
                     if !self.certified_sibling(&sender) {
                         let _ = self.incoming.send(ReceivedDm {
+                            received_via: self.reception_effects.received_via(
+                                entry.conversation,
+                                envelope
+                                    .as_ref()
+                                    .map_or(entry.event_id, |env| EventId::new(env.msg_id)),
+                            )?,
                             message_id: envelope.as_ref().map(|env| EventId::new(env.msg_id)),
                             from_account: envelope
                                 .as_ref()
@@ -2179,7 +2196,9 @@ impl Node {
     }
 
     /// Immediate best-effort transfer of an already accepted immutable intent.
-    /// A transport success is never a delivery confirmation.
+    /// Direct and relay alternatives share the recovery worker's exchange rules.
+    /// One network deadline covers the full fanout; expiry leaves durable work
+    /// pending. A transport success is never a delivery confirmation.
     pub async fn flush_delivery(self: &Arc<Self>, id: EventId) {
         let message = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
@@ -2198,34 +2217,12 @@ impl Node {
         let Some(message) = message else {
             return;
         };
-        for destination in message.destinations {
-            if !self.delivery_destination_allowed(&destination) {
-                continue;
+        let transfer = async {
+            for destination in message.destinations {
+                Box::pin(self.retry_one_destination(&destination)).await;
             }
-            let conv = destination.event.conversation_id;
-            if let Some(peer) = self
-                .routing_peer(&destination.device.user_id())
-                .filter(|p| {
-                    p.public == destination.device
-                        && (destination.account.is_none() || p.account_id == destination.account)
-                        && self.known_account_allowed(&p.public)
-                })
-            {
-                self.transfer_delivery_destination(&peer, &destination, conv)
-                    .await;
-                self.emit_new_messages(conv);
-                // The remote serve loop processes plaintext after sync replies;
-                // a second round requests control evidence over its own scope.
-                let control = super::delivery_receipt::delivery_conversation_id(
-                    &self.identity.public(),
-                    &peer.public,
-                );
-                self.transfer_delivery_destination(&peer, &destination, control)
-                    .await;
-                self.emit_new_messages(control);
-            }
-            self.replicate_delivery_destination(&destination).await;
-        }
+        };
+        let _ = tokio::time::timeout(super::route_timing::MAX_CONTROL_DEADLINE, transfer).await;
     }
 
     /// Bounded direct receipt transfer hook. The shared worker separately
@@ -3209,7 +3206,7 @@ impl Node {
             .routing_peer(&destination.device.user_id())
             .filter(|p| {
                 p.public == destination.device
-                    && p.account_id == destination.account
+                    && (destination.account.is_none() || p.account_id == destination.account)
                     && self.known_account_allowed(&p.public)
             });
         // Snapshot only locally known and permitted alternatives. No remote

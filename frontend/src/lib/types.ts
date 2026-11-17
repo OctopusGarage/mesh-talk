@@ -50,6 +50,7 @@ export interface HistoryFileInfo {
 }
 
 export interface HistoryItem {
+  received_via?: ReceivedVia;
   file_message_aliases?: string[];
   protection?: MessageProtection | null;
   expires_at_ms?: number | null;
@@ -499,6 +500,7 @@ export interface FavoriteInfo {
 // --- Tauri events (src-tauri/src/events.rs) ---
 
 export interface DmReceivedEvent {
+  received_via?: ReceivedVia;
   protection?: MessageProtection | null;
   /** Logical account message ID, matching history; legacy hosts may omit it. */
   message_id?: string | null;
@@ -532,8 +534,12 @@ export interface ReceptionPage<Receipt> {
   receipts: Receipt[];
 }
 
+/** Local first-ingress source; never a complete route or download source. */
+export type ReceivedVia = "sender" | "member" | "post_office" | "linked_device";
+
 export type ArrivalKind = "live" | "catch_up" | "history_sync";
 export interface ReceptionMetadata {
+  received_via?: ReceivedVia;
   expires_at_ms?: number | null;
   event_id?: string;
   authored_at?: number;

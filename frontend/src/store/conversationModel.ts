@@ -28,6 +28,7 @@ export interface ChatMessage {
   /** Authenticated absolute send-time deadline; null/absent means keep. */
   expiresAtMs?: number | null;
   receivedAt?: number;
+  receivedVia?: import("@/lib/types").ReceivedVia;
   arrivalKind?: import("@/lib/types").ArrivalKind;
   delivery?: "awaiting" | "delivered";
   /** Local runtime fact sampled at a monotonic response boundary; never persisted. */

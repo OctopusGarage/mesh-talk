@@ -390,6 +390,22 @@ needed. Distinguish observation deadlines, admission refusal and transport failu
 Preserve the owner-defined retry policy and original operation identity. Do not
 reset the overall budget on every attempt or increase it just to hide a hang.
 
+Immediate best-effort sends must reuse the bounded delivery exchange owner;
+wrapping only the background retry leaves the public send waiting indefinitely
+after a peer authenticates but stops replying. Direct and relay alternatives
+must progress independently, with one network deadline across the immediate
+fanout. Deadline cancellation drops unfinished channels without confirming or
+discarding the accepted intent. The `immediate_delivery_` regressions in
+[delivery runtime tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+hold real authenticated requests, require relay custody before releasing the
+direct peer, then qualify socket closure and restored capacity after expiry.
+Their virtual clock advances only the network deadline; synchronous recovery
+and storage lookups remain outside that interruptibility evidence.
+When moving a caller onto this shared exchange, revalidate its file consumers.
+The consented-file relay fallback in the same test owner rejects receipt control
+after failed payload custody, keeps the accepted card pending, then verifies the
+real relayed offer, consent, encrypted chunks and final recipient bytes.
+
 Check cancellation cleanup and late completion as well as elapsed time. Async
 timers cannot interrupt a thread blocked in a synchronous mutex, native call or
 filesystem syscall. Such a path also needs R01–R03. Budget values remain in the
@@ -426,6 +442,15 @@ round cannot earn it. Preserve existing callers' result meaning through an
 additive internal observation, and keep delivery/custody proof independent. The
 same profile publisher controls exercise warm relay publication with unavailable
 direct delivery; mailbox controls retain source-change and relay-reset recovery.
+Do not discard a sync error while returning a successful byte count to the
+distribution owner. Whole-history `NoProgress` can coexist with an exact retained
+message. Preserve the failed control revision and its existing backoff while a
+fresh authenticated exact-have query independently qualifies that copy within the
+original deadline. Retire the old protocol connection and actual reception
+admission before redialing. The [confirming-fanout regression](../crates/mesh-talk-core/src/node/channels.rs)
+and [exact-custody failure-path regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+exercise authenticated closure, incomplete reconciliation and positive/negative
+answers on the replacement connection.
 
 When replacing fast polling with sparse recovery, preserve the progress that the
 old poll accidentally supplied. A completed record is not active demand, but a
@@ -1115,6 +1140,12 @@ remain unknown; reconcile or retry according to the owning idempotency contract.
 Process a late definite refusal without fabricating a protocol terminal state.
 Do not turn failed readback into an empty successful save or resend an accepted
 message because optional roster, preview or notification work failed.
+Preserve independent successful observations in presentation. Member custody and
+post-office custody can both exist; a fallback expression must not hide one when
+the other becomes positive. The [delivery footer regressions](../frontend/src/features/chat/deliveryFooter.test.ts)
+cover simultaneous confirmations and absent relay evidence; the mounted
+[status disclosures](../frontend/src/features/chat/DeliveryDetails.test.ts) cover
+late confirmation, independent explanations and removal of stale relay status.
 Durable local erasure must classify its target from canonical identity, not an
 enumeration of display projections. A ready history observation is not a lease
 on subsequent projection readiness, and a generic mutation retry can repeat work
@@ -1188,6 +1219,23 @@ read is silently treated as empty state; cleanup after a partial failure destroy
 recoverable user data.
 
 Identify the commit point, serialization owner and restart/replay behavior.
+Keep local ingress evidence separate from message authorship and arrival timing.
+Capture it from the authenticated application peer at raw acceptance; transfer
+it with the canonical transcript commit, never infer it from a catch-up flag or
+copy another device's route during history import. Preserve an unknown first
+alias instead of borrowing a later alias's known source. Frontend receipt times
+cover only its observed subset; even a known logical-message ID need not be the
+first retained alias. The native canonical history projection owns both known
+and unknown ingress. The [reception reconciliation regressions](../frontend/src/store/reception.test.ts)
+omit the first alias from the ledger and retain the later alias's timestamp,
+unread state and identity while accepting the native source, including unknown. The
+[history reload tests](../frontend/src/store/conversationHistory.test.ts) also seed
+an existing message cache so presentation reconciliation cannot restore a
+superseded source while preserving local arrival timing. The
+[origin owner regressions](../crates/mesh-talk-core/src/node/reception_effects/origins.rs)
+cover rollback, duplicate stability, canonical DM relocation, reopen, account
+replacement and cascaded reclamation; real receive-loop assertions cover sender,
+member and post-office paths.
 Prepare expensive work separately, then compare expected revision and lifetime
 under the owning commit guard. Preserve operation IDs, ordering, atomic replacement
 and existing compatibility rules. Multi-store changes are not automatically one
@@ -1862,7 +1910,10 @@ The [queued-control fixture](../crates/mesh-talk-core/src/node/account_group/tes
 holds A's real receiver before Wake commit, verifies its epoch/revision and live
 original read, then releases it only after B's validated prefix and A's exact
 protected resume exist. The same owned sender must receive its actual WakeAck
-after release. Keep all production hosts, page/terminal assertions and deadlines;
+after release. Establish its authenticated receiving boundary before arming the
+natural read, so preparation does not wait on transport admission while that
+exact read must remain live. Keep all production hosts, page/terminal assertions
+and deadlines;
 a queued-frame observation is neither a committed Wake nor permission to skip work.
 
 Scope fixture transformations and assertions to the owning configuration table,
@@ -1924,6 +1975,11 @@ can exhaust its budget before any decode or geometry observation. The
 preparation before releasing media and checks an absent row through a snapshot-only
 observer; retain its exact geometry and cache assertions. Keep independent
 negative controls outside the journey's active retention window.
+DOMRect measurements are floating-point values. Preserve required dimensions and
+row stability with explicit subpixel comparison precision rather than exact
+numeric equality; do not widen the visible layout allowance or readiness deadline.
+The [media-recovery fixture](../frontend/e2e/media-recovery.spec.ts) owns this
+cross-browser geometry boundary together with its full-size image actions.
 The [group reading-anchor fixture](../frontend/e2e/group-reception.spec.ts) also
 samples the log and row through one nonwaiting page evaluation, returning pending
 when either is absent. Keep its existing assertion budget and exact ID/offset,

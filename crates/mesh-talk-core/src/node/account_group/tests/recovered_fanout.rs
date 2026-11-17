@@ -1084,3 +1084,144 @@ async fn assert_current_terminal_publication(panic_older: bool) {
         "the actual newer local publisher must contend behind the older fanout projection"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovered_text_fanout_retries_authenticated_eof_without_changing_revision() {
+    use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(
+        &source,
+        &dir.path().join("source"),
+        source_listener.local_addr().unwrap().port(),
+    );
+    configure(&external, &dir.path().join("external"), address.port());
+    source.roster.lock().unwrap().update(
+        &external.signed_announce("External member", address.port()),
+        address.ip(),
+        &source.user_id(),
+    );
+    let armed = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (failed, first_failure) = oneshot::channel();
+    let failed = Arc::new(Mutex::new(Some(failed)));
+    let mut tasks = tokio::task::JoinSet::new();
+    let peer = external.clone();
+    let expected = source.identity.public();
+    tasks.spawn({
+        let armed = armed.clone(); let attempts = attempts.clone(); let failed = failed.clone();
+        async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    incoming = listener.accept() => {
+                        let (stream, _) = incoming.unwrap();
+                        let peer = peer.clone(); let expected = expected.clone();
+                        let armed = armed.clone(); let attempts = attempts.clone(); let failed = failed.clone();
+                        let Some(permit) = peer.runtime_work.admit() else { return; };
+                        connections.spawn(permit.track(Box::pin(async move {
+                            let mut channel = peer.privacy_accept(stream).await.unwrap();
+                            assert_eq!(channel.peer_identity(), &expected);
+                            let first = channel.recv().await.unwrap();
+                            if let Some(request) = crate::node::channel_account_bootstrap::AccountGroupRequest::decode(&first) {
+                                peer.serve_account_group_request(&mut channel, request).await;
+                                return;
+                            }
+                            assert!(crate::node::session::requests_response(&first));
+                            if armed.load(Ordering::SeqCst) {
+                                attempts.fetch_add(1, Ordering::SeqCst);
+                                if let Some(signal) = failed.lock().unwrap().take() {
+                                    signal.send(()).unwrap();
+                                    // Real Noise and first sync frame succeeded;
+                                    // lose this exchange before any event arrives.
+                                    return;
+                                }
+                            }
+                            let store = peer.sync_store(channel.peer_identity());
+                            if let Ok(crate::node::session::Served::Handled(conversation)) =
+                                crate::node::session::serve_wire_bytes(&mut channel, &store, &first).await {
+                                peer.process_channel(conversation);
+                            } else { return; }
+                            while let Ok(crate::node::session::Served::Handled(conversation)) =
+                                crate::node::session::serve_one(&mut channel, &store).await {
+                                peer.process_channel(conversation);
+                            }
+                        })));
+                    }
+                    _ = connections.join_next(), if !connections.is_empty() => {}
+                }
+            }
+        }
+    });
+    let outcome = AssertUnwindSafe(async {
+        let group = source.create_channel("Retry exact text", vec![external.identity.public()]).await.unwrap();
+        // Settle capability migration before the measured operation so a real
+        // authority change cannot manufacture a fresh fanout revision later.
+        let mut maintenance = crate::node::channel_account_maintenance::ChannelAccountMaintenance::default();
+        for _ in 0..12 {
+            source.maintain_account_channels(&mut maintenance).await;
+            if source.account_group_projection(group).unwrap().authority.current_event().is_some() { break; }
+        }
+        assert!(source.account_group_projection(group).unwrap().authority.current_event().is_some());
+        source.prepare_account_group_fanout(group).await.unwrap();
+        source.sessions.clear();
+        armed.store(true, Ordering::SeqCst);
+        let id = source.new_account_group_operation_id(&account.account_id()).unwrap();
+        source.submit_account_group_text_if(&account.account_id(), id, group,
+            crate::node::AccountGroupTextInput {
+                text: b"Only the original committed text may recover".to_vec(),
+                reply_to: None, expires_at_ms: None, protection: None,
+            }, |commit| commit()).unwrap();
+        // Commit through the real operation owner without distributing yet.
+        // Startup must not fault an older setup revision before text commits.
+        assert!(source.maintain_account_group_operation_effects().contains(&group));
+        source.prepare_account_group_fanout(group).await.unwrap();
+        // Only this production owner may originate public traffic. The source
+        // listener stays unserved, and no delivery/custody recovery loop runs.
+        tasks.spawn(source.clone().run_account_history_loop());
+        tokio::time::timeout(Duration::from_secs(8), first_failure).await
+            .expect("owned text fanout must reach its real authenticated failure cut").unwrap();
+        let original = source.account_group_operation_status(&account.account_id(), id).unwrap().unwrap();
+        assert_eq!(original.phase, AccountGroupOperationPhase::Committed);
+        let event = original.primary_event.unwrap();
+        assert_eq!(source.account_group_fanout_message(group).unwrap(), Some(event));
+        let revision = source.account_group_fanout_sequence(group).unwrap();
+        assert!(external.log.lock().unwrap().get(&event).unwrap().is_none());
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                assert_eq!(source.account_group_fanout_sequence(group), Some(revision));
+                assert_eq!(source.account_group_operation_status(&account.account_id(), id).unwrap().unwrap(), original);
+                if external.log.lock().unwrap().get(&event).unwrap().is_some()
+                    && source.channel_custody_count(group, event).unwrap() == Some(1) { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("the same committed fanout revision must retry without another producer or resubmission");
+        assert!(attempts.load(Ordering::SeqCst) >= 2);
+        assert_eq!(source.log.lock().unwrap().events(&group).unwrap().iter()
+            .filter(|row| row.kind == EventKind::Message).count(), 1);
+    }).catch_unwind().await;
+    for node in [&source, &external] {
+        node.runtime_work.close();
+        node.sessions.clear();
+    }
+    let retired = super::cold_account_setup(async {
+        tasks.shutdown().await;
+        source.runtime_work.drain().await;
+        external.runtime_work.drain().await;
+    })
+    .await;
+    if retired.is_err() {
+        let _retained_store = dir.keep();
+        panic!("network retry fixture retirement was unverified; private store retained");
+    }
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+}

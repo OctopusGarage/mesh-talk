@@ -1,6 +1,15 @@
 import { DeliveryDetails } from "./DeliveryDetails";
 import { useAuth } from "@/store/auth";
-import { Check, Copy, Inbox, Timer } from "lucide-react";
+import {
+  Check,
+  Copy,
+  Inbox,
+  Timer,
+  UserRound,
+  UsersRound,
+  Monitor,
+  CircleHelp,
+} from "lucide-react";
 import { MessageStatus } from "./MessageStatus";
 import { useChat } from "@/store/chat";
 import { useTranslation } from "react-i18next";
@@ -91,6 +100,19 @@ export function DeliveryFooter({
           : t(
               `message.custody.${custody === 0 ? "local" : custody === 1 ? "one" : "multiple"}`,
             );
+  const showSource =
+    !message.fromMe &&
+    !message.recalled &&
+    !message.pending &&
+    !message.announcement;
+  const source = message.receivedVia ?? "unknown";
+  const SourceIcon = {
+    sender: UserRound,
+    member: UsersRound,
+    post_office: Inbox,
+    linked_device: Monitor,
+    unknown: CircleHelp,
+  }[source];
   const saved =
     isPersonal &&
     message.fromMe &&
@@ -104,7 +126,8 @@ export function DeliveryFooter({
     !message.pending &&
     !delivery &&
     custody === undefined &&
-    !saved
+    !saved &&
+    !showSource
   )
     return null;
   return (
@@ -135,6 +158,24 @@ export function DeliveryFooter({
         <span data-testid="message-time">{formatTime(message.wallClock)}</span>
       )}
       {message.pending && <span>{` · ${t("message.sending")}`}</span>}
+      {showSource && (
+        <MessageStatus
+          key={`${detailsKey}:source:${source}`}
+          testId="message-source"
+          label={t(`message.source.${source}`)}
+          icon={<SourceIcon className="h-3 w-3" aria-hidden="true" />}
+        >
+          {() => (
+            <p>
+              {t(
+                source === "unknown"
+                  ? "message.source.unknownHelp"
+                  : "message.source.help",
+              )}
+            </p>
+          )}
+        </MessageStatus>
+      )}
       {saved && (
         <span data-personal-saved>
           {t(message.file ? "personal.fileCardSaved" : "personal.saved")}
@@ -188,6 +229,18 @@ export function DeliveryFooter({
           )}
         </MessageStatus>
       )}
+      {custody !== undefined &&
+        !postOfficeOnly &&
+        (message.postOfficeCopies ?? 0) > 0 && (
+          <MessageStatus
+            key={`${detailsKey}:post-office`}
+            label={t("message.custody.postOffice")}
+            custody={1}
+            icon={<Inbox className="h-3 w-3" aria-hidden="true" />}
+          >
+            {() => <p>{t("message.custody.postOfficeHelp")}</p>}
+          </MessageStatus>
+        )}
     </div>
   );
 }

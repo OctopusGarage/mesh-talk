@@ -72,6 +72,8 @@ pub struct ReceivedProfile {
 /// A received direct message, surfaced to the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedDm {
+    /// Local first-ingress observation; absent for unknown or imported history.
+    pub received_via: Option<super::ReceivedVia>,
     /// Account-envelope logical ID matching account conversation history.
     /// Legacy device messages have no logical account-message identity.
     pub message_id: Option<EventId>,
@@ -158,6 +160,8 @@ pub struct SearchHit {
 /// A merged conversation-history entry (sent or received), for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
+    /// Local first-ingress observation; absent for unknown or imported history.
+    pub received_via: Option<super::ReceivedVia>,
     /// Authenticated absolute UTC deadline shared by sender and recipient.
     pub expires_at_ms: Option<u64>,
     pub id: EventId,

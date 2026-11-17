@@ -115,6 +115,8 @@ member accounts. The number beside it is 1 or 2+; a question mark means the
 status is unavailable, and the icon alone means no member copy is confirmed.
 An inbox icon identifies a post-office copy. Select a status icon to expand its
 explanation below the message; select it again or press Escape to collapse it.
+When both member and post-office copies are confirmed, both icons appear;
+each opens its own explanation. Member copies do not suppress post-office storage.
 These signals do not mean everyone received or read the message. Copies
 on your own linked devices do not count as another member's confirmation.
 
@@ -124,6 +126,19 @@ the status yet; **No member copy confirmed** means no eligible member copy is
 currently confirmed in the available evidence. A post-office copy has a separate
 label. A holder can later delete a copy, so an old confirmation is not a permanent
 availability guarantee.
+
+## See where a message came from
+
+Received messages have a small source icon beside their time. Select it to see
+whether this device first obtained the message from its sender, another member,
+a post office or one of your linked devices. Select it again or press Escape to
+close the explanation. A file card describes where the card arrived from, not
+where its file bytes were downloaded.
+
+The source is local to this device. It does not show every forwarding hop or
+mean that the source still holds a copy. Older or imported history may show
+**Reception source unknown** because no local source was recorded. Catch-up timing and
+member/post-office copy confirmations remain separate observations.
 
 ## History for new members
 
