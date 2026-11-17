@@ -1855,6 +1855,16 @@ one-axis or two-axis zero translation while preserving the exact wheel-anchor,
 drag-clamp and cancellation checks; reproduce the old assertion failure against
 the upgraded DOM implementation before changing it.
 
+A queue-priority fixture must stage competing authenticated source changes when
+its setup requires one specific source to interrupt a live page. Otherwise a valid
+same-source Wake can replace that page before the intended cross-source branch.
+The [queued-control fixture](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)
+holds A's real receiver before Wake commit, verifies its epoch/revision and live
+original read, then releases it only after B's validated prefix and A's exact
+protected resume exist. The same owned sender must receive its actual WakeAck
+after release. Keep all production hosts, page/terminal assertions and deadlines;
+a queued-frame observation is neither a committed Wake nor permission to skip work.
+
 Scope fixture transformations and assertions to the owning configuration table,
 not globally unique text. Test the same valid value in an unrelated profile and
 verify that it stays unchanged. The [Nextest fixture owner](../scripts/diagnostics/test-fixtures/nextest.mjs)
