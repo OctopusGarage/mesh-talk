@@ -1751,6 +1751,14 @@ the returned draft at preparation and publication boundaries. The existing
 reject changed titles before dispatch or publication; a successful API call alone
 does not establish that the visible result follows the release convention.
 
+Timer-observation fixtures must own their held work independently of an
+unreferenced diagnostic timer. A pending Promise and a test watchdog do not
+necessarily keep the supported Node runtime alive. The [ASan observer controls](../scripts/diagnostics/asan.test.mjs)
+retain an independently referenced work handle until the sampling limit is
+observed, then verify timer retirement and real child failure/cancellation.
+Qualify these lifecycle tests on CI's Node major; a newer local test runner can
+mask missing work ownership.
+
 Release preflight fixtures must own their version inputs and curated notes rather
 than read the checkout's live changelog. The development target can legitimately
 advance before Stable notes exist. The [preflight regression](../scripts/diagnostics/release-preflight.test.mjs)

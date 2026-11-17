@@ -306,8 +306,11 @@ test("ASan build observation is bounded, retires its timer and preserves the wor
   let count = 0, reachedLimit;
   const limited = new Promise(resolve => { reachedLimit = resolve; });
   const result = await observeBuild(directory, async () => {
-    await limited;
-    return "compiled";
+    // Model actual admitted work independently of the unreferenced observer.
+    // Node 22's test watchdog does not keep a promise-only fixture alive.
+    const workOwner = setInterval(() => {}, 1000);
+    try { await limited; return "compiled"; }
+    finally { clearInterval(workOwner); }
   }, { intervalMs: 5, maxSamples: 3, sample: () => ({ availableBytes: ++count }), emit: row => { emitted.push(row); if (row.event === "limit") reachedLimit(); } });
   assert.equal(result, "compiled");
   const rows = readFileSync(path.join(directory, "resources.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
