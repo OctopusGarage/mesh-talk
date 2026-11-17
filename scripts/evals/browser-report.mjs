@@ -27,6 +27,11 @@ export function requiredBrowserPaths(tier) {
   for (const size of ["1280x800", "760x620", "320x360"]) {
     paths.push(["automatic-delivery.spec.ts", `delivery details preserve keyboard focus and fit ${size}`]);
   }
+  for (const size of ["390x560", "1280x720"]) {
+    for (const source of ["sender", "member", "post_office", "linked_device", "unknown"]) {
+      paths.push(["automatic-delivery.spec.ts", `received-message source ${source} stays accessible at ${size}`]);
+    }
+  }
   paths.push(
     ["automatic-delivery.spec.ts", "delivery recovery survives its receipt and returns focus safely, then retires on logout"],
     ["automatic-delivery.spec.ts", "delivery details close on navigation and app lock, including a late status response"],

@@ -1875,6 +1875,11 @@ can exhaust its budget before any decode or geometry observation. The
 preparation before releasing media and checks an absent row through a snapshot-only
 observer; retain its exact geometry and cache assertions. Keep independent
 negative controls outside the journey's active retention window.
+DOMRect measurements are floating-point values. Preserve required dimensions and
+row stability with explicit subpixel comparison precision rather than exact
+numeric equality; do not widen the visible layout allowance or readiness deadline.
+The [media-recovery fixture](../frontend/e2e/media-recovery.spec.ts) owns this
+cross-browser geometry boundary together with its full-size image actions.
 The [group reading-anchor fixture](../frontend/e2e/group-reception.spec.ts) also
 samples the log and row through one nonwaiting page evaluation, returning pending
 when either is absent. Keep its existing assertion budget and exact ID/offset,
