@@ -70,6 +70,10 @@ subscriptions and incoming HTTP webhooks are later stages.
 
 ## Contributor workflow and design
 
+For planned work, priorities, task dependencies and agent claims, start with the
+[development roadmap](development-roadmap.md). Implemented behavior remains in the
+[capability index](../specifications/TODO.md) and its owning guides.
+
 | Doc                                                                                           | What it covers                                                                                                 |
 | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | [`AGENTS.md`](../AGENTS.md)                                                                   | Repository guidelines for AI agents / contributors — structure, build/test commands, conventions.              |
