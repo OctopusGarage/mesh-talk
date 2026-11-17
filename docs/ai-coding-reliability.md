@@ -2308,6 +2308,9 @@ Post-login browser notice, retry and backup assertions first await the existing
 [chat-shell readiness owner](../frontend/e2e/helpers/session.ts). Lazy startup
 uses its existing platform budget; content and action assertions retain their
 original behavior deadlines after that boundary.
+Reapply that same readiness boundary after cold reload and sign-in, including
+the [hidden-contact persistence scenario](../frontend/e2e/hidden-contacts.spec.ts);
+readiness from the previous document cannot qualify the restarted chat shell.
 
 Negative idle assertions must consume startup JoinSet results and retained wakes,
 then invalidate the old idle marker when the target event is observed. Await the
