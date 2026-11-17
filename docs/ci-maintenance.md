@@ -650,7 +650,12 @@ control from an ad-hoc signed temporary bundle. The CLI admits only a disposable
 hosted macOS runner, exact current-source instrumented Host-library metadata and
 one actual passing case. It forces authorization requests off, verifies fresh
 native not-determined authorization and absent delivery, preserves the current
-LLVM profile destination and regenerates LCOV before Codecov upload. The shared
+LLVM profile destination and regenerates LCOV before Codecov upload. The
+post-control step explicitly binds both Cargo and llvm-cov target directories to
+`target/llvm-cov-target`: `show-env` otherwise defaults to `target`, unlike the
+default `llvm-cov nextest` cohort. The real instrumented notification protocol
+fixture verifies default-test profiles survive the sourced environment and gain
+native-control counters in the regenerated report. The shared
 command owner bounds the whole control and retires children before successful
 private-bundle cleanup. Failed controls retain their private bundle for the disposable
 VM to retire rather than delete files under uncertain work. Portable/Mach-O protocol fixtures do not qualify real OS authorization;

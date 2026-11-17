@@ -431,6 +431,11 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: src-tauri
         shell: bash
+        # show-env defaults to target, while llvm-cov nextest defaults to
+        # target/llvm-cov-target. Continue the existing instrumented cohort.
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/llvm-cov-target
+          CARGO_LLVM_COV_TARGET_DIR: ${{ github.workspace }}/target/llvm-cov-target
         run: |
           coverage_environment="$(cargo llvm-cov show-env --sh)"
           eval "$coverage_environment"

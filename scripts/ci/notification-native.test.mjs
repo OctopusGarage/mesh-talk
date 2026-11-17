@@ -106,13 +106,26 @@ test("signed relocated control contributes real counters to the original instrum
   mkdirSync(path.join(fixture, "src-tauri/src"), { recursive: true });
   writeFileSync(path.join(fixture, "Cargo.toml"), '[workspace]\nmembers=["src-tauri"]\nresolver="2"\n');
   writeFileSync(path.join(fixture, "src-tauri/Cargo.toml"), '[package]\nname="mesh-talk"\nversion="0.0.0"\nedition="2024"\n');
-  writeFileSync(path.join(fixture, "src-tauri/src/lib.rs"), '#[inline(never)] pub fn native_bundle_control_sentinel() -> u64 { std::hint::black_box(37) }\nmod notifications { mod tests { #[test] #[ignore] fn mac_packaged_permission_and_delivery() { assert_eq!(super::super::native_bundle_control_sentinel(), 37); } } }\n');
-  const target = path.join(fixture, "target");
-  mkdirSync(path.join(fixture, "setup"));
-  const env = { ...process.env, CARGO_TARGET_DIR: target, RUSTFLAGS: "-Cinstrument-coverage", LLVM_PROFILE_FILE: path.join(fixture, "setup/%p-%m.profraw") };
-  for (const key of Object.keys(env)) if (key.startsWith("CARGO_LLVM_COV") || key.startsWith("__CARGO_LLVM_COV") || ["CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"].includes(key)) delete env[key];
+  writeFileSync(path.join(fixture, "src-tauri/src/lib.rs"), '#[inline(never)] pub fn native_bundle_control_sentinel() -> u64 { std::hint::black_box(37) }\n#[test] fn default_case() {}\nmod notifications { mod tests { #[test] #[ignore] fn mac_packaged_permission_and_delivery() { assert_eq!(super::super::native_bundle_control_sentinel(), 37); } } }\n');
+  const target = path.join(fixture, "target/llvm-cov-target");
+  const manifest = path.join(fixture, "Cargo.toml");
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith("CARGO_LLVM_COV") || key.startsWith("__CARGO_LLVM_COV") || ["CARGO_TARGET_DIR", "RUSTFLAGS", "LLVM_PROFILE_FILE", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"].includes(key)) delete env[key];
+  // Reproduce the production default cohort first, then source show-env with
+  // the workflow's explicit target. Their defaults intentionally differ.
+  await run("cargo", ["llvm-cov", "nextest", "--manifest-path", manifest, "--no-report", "--no-tests", "fail"], env);
+  const exported = JSON.parse(await run("bash", ["-e", "-o", "pipefail", "-c",
+    'coverage_environment="$(cargo llvm-cov show-env --sh --manifest-path "$1")"\neval "$coverage_environment"\n"$2" -e \'process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(?:__)?CARGO_LLVM_COV|^RUSTC_WRAPPER$|^LLVM_PROFILE_FILE$|^CARGO_TARGET_DIR$/.test(key)))))\'',
+    "native-profile-fixture", manifest, process.execPath], { ...env, CARGO_TARGET_DIR: target, CARGO_LLVM_COV_TARGET_DIR: target }));
+  Object.assign(env, exported);
+  assert.equal(env.CARGO_LLVM_COV_TARGET_DIR, target);
+  assert.equal(env.CARGO_TARGET_DIR, target);
   const metadata = JSON.parse(await run("cargo", ["nextest", "list", "--manifest-path", path.join(fixture, "Cargo.toml"), "-p", "mesh-talk", "--lib", "--message-format", "json", "--list-type", "binaries-only"], env));
   const binary = selectNotificationBinary(metadata, { target, packageDirectory: path.join(fixture, "src-tauri"), version: "0.0.0" });
+  const reportArgs = ["llvm-cov", "report", "--manifest-path", manifest, "--lcov"];
+  const before = await run("cargo", reportArgs, env);
+  assert.match(before, /^FNDA:0,.*native_bundle_control_sentinel/mu);
+  assert.match(before, /^FNDA:[1-9]\d*,.*default_case/mu);
   const { readdirSync } = await import("node:fs");
   const report = async name => {
     const directory = path.join(fixture, name);
@@ -127,4 +140,8 @@ test("signed relocated control contributes real counters to the original instrum
   assert.match(await report("negative"), /^FNDA:0,.*native_bundle_control_sentinel/mu);
   await runBundledNotificationControl(binary, path.join(fixture, "bundle"), run, { ...env, LLVM_PROFILE_FILE: path.join(fixture, "positive/%p-%m.profraw") });
   assert.match(await report("positive"), /^FNDA:[1-9]\d*,.*native_bundle_control_sentinel/mu, "Relocated signed control did not accumulate genuine library counters");
+  await runBundledNotificationControl(binary, path.join(fixture, "accumulated-bundle"), run, env);
+  const after = await run("cargo", reportArgs, env);
+  assert.match(after, /^FNDA:[1-9]\d*,.*native_bundle_control_sentinel/mu, "Post-native LCOV lost the native counters");
+  assert.match(after, /^FNDA:[1-9]\d*,.*default_case/mu, "Post-native LCOV lost the default cohort counters");
 });

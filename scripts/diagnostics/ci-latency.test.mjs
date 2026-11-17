@@ -943,6 +943,8 @@ test("macOS native notification coverage is appended once after defaults and bef
   assert.ok(control);
   assert.match(control, /steps\.scope\.outputs\.full == 'true'/u);
   assert.doesNotMatch(control, /continue-on-error/u);
+  assert.match(control, /CARGO_TARGET_DIR: \$\{\{ github\.workspace \}\}\/target\/llvm-cov-target/u);
+  assert.match(control, /CARGO_LLVM_COV_TARGET_DIR: \$\{\{ github\.workspace \}\}\/target\/llvm-cov-target/u);
   assert.match(control, /coverage_environment="\$\(cargo llvm-cov show-env --sh\)"/u);
   assert.ok(control.indexOf("notification-native.mjs") < control.indexOf("cargo llvm-cov report --lcov"));
   assert.equal(source.split("\n").filter(line => line.trim() === "cargo llvm-cov report --lcov --output-path lcov.info").length, 1);
