@@ -1,0 +1,46 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7KXK27GGZJV8NGH32FZNSSQ",
+  "strategy": "manual-commit",
+  "branch": "fix/release-stable-title",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/updates.md",
+    "scripts/diagnostics/release-state.test.mjs",
+    "scripts/diagnostics/version-automation.test.mjs",
+    "scripts/release/maintenance.mjs",
+    "scripts/release/release-state.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3271351,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 459661056,
+    "output_tokens": 1195329,
+    "api_call_count": 2460
+  },
+  "redaction": {
+    "replacements": 78550,
+    "layers": {
+      "betterleaks": 68,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 53,
+      "credentialed_uri": 0,
+      "entropy": 78462,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}

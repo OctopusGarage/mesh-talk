@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7KXK27GGZJV8NGH32FZNSSQ",
+  "session_id": "01a16cc2-1748-7da2-9a47-a82aefcb3feb",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-17T04:52:44.424581Z",
+  "branch": "fix/release-stable-title",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/updates.md",
+    "scripts/diagnostics/release-state.test.mjs",
+    "scripts/diagnostics/version-automation.test.mjs",
+    "scripts/release/maintenance.mjs",
+    "scripts/release/release-state.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "02f5d3906c7c",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 3271351,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 459661056,
+    "output_tokens": 1195329,
+    "api_call_count": 2460
+  },
+  "redaction": {
+    "replacements": 78550,
+    "layers": {
+      "betterleaks": 68,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 53,
+      "credentialed_uri": 0,
+      "entropy": 78462,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
