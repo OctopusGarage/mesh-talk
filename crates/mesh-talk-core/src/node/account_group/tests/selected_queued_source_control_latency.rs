@@ -467,6 +467,69 @@ struct B2Publication {
     continuation: crate::node::AccountDocumentKey,
 }
 
+impl B2Publication {
+    fn pending_at_server(
+        &self,
+        dispatched_at: std::time::Instant,
+        source: &Node,
+        requester: &Node,
+        reason: &mut String,
+    ) -> bool {
+        // Dispatch can precede publication while this authenticated request is in flight.
+        // B reads its response page after this hook, from the current signed rows.
+        if dispatched_at < self.started_at {
+            reason.push_str(" dispatched_before_B2");
+        }
+        let mut rows = Vec::new();
+        let rows_current = self.rows.iter().all(|meta| {
+            let current = source.account_document_meta(&meta.key).as_ref() == Some(meta);
+            let absent = current.then(|| requester.account_document_meta(&meta.key).is_none());
+            rows.push((current, absent));
+            current && absent == Some(true)
+        });
+        reason.push_str(&format!(" rows_source_current_requester_absent={rows:?}"));
+        rows_current
+    }
+}
+
+#[test]
+fn protected_b_request_dispatched_before_publication_observes_published_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let requester = node(&dir.path().join("requester"), &account);
+    let dispatched_at = std::time::Instant::now();
+    let keys =
+        crate::node::account_documents::sync::publish_legacy_control_page_for_test(&source, 2);
+    let publication = B2Publication {
+        started_at: dispatched_at + Duration::from_millis(1),
+        rows: keys
+            .iter()
+            .map(|key| source.account_document_meta(key).unwrap())
+            .collect(),
+        continuation: crate::node::AccountDocumentKey::GroupOperation {
+            channel: hex::encode([254; 32]),
+            source_device: source.user_id(),
+        },
+    };
+    let mut reason = String::new();
+    assert!(
+        publication.pending_at_server(dispatched_at, &source, &requester, &mut reason),
+        "{reason}"
+    );
+    assert!(
+        !publication.pending_at_server(dispatched_at, &source, &source, &mut String::new()),
+        "a requester that already holds the suffix cannot establish outstanding work"
+    );
+    // Both suffix versions must still be exact when the serving request arrives.
+    crate::node::account_documents::sync::seed_legacy_control_page_revision_for_test(
+        &source,
+        ConversationId::new([2; 32]),
+        2,
+    );
+    assert!(!publication.pending_at_server(dispatched_at, &source, &requester, &mut String::new()));
+}
+
 #[derive(Default)]
 struct ProtectedBPageProgress {
     request_task: Option<tokio::task::Id>,
@@ -1785,27 +1848,12 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                                         publication.started_at.duration_since(clock).as_millis(),
                                         page.dispatched_at.duration_since(clock).as_millis()
                                     );
-                                    // Capture the original short-circuit operands, without
-                                    // repeating metadata reads after concurrent imports.
-                                    if page.dispatched_at < publication.started_at {
-                                        candidate_reason.push_str(" dispatched_before_B2");
-                                        return None;
-                                    }
-                                    let mut rows = Vec::new();
-                                    let rows_current = publication.rows.iter().all(|meta| {
-                                        let current =
-                                            source.account_document_meta(&meta.key).as_ref()
-                                                == Some(meta);
-                                        let absent = current.then(|| {
-                                            requester.account_document_meta(&meta.key).is_none()
-                                        });
-                                        rows.push((current, absent));
-                                        current && absent == Some(true)
-                                    });
-                                    candidate_reason.push_str(&format!(
-                                        " rows_source_current_requester_absent={rows:?}"
-                                    ));
-                                    if !rows_current {
+                                    if !publication.pending_at_server(
+                                        page.dispatched_at,
+                                        &source,
+                                        &requester,
+                                        &mut candidate_reason,
+                                    ) {
                                         return None;
                                     }
                                     candidate_reason.push_str(" eligible");

@@ -893,6 +893,14 @@ that also describes another phase. Do not sample a later observer projection to
 decide whether to capture a one-shot event; observe that evidence before releasing
 the captured task and retain its exact operation and child identity.
 
+When dispatch races a publication marker, qualify the actual signed source rows,
+request identity and validated page completion; dispatch time alone cannot prove
+that a request observed stale data. Retain stale-source and already-installed
+negative controls. For concurrent recovery scopes, a total accepted-socket count
+cannot by itself identify a restarted exchange. Observe the authenticated scope,
+its active lifetime and exact durable confirmation through the real protocol
+owner, and distinguish fixture teardown from production cancellation.
+
 Separate expensive fixture preparation from the operation's measured window when
 preparation is outside the requirement. Continue using the real signing,
 persistence, transport or UI owner when it is part of the assertion. Preserve

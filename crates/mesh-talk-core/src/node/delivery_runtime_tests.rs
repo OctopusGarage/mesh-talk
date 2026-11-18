@@ -11205,6 +11205,224 @@ async fn delayed_route_delivery(
     .await;
 }
 
+type SlowRouteObservation = (
+    std::time::Duration,
+    usize,
+    &'static str,
+    Option<ConversationId>,
+    Option<EventId>,
+    bool,
+);
+
+fn validate_slow_route_trace(
+    events: &[SlowRouteObservation],
+    overflow: bool,
+    accepted: usize,
+    binding: (ConversationId, ConversationId, EventId, EventId),
+) -> Result<(), &'static str> {
+    use std::collections::HashSet;
+    let (dm, control, original, logical) = binding;
+    if overflow {
+        return Err("session trace overflowed");
+    }
+    // A failed route may lead to another bounded attempt and empty receipt
+    // poll. Limit simultaneous lifetimes, not cumulative healthy control polls.
+    let mut authenticated = HashSet::new();
+    let mut active = HashSet::new();
+    let mut original_owners = HashSet::new();
+    let mut control_owners = HashSet::new();
+    let mut queries = HashSet::new();
+    let mut positive = HashSet::new();
+    let mut completed = false;
+    for &(_, connection, kind, scope, event, value) in events {
+        if kind == "authenticated" {
+            if !authenticated.insert(connection) {
+                return Err("duplicate connection identity");
+            }
+            active.insert(connection);
+            if active.len() > 2 {
+                return Err("concurrent session budget exceeded");
+            }
+            if authenticated.len() > accepted {
+                return Err("authenticated sessions exceed accepted connections");
+            }
+            continue;
+        }
+        if !active.contains(&connection) {
+            return Err("observation outside authenticated lifetime");
+        }
+        if matches!(kind, "scope_request" | "have_request" | "have_response")
+            && scope != Some(dm)
+            && scope != Some(control)
+        {
+            return Err("unexpected conversation scope");
+        }
+        if matches!(kind, "have_request" | "have_response") && scope != Some(dm) {
+            return Err("Have outside original scope");
+        }
+        let original_scope = scope == Some(dm)
+            && (kind == "scope_request" || kind == "have_request" || kind == "have_response");
+        if original_scope {
+            original_owners.insert(connection);
+            if original_owners.len() > 1 {
+                return Err("original exchange restarted");
+            }
+        }
+        if kind == "scope_request" && scope == Some(control) {
+            control_owners.insert(connection);
+        }
+        if kind == "have_request" && scope == Some(dm) && event == Some(original) {
+            queries.insert(connection);
+        }
+        if kind == "have_response" && scope == Some(dm) {
+            if event != Some(original) || !queries.remove(&connection) {
+                return Err("Have response lacks its exact same-connection query");
+            }
+            if value {
+                positive.insert(connection);
+                completed = true;
+            }
+        }
+        if matches!(kind, "closed" | "teardown") && original_owners.contains(&connection) {
+            // Genuine Delivered can cancel a still-running original. Teardown
+            // is reported separately and never becomes a production restart.
+            let delivered = value && event == Some(logical);
+            if !positive.contains(&connection) && !delivered {
+                return Err("original exchange closed before custody or exact delivery");
+            }
+            completed |= delivered;
+        }
+        if matches!(kind, "closed" | "teardown") {
+            active.remove(&connection);
+        }
+    }
+    if !active.is_empty() {
+        return Err("authenticated session lifetime was not retired");
+    }
+    if original_owners.len() != 1 || !completed {
+        return Err("missing original owner or completion witness");
+    }
+    if control_owners.is_empty() {
+        return Err("missing receipt control scope");
+    }
+    Ok(())
+}
+
+#[test]
+fn slow_route_trace_rejects_original_restarts_without_confusing_control_scopes() {
+    use std::time::Duration;
+    let dm = ConversationId::new([1; 32]);
+    let control = ConversationId::new([2; 32]);
+    let original = EventId::new([3; 32]);
+    let logical = EventId::new([4; 32]);
+    let observation = |connection, kind, scope, event, value| {
+        (Duration::ZERO, connection, kind, scope, event, value)
+    };
+    let healthy = vec![
+        observation(1, "authenticated", None, None, false),
+        observation(1, "scope_request", Some(dm), None, false),
+        observation(2, "authenticated", None, None, false),
+        observation(2, "scope_request", Some(control), None, false),
+        observation(1, "have_request", Some(dm), Some(original), false),
+        observation(1, "have_response", Some(dm), Some(original), true),
+        observation(2, "closed", None, Some(logical), false),
+        observation(3, "authenticated", None, None, false),
+        observation(3, "scope_request", Some(control), None, false),
+        observation(1, "closed", None, Some(logical), false),
+        observation(3, "teardown", None, Some(logical), true),
+    ];
+    let validate = |events: &[SlowRouteObservation], overflow, accepted| {
+        validate_slow_route_trace(events, overflow, accepted, (dm, control, original, logical))
+    };
+    assert_eq!(validate(&healthy, false, 3), Ok(()));
+    let mut restarted = healthy.clone();
+    restarted[3] = observation(2, "scope_request", Some(dm), None, false);
+    assert_eq!(
+        validate(&restarted, false, 2),
+        Err("original exchange restarted")
+    );
+    let mut premature = healthy.clone();
+    premature.insert(4, observation(1, "closed", None, Some(logical), false));
+    assert_eq!(
+        validate(&premature, false, 3),
+        Err("original exchange closed before custody or exact delivery")
+    );
+    let mut wrong_event = healthy.clone();
+    wrong_event[5].4 = Some(EventId::new([9; 32]));
+    assert_eq!(
+        validate(&wrong_event, false, 3),
+        Err("Have response lacks its exact same-connection query")
+    );
+    let mut wrong_connection = healthy.clone();
+    wrong_connection[5].1 = 2;
+    assert!(validate(&wrong_connection, false, 3).is_err());
+    assert_eq!(validate(&healthy, true, 3), Err("session trace overflowed"));
+    assert_eq!(
+        validate(&healthy, false, 2),
+        Err("authenticated sessions exceed accepted connections")
+    );
+    let mut excess_control = healthy.clone();
+    excess_control.insert(4, observation(4, "authenticated", None, None, false));
+    excess_control.insert(
+        5,
+        observation(4, "scope_request", Some(control), None, false),
+    );
+    assert_eq!(
+        validate(&excess_control, false, 4),
+        Err("concurrent session budget exceeded")
+    );
+    let mut sequential_controls = healthy.clone();
+    for connection in 4..=6 {
+        sequential_controls.extend([
+            observation(connection, "authenticated", None, None, false),
+            observation(connection, "scope_request", Some(control), None, false),
+            observation(connection, "closed", None, Some(logical), true),
+        ]);
+    }
+    assert_eq!(validate(&sequential_controls, false, 6), Ok(()));
+    // Replay the observed four-session failure: two completed empty control
+    // polls preceded the sole original and its final receipt-control pull.
+    let observed_serial = vec![
+        observation(1, "authenticated", None, None, false),
+        observation(1, "scope_request", Some(control), None, false),
+        observation(1, "closed", None, Some(logical), false),
+        observation(2, "authenticated", None, None, false),
+        observation(2, "scope_request", Some(control), None, false),
+        observation(2, "closed", None, Some(logical), false),
+        observation(3, "authenticated", None, None, false),
+        observation(3, "scope_request", Some(dm), None, false),
+        observation(3, "have_request", Some(dm), Some(original), false),
+        observation(3, "have_response", Some(dm), Some(original), true),
+        observation(3, "closed", None, Some(logical), false),
+        observation(4, "authenticated", None, None, false),
+        observation(4, "scope_request", Some(control), None, false),
+        observation(4, "teardown", None, Some(logical), true),
+    ];
+    assert_eq!(validate(&observed_serial, false, 4), Ok(()));
+    assert_eq!(
+        validate(&healthy[..healthy.len() - 1], false, 3),
+        Err("authenticated session lifetime was not retired")
+    );
+    let mut wrong_scope = healthy.clone();
+    wrong_scope[3].3 = Some(ConversationId::new([9; 32]));
+    assert_eq!(
+        validate(&wrong_scope, false, 3),
+        Err("unexpected conversation scope")
+    );
+    let canceled_after_delivery = vec![
+        observation(1, "authenticated", None, None, false),
+        observation(1, "scope_request", Some(dm), None, false),
+        observation(2, "authenticated", None, None, false),
+        observation(2, "scope_request", Some(control), None, false),
+        observation(1, "closed", None, Some(logical), true),
+        observation(2, "teardown", None, Some(logical), true),
+    ];
+    assert_eq!(validate(&canceled_after_delivery, false, 2), Ok(()));
+    let mut wrong_delivery = canceled_after_delivery;
+    wrong_delivery[4].4 = Some(EventId::new([9; 32]));
+    assert!(validate(&wrong_delivery, false, 2).is_err());
+}
+
 async fn delayed_route_delivery_with_budget(
     initial_delay: std::time::Duration,
     frame_delay: std::time::Duration,
@@ -11212,6 +11430,54 @@ async fn delayed_route_delivery_with_budget(
     recipient_inbound_only: bool,
 ) {
     use std::time::{Duration, Instant};
+    #[derive(Default, Debug)]
+    struct Trace {
+        events: Vec<SlowRouteObservation>,
+        overflow: bool,
+    }
+    fn record(trace: &Arc<Mutex<Trace>>, observation: SlowRouteObservation) {
+        let mut trace = trace.lock().unwrap();
+        if trace.events.len() < 128 {
+            trace.events.push(observation);
+        } else {
+            trace.overflow = true;
+        }
+    }
+    struct SessionLifetime {
+        trace: Arc<Mutex<Trace>>,
+        start: Instant,
+        connection: usize,
+        sender: Arc<Node>,
+        logical: Arc<Mutex<Option<EventId>>>,
+        teardown: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for SessionLifetime {
+        fn drop(&mut self) {
+            let logical = *self.logical.lock().unwrap();
+            let delivered = logical.is_some_and(|id| {
+                self.sender.delivery_status(id) == Some(DeliveryStatus::Delivered)
+            });
+            record(
+                &self.trace,
+                (
+                    self.start.elapsed(),
+                    self.connection,
+                    if self.teardown.load(std::sync::atomic::Ordering::SeqCst) {
+                        "teardown"
+                    } else {
+                        "closed"
+                    },
+                    None,
+                    logical,
+                    delivered,
+                ),
+            );
+        }
+    }
+    let trace = Arc::new(Mutex::new(Trace::default()));
+    let logical = Arc::new(Mutex::new(None));
+    let teardown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let trace_start = Instant::now();
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
@@ -11247,23 +11513,108 @@ async fn delayed_route_delivery_with_budget(
     a.initiate_contact_locally(&b.account_id()).await.unwrap();
     let backend = bl.local_addr().unwrap();
     let mut tasks = tokio::task::JoinSet::new();
+    // The fixture, rather than cancellable accept tasks, retains recipient
+    // sessions and proxy forwarding until their destruction is joined.
+    let fixture_sessions = Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new()));
     tasks.spawn(a.clone().run_accept_loop(al));
     if recipient_inbound_only {
         let recipient = b.clone();
+        let sender = a.clone();
+        let trace = trace.clone();
+        let logical = logical.clone();
+        let teardown = teardown.clone();
+        let fixture_sessions = fixture_sessions.clone();
         tasks.spawn(async move {
-            let mut connections = tokio::task::JoinSet::new();
+            let mut next_connection = 0;
             loop {
-                tokio::select! {
-                    result = bl.accept() => {
-                        let (stream, _) = result.unwrap();
-                        let recipient = recipient.clone();
-                        connections.spawn(async move {
-                            if let Ok(channel) = recipient.privacy_accept(stream).await {
-                                recipient.serve_connection(channel).await;
-                            }
-                        });
+                // Never hold the session-owner guard across accept or IO.
+                let (stream, _) = bl.accept().await.unwrap();
+                {
+                    let mut connections = fixture_sessions.lock().await;
+                    while let Some(result) = connections.try_join_next() {
+                        result.expect("fixture session must not panic");
                     }
-                    _ = connections.join_next(), if !connections.is_empty() => {}
+                    let recipient = recipient.clone();
+                    next_connection += 1;
+                    let connection = next_connection;
+                    let trace = trace.clone();
+                    let sender = sender.clone();
+                    let logical = logical.clone();
+                    let teardown = teardown.clone();
+                    connections.spawn(async move {
+                        if let Ok(mut channel) = recipient.privacy_accept(stream).await {
+                            record(
+                                &trace,
+                                (
+                                    trace_start.elapsed(),
+                                    connection,
+                                    "authenticated",
+                                    None,
+                                    None,
+                                    false,
+                                ),
+                            );
+                            let _lifetime = SessionLifetime {
+                                trace: trace.clone(),
+                                start: trace_start,
+                                connection,
+                                sender,
+                                logical,
+                                teardown,
+                            };
+                            channel.set_test_frame_observer(Arc::new(move |sent, bytes| {
+                                if sent {
+                                    if let Some((scope, event, stored)) =
+                                        super::session::durable_have_response_for_test(bytes)
+                                    {
+                                        record(
+                                            &trace,
+                                            (
+                                                trace_start.elapsed(),
+                                                connection,
+                                                "have_response",
+                                                Some(scope),
+                                                Some(event),
+                                                stored,
+                                            ),
+                                        );
+                                    }
+                                } else if let Some((scope, event)) =
+                                    super::session::durable_have_query_for_test(bytes)
+                                {
+                                    record(
+                                        &trace,
+                                        (
+                                            trace_start.elapsed(),
+                                            connection,
+                                            "have_request",
+                                            Some(scope),
+                                            Some(event),
+                                            false,
+                                        ),
+                                    );
+                                } else if let Some(scope) =
+                                    super::session::fingerprint_request_conversation(bytes).or_else(
+                                        || super::session::round_request_conversation(bytes),
+                                    )
+                                {
+                                    record(
+                                        &trace,
+                                        (
+                                            trace_start.elapsed(),
+                                            connection,
+                                            "scope_request",
+                                            Some(scope),
+                                            None,
+                                            false,
+                                        ),
+                                    );
+                                }
+                            }));
+                            // Keep production protocol dispatch, admission and completion.
+                            recipient.serve_connection(channel).await;
+                        }
+                    });
                 }
             }
         });
@@ -11279,33 +11630,41 @@ async fn delayed_route_delivery_with_budget(
             streams.push(stream); // Simulate a proxy accepting the departed LAN route.
         }
     });
+    let proxy_sessions = fixture_sessions.clone();
     tasks.spawn(async move {
-        let mut connections = tokio::task::JoinSet::new();
         loop {
-            tokio::select! {
-                result = proxy.accept() => {
-                    let (client, _) = result.unwrap();
-                    accepted_by_proxy.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    connections.spawn(async move {
-                        // Routed authentication can legitimately exceed three seconds.
-                        tokio::time::sleep(initial_delay).await;
-                        let server = tokio::net::TcpStream::connect(backend).await.unwrap();
-                        let (client_read, client_write) = client.into_split();
-                        let (server_read, server_write) = server.into_split();
-                        let forward = |mut input: tokio::net::tcp::OwnedReadHalf, mut output: tokio::net::tcp::OwnedWriteHalf| async move {
+            let (client, _) = proxy.accept().await.unwrap();
+            {
+                let mut connections = proxy_sessions.lock().await;
+                while let Some(result) = connections.try_join_next() {
+                    result.expect("fixture session must not panic");
+                }
+                accepted_by_proxy.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                connections.spawn(async move {
+                    // Routed authentication can legitimately exceed three seconds.
+                    tokio::time::sleep(initial_delay).await;
+                    let server = tokio::net::TcpStream::connect(backend).await.unwrap();
+                    let (client_read, client_write) = client.into_split();
+                    let (server_read, server_write) = server.into_split();
+                    let forward =
+                        |mut input: tokio::net::tcp::OwnedReadHalf,
+                         mut output: tokio::net::tcp::OwnedWriteHalf| async move {
                             use tokio::io::{AsyncReadExt, AsyncWriteExt};
                             let mut buffer = vec![0u8; 65536];
                             loop {
                                 let count = input.read(&mut buffer).await?;
-                                if count == 0 { return output.shutdown().await; }
+                                if count == 0 {
+                                    return output.shutdown().await;
+                                }
                                 tokio::time::sleep(frame_delay).await;
                                 output.write_all(&buffer[..count]).await?;
                             }
                         };
-                        let _ = tokio::try_join!(forward(client_read, server_write), forward(server_read, client_write));
-                    });
-                }
-                _ = connections.join_next(), if !connections.is_empty() => {}
+                    let _ = tokio::try_join!(
+                        forward(client_read, server_write),
+                        forward(server_read, client_write)
+                    );
+                });
             }
         }
     });
@@ -11317,6 +11676,10 @@ async fn delayed_route_delivery_with_budget(
     .await
     .expect("local enqueue remains independent of network latency")
     .unwrap();
+    *logical.lock().unwrap() = Some(id);
+    let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .id;
     let result = tokio::time::timeout(total_budget, async {
         let message = incoming.recv().await.unwrap();
         assert_eq!(message.text, b"hotspot handoff");
@@ -11336,18 +11699,55 @@ async fn delayed_route_delivery_with_budget(
         (received, start.elapsed())
     })
     .await;
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
+    // Cleanup cancellation is labelled separately from production retirement.
+    teardown.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                assert!(error.is_cancelled(), "fixture owner panicked: {error}");
+            }
+        }
+        let mut connections = fixture_sessions.lock().await;
+        connections.abort_all();
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                assert!(error.is_cancelled(), "fixture session panicked: {error}");
+            }
+        }
+    })
+    .await
+    .expect("fixture owners and all nested IO sessions must retire within the cleanup watchdog");
+    if recipient_inbound_only {
+        eprintln!(
+            "slow route accepted={} logical={id:?} original={original:?} result={result:?} trace={:?}",
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            trace.lock().unwrap()
+        );
+        assert!(
+            !trace.lock().unwrap().overflow,
+            "bounded session trace must remain complete"
+        );
+    }
     let (received, confirmed) = result.expect("automatic delivery and authenticated receipt must progress over the slow valid route without waiting for the stale route");
     if recipient_inbound_only {
         assert!(
             confirmed > Duration::from_secs(15),
             "fixture must exercise an exchange beyond the former fixed deadline"
         );
-        assert!(
-            accepted.load(std::sync::atomic::Ordering::SeqCst) <= 2,
-            "slow but progressing exchanges must not restart their authenticated connections"
+        let trace = trace.lock().unwrap();
+        let dm =
+            super::conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
+        let control = super::delivery_receipt::delivery_conversation_id(
+            &a.identity.public(),
+            &b.identity.public(),
         );
+        validate_slow_route_trace(
+            &trace.events,
+            trace.overflow,
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            (dm, control, original, id),
+        ).expect("slow progress must preserve the exact original owner; distinct control scopes retain their bounded opportunities");
     }
     eprintln!("handoff received={received:?} confirmed={confirmed:?}");
 }
