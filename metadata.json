@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7Q27KD4CB7P0V2SD5YMSSDY",
+  "strategy": "manual-commit",
+  "branch": "fix/stella-receipt-recovery",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+    "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs",
+    "crates/mesh-talk-core/validation.json",
+    "docs/ai-coding-reliability.md",
+    "docs/network-design-reference.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 17916,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 7691776,
+    "output_tokens": 15272,
+    "api_call_count": 29,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 59168,
+    "layers": {
+      "betterleaks": 9,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 59251,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
