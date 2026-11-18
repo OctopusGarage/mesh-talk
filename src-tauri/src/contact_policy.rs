@@ -1,6 +1,7 @@
 //! Local account-scoped contact presentation policy, separate from network admission.
 
 mod deletion;
+mod expiry;
 // Glob also forwards Tauri command macros.
 pub use deletion::*;
 

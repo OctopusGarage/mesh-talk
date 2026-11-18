@@ -3043,6 +3043,9 @@
     {
       "id": "core-indexed-transcripts",
       "paths": [
+        "crates/mesh-talk-core/src/node/conversation.rs",
+        "crates/mesh-talk-core/src/node/search.rs",
+        "crates/mesh-talk-core/src/node/search_tests.rs",
         "crates/mesh-talk-core/src/node/delivery_receipt.rs",
         "crates/mesh-talk-core/src/node/delivery_receipt_tests.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
@@ -3067,6 +3070,8 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "node::search::tests::account_ever_history_",
+            "node::conversation::tests::",
             "receipt_retirement",
             "node::delivery_receipt::tests::",
             "node::transcript_repository::tests::",
@@ -3104,6 +3109,10 @@
         "summary": "Serve production participant history, recall, archive, and exact deletion state from profile-owned indexed stores with bounded metadata discovery and selected-body reads.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
+          {
+            "name": "Ever-history selection reads at most 128 indexed account or verified legacy device-pair keys without plaintext and retains sent, received and file-card existence after clear, prune and restart. Legacy attribution shares search human-binding and live-relay precedence, uses at most 129 deduplicated signing keys from current identity, up to 64 authenticated recovery origins and up to 64 certified own devices, and supplies optional contact-specific offline candidates only with positive indexed history. Generic known-account enumeration keeps its prior cost and failure behavior; binding alone is never history and storage errors remain errors rather than false absence.",
+            "reference": "docs/privacy-controls.md#discovered-contacts-without-chat-history"
+          },
           {
             "name": "Authenticated delivery receipt controls retire exact retained receive work after durable delivery; Message discovery and pending selection honor processed-control evidence without replacing transcript evidence. Current-owner retirement retries after failure/reopen. Terminal irrelevance requires exact completed modern account-message scope, wall clock and an absent remaining original; it never grants delivery or retires another destination. Unknown, cancelled, legacy, file-alias and still-pending work retain authentication and recovery.",
             "reference": "docs/network-design-reference.md#state-and-concurrency-contract"

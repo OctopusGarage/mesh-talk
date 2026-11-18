@@ -1482,6 +1482,17 @@ state survives, stale cleanup cannot delete a newer write, and partial outcomes
 are reported honestly. See [development conventions](../specifications/development_conventions.md)
 and the feature-specific owners in [module ownership](module-boundaries.md).
 
+For policies that depend on whether something has **ever** happened, current
+cardinality is insufficient. Clearing or pruning history must not convert a
+previously established conversation into a never-used contact. The transcript
+conversation index owns the sticky historical fact; automatic contact expiry in
+`src-tauri/src/contact_policy/expiry.rs` uses its existence rather than message
+counts or decrypted previews. `ever_history_metadata_survives_clear_for_sent_received_and_files`
+qualifies the sent, received and file-card boundaries. Completed expiry remains
+settled across wall-clock rollback and restart; `expiry_remains_consumed_after_clock_rollback_and_restart`
+qualifies its durable marker independently of the original deadline. A failed index or clock
+read must preserve presentation rather than authorizing expiry.
+
 ## R09: Bound input and resource use
 
 **Failure pattern:** peer/UI-controlled data expands into unbounded allocation,
@@ -1860,6 +1871,12 @@ use `Debug` to log whole tuples or containers containing identifiers. The
 retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
+
+A dismissed modal may still own its closing focus scope. Before reopening the
+same confirmation, wait for its trigger to regain focus as well as for the old
+content to leave the DOM. The [native privacy cancellation controls](../scripts/diagnostics/native-core-scenarios.test.mjs)
+exercise mounted, unmounted-but-unsettled and fully restored phases; a generic
+click retry must not replace this lifecycle acknowledgement.
 
 External publication metadata must follow the owning contract even when an API
 accepts a mutation. Derive Stable titles from the validated version tag and check

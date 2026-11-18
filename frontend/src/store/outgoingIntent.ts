@@ -46,6 +46,7 @@ export interface OutgoingIntentState extends ConversationCacheState {
 }
 
 export interface OutgoingIntentContext extends OutgoingIntentState {
+  onAccountMessageCommitted?: (account?: string, senderDevice?: string) => void;
   onGroupOperationTerminal?: (
     status: import("@/lib/types").AccountGroupOperationStatus,
   ) => void;
@@ -718,6 +719,8 @@ export async function dispatchIntent(
       if (!lease.current()) return false;
       const hadIntent = !!get().intents[clientId];
       update(accepted);
+      if (!lease.current()) return false;
+      get().onAccountMessageCommitted?.(c.id);
       if (!hadIntent) return true;
     }
     if (!lease.current()) return false;

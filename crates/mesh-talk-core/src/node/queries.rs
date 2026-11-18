@@ -10,6 +10,129 @@ use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
 
 impl Node {
+    /// Accounts with committed sent, received or file-card history, including
+    /// cleared/pruned account and verified legacy device-pair transcripts.
+    /// Binding alone is not history. Each read selects at most 128 indexed keys;
+    /// errors preserve uncertainty instead of becoming false absence.
+    pub fn accounts_with_ever_history(
+        &self,
+        accounts: &[String],
+    ) -> Result<std::collections::HashSet<String>, super::NodeError> {
+        let own = self.account.account_id();
+        let mut result = self.indexed_history_accounts(
+            accounts
+                .iter()
+                .map(|account| (account.clone(), account_conversation_id(&own, account))),
+        )?;
+        let pending: std::collections::HashSet<_> = accounts
+            .iter()
+            .filter(|account| !result.contains(*account))
+            .cloned()
+            .collect();
+        if !pending.is_empty() {
+            result.extend(self.indexed_history_accounts(
+                self.legacy_account_conversations(|account| pending.contains(account)),
+            )?);
+        }
+        Ok(result)
+    }
+
+    /// Contact-specific optional classification: protect supplied canonical
+    /// accounts and return positive offline legacy account candidates as well.
+    /// This remains separate from generic known-account enumeration so hosts
+    /// can retain baseline rows if this extra classification is unavailable.
+    pub fn contact_history_account_ids(
+        &self,
+        accounts: &[String],
+    ) -> Result<std::collections::HashSet<String>, super::NodeError> {
+        let own = self.account.account_id();
+        let mut result = self.indexed_history_accounts(
+            accounts
+                .iter()
+                .map(|account| (account.clone(), account_conversation_id(&own, account))),
+        )?;
+        let legacy = self.indexed_history_accounts(
+            self.legacy_account_conversations(|account| !result.contains(account)),
+        )?;
+        result.extend(legacy);
+        Ok(result)
+    }
+
+    fn legacy_account_conversations<'a>(
+        &'a self,
+        include: impl Fn(&str) -> bool + 'a,
+    ) -> impl Iterator<Item = (String, ConversationId)> + 'a {
+        let peers = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .peers();
+        let own = self.account.account_id();
+        // The existing owners authenticate each source: current identity,
+        // recovery-origin journal (64), and own certified-device registry (64).
+        // Deduplicate at most 129 signing keys; never synthesize exchange keys.
+        let own_authors: std::sync::Arc<[[u8; 32]]> =
+            std::iter::once(self.identity.public().ed25519_pub)
+                .chain(
+                    self.recovery_origins
+                        .iter()
+                        .map(|origin| *origin.ed25519_pub()),
+                )
+                .chain(
+                    self.linked_devices()
+                        .into_iter()
+                        .map(|device| device.public.ed25519_pub),
+                )
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .into();
+        self.human_dm_peer_bindings(&peers)
+            .into_iter()
+            .filter_map(move |(public, account, _)| {
+                account
+                    .filter(|account| account != &own && include(account))
+                    .map(|account| (public, account))
+            })
+            .flat_map(move |(peer, account)| {
+                let own_authors = own_authors.clone();
+                (0..own_authors.len()).map(move |index| {
+                    (
+                        account.clone(),
+                        super::conversation::dm_conversation_id_from_ed25519(
+                            &own_authors[index],
+                            &peer.ed25519_pub,
+                        ),
+                    )
+                })
+            })
+    }
+
+    fn indexed_history_accounts(
+        &self,
+        associations: impl IntoIterator<Item = (String, ConversationId)>,
+    ) -> Result<std::collections::HashSet<String>, super::NodeError> {
+        let mut associations = associations.into_iter();
+        let mut result = std::collections::HashSet::new();
+        loop {
+            let batch: Vec<_> = associations.by_ref().take(128).collect();
+            if batch.is_empty() {
+                return Ok(result);
+            }
+            let conversations: Vec<_> = batch
+                .iter()
+                .map(|(_, conversation)| *conversation)
+                .collect();
+            let known = super::transcript_repository::ever_history_conversations(
+                &self.storage,
+                &conversations,
+            )?;
+            result.extend(batch.into_iter().filter_map(|(account, conversation)| {
+                known.contains(&conversation).then_some(account)
+            }));
+        }
+    }
+
     /// Capture while holding the event-log guard, before loading selected plaintext.
     /// A Ready checkpoint is not a lease: the captured source is checked again
     /// after recall materialization, immediately before publishing the result.

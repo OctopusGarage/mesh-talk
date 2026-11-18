@@ -316,11 +316,15 @@ async fn search_excludes_recalled_channel_text() {
 }
 
 fn recent_search_node(dir: &std::path::Path) -> Arc<Node> {
+    recent_search_node_with_identity(dir, DeviceIdentity::generate())
+}
+
+fn recent_search_node_with_identity(dir: &std::path::Path, identity: DeviceIdentity) -> Arc<Node> {
     let (dm, _) = mpsc::unbounded_channel();
     let (channel, _) = mpsc::unbounded_channel();
     let (file, _) = mpsc::unbounded_channel();
     Node::open(
-        DeviceIdentity::generate(),
+        identity,
         Arc::new(Mutex::new(Roster::default())),
         dm,
         channel,
@@ -1752,4 +1756,350 @@ fn indexed_runtime_recent_history_reuses_metadata_prefix_after_ordinary_append()
         assert_eq!(erased.len(), retained as usize + 1);
         assert!(erased.iter().all(|row| row.id != EventId::new(deleted)));
     }
+}
+
+#[test]
+fn account_ever_history_preserves_verified_route_less_legacy_transcripts() {
+    use crate::eventlog::event::EventId;
+    for source in ["sent", "received", "files"] {
+        let dir = tempfile::tempdir().unwrap();
+        let node = recent_search_node(dir.path());
+        configure_ever_history_privacy(&node, dir.path());
+        let peer = DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        let empty_peer = DeviceIdentity::generate();
+        let empty_account = crate::identity::account::Account::generate();
+        for (device, account) in [(&peer, &account), (&empty_peer, &empty_account)] {
+            node.roster.lock().unwrap().update(
+                &Announce::new_with_account(device, account, "Legacy", 1),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &node.user_id(),
+            );
+        }
+        let requested = vec![account.account_id(), empty_account.account_id()];
+        assert!(
+            node.accounts_with_ever_history(&requested)
+                .unwrap()
+                .is_empty(),
+            "verified account binding alone is not history"
+        );
+        let conversation = dm_conversation_id(&node.identity.public(), &peer.public());
+        if source == "files" {
+            node.cached_peer_snapshot().unwrap();
+            node.roster.lock().unwrap().evict_stale(Duration::ZERO);
+            assert!(
+                node.roster.lock().unwrap().peers().is_empty(),
+                "first legacy file can arrive without a live candidate"
+            );
+        }
+        let body = if source == "files" {
+            crate::file::FileManifest {
+                name: "legacy.bin".into(),
+                size: 1,
+                mime: "application/octet-stream".into(),
+                checksum: [1; 32],
+                file_key: [2; 32],
+                file_conv: crate::eventlog::ConversationId::new([3; 32]),
+                chunk_count: 1,
+            }
+            .encode()
+        } else {
+            MessageBody::new(b"legacy".to_vec(), None).encode()
+        };
+        match source {
+            "sent" => node
+                .sentlog
+                .lock()
+                .unwrap()
+                .record(conversation, 1, 10, &body)
+                .unwrap(),
+            "received" => node
+                .received
+                .lock()
+                .unwrap()
+                .record(
+                    conversation,
+                    peer.user_id(),
+                    10,
+                    &body,
+                    EventId::new([17; 32]),
+                )
+                .unwrap(),
+            _ => node
+                .received_files
+                .lock()
+                .unwrap()
+                .record(
+                    conversation,
+                    peer.user_id(),
+                    10,
+                    &body,
+                    EventId::new([17; 32]),
+                )
+                .unwrap(),
+        }
+        let reads = (
+            node.sentlog.lock().unwrap().body_reads(),
+            node.received.lock().unwrap().body_reads(),
+            node.received_files.lock().unwrap().body_reads(),
+        );
+        let history = node.accounts_with_ever_history(&requested).unwrap();
+        assert_eq!(
+            (
+                node.sentlog.lock().unwrap().body_reads(),
+                node.received.lock().unwrap().body_reads(),
+                node.received_files.lock().unwrap().body_reads()
+            ),
+            reads,
+            "legacy classification must not hydrate bodies"
+        );
+        assert!(
+            history.contains(&account.account_id()),
+            "{source} route-less device-pair history belongs to its verified human account"
+        );
+        assert!(!history.contains(&empty_account.account_id()));
+        let known = node.contact_history_account_ids(&[]).unwrap();
+        assert!(
+            known.contains(&account.account_id()),
+            "{source} legacy history supplies its own contact candidate even offline"
+        );
+        assert!(!known.contains(&empty_account.account_id()));
+        node.sentlog.lock().unwrap().remove_where(|_| true).unwrap();
+        node.received
+            .lock()
+            .unwrap()
+            .remove_where(|_| true)
+            .unwrap();
+        node.received_files
+            .lock()
+            .unwrap()
+            .remove_where(|_| true)
+            .unwrap();
+        assert!(
+            node.accounts_with_ever_history(&requested)
+                .unwrap()
+                .contains(&account.account_id()),
+            "{source} history stays protected after clear"
+        );
+        node.cached_peer_snapshot().unwrap();
+        node.roster.lock().unwrap().update(
+            &Announce::new_post_office_with_account(&peer, &account, "Relay", 1),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+        assert!(
+            !node
+                .accounts_with_ever_history(&requested)
+                .unwrap()
+                .contains(&account.account_id()),
+            "live relay role masks historical human proof"
+        );
+        let secret = node.identity.secret_bytes();
+        drop(node);
+        let reopened = recent_search_node_with_identity(
+            dir.path(),
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        );
+        configure_ever_history_privacy(&reopened, dir.path());
+        assert!(reopened.roster.lock().unwrap().peers().is_empty());
+        assert!(
+            reopened
+                .accounts_with_ever_history(&requested)
+                .unwrap()
+                .contains(&account.account_id()),
+            "{source} cached offline proof still attributes cleared legacy history after restart"
+        );
+        assert!(
+            !reopened
+                .known_account_ids()
+                .unwrap()
+                .contains(&account.account_id()),
+            "generic account enumeration keeps its original namespace contract"
+        );
+        let known = reopened.contact_history_account_ids(&[]).unwrap();
+        assert!(
+            known.contains(&account.account_id()),
+            "offline positive legacy history must create a roster candidate"
+        );
+        assert!(
+            !known.contains(&empty_account.account_id()),
+            "cached account binding alone is not a history contact"
+        );
+    }
+}
+
+#[test]
+fn account_ever_history_attributes_recovery_origins_in_bounded_metadata_batches() {
+    use crate::eventlog::{Author, event::EventId};
+    let dir = tempfile::tempdir().unwrap();
+    let origins: Vec<_> = (0..64).map(|_| DeviceIdentity::generate()).collect();
+    let (mut origin_log, _) = crate::storage::record_log::EncryptedRecordLog::<[u8; 32]>::open(
+        &dir.path().join("recovery-origin.log"),
+        "pw",
+        b"MTORIG",
+    )
+    .unwrap();
+    for origin in &origins {
+        origin_log
+            .append_durable(&origin.public().ed25519_pub)
+            .unwrap();
+    }
+    drop(origin_log);
+    let node = recent_search_node(dir.path());
+    configure_ever_history_privacy(&node, dir.path());
+    assert_eq!(node.recovery_origins.len(), 64);
+    assert_eq!(
+        node.recovery_origins.last(),
+        Some(&Author::from_ed25519(
+            origins.last().unwrap().public().ed25519_pub
+        ))
+    );
+    let mut requested = Vec::new();
+    let mut last_peer = None;
+    for _ in 0..3 {
+        let peer = DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        node.roster.lock().unwrap().update(
+            &Announce::new_with_account(&peer, &account, "Recovered", 1),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+        requested.push(account.account_id());
+        last_peer = Some(peer);
+    }
+    let positive = requested.last().unwrap().clone();
+    let peer = last_peer.unwrap();
+    let conversation = dm_conversation_id(&origins.last().unwrap().public(), &peer.public());
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            peer.user_id(),
+            1,
+            &MessageBody::new(b"recovered legacy".to_vec(), None).encode(),
+            EventId::new([9; 32]),
+        )
+        .unwrap();
+    for index in 3..130 {
+        requested.push(format!("{index:032x}"));
+    }
+    let result = node.accounts_with_ever_history(&requested).unwrap();
+    assert_eq!(result, std::collections::HashSet::from([positive.clone()]));
+    node.cached_peer_snapshot().unwrap();
+    node.received
+        .lock()
+        .unwrap()
+        .remove_where(|_| true)
+        .unwrap();
+    let secret = node.identity.secret_bytes();
+    drop(node);
+    let reopened = recent_search_node_with_identity(
+        dir.path(),
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+    );
+    configure_ever_history_privacy(&reopened, dir.path());
+    assert!(reopened.roster.lock().unwrap().peers().is_empty());
+    assert_eq!(
+        reopened.accounts_with_ever_history(&requested).unwrap(),
+        std::collections::HashSet::from([positive.clone()])
+    );
+    assert!(
+        reopened
+            .contact_history_account_ids(&[])
+            .unwrap()
+            .contains(&positive)
+    );
+}
+
+fn configure_ever_history_privacy(node: &Node, directory: &std::path::Path) {
+    node.configure_privacy(
+        directory,
+        "pw",
+        &node.signed_announce("Me", 1),
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+}
+
+#[test]
+fn account_ever_history_attributes_certified_sibling_legacy_file_history() {
+    use crate::eventlog::{ConversationId, event::EventId};
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    configure_ever_history_privacy(&node, dir.path());
+    let sibling = DeviceIdentity::generate();
+    node.account_devices
+        .lock()
+        .unwrap()
+        .insert(crate::node::account_devices::AccountDevice {
+            public: sibling.public(),
+            certificate: node.account.certify(&sibling.public().ed25519_pub),
+        })
+        .unwrap();
+    let peer = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let empty_peer = DeviceIdentity::generate();
+    let empty_account = crate::identity::account::Account::generate();
+    for (device, account) in [(&peer, &account), (&empty_peer, &empty_account)] {
+        node.roster.lock().unwrap().update(
+            &Announce::new_with_account(device, account, "File peer", 1),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+    }
+    node.cached_peer_snapshot().unwrap();
+    node.roster.lock().unwrap().evict_stale(Duration::ZERO);
+    let requested = vec![account.account_id(), empty_account.account_id()];
+    assert!(
+        node.accounts_with_ever_history(&requested)
+            .unwrap()
+            .is_empty()
+    );
+    let conversation = dm_conversation_id(&sibling.public(), &peer.public());
+    let manifest = crate::file::FileManifest {
+        name: "sibling.bin".into(),
+        size: 1,
+        mime: "application/octet-stream".into(),
+        checksum: [1; 32],
+        file_key: [2; 32],
+        file_conv: ConversationId::new([3; 32]),
+        chunk_count: 1,
+    }
+    .encode();
+    node.received_files
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            sibling.user_id(),
+            1,
+            &manifest,
+            EventId::new([8; 32]),
+        )
+        .unwrap();
+    assert_eq!(
+        node.accounts_with_ever_history(&requested).unwrap(),
+        std::collections::HashSet::from([account.account_id()]),
+        "a certified own sibling's legacy file host is attributable history"
+    );
+    node.received_files
+        .lock()
+        .unwrap()
+        .remove_where(|_| true)
+        .unwrap();
+    let secret = node.identity.secret_bytes();
+    drop(node);
+    let reopened = recent_search_node_with_identity(
+        dir.path(),
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+    );
+    configure_ever_history_privacy(&reopened, dir.path());
+    assert_eq!(
+        reopened.accounts_with_ever_history(&requested).unwrap(),
+        std::collections::HashSet::from([account.account_id()])
+    );
+    let known = reopened.contact_history_account_ids(&[]).unwrap();
+    assert!(known.contains(&account.account_id()));
+    assert!(!known.contains(&empty_account.account_id()));
 }

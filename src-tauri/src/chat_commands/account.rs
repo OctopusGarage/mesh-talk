@@ -249,6 +249,8 @@ pub struct AccountInfo {
     pub account_id: String,
     pub device_count: usize,
     pub names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact_expires_at_ms: Option<u64>,
 }
 
 #[tauri::command]
@@ -282,21 +284,69 @@ pub async fn list_accounts(
             if rt.host_account_id() != Some(owner.as_str()) {
                 return Err("Contact roster requires this account's running node".into());
             }
-            let mut peers = rt.peers();
+            let mut peers = rt
+                .handle()
+                .cached_peer_snapshot()
+                .map_err(|error| error.to_string())?;
             peers.sort_by_key(|peer| std::cmp::Reverse(peer.last_seen));
             let live = peers
                 .into_iter()
                 .filter_map(|p| p.account_id.map(|id| (id, p.name, p.post_office)))
                 .collect();
-            let mut rows =
-                merge_account_rows(live, rt.known_account_ids().map_err(|e| e.to_string())?);
-            fill_account_names(
-                &mut rows,
-                rt.known_account_names()
-                    .map_err(|error| error.to_string())?,
-            );
+            let known = rt.known_account_ids().map_err(|e| e.to_string())?;
+            // These are durable sent/received/file routes or restored legacy
+            // recovery records, never authenticated transport/session routes.
+            let legacy_history: std::collections::HashSet<_> = known.iter().cloned().collect();
+            let mut rows = merge_account_rows(live, known);
+            let known_names = rt
+                .known_account_names()
+                .map_err(|error| error.to_string())?;
             let personal = policy.personal_snapshot(&owner, &rt.handle())?;
-            rows.retain(|row| !personal.deleted.contains(&row.account_id));
+            let deleted: std::collections::HashSet<_> = personal.deleted.iter().cloned().collect();
+            rows.retain(|row| !deleted.contains(&row.account_id));
+            let accounts: Vec<_> = rows
+                .iter()
+                .filter(|row| !legacy_history.contains(&row.account_id))
+                .map(|row| row.account_id.clone())
+                .collect();
+            match rt.handle().contact_history_account_ids(&accounts) {
+                Ok(mut ever_history) => {
+                    // Positive legacy history can arrive via custody while its
+                    // verified sender is absent from the live roster. Discovery
+                    // alone still cannot manufacture a historical contact.
+                    let existing: std::collections::HashSet<_> =
+                        rows.iter().map(|row| row.account_id.clone()).collect();
+                    for account in &ever_history {
+                        if !existing.contains(account) && !deleted.contains(account) {
+                            rows.push(AccountInfo {
+                                account_id: account.clone(),
+                                device_count: 0,
+                                names: Vec::new(),
+                                contact_expires_at_ms: None,
+                            });
+                        }
+                    }
+                    rows.sort_by(|left, right| left.account_id.cmp(&right.account_id));
+                    ever_history.extend(legacy_history);
+                    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                        Ok(now) => {
+                            let now_ms = now.as_millis().min(u64::MAX as u128) as u64;
+                            if let Err(error) = policy.expire_empty_accounts(
+                                &owner,
+                                rt.account_id(),
+                                &mut rows,
+                                &ever_history,
+                                now_ms,
+                            ) {
+                                log::warn!("Contact expiry unavailable: {error}");
+                            }
+                        }
+                        Err(error) => log::warn!("Contact expiry clock unavailable: {error}"),
+                    }
+                }
+                Err(error) => log::warn!("Contact history eligibility unavailable: {error}"),
+            }
+            fill_account_names(&mut rows, known_names);
             Ok(rows)
         })
     })
@@ -333,6 +383,7 @@ fn merge_account_rows(live: Vec<(String, String, bool)>, known: Vec<String>) -> 
     by_account
         .into_iter()
         .map(|(account_id, names)| AccountInfo {
+            contact_expires_at_ms: None,
             device_count: names.len(),
             names,
             account_id,
