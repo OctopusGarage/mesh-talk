@@ -1,3 +1,7 @@
+import {
+  resetOutgoingMediaPreviews,
+  pruneOutgoingMediaPreviews,
+} from "./outgoingMediaPreviews";
 import { createRosterObservation } from "@/lib/rosterObservation";
 import { presence as rosterPresenceApi } from "@/lib/api/diagnostics";
 import type { RosterTicket } from "@/lib/syncInvalidation";
@@ -199,6 +203,7 @@ function applyVerifiedIdentity(
     const replacedScope =
       invalidateScope ||
       (state.myAccountId !== "" && state.myAccountId !== acct);
+    if (replacedScope) resetOutgoingMediaPreviews();
     const hydrated = sameScope
       ? state
       : mergeReception(
@@ -339,6 +344,7 @@ async function pollUntilReady(
               );
         if (superseded() || performance.now() >= deadline) return false;
         if (startup === null && get().startupId !== null) {
+          resetOutgoingMediaPreviews();
           resetChatFileAvailability();
           set((state) => ({
             ...invalidateConversationIdentity(state),
@@ -354,6 +360,7 @@ async function pollUntilReady(
             Boolean(startup.account_id && startup.device_id);
           const changed = get().startupId !== startup.startup_id;
           if ((changed || !hasIdentity) && get().myAccountId) {
+            resetOutgoingMediaPreviews();
             resetChatFileAvailability();
             set((state) => ({
               ...invalidateConversationIdentity(state),
@@ -504,6 +511,7 @@ export interface ChatState
     path: string,
     media: boolean,
     expiresAtMs?: number | null,
+    localPreview?: Blob,
   ) => Promise<void>;
   admitImage: (
     path: string,
@@ -761,6 +769,7 @@ async function refreshRosterSnapshot(
     ) {
       // Runtime/account replacement can happen without a host logout. Invalidate
       // old in-flight conversation work; the run's owned ticker performs fresh boot.
+      resetOutgoingMediaPreviews();
       resetChatFileAvailability();
       rawSet((state) => ({
         ...invalidateConversationIdentity(state),
@@ -973,6 +982,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   setError: (msg) => rawSet({ error: msg }),
 
   resetForLock: () => {
+    resetOutgoingMediaPreviews();
     publishedAccountRoster = null;
     setPushStateSupport(null);
     lastUnknownSenderRefresh = 0;
@@ -1145,6 +1155,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   },
 
   start: () => {
+    resetOutgoingMediaPreviews();
     rawSet((s) => ({ runEpoch: s.runEpoch + 1 }));
     const lease = captureChat(get, false);
     const set = guardedSet(rawSet, lease.current);
@@ -1375,8 +1386,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         state.ledger !== previous.ledger ||
         state.incomingFiles !== previous.incomingFiles ||
         state.searchTarget !== previous.searchTarget
-      )
+      ) {
+        pruneOutgoingMediaPreviews();
         expiry.schedule();
+      }
     });
     const resumeReception = () => {
       if (
@@ -1627,6 +1640,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       }
       unlisten();
       if (get().runEpoch === lease.run) {
+        resetOutgoingMediaPreviews();
         stopChatCalls();
         rawSet((s) => ({
           runEpoch: s.runEpoch + 1,
@@ -2001,17 +2015,24 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     // Local transfer gives the bubble sole retry ownership, including native failure.
     return (await admission) ? "accepted" : "failed";
   },
-  sendFile: async (path, media, expiresAtMs) => {
+  sendFile: async (path, media, expiresAtMs, localPreview) => {
     const lease = captureChat(get);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    await sendIntent(rawSet, get, c, {
-      kind: "file",
-      path,
-      media,
-      expiresAtMs,
-    });
+    const sending = beginSendIntent(
+      rawSet,
+      get,
+      c,
+      {
+        kind: "file",
+        path,
+        media,
+        expiresAtMs,
+      },
+      { localPreview },
+    );
+    if (sending) await sending;
   },
 
   toggleReaction: async (target, emoji, remove) => {
@@ -2205,17 +2226,27 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           convKey(get().active!) !== convKey(c)
         )
           return;
-        const sending = beginSendIntent(rawSet, get, c, {
-          kind: "file",
-          path: stagedPath,
-          media: true,
-          expiresAtMs,
-          stickerMedia: {
-            name: snapshot.name,
-            size: snapshot.bytes.length,
-            mime: snapshot.mime,
+        const sending = beginSendIntent(
+          rawSet,
+          get,
+          c,
+          {
+            kind: "file",
+            path: stagedPath,
+            media: true,
+            expiresAtMs,
+            stickerMedia: {
+              name: snapshot.name,
+              size: snapshot.bytes.length,
+              mime: snapshot.mime,
+            },
           },
-        });
+          {
+            localPreview: new Blob([new Uint8Array(snapshot.bytes)], {
+              type: snapshot.mime,
+            }),
+          },
+        );
         if (!sending) return;
         // The ordinary file intent owns this immutable path through retry.
         transferred = true;

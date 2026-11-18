@@ -42,6 +42,16 @@ not replay preparation. Progress transitions last 160ms and stop under reduced
 motion. Decoded images preserve their original proportions, and file availability,
 preview failures, consent and delayed message arrival keep their separate meanings.
 
+Outgoing images and stickers keep the exact locally captured artwork while the
+canonical file source decodes. Stickers reserve a 128px stage; photos retain the
+selected image proportions. Replacing identical artwork happens without replaying
+a loading phase. Preview URLs are presentation only: at most eight images, three
+MiB each and twelve MiB total, reclaimed after thirty seconds or earlier on
+canonical decode and owner retirement. Protected and read-only views never use
+them. Files put transfer status in their secondary line; photos use a restrained
+status capsule over the image. Percentages and remaining time come only from
+measured transfer observations, and byte completion remains confirmation pending.
+
 Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
 
 Group member lists show people, their presence and account role. Device counts, routing identities and per-device sharing state stay out of the list. Personal sharing options live in Group settings.
@@ -76,7 +86,6 @@ Selecting a signal expands its explanation in the message flow; hover and focus
 do not open overlays. Enter/Space toggles the disclosure, Escape collapses it
 and restores focus. Reset disclosure on message, conversation or session changes.
 Failure text, retry actions and file byte progress retain their separate meaning.
-
 
 ### Message reactions
 

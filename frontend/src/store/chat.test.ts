@@ -3051,6 +3051,13 @@ describe("incoming events", () => {
     const newStop = useChat.getState().start();
     await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
     const run = useChat.getState().runEpoch;
+    const previews = await import("./outgoingMediaPreviews");
+    previews.retainOutgoingMediaPreview(
+      "new-run",
+      new Blob(["image"], { type: "image/png" }),
+      () => true,
+    );
+    expect(previews.getOutgoingMediaPreview("new-run")).toBeDefined();
     oldEvents.onFile({
       from: "stranger",
       is_channel: false,
@@ -3064,7 +3071,9 @@ describe("incoming events", () => {
     expect(useChat.getState().incomingFiles).toEqual([]);
     expect(useChat.getState().runEpoch).toBe(run);
     expect(useChat.getState().ready).toBe(true);
+    expect(previews.getOutgoingMediaPreview("new-run")).toBeDefined();
     newStop();
+    expect(previews.getOutgoingMediaPreview("new-run")).toBeUndefined();
   });
 
   const peer = {
@@ -5751,6 +5760,8 @@ it("revokes an old staged identity when a full reply races a newer pending start
 it("sends installed sticker bytes as media and retries that snapshot after pack removal", async () => {
   const { usePacks } = await import("./packs");
   const { decodeStickerMedia } = await import("@/lib/stickerMedia");
+  const previews = await import("./outgoingMediaPreviews");
+  const create = vi.spyOn(URL, "createObjectURL");
   const fullPacks: import("@/lib/pack").CustomizationPack[] = [
     {
       kind: "sticker",
@@ -5791,6 +5802,13 @@ it("sends installed sticker bytes as media and retries that snapshot after pack 
   ).toMatchObject({ bytes: [1, 2, 3], ext: "png" });
   const failed = useChat.getState().messages["account:target"][0];
   expect(failed.failed).toBe(true);
+  const exactBlob = create.mock.calls[create.mock.calls.length - 1][0] as Blob;
+  expect(Array.from(new Uint8Array(await exactBlob.arrayBuffer()))).toEqual([
+    1, 2, 3,
+  ]);
+  expect(previews.getOutgoingMediaPreview(failed.clientId)).toBeDefined();
+  create.mockRestore();
+  previews.resetOutgoingMediaPreviews();
   expect(decodeStickerMedia(failed.file!)).toEqual({
     id: "pack:cats:wave",
     fallback: "👋",

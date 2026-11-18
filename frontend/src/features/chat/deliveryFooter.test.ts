@@ -224,7 +224,7 @@ describe("automatic delivery footer", () => {
       });
       expect(markup).not.toContain("0 B");
       expect(markup).not.toContain('data-testid="file-image"');
-      expect(markup).toContain('disabled=""');
+      expect(markup).not.toContain('aria-label="Save"');
     }
     await i18n.changeLanguage("en");
   });
@@ -347,4 +347,24 @@ it("shows file-card ingress without claiming byte-download provenance", async ()
   );
   expect(html).toContain('aria-label="Received from a post office"');
   expect(html).not.toContain("data-custody=");
+});
+
+it("lets a pending file's transfer surface own its sending label", async () => {
+  await i18n.changeLanguage("en");
+  const html = render({
+    ...base,
+    id: null,
+    pending: true,
+    metadataPending: true,
+    file: {
+      name: "report.pdf",
+      size: 0,
+      mime: "application/pdf",
+      fileConv: "",
+      media: false,
+    },
+  });
+  expect(html).toContain("Preparing");
+  expect(html).not.toContain("> · sending");
+  expect(render({ ...base, id: null, pending: true })).toContain("> · sending");
 });

@@ -1,3 +1,4 @@
+import { canPreviewStaticImage } from "@/lib/imageDimensions";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -108,6 +109,7 @@ export function useAttachmentIntake(
     media: boolean,
     current: Current,
     policy: AttachmentSendOptions,
+    localPreview?: Blob,
   ) {
     if (!current()) return;
     if (policy.protection) {
@@ -124,7 +126,9 @@ export function useAttachmentIntake(
       return outcome === "accepted";
     }
     const sendFile = useChat.getState().sendFile;
-    if (policy.expiresAtSend)
+    if (localPreview)
+      await sendFile(path, media, policy.expiresAtSend?.(), localPreview);
+    else if (policy.expiresAtSend)
       await sendFile(path, media, policy.expiresAtSend());
     else await sendFile(path, media);
     if (current()) policy.onHandoff?.();
@@ -137,6 +141,7 @@ export function useAttachmentIntake(
     media: boolean,
     current: Current,
     policy: AttachmentSendOptions,
+    mime?: string,
   ) {
     if (!current()) return;
     if (policy.protection && bytes.byteLength > IMAGE_INLINE_CAP)
@@ -150,7 +155,22 @@ export function useAttachmentIntake(
     }
     // The intent retains this path for its own retry lifecycle after handoff.
     try {
-      return await handoff(path, media, current, policy);
+      const image =
+        media &&
+        (mime?.startsWith("image/") || isImage(name ?? `image.${ext}`));
+      const previewMime = mime?.startsWith("image/")
+        ? mime
+        : ext.toLowerCase() === "jpg" || ext.toLowerCase() === "jpeg"
+          ? "image/jpeg"
+          : `image/${ext.toLowerCase()}`;
+      const localPreview =
+        !policy.protection &&
+        image &&
+        bytes.byteLength <= 3 * 1024 ** 2 &&
+        canPreviewStaticImage(bytes, previewMime)
+          ? new Blob([new Uint8Array(bytes)], { type: previewMime })
+          : undefined;
+      return await handoff(path, media, current, policy, localPreview);
     } catch (error) {
       // Refused before intent transfer: staging still owns this temporary source.
       await chat.deleteTempFile(path).catch(() => {});
@@ -232,6 +252,7 @@ export function useAttachmentIntake(
             isVideo(file.name),
           () => current() && sourceCurrent(),
           policy,
+          file.type,
         );
         if (accepted === undefined) return;
         handedOffCount++;

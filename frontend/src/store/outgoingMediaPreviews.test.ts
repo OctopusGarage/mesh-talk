@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   getOutgoingMediaPreview,
+  pruneOutgoingMediaPreviews,
   releaseOutgoingMediaPreview,
   resetOutgoingMediaPreviews,
   retainOutgoingMediaPreview,
@@ -298,4 +299,14 @@ it("subscribes a mounted consumer to just its chosen entry", () => {
   } finally {
     act(() => root.unmount());
   }
+});
+
+it("reclaims a retired message row on its producer invalidation without waiting for TTL", () => {
+  let retained = true;
+  retainOutgoingMediaPreview("deleted", image(), () => retained);
+  retained = false;
+  pruneOutgoingMediaPreviews();
+  expect(getOutgoingMediaPreview("deleted")).toBeUndefined();
+  expect(revokeUrl).toHaveBeenCalledExactlyOnceWith("blob:outgoing-1");
+  expect(vi.getTimerCount()).toBe(0);
 });

@@ -173,3 +173,8 @@ export function useOutgoingMediaPreview(
 ): OutgoingMediaPreview | undefined {
   return usePreviews((entries) => readPreview(entries, key));
 }
+
+/** Reclaim previews whose optimistic or canonical row was retired. */
+export function pruneOutgoingMediaPreviews(): void {
+  releasePreviews();
+}

@@ -1521,3 +1521,65 @@ it("rechecks channel custody after an invalidation during an older one-copy read
   });
   expect(store.getState().statusBusy).toBe(false);
 });
+
+it("retains local preview before native admission without adding Blob to intent", async () => {
+  const { getOutgoingMediaPreview, resetOutgoingMediaPreviews } =
+    await import("./outgoingMediaPreviews");
+  const create = vi.fn(() => "blob:outgoing");
+  vi.stubGlobal("URL", { createObjectURL: create, revokeObjectURL: vi.fn() });
+  const store = session();
+  let resolve!: (value: unknown) => void;
+  invoke.mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" });
+  const sending = beginSendIntent(
+    store.setState,
+    store.getState,
+    conversation,
+    { kind: "file", path: "/tmp/image.png", media: true },
+    { localPreview: blob },
+  );
+  const intent = Object.values(store.getState().intents)[0];
+  expect(getOutgoingMediaPreview(intent.message.clientId)?.url).toBe(
+    "blob:outgoing",
+  );
+  expect(create).toHaveBeenCalledWith(blob);
+  expect(Object.values(intent)).not.toContain(blob);
+  expect(Object.values(intent.payload)).not.toContain(blob);
+  resolve({ id: "event", fileConv: "file" });
+  await sending;
+  expect(store.getState().messages[key][0].clientId).toBe(
+    intent.message.clientId,
+  );
+  store.setState({ messages: { [key]: [] }, intents: {} });
+  expect(getOutgoingMediaPreview(intent.message.clientId)).toBeUndefined();
+  store.setState({ identityEpoch: 1 });
+  expect(getOutgoingMediaPreview(intent.message.clientId)).toBeUndefined();
+  resetOutgoingMediaPreviews();
+  vi.unstubAllGlobals();
+});
+
+it("never creates local previews for protected file intents", async () => {
+  const create = vi.fn();
+  vi.stubGlobal("URL", { createObjectURL: create, revokeObjectURL: vi.fn() });
+  const store = session();
+  invoke.mockResolvedValue({ id: "protected", fileConv: "secret" });
+  await beginSendIntent(
+    store.setState,
+    store.getState,
+    conversation,
+    {
+      kind: "file",
+      path: "/tmp/private.png",
+      media: true,
+      protection: "authenticate",
+    },
+    { localPreview: new Blob(["secret"], { type: "image/png" }) },
+  );
+  expect(create).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});

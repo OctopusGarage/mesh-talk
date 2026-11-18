@@ -108,6 +108,13 @@ Static PNG/JPEG inline views request ephemeral `read_media_preview` binary bytes
 core derives a PNG within 768 pixels without upscaling and preserves orientation
 and alpha. Encoded input is at most 16 MiB, static dimensions at most 16,777,216
 pixels and decoder allocation at most 64 MiB; this is not a whole-process budget.
+Optional outgoing still-image previews reuse the bounded raster-header reader in
+`ui/lib/imageDimensions.ts` before creating any original-image URL. Only verified
+PNG/JPEG dimensions within the same pixel ceiling are admitted; unknown,
+uninspectable or excessive dimension headers retain the preparing surface. Header
+inspection is not full image validation; decoder failures retain the existing
+retry presentation. The existing pack
+validator shares that reader and retains its own stricter pack limits.
 APNG retains its original animation, and GIF/WebP/video keep their existing paths.
 Current protection, expiry, consent and source identity are rechecked around work.
 The host admits at most 64 queued requests and one decode. One five-second

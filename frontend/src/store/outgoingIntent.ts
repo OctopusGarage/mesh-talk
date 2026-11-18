@@ -1,3 +1,7 @@
+import {
+  retainOutgoingMediaPreview,
+  releaseOutgoingMediaPreview,
+} from "./outgoingMediaPreviews";
 import type {
   GroupOperationContext,
   GroupOperationTicket,
@@ -356,6 +360,7 @@ export function settleGroupSendIntents(
           )
         : {},
     );
+    if (next === null) releaseOutgoingMediaPreview(clientId);
     // Complete the durable identity before fallible composer cleanup.
     if (status.phase.kind === "committed" && lease.current())
       intent.onAccepted?.();
@@ -397,6 +402,7 @@ export function beginSendIntent(
   c: Conversation,
   payload: SendPayload,
   options: {
+    localPreview?: Blob;
     waitForHydration?: boolean;
     onAccepted?: () => void;
     retainFailure?: boolean;
@@ -475,7 +481,30 @@ export function beginSendIntent(
     );
     return null;
   }
-  return dispatchIntent(set, get, intent, options);
+  if (payload.kind === "file" && !payload.protection && options.localPreview)
+    retainOutgoingMediaPreview(
+      clientId,
+      options.localPreview,
+      () =>
+        current() &&
+        (Boolean(get().intents[clientId]) ||
+          Boolean(
+            get().messages[key]?.some((row) => row.clientId === clientId),
+          )),
+    );
+  if (!current() || get().intents[clientId] !== intent) {
+    releaseOutgoingMediaPreview(clientId);
+    set((state) =>
+      state.intents[clientId] === intent
+        ? completeSendIntentState(state, c, clientId, null)
+        : {},
+    );
+    return null;
+  }
+  return dispatchIntent(set, get, intent, {
+    waitForHydration: options.waitForHydration,
+    retainFailure: options.retainFailure,
+  });
 }
 
 export async function dispatchIntent(

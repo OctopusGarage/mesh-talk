@@ -1683,3 +1683,44 @@ it.each(["conversation", "auth"])(
     expect(useChat.getState().sendFile).not.toHaveBeenCalled();
   },
 );
+
+it("reuses staged image bytes for the optimistic preview without another native read", async () => {
+  native.invoke.mockClear();
+  native.invoke.mockResolvedValue("/tmp/exact.png");
+  const selected = new File([], "exact.png", { type: "image/png" });
+  const header = new Uint8Array([
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 32,
+    0, 0, 0, 32,
+  ]);
+  Object.defineProperty(selected, "arrayBuffer", {
+    configurable: true,
+    value: async () => header.buffer,
+  });
+  await act(async () => composer.onPasteFiles!([selected]));
+  const calls = vi.mocked(useChat.getState().sendFile).mock.calls;
+  const args = calls[calls.length - 1];
+  const preview = args[3]!;
+  expect(preview.type).toBe("image/png");
+  expect(preview.size).toBe(header.length);
+  expect(native.invoke.mock.calls.map(([command]) => command)).toEqual([
+    "write_temp_file",
+  ]);
+});
+
+it("sends oversized-pixel images without creating an optimistic original decode", async () => {
+  native.invoke.mockResolvedValue("/tmp/large-pixels.png");
+  const bytes = new Uint8Array([
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 23, 112,
+    0, 0, 15, 160,
+  ]);
+  const selected = new File([], "large-pixels.png", { type: "image/png" });
+  Object.defineProperty(selected, "arrayBuffer", {
+    value: async () => bytes.buffer,
+  });
+  await act(async () => composer.onPasteFiles!([selected]));
+  expect(useChat.getState().sendFile).toHaveBeenCalledWith(
+    "/tmp/large-pixels.png",
+    true,
+    null,
+  );
+});

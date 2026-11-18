@@ -138,7 +138,10 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
-async function renderImage(readOnly = false) {
+async function renderImage(
+  readOnly = false,
+  localPreview?: { url: string; current: () => boolean; release: () => void },
+) {
   await act(async () =>
     root.render(
       createElement(MediaPreview, {
@@ -147,6 +150,7 @@ async function renderImage(readOnly = false) {
         size: 100,
         mime: "image/png",
         readOnly,
+        localPreview,
       }),
     ),
   );
@@ -590,4 +594,180 @@ it("keeps video controls interactive and restores focus after Escape", async () 
   );
   expect(host.querySelector('[data-testid="file-video-lightbox"]')).toBeNull();
   expect(document.activeElement).toBe(trigger);
+});
+
+it("keeps selected image geometry and pixels until the durable source decodes", async () => {
+  const preview = {
+    url: "blob:selected-photo",
+    current: () => true,
+    release: vi.fn(),
+  };
+  state.status = { ...state.status, ready: false };
+  state.url = null;
+  await renderImage(false, preview);
+  const selected = host.querySelector<HTMLImageElement>(
+    '[data-testid="outgoing-media-preview"]',
+  )!;
+  expect(selected).not.toBeNull();
+  await loadImage(selected, 400, 800);
+  expect(selected.parentElement?.style.aspectRatio).toBe("400 / 800");
+  expect(host.querySelector("button")).toBeNull();
+  state.status = { ...state.status, ready: true };
+  state.url = "blob:durable-selected-photo";
+  await renderImage(false, preview);
+  const durable = host.querySelector<HTMLImageElement>(
+    '[data-testid="file-image"]',
+  )!;
+  expect(
+    durable.closest("[data-inline-image]")?.getAttribute("style"),
+  ).toContain("400 / 800");
+  expect(preview.release).not.toHaveBeenCalled();
+  await loadImage(durable, 400, 800);
+  expect(preview.release).toHaveBeenCalledTimes(1);
+  expect(
+    host.querySelector('[data-testid="outgoing-media-preview"]'),
+  ).toBeNull();
+});
+it("does not show local selected images in read-only or retired history", async () => {
+  const preview = {
+    url: "blob:selected-private",
+    current: () => true,
+    release: vi.fn(),
+  };
+  state.url = null;
+  await renderImage(true, preview);
+  expect(
+    host.querySelector('[data-testid="outgoing-media-preview"]'),
+  ).toBeNull();
+  await renderImage(false, { ...preview, current: () => false });
+  expect(
+    host.querySelector('[data-testid="outgoing-media-preview"]'),
+  ).toBeNull();
+});
+it("rejects late durable photo callbacks after source replacement and owner retirement", async () => {
+  const preview = {
+    url: "blob:selected-late",
+    current: () => true,
+    release: vi.fn(),
+  };
+  await renderImage(false, preview);
+  const old = host.querySelector<HTMLImageElement>(
+    '[data-testid="file-image"]',
+  )!;
+  state.url = "blob:new-photo-source";
+  await renderImage(false, preview);
+  await loadImage(old);
+  expect(preview.release).not.toHaveBeenCalled();
+  state.current = false;
+  await loadImage(
+    host.querySelector<HTMLImageElement>('[data-testid="file-image"]')!,
+  );
+  expect(preview.release).not.toHaveBeenCalled();
+});
+
+it("uses the truthful preparing stage when an optional selected photo cannot decode", async () => {
+  state.url = null;
+  const preview = {
+    url: "blob:selected-invalid-photo",
+    current: () => true,
+    release: vi.fn(),
+  };
+  await renderImage(false, preview);
+  await act(async () =>
+    host
+      .querySelector('[data-testid="outgoing-media-preview"]')!
+      .dispatchEvent(new Event("error")),
+  );
+  expect(
+    host.querySelector('[data-testid="outgoing-media-preview"]'),
+  ).toBeNull();
+  expect(host.textContent).toContain("transfer.imagePreparing");
+  expect(preview.release).not.toHaveBeenCalled();
+});
+
+it("prepares an unstaged local image without requesting file bytes", async () => {
+  state.status = { ...state.status, ready: false };
+  state.sources.mockClear();
+  await act(async () =>
+    root.render(
+      createElement(MediaPreview, {
+        fileConv: "",
+        name: "photo.png",
+        mime: "image/png",
+        size: 4_000_000,
+        preparing: true,
+      }),
+    ),
+  );
+  expect(host.textContent).toContain("transfer.imagePreparing");
+  expect(state.sources.mock.calls.every(([enabled]) => enabled === false)).toBe(
+    true,
+  );
+  expect(host.querySelector("button")).toBeNull();
+});
+
+it("retains exact selected artwork when the canonical preview read fails", async () => {
+  const preview = {
+    url: "blob:selected-read-failure",
+    current: () => true,
+    release: vi.fn(),
+  };
+  await renderImage(false, preview);
+  await act(async () => {
+    state.failPreview = true;
+    state.previewError?.();
+  });
+  expect(
+    host.querySelector('[data-testid="outgoing-media-preview"]'),
+  ).not.toBeNull();
+  expect(host.textContent).toContain("files.unavailable");
+  expect(host.textContent).toContain("common.retry");
+  expect(preview.release).not.toHaveBeenCalled();
+});
+it("lets the outgoing transfer surface own preparation without a duplicate inner status", async () => {
+  state.status = { ...state.status, ready: false };
+  await act(async () =>
+    root.render(
+      createElement(MediaPreview, {
+        fileConv: "",
+        name: "photo.png",
+        size: 4_000_000,
+        preparing: true,
+        externalStatus: true,
+      }),
+    ),
+  );
+  expect(host.textContent).not.toContain("transfer.imagePreparing");
+  expect(host.querySelector('[role="progressbar"]')).toBeNull();
+});
+
+it("does not label a locally preparing video as waiting for incoming bytes", async () => {
+  state.status = { ...state.status, ready: false, done: 0, total: 0 };
+  await act(async () =>
+    root.render(
+      createElement(MediaPreview, {
+        fileConv: "",
+        name: "clip.mp4",
+        size: 100,
+        preparing: true,
+        externalStatus: true,
+      }),
+    ),
+  );
+  expect(host.textContent).not.toContain("transfer.waiting");
+});
+it("keeps a neutral media stage after outgoing admission fails", async () => {
+  state.status = { ...state.status, ready: false, done: 0, total: 0 };
+  await act(async () =>
+    root.render(
+      createElement(MediaPreview, {
+        fileConv: "",
+        name: "photo.png",
+        size: 100,
+        failed: true,
+      }),
+    ),
+  );
+  expect(host.textContent).not.toContain("transfer.imageWaiting");
+  expect(host.querySelector('[role="progressbar"]')).toBeNull();
 });

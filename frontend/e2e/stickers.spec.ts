@@ -95,7 +95,61 @@ test("an installed cat sticker collection can send artwork", async ({
   const option = page.getByTestId("sticker-option-pack:cats:cat-01-01");
   const label = await option.getAttribute("title");
   await expect(option.locator("img")).toBeVisible();
+  // Hold the real admission boundary so the selected, immutable artwork must
+  // carry the pending stage before any canonical file source exists.
+  await page.evaluate(() => {
+    const win = window as unknown as {
+      __releaseSticker?: () => void;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const original = win.__TAURI_INTERNALS__.invoke;
+    win.__TAURI_INTERNALS__.invoke = (cmd, args) =>
+      cmd === "owner_enqueue_file"
+        ? new Promise((resolve, reject) => {
+            win.__releaseSticker = () => {
+              void original(cmd, args).then(resolve, reject);
+            };
+          })
+        : original(cmd, args);
+  });
   await option.click();
+  const bubble = page.getByTestId("message-bubble").last();
+  const preview = bubble.getByTestId("outgoing-media-preview");
+  await expect(preview).toBeVisible();
+  await expect
+    .poll(() =>
+      preview.evaluate((img) => (img as HTMLImageElement).naturalWidth),
+    )
+    .toBeGreaterThan(0);
+  await expect(bubble.getByTestId("message-sticker-fallback")).toHaveCount(0);
+  await expect(bubble.getByText(/Loading|Waiting for file/)).toHaveCount(0);
+  const before = await preview.boundingBox();
+  expect(before?.height).toBeCloseTo(128, 2);
+  await page.screenshot({
+    path: test.info().outputPath("sticker-pending-desktop.png"),
+  });
+  await page.setViewportSize({ width: 760, height: 700 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(preview).toBeVisible();
+  expect((await preview.boundingBox())?.height).toBeCloseTo(128, 2);
+  await page.screenshot({
+    path: test.info().outputPath("sticker-pending-narrow-reduced.png"),
+  });
+  await page.evaluate(() =>
+    (window as unknown as { __releaseSticker: () => void }).__releaseSticker(),
+  );
+  await expect(preview).toHaveCount(0);
+  const canonical = page.getByTestId("message-sticker").last();
+  await expect(canonical).toBeVisible();
+  expect((await canonical.boundingBox())?.height).toBeCloseTo(
+    before!.height,
+    2,
+  );
   await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
     "alt",
     `[${label}]`,
