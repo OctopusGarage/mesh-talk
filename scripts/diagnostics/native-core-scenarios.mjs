@@ -427,13 +427,13 @@ record('started');return true;`);
 }
 
 /** Retire both closing modal surfaces and their focus scope before reopening. */
-export async function settledPrivacyCancellation(c) {
-  await c.until("invisible cancellation retires its modal and restores its trigger", () => c.execute("const closing=Array.from(document.querySelectorAll('[data-state=closed]')).some(e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.position==='fixed'&&s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&r.left<=0&&r.top<=0&&r.right>=innerWidth&&r.bottom>=innerHeight;});return !closing&&!document.querySelector('[data-testid=invisible-confirm]')&&document.activeElement?.getAttribute('data-testid')==='invisible-switch';"));
+export async function settledPrivacyConfirmationDismissal(c) {
+  await c.until("invisible confirmation retires its modal and restores its trigger", () => c.execute("const closing=Array.from(document.querySelectorAll('[data-state=closed]')).some(e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.position==='fixed'&&s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&r.left<=0&&r.top<=0&&r.right>=innerWidth&&r.bottom>=innerHeight;});return !closing&&!document.querySelector('[data-testid=invisible-confirm]')&&document.activeElement?.getAttribute('data-testid')==='invisible-switch';"));
   return { confirmationDismissed: true, triggerFocusRestored: true, closingSurfacesRetired: true };
 }
 
 export async function settledPrivacyMode(c) {
-  await c.until("invisible confirmation fully dismissed", () => c.execute("return !document.querySelector('[data-testid=invisible-confirm]');"));
+  await settledPrivacyConfirmationDismissal(c);
   await c.settledDialog("settings-dialog");
   return { confirmationDismissed: true, dialogSettled: true };
 }

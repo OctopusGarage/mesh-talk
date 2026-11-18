@@ -591,7 +591,7 @@ test("attachment failure snapshot uses read-only IPC and excludes message bodies
 
 
 test("privacy cancellation waits for returned trigger focus before reopening", async () => {
-  const { settledPrivacyCancellation } = await import("./native-core-scenarios.mjs");
+  const { settledPrivacyConfirmationDismissal } = await import("./native-core-scenarios.mjs");
   let phase = 0;
   const c = {
     execute: async (script) => Function("document", "getComputedStyle", "innerWidth", "innerHeight", script)({
@@ -614,8 +614,8 @@ test("privacy cancellation waits for returned trigger focus before reopening", a
       assert.equal(await poll(), true, "retired confirmation backdrop does not wait for the open settings backdrop or unrelated closed controls");
     },
   };
-  assert.deepEqual(await settledPrivacyCancellation(c), { confirmationDismissed: true, triggerFocusRestored: true, closingSurfacesRetired: true });
-  await assert.rejects(settledPrivacyCancellation({ execute: async () => false, until: async (_label, poll) => { assert.equal(await poll(), false); throw new Error("trigger focus never returned"); } }), /trigger focus never returned/);
+  assert.deepEqual(await settledPrivacyConfirmationDismissal(c), { confirmationDismissed: true, triggerFocusRestored: true, closingSurfacesRetired: true });
+  await assert.rejects(settledPrivacyConfirmationDismissal({ execute: async () => false, until: async (_label, poll) => { assert.equal(await poll(), false); throw new Error("trigger focus never returned"); } }), /trigger focus never returned/);
 });
 
 
@@ -664,4 +664,27 @@ test("privacy dialog diagnostics are bounded, content-free and retire their exac
   assert.equal(observers[1].disconnected, 1);
   assert.equal(host.__nativePrivacyDialogTrace, undefined);
   assert.deepEqual(await finish(), []);
+});
+
+
+test("successful privacy confirmation retires its closing backdrop before settling settings", async () => {
+  const { settledPrivacyMode } = await import("./native-core-scenarios.mjs");
+  let backdrop = true, settled = false;
+  const document = {
+    querySelector: () => null,
+    querySelectorAll: () => backdrop ? [{ getBoundingClientRect: () => ({ left: 0, top: 0, right: 1040, bottom: 720, width: 1040, height: 720 }) }] : [],
+    activeElement: { getAttribute: () => "invisible-switch" },
+  };
+  const c = {
+    execute: async script => Function("document", "getComputedStyle", "innerWidth", "innerHeight", script)(document, () => ({ position: "fixed", display: "block", visibility: "visible" }), 1040, 720),
+    until: async (_label, poll) => {
+      assert.equal(await poll(), false, "successful commit has not retired its closing backdrop");
+      assert.equal(settled, false);
+      backdrop = false;
+      assert.equal(await poll(), true);
+    },
+    settledDialog: async id => { assert.equal(backdrop, false); assert.equal(id, "settings-dialog"); settled = true; },
+  };
+  assert.deepEqual(await settledPrivacyMode(c), { confirmationDismissed: true, dialogSettled: true });
+  assert.equal(settled, true);
 });
