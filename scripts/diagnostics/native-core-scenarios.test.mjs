@@ -3,6 +3,124 @@ import { test } from "node:test";
 import { Writable } from "node:stream";
 import { runInNewContext } from "node:vm";
 import { writeChildCommand } from "./native-core-scenarios.mjs";
+function linuxKeyFixture() {
+  const host = {}, listeners = new Map(), body = {};
+  const document = {
+    addEventListener(type, fn, capture) { assert.equal(capture, true); assert.ok(!listeners.has(type)); listeners.set(type, fn); },
+    removeEventListener(type, fn, capture) { assert.equal(capture, true); assert.equal(listeners.get(type), fn); listeners.delete(type); },
+  };
+  const c = {
+    current: () => true,
+    execute: async (script, args) => Function("window", "document", "args", `return (function(){${script}}).apply(null,args);`)(host, document, args),
+    until: async (label, probe, timeout) => {
+      assert.equal(timeout, 10000);
+      const result = await probe();
+      if (!result) throw new Error(`Timed out: ${label}`);
+      return result;
+    },
+  };
+  function edge(type, options = {}) {
+    listeners.get(type)?.({ type, target: body, key: "Enter", repeat: false, isTrusted: true, ...options });
+  }
+  return { c, host, listeners, edge };
+}
+
+test("Linux native input requires one trusted press and release across a focus handoff", async () => {
+  const { sendNativeLinuxKey } = await import("./native-core-scenarios.mjs");
+  for (const [name, edges, expected] of [
+    ["focused control removed, release on BODY", [["keydown", { target: {} }], ["keyup"]], null],
+    ["unrelated key and untrusted input", [["keydown", { key: "x" }], ["keydown", { isTrusted: false }], ["keydown"], ["keyup"]], null],
+    ["missing release", [["keydown"]], /Timed out/],
+    ["repeat", [["keydown"], ["keydown", { repeat: true }], ["keyup"]], /invalid/],
+    ["duplicate press", [["keydown"], ["keydown"], ["keyup"]], /invalid/],
+    ["duplicate release", [["keydown"], ["keyup"], ["keyup"]], /invalid/],
+    ["release without a press", [["keyup"]], /invalid/],
+  ]) {
+    const { c, host, listeners, edge } = linuxKeyFixture();
+    const dispatch = sendNativeLinuxKey({ ...c, input: async () => { for (const args of edges) edge(...args); } }, 42, "Enter");
+    if (expected) await assert.rejects(dispatch, expected, name);
+    else await dispatch;
+    assert.equal(listeners.size, 0, name);
+    assert.equal(host.__nativeLinuxKey, undefined, name);
+  }
+});
+
+test("a failed or replaced Linux key observer releases only its own listeners", async () => {
+  const { sendNativeLinuxKey } = await import("./native-core-scenarios.mjs");
+  const { c, listeners, edge } = linuxKeyFixture();
+  let emitted = false;
+  await assert.rejects(sendNativeLinuxKey({ ...c, current: () => false, input: () => { emitted = true; } }, 42, "Enter"), /live application owner/);
+  assert.equal(emitted, false);
+  assert.equal(listeners.size, 0);
+  await assert.rejects(sendNativeLinuxKey({ ...c, input: () => { throw new Error("X11 input failed"); } }, 42, "Enter"), /X11 input failed/);
+  assert.equal(listeners.size, 0);
+
+  const firstStarted = Promise.withResolvers(), secondStarted = Promise.withResolvers();
+  const firstRelease = Promise.withResolvers(), secondRelease = Promise.withResolvers();
+  const first = sendNativeLinuxKey({ ...c, input: () => { firstStarted.resolve(); return firstRelease.promise; } }, 42, "Enter");
+  await firstStarted.promise;
+  const second = sendNativeLinuxKey({ ...c, input: () => { secondStarted.resolve(); return secondRelease.promise; } }, 42, "Enter");
+  await secondStarted.promise;
+  firstRelease.resolve();
+  await assert.rejects(first, /replaced/);
+  assert.equal(listeners.size, 2);
+  edge("keydown"); edge("keyup");
+  secondRelease.resolve();
+  await second;
+  assert.equal(listeners.size, 0);
+});
+
+test("Linux X11 input uses a fresh empty window stack only after verifying the focused client and PID", { skip: process.platform === "win32" }, async () => {
+  const { sendNativeLinuxKey } = await import("./native-core-scenarios.mjs");
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const dir = await mkdtemp(join(tmpdir(), "mesh-fixture-x11-"));
+  try {
+    const lines = [
+      "#!/bin/sh", 'case "$1" in',
+      'search) [ "$*" = "search --onlyvisible --pid $OWNED_PID" ] && echo 17;;',
+      'windowfocus) [ "$*" = "windowfocus --sync 17" ];;',
+      'getwindowpid) [ "$2" = 17 ] && echo "$CLIENT_PID";;',
+      'getwindowfocus) echo "$FOCUSED_WINDOW";;',
+      'key) echo "$*";;',
+      '*) exit 1;;', 'esac',
+    ];
+    await writeFile(join(dir, "xdotool"), lines.join("\n") + "\n", { mode: 0o755 });
+    for (const [focus, pid, admitted] of [["17", process.pid, true], ["19", process.pid, false], ["17", process.pid + 1, false]]) {
+      const { c, edge } = linuxKeyFixture();
+      const dispatch = sendNativeLinuxKey({ ...c, input: (bin, args) => {
+        const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, FOCUSED_WINDOW: focus, CLIENT_PID: String(pid), OWNED_PID: String(process.pid) };
+        const output = execFileSync(bin, args, { encoding: "utf8", stdio: "pipe", env });
+        assert.equal(output.trim(), "key --clearmodifiers Return");
+        edge("keydown"); edge("keyup");
+      } }, process.pid, "Enter");
+      if (admitted) await dispatch;
+      else await assert.rejects(dispatch, /does not own X11 input focus/);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("AppKit accepts every native control key emitted by the fixture", async () => {
+  const { nativeControlKeyName } = await import("./native-core-scenarios.mjs");
+  const { readFile } = await import("node:fs/promises");
+  const appKit = await readFile(new URL("../../src-tauri/examples/native-contact-eval.rs", import.meta.url), "utf8");
+  const dispatch = appKit.match(/let \(code, characters\) = match key \{([\s\S]*?)\n\s*\};/);
+  assert.ok(dispatch, "locate the native AppKit key match");
+  const accepted = new Set([...dispatch[1].matchAll(/^\s*"([^"]+)"\s*=>/gm)].map(match => match[1]));
+  // WebDriver encodes control keys in the Unicode private-use range.
+  const emitted = new Set();
+  for (let code = 0xe000; code <= 0xf8ff; code++) {
+    const name = nativeControlKeyName(String.fromCharCode(code));
+    if (name) emitted.add(name);
+  }
+  assert.ok(emitted.has("PageDown"), "historical receipt navigation emits PageDown");
+  for (const name of emitted) assert.ok(accepted.has(name), `AppKit must accept emitted key ${name}`);
+});
+
 test("Windows native helper only emits bounded owned-PID control keys with ABI-sized SendInput", async () => {
   const { nativeWindowsKeyboardScript } = await import("./native-core-scenarios.mjs");
   for (const [key, vk] of [["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33], ["\uE00F", 34]]) {
@@ -649,6 +767,12 @@ test("privacy dialog diagnostics are bounded, content-free and retire their exac
   assert.ok(!JSON.stringify(host.__nativePrivacyDialogTrace.events).includes("PRIVATE-KEY-TEXT"));
   handlers.get("keydown")({ target, key: "Enter" });
   assert.equal(host.__nativePrivacyDialogTrace.events.at(-1).key, "Enter");
+  handlers.get("keyup")({ target: document.body, key: "Enter" });
+  assert.deepEqual(
+    [host.__nativePrivacyDialogTrace.events.at(-1).kind, host.__nativePrivacyDialogTrace.events.at(-1).target, host.__nativePrivacyDialogTrace.events.at(-1).key],
+    ["keyup", null, "Enter"],
+    "a trusted control can disappear before release reaches BODY",
+  );
   handlers.get("pointerdown")({ target: { getAttribute: () => "PRIVATE-UNRELATED-ID" } });
   assert.equal(host.__nativePrivacyDialogTrace.events.at(-1).target, null);
   assert.ok(!JSON.stringify(host.__nativePrivacyDialogTrace.events).includes("PRIVATE-UNRELATED-ID"));

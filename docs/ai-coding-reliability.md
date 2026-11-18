@@ -1872,9 +1872,22 @@ retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
 
+Native key injection needs an observed matching press and release before another
+key-dependent action. A helper exit or rendered frame does not establish release;
+focus may move to `BODY` when the activated control unmounts. Validate the owned
+application and its focused client before using global input on an isolated test
+display. Keep both edges on the same input path: an explicit X11 target can change
+transport when raw widget focus moves, while an inherited window stack can restore
+that explicit target implicitly. Reject repeated presses, missing releases and
+stale dispatch owners instead of retrying the key through a paging poll. The
+[native input controls](../scripts/diagnostics/native-core-scenarios.test.mjs)
+retain actual shell invocation, foreign-focus rejection, document-level release
+and observer retirement; hosted native evaluation supplies the real WebView
+acceptance. Every emitted named key must also be accepted by its platform owner.
+
 A dismissed modal may still own its closing focus scope. Before reopening a
-confirmation or moving to another modal, wait for its trigger to regain focus as well as for the old
-content and rendered closing modal surfaces to leave the DOM. A closing overlay
+confirmation or moving to another modal, wait for its trigger to regain focus as
+well as for the old content and rendered closing modal surfaces to leave the DOM. A closing overlay
 can outlive both content and returned focus. The [native privacy dismissal controls](../scripts/diagnostics/native-core-scenarios.test.mjs)
 exercise mounted, focus-pending, closing-overlay and fully retired phases; a generic
 click retry must not replace this lifecycle acknowledgement.
