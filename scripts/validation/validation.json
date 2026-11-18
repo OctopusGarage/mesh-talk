@@ -486,6 +486,7 @@
         "scripts/diagnostics/runner-storage.test.mjs",
         "scripts/diagnostics/windows-native-deps.test.mjs",
         "scripts/diagnostics/ci-latency.test.mjs",
+        "scripts/diagnostics/release-workflow.test.mjs",
         "scripts/test-ai-eval.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
         "scripts/diagnostics/merge-queue.test.mjs",
