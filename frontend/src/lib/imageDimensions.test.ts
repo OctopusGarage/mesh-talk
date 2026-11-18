@@ -65,3 +65,56 @@ it("preserves GIF and WebP header inspection for pack validation", () => {
   });
   expect(canPreviewStaticImage(webp, "image/webp")).toBe(false);
 });
+
+it("preserves lossless and lossy WebP geometry and rejects incomplete pack headers", () => {
+  const lossy = new Uint8Array(30);
+  lossy.set([86, 80, 56, 32], 12);
+  lossy.set([0x9d, 1, 0x2a], 23);
+  lossy[26] = 32;
+  lossy[27] = 0xc0;
+  lossy[28] = 64;
+  lossy[29] = 0xc0;
+  expect(imageDimensions(lossy, "image/webp")).toEqual({
+    width: 32,
+    height: 64,
+  });
+  const lossless = new Uint8Array(30);
+  lossless.set([86, 80, 56, 76], 12);
+  lossless[20] = 0x2f;
+  lossless[21] = 31;
+  lossless[22] = 192;
+  lossless[23] = 15;
+  expect(imageDimensions(lossless, "image/webp")).toEqual({
+    width: 32,
+    height: 64,
+  });
+  lossless[20] = 0;
+  expect(imageDimensions(lossless, "image/webp")).toBeUndefined();
+  for (const mime of [
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/jpeg",
+    "image/svg+xml",
+  ])
+    expect(imageDimensions(new Uint8Array(4), mime)).toBeUndefined();
+});
+it("defers JPEG end markers, truncated frames and malformed marker streams", () => {
+  for (const bytes of [
+    [255, 216, 255, 217, 0, 0],
+    [255, 216, 255, 218, 0, 0],
+    [255, 216, 0, 0, 0, 0],
+    [255, 216, 255, 255, 255, 255],
+    [255, 216, 255, 192, 0, 6, 8, 0, 32, 0],
+  ])
+    expect(
+      imageDimensions(new Uint8Array(bytes), "image/jpeg"),
+    ).toBeUndefined();
+  const standalone = new Uint8Array([
+    255, 216, 255, 1, 255, 255, 194, 0, 7, 8, 0, 32, 0, 64,
+  ]);
+  expect(imageDimensions(standalone, "image/jpeg")).toEqual({
+    width: 64,
+    height: 32,
+  });
+});

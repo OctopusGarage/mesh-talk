@@ -1583,3 +1583,28 @@ it("never creates local previews for protected file intents", async () => {
   expect(create).not.toHaveBeenCalled();
   vi.unstubAllGlobals();
 });
+
+it("never dispatches a file whose row retires during optional preview creation", () => {
+  const store = session();
+  const revoke = vi.fn();
+  vi.stubGlobal("URL", {
+    createObjectURL: () => {
+      store.setState({ messages: { [key]: [] }, intents: {} });
+      return "blob:cancelled-preview";
+    },
+    revokeObjectURL: revoke,
+  });
+  invoke.mockClear();
+  const sending = beginSendIntent(
+    store.setState,
+    store.getState,
+    conversation,
+    { kind: "file", path: "/tmp/cancelled.png", media: true },
+    { localPreview: new Blob(["image"], { type: "image/png" }) },
+  );
+  expect(sending).toBeNull();
+  expect(invoke).not.toHaveBeenCalled();
+  expect(store.getState().intents).toEqual({});
+  expect(revoke).toHaveBeenCalledExactlyOnceWith("blob:cancelled-preview");
+  vi.unstubAllGlobals();
+});

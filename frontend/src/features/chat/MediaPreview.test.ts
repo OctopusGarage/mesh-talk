@@ -723,6 +723,12 @@ it("retains exact selected artwork when the canonical preview read fails", async
   expect(host.textContent).toContain("files.unavailable");
   expect(host.textContent).toContain("common.retry");
   expect(preview.release).not.toHaveBeenCalled();
+  state.failPreview = false;
+  await act(async () =>
+    host.querySelector<HTMLButtonElement>("button")!.click(),
+  );
+  expect(host.querySelector('[data-testid="file-image"]')).not.toBeNull();
+  expect(host.textContent).not.toContain("files.unavailable");
 });
 it("lets the outgoing transfer surface own preparation without a duplicate inner status", async () => {
   state.status = { ...state.status, ready: false };
