@@ -85,13 +85,13 @@ export function nativeControlKeyName(value) {
 
 // The Linux fixture runs on its own X11 display. Verify the normalized client
 // window immediately before a fresh xdotool invocation with an empty window stack.
+// Preserve GTK's raw child focus; foreground verification must not reassign it.
 const linuxKeyScript = `
 pid=$1
 symbol=$2
 windows=$(xdotool search --onlyvisible --pid "$pid")
 window=$(printf '%s\n' "$windows" | head -n 1)
 case "$window" in ''|*[!0-9]*) echo 'Missing owned X11 window' >&2; exit 1;; esac
-xdotool windowfocus --sync "$window"
 if ! kill -0 "$pid" || [ "$(xdotool getwindowpid "$window")" != "$pid" ] || [ "$(xdotool getwindowfocus)" != "$window" ]; then
   echo 'Owned application does not own X11 input focus' >&2
   exit 1

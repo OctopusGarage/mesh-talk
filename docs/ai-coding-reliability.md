@@ -1893,7 +1893,10 @@ Native key injection needs an observed matching press and release before another
 key-dependent action. A helper exit or rendered frame does not establish release;
 focus may move to `BODY` when the activated control unmounts. Validate the owned
 application and its focused client before using global input on an isolated test
-display. Keep both edges on the same input path: an explicit X11 target can change
+display. Verify the normalized client without assigning raw focus to that
+client: GTK may own keyboard focus through its input-only child. A foreground
+check must not overwrite that widget focus, and foreign focus must reject input.
+Keep both edges on the same input path: an explicit X11 target can change
 transport when raw widget focus moves, while an inherited window stack can restore
 that explicit target implicitly. Reject repeated presses, missing releases and
 stale dispatch owners instead of retrying the key through a paging poll. The

@@ -70,7 +70,7 @@ test("a failed or replaced Linux key observer releases only its own listeners", 
   assert.equal(listeners.size, 0);
 });
 
-test("Linux X11 input uses a fresh empty window stack only after verifying the focused client and PID", { skip: process.platform === "win32" }, async () => {
+test("Linux X11 input preserves owned widget focus and rejects foreign focus before a fresh key", { skip: process.platform === "win32" }, async () => {
   const { sendNativeLinuxKey } = await import("./native-core-scenarios.mjs");
   const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
@@ -81,7 +81,7 @@ test("Linux X11 input uses a fresh empty window stack only after verifying the f
     const lines = [
       "#!/bin/sh", 'case "$1" in',
       'search) [ "$*" = "search --onlyvisible --pid $OWNED_PID" ] && echo 17;;',
-      'windowfocus) [ "$*" = "windowfocus --sync 17" ];;',
+      'windowfocus|windowactivate) echo "Unexpected focus mutation" >&2; exit 1;;',
       'getwindowpid) [ "$2" = 17 ] && echo "$CLIENT_PID";;',
       'getwindowfocus) echo "$FOCUSED_WINDOW";;',
       'key) echo "$*";;',
