@@ -1,0 +1,44 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7PS6TNH7J3QF18Z4HC77D63",
+  "strategy": "manual-commit",
+  "branch": "fix/media-send-transitions",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "frontend/src/features/chat/DeliveryFooter.tsx",
+    "frontend/src/features/chat/deliveryFooter.test.ts",
+    "frontend/src/store/chat.ts",
+    "frontend/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 175965,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 18913664,
+    "output_tokens": 40217,
+    "api_call_count": 144,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 41349,
+    "layers": {
+      "betterleaks": 5,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 41426,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
