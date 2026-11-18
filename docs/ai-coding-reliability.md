@@ -1183,8 +1183,13 @@ authorization, and the opt-in bundled control observes permission and actual
 Notification Center delivery as independent assertions.
 The [hosted notification control](../scripts/ci/notification-native.mjs) runs the
 current instrumented Host test from an isolated bundle without authorization
-requests. Its raw native initial-state and delivery assertions remain separate;
-the prompt guard must reject forbidden intent before invoking the native API.
+requests. Its raw native before/after authorization and delivery assertions remain
+separate: not-determined authorization does not establish Notification Center
+absence. Compare product delivery against an independently built native reference
+in the same observation window; reject either asymmetric result, and observe both
+absent through the original deadline. Neither fixture may reuse the other's request
+builder as its oracle. The prompt guard must reject forbidden intent before invoking
+the native API.
 A portable metadata/signing fixture is not OS authorization evidence.
 The [native completion adapters](../src-tauri/src/notifications/mac_callbacks.rs)
 keep callback completion separate from permission grants and retain only their

@@ -673,8 +673,13 @@ macOS Host coverage additionally executes the existing ignored notification
 control from an ad-hoc signed temporary bundle. The CLI admits only a disposable
 hosted macOS runner, exact current-source instrumented Host-library metadata and
 one actual passing case. It forces authorization requests off, verifies fresh
-native not-determined authorization and absent delivery, preserves the current
-LLVM profile destination and regenerates LCOV before Codecov upload. The
+native not-determined authorization before and after submission and compares
+product delivery against an independently constructed native reference request.
+Distinct title/body pairs share the original eight-second observation window;
+both absent must wait through the window, while asymmetric delivery fails. A
+not-determined authorization snapshot alone cannot establish Notification Center
+absence across runner images. Explicit operator delivery expectations stay
+unchanged. The control preserves the current LLVM profile destination and regenerates LCOV before Codecov upload. The
 post-control step explicitly binds both Cargo and llvm-cov target directories to
 `target/llvm-cov-target`: `show-env` otherwise defaults to `target`, unlike the
 default `llvm-cov nextest` cohort. The real instrumented notification protocol

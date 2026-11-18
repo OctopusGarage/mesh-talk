@@ -231,9 +231,16 @@ to the expected status and `MESH_NOTIFICATION_NATIVE_DELIVERY` to `present` or
 alone after each system-setting transition and after restarting its process.
 The hosted macOS coverage owner also runs this exact instrumented test in a
 fresh temporary bundle with `MESH_NOTIFICATION_NATIVE_EXPECT=unconfigured`,
-`MESH_NOTIFICATION_NATIVE_DELIVERY=absent` and authorization requests forced off.
-It independently requires initial raw native authorization to be not determined;
-observation may be prompt or unknown depending on the native alert setting.
+`MESH_NOTIFICATION_NATIVE_DELIVERY=reference` and authorization requests forced off.
+It independently requires raw native authorization to remain not determined before
+and after submission; observation may be prompt or unknown depending on the native
+alert setting. Notification Center availability is separate from alert permission:
+[its setting](https://developer.apple.com/documentation/usernotifications/unnotificationsettings/notificationcentersetting)
+cannot be inferred from authorization alone. The hosted control independently
+constructs a direct native reference request, submits the product request, and
+requires matching observed title/body delivery within the same eight-second window.
+Both absent must remain absent through that window; either asymmetric result fails.
+The explicit operator `present` and `absent` expectations remain independent.
 A test-only guard rejects an attempted authorization call before reaching the OS.
 This baseline does not replace operator-controlled grant/revocation acceptance.
 It verifies real permission and Notification Center delivery without accessing

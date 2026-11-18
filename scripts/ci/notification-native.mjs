@@ -29,7 +29,7 @@ export function notificationControlEnvironment(env, platform) {
   assert.equal(env.GITHUB_ACTIONS, "true", "Native control requires GitHub Actions");
   assert.equal(env.RUNNER_ENVIRONMENT, "github-hosted", "Native control requires a disposable hosted runner");
   assert.equal(env.RUNNER_OS, "macOS");
-  return { ...env, MESH_NOTIFICATION_NATIVE_REQUEST: "0", MESH_NOTIFICATION_NATIVE_EXPECT: "unconfigured", MESH_NOTIFICATION_NATIVE_DELIVERY: "absent" };
+  return { ...env, MESH_NOTIFICATION_NATIVE_REQUEST: "0", MESH_NOTIFICATION_NATIVE_EXPECT: "unconfigured", MESH_NOTIFICATION_NATIVE_DELIVERY: "reference" };
 }
 // Kept separate for an actual Mach-O/bundle protocol fixture without native APIs.
 export async function runBundledNotificationControl(binary, directory, run, env) {

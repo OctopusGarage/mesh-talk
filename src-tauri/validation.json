@@ -1191,7 +1191,7 @@
             "reference": "docs/settings.md#system-notification-permission"
           },
           {
-            "name": "Only explicit actions may prompt or open fixed system-settings destinations",
+            "name": "Only explicit actions may prompt or open fixed system-settings destinations; the hosted native control preserves not-determined authorization before and after submission, compares product delivery against an independently constructed native reference under the same observation deadline, and cannot infer Notification Center absence from authorization alone",
             "reference": "docs/settings.md#system-notification-permission"
           }
         ]

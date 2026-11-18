@@ -51,7 +51,7 @@ test("native notification CI never inherits authorization intent or runs on a us
   const actual = notificationControlEnvironment(env, "darwin");
   assert.equal(actual.MESH_NOTIFICATION_NATIVE_REQUEST, "0");
   assert.equal(actual.MESH_NOTIFICATION_NATIVE_EXPECT, "unconfigured");
-  assert.equal(actual.MESH_NOTIFICATION_NATIVE_DELIVERY, "absent");
+  assert.equal(actual.MESH_NOTIFICATION_NATIVE_DELIVERY, "reference");
   for (const change of [{ GITHUB_ACTIONS: "false" }, { RUNNER_ENVIRONMENT: "self-hosted" }, { RUNNER_OS: "Linux" }]) assert.throws(() => notificationControlEnvironment({ ...env, ...change }, "darwin"));
   assert.throws(() => notificationControlEnvironment(env, "linux"));
 });

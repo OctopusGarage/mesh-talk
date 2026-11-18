@@ -298,11 +298,18 @@ mod tests {
         };
         let expected =
             std::env::var("MESH_NOTIFICATION_NATIVE_EXPECT").expect("explicit expected permission");
-        let expect_delivery = match std::env::var("MESH_NOTIFICATION_NATIVE_DELIVERY").as_deref() {
-            Ok("present") => true,
-            Ok("absent") => false,
-            _ => panic!("explicit expected delivery: present or absent"),
-        };
+        let delivery = std::env::var("MESH_NOTIFICATION_NATIVE_DELIVERY")
+            .expect("explicit delivery expectation");
+        assert!(matches!(
+            delivery.as_str(),
+            "present" | "absent" | "reference"
+        ));
+        let compare_reference = delivery == "reference";
+        assert!(
+            !compare_reference || expected == "unconfigured",
+            "reference comparison belongs to the unconfigured hosted control"
+        );
+        let expect_delivery = delivery == "present";
         let mut context = tauri::test::mock_context(tauri::test::noop_assets());
         context.config_mut().identifier = "com.mesh-talk.notification-validation".into();
         let app = tauri::test::mock_builder().build(context).unwrap();
@@ -312,20 +319,27 @@ mod tests {
             assert!(!request, "CI must never request notification authorization");
         }
         let status = platform_permission(app.handle(), request);
-        if expected == "unconfigured" {
+        let raw_settings = || {
             let (tx, rx) = mpsc::sync_channel(1);
             let reply = RcBlock::new(
                 move |settings: NonNull<objc2_user_notifications::UNNotificationSettings>| {
                     let settings = unsafe { settings.as_ref() };
-                    let _ = tx.send((settings.authorizationStatus().0, settings.alertSetting().0));
+                    let _ = tx.send((
+                        settings.authorizationStatus().0,
+                        settings.alertSetting().0,
+                        settings.notificationCenterSetting().0,
+                    ));
                 },
             );
             center.getNotificationSettingsWithCompletionHandler(&reply);
-            let (authorization, alerts) = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-            assert_eq!(
-                authorization, 0,
-                "CI requires a fresh unconfigured fixture identity"
+            rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        };
+        let require_unconfigured = |status| {
+            let (authorization, alerts, notification_center) = raw_settings();
+            eprintln!(
+                "unconfigured native control: authorization={authorization}, alerts={alerts}, center={notification_center}"
             );
+            assert_eq!(authorization, 0, "CI requires unconfigured authorization");
             assert_eq!(
                 status,
                 if alerts == 2 {
@@ -334,6 +348,9 @@ mod tests {
                     PermissionStatus::Prompt
                 }
             );
+        };
+        if expected == "unconfigured" {
+            require_unconfigured(status);
         } else {
             assert_eq!(serde_json::to_value(status).unwrap(), expected);
         }
@@ -341,40 +358,135 @@ mod tests {
             "Mesh-Talk notification validation {:032x}",
             rand::random::<u128>()
         );
-        send(app.handle(), &title, "Native notification delivery check").unwrap();
+        let reference_title = format!("Mesh-Talk native reference {:032x}", rand::random::<u128>());
         let deadline = Instant::now() + Duration::from_secs(8);
+        if compare_reference {
+            use objc2_foundation::{NSError, NSString};
+            use objc2_user_notifications::{UNMutableNotificationContent, UNNotificationRequest};
+            // Build the oracle independently: using mac_request/send here would
+            // let a broken product request fail identically and pass comparison.
+            let content = UNMutableNotificationContent::new();
+            content.setTitle(&NSString::from_str(&reference_title));
+            content.setBody(&NSString::from_str("Native reference delivery check"));
+            let identifier =
+                NSString::from_str(&format!("reference-{:032x}", rand::random::<u128>()));
+            let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+                &identifier,
+                &content,
+                None,
+            );
+            let (tx, rx) = mpsc::sync_channel(1);
+            let completion = RcBlock::new(move |error: *mut NSError| {
+                let _ = tx.send(unsafe { error.as_ref() }.map(|error| error.code()));
+            });
+            center.addNotificationRequest_withCompletionHandler(&request, Some(&completion));
+            let error = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("native reference submission completion");
+            eprintln!("native reference submission error code: {error:?}");
+        }
+        send(app.handle(), &title, "Native notification delivery check").unwrap();
         loop {
             let (tx, rx) = mpsc::sync_channel(1);
             let title = title.clone();
+            let reference_title = reference_title.clone();
             let reply = RcBlock::new(move |items: NonNull<NSArray<UNNotification>>| {
-                let found = unsafe { items.as_ref() }
-                    .iter()
-                    .any(|item| item.request().content().title().to_string() == title);
-                let _ = tx.send(found);
+                let (mut product, mut reference, mut wrong_body) = (false, false, false);
+                for item in unsafe { items.as_ref() }.iter() {
+                    let content = item.request().content();
+                    let observed_title = content.title().to_string();
+                    if observed_title == title {
+                        product = true;
+                        wrong_body |=
+                            content.body().to_string() != "Native notification delivery check";
+                    }
+                    if observed_title == reference_title {
+                        reference = true;
+                        wrong_body |=
+                            content.body().to_string() != "Native reference delivery check";
+                    }
+                }
+                let _ = tx.send((product, reference, wrong_body));
             });
             center.getDeliveredNotificationsWithCompletionHandler(&reply);
-            let found = rx
+            let (found, reference_found, wrong_body) = rx
                 .recv_timeout(Duration::from_secs(2))
                 .expect("native delivery observation");
-            if expect_delivery && found {
-                break;
-            }
             assert!(
-                !found,
-                "notification unexpectedly delivered: before={status:?}, after={:?}",
-                platform_permission(app.handle(), false)
+                !wrong_body,
+                "native delivery must preserve the exact payload"
             );
-            if Instant::now() >= deadline {
+            let expired = Instant::now() >= deadline;
+            if compare_reference {
+                if reference_delivery_complete(found, reference_found, expired)
+                    .expect("product delivery differs from the independent native reference")
+                {
+                    eprintln!(
+                        "native delivery comparison: product={found}, reference={reference_found}"
+                    );
+                    break;
+                }
+            } else {
+                if expect_delivery && found {
+                    break;
+                }
                 assert!(
-                    !expect_delivery,
-                    "notification never reached Notification Center"
+                    !found,
+                    "notification unexpectedly delivered: before={status:?}, after={:?}",
+                    platform_permission(app.handle(), false)
                 );
-                break;
+                if expired {
+                    assert!(
+                        !expect_delivery,
+                        "notification never reached Notification Center"
+                    );
+                    break;
+                }
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        if expected == "unconfigured" {
+            require_unconfigured(platform_permission(app.handle(), false));
+        }
         // The center is bound to the dedicated fixture, never the installed app.
         center.removeAllDeliveredNotifications();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn reference_delivery_complete(
+        product: bool,
+        reference: bool,
+        expired: bool,
+    ) -> Result<bool, &'static str> {
+        if product && reference {
+            return Ok(true);
+        }
+        if !expired {
+            return Ok(false);
+        }
+        if product == reference {
+            Ok(true)
+        } else {
+            Err("asymmetric native delivery")
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hosted_delivery_reference_requires_actual_agreement_and_the_absence_deadline() {
+        assert_eq!(reference_delivery_complete(false, false, false), Ok(false));
+        assert_eq!(reference_delivery_complete(true, false, false), Ok(false));
+        assert_eq!(reference_delivery_complete(false, true, false), Ok(false));
+        assert_eq!(reference_delivery_complete(true, true, false), Ok(true));
+        assert_eq!(reference_delivery_complete(false, false, true), Ok(true));
+        assert!(
+            reference_delivery_complete(false, true, true).is_err(),
+            "a product no-op cannot pass when native delivery succeeds"
+        );
+        assert!(
+            reference_delivery_complete(true, false, true).is_err(),
+            "extra product delivery cannot pass against native absence"
+        );
     }
 
     #[cfg(target_os = "macos")]
