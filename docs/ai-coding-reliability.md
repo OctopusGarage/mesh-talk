@@ -1943,6 +1943,14 @@ natural read, so preparation does not wait on transport admission while that
 exact read must remain live. Keep all production hosts, page/terminal assertions
 and deadlines;
 a queued-frame observation is neither a committed Wake nor permission to skip work.
+Request dispatch time does not identify the source snapshot it will read. A protected
+request can already be in flight when a later corpus is published, then serve that exact
+corpus. The queued-control fixture qualifies the live nonce/task, current source rows and
+requester absence at the server boundary, then requires the client's validated partial
+continuation. Its forced in-flight request regression retains all operation/receipt and
+recovery assertions. Do not reject it solely because dispatch preceded publication
+bookkeeping, or accept send attempts as received/validated bytes. Copy diagnostic mutex
+values before panicking so the first failure does not poison observation state.
 
 Scope fixture transformations and assertions to the owning configuration table,
 not globally unique text. Test the same valid value in an unrelated profile and

@@ -349,6 +349,7 @@ jobs:
           merge-multiple: true
           path: workflow-assets
       - name: Verify workflow artifacts
+        id: verified_workflow
         run: bash scripts/release/verify-release.sh workflow-assets "$ARTIFACT_TAG" "$RELEASE_VERSION" "$SOURCE_REPO" "$SOURCE_REF" "$SOURCE_SHA"
       - name: Recheck draft state immediately before the single upload
         if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
@@ -373,6 +374,7 @@ jobs:
           generate_release_notes: false
           files: workflow-assets/*
       - name: Verify actual draft release assets
+        id: verified_draft
         if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
         run: |
           mkdir draft-assets
@@ -386,18 +388,32 @@ jobs:
           node scripts/release/release-state.mjs verify "$ARTIFACT_TAG" draft-assets
           node scripts/release/release-state.mjs publish "$ARTIFACT_TAG"
       - name: Record verification evidence
+        id: verification_evidence
+        if: always() && steps.verified_workflow.outcome == 'success' && (steps.verified_draft.outcome == 'success' || (!startsWith(github.ref, 'refs/tags/') && needs.preflight.outputs.nightly != 'true'))
         run: |
           printf 'Verified source: %s\nArtifact tag: %s\nVersion: %s\n' "$SOURCE_SHA" "$ARTIFACT_TAG" "$RELEASE_VERSION" > verification.txt
           sha256sum workflow-assets/* >> verification.txt
           if [[ -d draft-assets ]]; then sha256sum draft-assets/* >> verification.txt; fi
           cat verification.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
+        if: always() && steps.verification_evidence.outcome == 'success'
         with:
           name: verified-release-evidence
           path: |
             verification.txt
             verified-draft.json
           if-no-files-found: error
+
+      - name: Explain retained Nightly draft and recovery
+        if: (failure() || cancelled()) && needs.preflight.outputs.nightly == 'true'
+        run: |
+          {
+            echo "Nightly workflow did not complete successfully for source $SOURCE_SHA (tag $ARTIFACT_TAG)."
+            echo "Inspect the live release state and this run's first failed step. Publication may have completed before an API response or evidence-upload failure; do not repeat an already completed publication."
+            echo "If evidence upload succeeded, verified-release-evidence retains its asset identities and digests; it does not authorize publication."
+            echo "Resolve failed source checks first. If code changes are needed, merge the fix and request a new Nightly on main with publish_nightly enabled and publish_release disabled."
+            echo "For a fresh attempt, rerun all jobs so preflight assigns a new attempt tag. Do not manually publish a retained draft or replace its assets."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   resolve-publication:
     needs: preflight

@@ -460,9 +460,16 @@ fn record_setup_milestone(
     }
 }
 
+#[derive(Clone, Copy)]
+struct HeldBRequest {
+    task: tokio::task::Id,
+    nonce: [u8; 32],
+    dispatched_at: std::time::Instant,
+}
+
 #[derive(Clone)]
 struct B2Publication {
-    started_at: std::time::Instant,
+    observed_at: std::time::Instant,
     rows: Vec<crate::node::AccountDocumentMeta>,
     continuation: crate::node::AccountDocumentKey,
 }
@@ -1021,6 +1028,9 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let paid_a_dispatch = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let b_page_progress = Arc::new(Mutex::new(ProtectedBPageProgress::default()));
     let b2_publication = Arc::new(Mutex::new(None::<B2Publication>));
+    let early_b_request = Arc::new(Mutex::new(None::<oneshot::Sender<HeldBRequest>>));
+    let publication_release = Arc::new(Semaphore::new(0));
+    let _publication_release = ReleaseQueuedReads(publication_release.clone());
     let causal_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saved_after = Arc::new(Mutex::new(None));
@@ -1637,6 +1647,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                         request.operation.as_ref().map(|probe| probe.known_digest),
                     ));
                 }
+                let paid_pair_resume = *paid_a_dispatch.lock().unwrap() == Some(page.task);
                 let first = first_tx.lock().unwrap().take();
                 if let Some(first) = first {
                     assert!(effective_after(&request).is_none());
@@ -1664,10 +1675,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                     let _ = first.send((page.task, lifetime));
                     let _ = release.acquire().await;
                 } else if b_partial.load(std::sync::atomic::Ordering::Acquire)
-                    && queued_background_resume(
-                        dispatch,
-                        *paid_a_dispatch.lock().unwrap() == Some(page.task),
-                    )
+                    && queued_background_resume(dispatch, paid_pair_resume)
                 {
                     let resumed = resume_tx.lock().unwrap().take();
                     if let Some(resumed) = resumed {
@@ -1675,21 +1683,18 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                         let _ = resumed.send(());
                         let _ = release.acquire().await;
                     }
-                } else if queued_background_resume(
-                    dispatch,
-                    *paid_a_dispatch.lock().unwrap() == Some(page.task),
-                ) {
+                } else if queued_background_resume(dispatch, paid_pair_resume) {
                     panic!(
                         "A cannot resume before B validates its actual partial page; task={:?} origin={} paid_pair_resume={}",
-                        page.task,
-                        page.origin,
-                        *paid_a_dispatch.lock().unwrap() == Some(page.task)
+                        page.task, page.origin, paid_pair_resume
                     );
                 }
             })
         }
     }));
     *b.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let early_b_request = early_b_request.clone();
+        let publication_release = publication_release.clone();
         let causal_trace = causal_trace.clone();
         let b2_publication = b2_publication.clone();
         let requester = Arc::downgrade(&reference);
@@ -1710,6 +1715,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let intent_entered = intent_entered.clone();
         let b_page_progress = b_page_progress.clone();
         move |peer, frame| {
+            let early_b_request = early_b_request.clone();
+            let publication_release = publication_release.clone();
             let expected = expected.clone();
             let admitted = admitted.clone();
             let saved_after = saved_after.clone();
@@ -1734,6 +1741,38 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                     return;
                 }
                 if !admitted.load(std::sync::atomic::Ordering::Acquire) {
+                    let early_page = match &frame {
+                        AccountHistoryFrame::DocumentsRequest { body } => {
+                            DocumentRequest::decode(body)
+                                .filter(|request| {
+                                    request.domain == AccountDocumentDomain::GroupControl
+                                })
+                                .and_then(|request| pages.lock().unwrap().live_request(&request))
+                                .filter(|page| {
+                                    effective_after(&page.request).is_none()
+                                        && page
+                                            .dispatch()
+                                            .is_some_and(|dispatch| dispatch.protected)
+                                })
+                        }
+                        _ => None,
+                    };
+                    let early = early_page.and_then(|page| {
+                        early_b_request.lock().unwrap().take().map(|sender| {
+                            (
+                                sender,
+                                HeldBRequest {
+                                    task: page.task,
+                                    nonce: page.request.operation.as_ref().unwrap().nonce,
+                                    dispatched_at: page.dispatched_at,
+                                },
+                            )
+                        })
+                    });
+                    if let Some((sender, request)) = early {
+                        let _ = sender.send(request);
+                        let _ = publication_release.acquire().await;
+                    }
                     // Headers carry no request nonce. Bind this one fixed-size
                     // observer to the serving task at its exact protected request;
                     // these are send attempts, not proof of received page bytes.
@@ -1782,14 +1821,15 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                                         "task={:?} origin={} publication_ms={} dispatch_ms={}",
                                         page.task,
                                         page.origin,
-                                        publication.started_at.duration_since(clock).as_millis(),
+                                        publication.observed_at.duration_since(clock).as_millis(),
                                         page.dispatched_at.duration_since(clock).as_millis()
                                     );
-                                    // Capture the original short-circuit operands, without
-                                    // repeating metadata reads after concurrent imports.
-                                    if page.dispatched_at < publication.started_at {
-                                        candidate_reason.push_str(" dispatched_before_B2");
-                                        return None;
+                                    // Dispatch precedes the server snapshot. An in-flight
+                                    // request may read this newer corpus; bind it to the
+                                    // exact rows below and the validated client page,
+                                    // rather than rejecting its earlier dispatch time.
+                                    if page.dispatched_at < publication.observed_at {
+                                        candidate_reason.push_str(" inflight_before_B2");
                                     }
                                     let mut rows = Vec::new();
                                     let rows_current = publication.rows.iter().all(|meta| {
@@ -2125,31 +2165,56 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             "the exact natural A hold must remain live at canonical B publication; task={first_task:?} ledger_active={first_active}; receiving={receiving:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}"
         );
     }
+    let mut held_b_request = None;
     let keys = super::cold_account_setup(async {
         record_setup_milestone(&setup_trace, clock, "B2_publication_begin", format!("first_A_task={first_task:?}"));
-        let publication_phase = b2_publication.lock().unwrap().as_ref().map(|publication| publication.started_at);
+        let publication_phase = b2_publication.lock().unwrap().as_ref().map(|publication| publication.observed_at);
         let partial_candidate = {
             let progress = b_page_progress.lock().unwrap();
             (progress.request_task, progress.partial_after.clone(), progress.complete_attempted)
         };
         assert!(publication_phase.is_none() && !b_partial.load(std::sync::atomic::Ordering::Acquire),
             "startup cannot certify the later B2 partial page: publication_phase={publication_phase:?} candidate_task_after_complete={partial_candidate:?}");
-        // Pin the real publication before its owning notifier wakes readers.
+        // Capture the exact corpus before notification; observation bookkeeping can lag dispatch.
         record_b_trace(&causal_trace, clock, "B2_publication", format!("first_A_task={first_task:?} wake_revision={}", b.account_wake_token_for_test().1));
+        let early_entered = if gate_local_maintenance {
+            let (sender, entered) = oneshot::channel();
+            *early_b_request.lock().unwrap() = Some(sender);
+            Some(entered)
+        } else {
+            None
+        };
+        let mut prepared_publication = None;
         let keys = crate::node::account_documents::sync::publish_legacy_control_page_before_notify_for_test(&b, 2, |keys| {
             let rows = keys.iter().map(|key| {
                 assert!(reference.account_document_meta(key).is_none());
                 b.account_document_meta(key).unwrap()
             }).collect();
-            *b2_publication.lock().unwrap() = Some(B2Publication {
-                started_at: std::time::Instant::now(),
+            let publication = B2Publication {
+                observed_at: std::time::Instant::now(),
                 rows,
                 continuation: crate::node::AccountDocumentKey::GroupOperation {
                     channel: hex::encode(padding_group.as_bytes()),
                     source_device: b.user_id(),
                 },
-            });
+            };
+            if gate_local_maintenance {
+                prepared_publication = Some(publication);
+            } else {
+                *b2_publication.lock().unwrap() = Some(publication);
+            }
         });
+        if let Some(mut publication) = prepared_publication {
+            let entered = early_entered.unwrap();
+            // The real publication already notified readers. Join its signed
+            // Wake sender and hold this exact protected request before the
+            // server snapshots the corpus, while bookkeeping is still absent.
+            send_boundary_wake(&b, &reference).await;
+            held_b_request = Some(entered.await.unwrap());
+            publication.observed_at = std::time::Instant::now();
+            *b2_publication.lock().unwrap() = Some(publication);
+        }
+        publication_release.close();
         // Keep the actual child's Weak separately from the bounded history;
         // never retain a strong Arc or accept retirement as a live hold.
         let (ledger_active, origin_retained) = {
@@ -2180,6 +2245,21 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             panic!("B protected partial page must be queued before A resumes: {error:?}; B_named_input_ready={named_ready} B_global_scope_settled={ready} B_partial={}; causal={:?}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire), causal_trace.lock().unwrap().clone());
         })
         .unwrap();
+    if let Some(request) = held_b_request {
+        let (task, nonce) = {
+            let progress = b_page_progress.lock().unwrap();
+            (progress.request_task, progress.nonce)
+        };
+        assert_eq!(task, Some(request.task));
+        assert_eq!(nonce, request.nonce);
+        assert!(
+            request.dispatched_at < b2_publication.lock().unwrap().as_ref().unwrap().observed_at
+        );
+        assert!(
+            b_partial.load(std::sync::atomic::Ordering::Acquire),
+            "the exact in-flight request must validate the later source snapshot"
+        );
+    }
     // B's validated prefix and A's exact protected resume now exist. Release
     // queued A changes and finish the same sender before starting demand.
     queued_a_wakes.close();

@@ -21,6 +21,12 @@ in ignored `tmp/` or PR/CI artifacts; durable decisions belong in the owning gui
 For producer/consumer artifact handoffs, pass the successful upload's immutable
 artifact ID instead of rediscovering it by name. Keep source, run, attempt and
 content-digest validation at the consumer; an artifact ID alone is not acceptance.
+Release evidence recording and upload retain their verified-draft prerequisite but run
+after final publication failure or cancellation. Keep failure summaries actionable and
+source-bound. Nonpublishing branch runs retain workflow-artifact evidence without requiring
+a draft. Retained evidence from a failed run is diagnostic; the verified-build owner
+still requires successful exact-source jobs/run before authorizing reuse. The existing
+release-gates and release-reuse regressions own these producer/consumer boundaries.
 
 ## Make the cost of a change explicit
 

@@ -359,6 +359,14 @@ verifiers. Stable and Nightly reuse the same platform matrix and verification ow
   creation leave an unpublished draft for inspection. Retry the workflow after fixing the source
   or environment; a rerun has a new attempt identity. Do not bypass verification to publish a
   partial draft. Inspect source SHA, run/attempt and recorded digests in Actions evidence.
+  After draft verification, evidence recording/upload still run when a final source-check
+  or publication step fails. The failed run summary identifies the source/tag and recovery
+  path. Retained asset evidence does not authorize publication or make a failed run eligible
+  for Stable build reuse. If source code must change, merge the fix and dispatch a new
+  Nightly from main; its new run/attempt has a distinct tag. A full rerun also uses a new
+  attempt tag. For a fresh attempt, rerun all jobs so preflight assigns the new attempt tag.
+  Check live release state before retrying: publication may succeed before evidence upload
+  or the final API response fails. Do not repeat an already completed publication.
 - Nightly produces downloadable post-office archives; GHCR container publication remains part of
   the existing explicit Stable publication path. Production relay operators should pin Stable tags.
 

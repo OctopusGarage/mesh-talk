@@ -154,7 +154,7 @@
             "reference": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding"
           },
           {
-            "name": "Nightly preflight waits at most four hours for missing or pending exact-source checks; completed unsuccessful checks, scanning alerts and API errors fail immediately. Final publication remains an immediate strict source recheck.",
+            "name": "Nightly preflight waits at most four hours for missing or pending exact-source checks; completed unsuccessful checks, scanning alerts and API errors fail immediately. Final publication remains an immediate strict source recheck. Once actual draft verification succeeds, evidence recording/upload survive later failure or cancellation; nonpublishing branch runs retain their workflow-artifact evidence without a draft. Recovery summaries require live release-state inspection; diagnostic artifacts from a failed run never authorize publication or verified-build reuse.",
             "reference": "docs/updates.md#publish-nightly-builds"
           },
           {

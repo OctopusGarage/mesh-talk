@@ -91,3 +91,30 @@ test("Stable rechecks changed source checks immediately before public container 
   }
   assert.ok(releaseGuard.indexOf("check-source-checks.mjs") < releaseGuard.indexOf("release-state.mjs publish"));
 });
+
+
+test("a verified draft retains recovery evidence when the final publication check fails", () => {
+  const verify = workflow.split("  verify-release:\n")[1]?.split(/^  [a-z-]+:/m)[0];
+  const steps = verify.split(/^      - /m).slice(1);
+  const draft = steps.find(step => step.startsWith("name: Verify actual draft release assets\n"));
+  const record = steps.find(step => step.startsWith("name: Record verification evidence\n"));
+  const upload = steps.find(step => step.includes("name: verified-release-evidence\n"));
+  assert.match(draft, /id: verified_draft/);
+  const workflowAssets = steps.find(step => step.startsWith("name: Verify workflow artifacts\n"));
+  assert.match(workflowAssets, /id: verified_workflow/);
+  assert.match(record, /if: always\(\) && steps\.verified_workflow\.outcome == 'success'/);
+  assert.match(record, /steps\.verified_draft\.outcome == 'success' \|\| \(!startsWith\(github\.ref, 'refs\/tags\/'\) && needs\.preflight\.outputs\.nightly != 'true'\)/);
+  assert.match(record, /id: verification_evidence/);
+  assert.match(upload, /if: always\(\) && steps\.verification_evidence\.outcome == 'success'/);
+  assert.match(upload, /verified-draft\.json/);
+  assert.match(upload, /if-no-files-found: error/);
+  const recovery = steps.find(step => step.startsWith("name: Explain retained Nightly draft and recovery\n"));
+  assert.match(recovery, /if: \(failure\(\) \|\| cancelled\(\)\) && needs\.preflight\.outputs\.nightly == 'true'/);
+  assert.match(recovery, /GITHUB_STEP_SUMMARY/);
+  assert.match(recovery, /SOURCE_SHA/);
+  assert.match(recovery, /ARTIFACT_TAG/);
+  assert.match(recovery, /live release state/);
+  assert.match(recovery, /If evidence upload succeeded/);
+  assert.doesNotMatch(recovery, /remains unpublished/);
+  assert.doesNotMatch(recovery, /gh release (?:edit|delete)|release-state\.mjs publish|continue-on-error/);
+});
