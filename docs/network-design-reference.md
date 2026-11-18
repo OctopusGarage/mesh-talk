@@ -1336,6 +1336,14 @@ If all six are accepted members with the needed keys, B can serve A's retained e
 
 Replica custody counts and exact-have checks are historical copy evidence. They are not a lease guaranteeing a holder will remain online forever, a human read receipt, or proof that every group destination received the event.
 
+Text and file-message records use that same exact-event evidence. Images,
+stickers and attachments confirm their retained manifest record independently
+of chunk transfer; the UI explains that record custody is not complete file-byte
+availability. Accepted file fanout carries its exact manifest ID to member and
+post-office confirmation. The existing 128-record cursor includes both kinds:
+each covering kind range reads at most the remaining page budget before their
+ordered merge, without loading bodies or adding an index, queue or timer.
+
 Message-confirming fanout preserves the actual synchronization error for the
 existing coalesced group-control retry owner. An authenticated connection that
 closes, a stale source, capacity deferral or an incomplete round is not a successful

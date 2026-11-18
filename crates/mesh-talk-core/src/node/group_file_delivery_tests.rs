@@ -240,7 +240,9 @@ impl GroupRelayFixture {
         // The manual attachment worker also needs the just-accepted signed
         // manifest's current authority before selecting recipient custody.
         self.a.await_channel_metadata(self.group).await.unwrap();
-        self.a.flush_channel_file(self.group, file).await;
+        self.a
+            .flush_channel_file_record(self.group, file, manifest)
+            .await;
         (manifest, file, payload)
     }
 
@@ -307,6 +309,22 @@ impl Drop for GroupRelayFixture {
             task.abort();
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_file_record_post_office_confirmation_does_not_claim_byte_delivery() {
+    let f = GroupRelayFixture::new().await;
+    let (manifest, file, _) = f.enqueue_offer_expiring(None).await;
+    assert_eq!(
+        f.a.channel_custody_counts(f.group, &[manifest]).unwrap(),
+        vec![(Some(0), Some(1))],
+        "only the encrypted file-message record has confirmed relay custody"
+    );
+    assert!(f.b.log.lock().unwrap().get(&manifest).unwrap().is_none());
+    assert!(
+        f.b.file_progress(file).unwrap().is_none(),
+        "record custody cannot imply recipient card or chunk delivery"
+    );
 }
 
 #[tokio::test]

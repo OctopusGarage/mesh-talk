@@ -363,6 +363,7 @@
     },
     "custody": {
       "postOfficeHelp": "The post office confirmed durable storage of this encrypted message. Recipient delivery, downloads and reading are separate.",
+      "fileRecordHelp": "These counts cover the file message record only. They do not confirm that all image or file bytes are stored.",
       "postOffice": "Post office confirmed a stored copy",
       "local": "No member copy confirmed",
       "one": "Last confirmed: 1 member copy",

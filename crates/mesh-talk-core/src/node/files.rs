@@ -996,7 +996,7 @@ impl Node {
         expires_at_ms: Option<u64>,
         authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
     ) -> Result<ConversationId, NodeError> {
-        let (_, file) = self
+        let (manifest, file) = self
             .enqueue_file_channel_progress_expiring_if(
                 channel,
                 path,
@@ -1006,7 +1006,8 @@ impl Node {
                 authorize,
             )
             .await?;
-        self.flush_channel_file(channel, file).await;
+        self.flush_channel_file_record(channel, file, manifest)
+            .await;
         Ok(file)
     }
 
@@ -1123,6 +1124,38 @@ impl Node {
         channel: ConversationId,
         file: ConversationId,
     ) {
+        self.flush_channel_file_with_confirmation(channel, file, None)
+            .await;
+    }
+
+    /// Confirm the accepted file-message record independently of its chunks.
+    /// Keep the compatibility flush above for callers without an acceptance ID.
+    pub async fn flush_channel_file_record(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        file: ConversationId,
+        manifest: EventId,
+    ) {
+        let confirming = match self.log.lock().expect("log lock").get(&manifest) {
+            Ok(Some(event))
+                if event.conversation_id == channel
+                    && event.kind == EventKind::FileManifest
+                    && event.author.user_id() == self.user_id() =>
+            {
+                Some(manifest)
+            }
+            _ => None,
+        };
+        self.flush_channel_file_with_confirmation(channel, file, confirming)
+            .await;
+    }
+
+    async fn flush_channel_file_with_confirmation(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        file: ConversationId,
+        confirming: Option<EventId>,
+    ) {
         let members = self
             .channels
             .lock()
@@ -1139,7 +1172,7 @@ impl Node {
             }
         };
         if let Some(members) = members {
-            self.distribute_channel_file(channel, file, &members, automatic_inline)
+            self.distribute_channel_file(channel, file, &members, automatic_inline, confirming)
                 .await;
         }
     }

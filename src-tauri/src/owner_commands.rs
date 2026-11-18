@@ -362,7 +362,7 @@ fn flush_channel_acceptance(
                 Box::pin(async move {
                     let node = runtime.handle();
                     if let Some(file) = file {
-                        node.flush_channel_file(channel, file).await;
+                        node.flush_channel_file_record(channel, file, id).await;
                     } else {
                         node.flush_accepted_message(
                             &mesh_talk_core::node::MessageDestination::Channel(channel),

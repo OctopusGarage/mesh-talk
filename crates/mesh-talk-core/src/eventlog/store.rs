@@ -27,7 +27,7 @@ pub struct EventLog {
     /// orders incrementally as events are indexed). `(lamport, id)` is stable per event
     /// (both are content-addressed), so no duplicate/aliasing.
     by_conversation: HashMap<ConversationId, BTreeSet<(u64, EventId)>>,
-    /// Message-only author index for bounded background custody scans.
+    /// Message-record author index for bounded custody scans, including file offers.
     messages_by_author: HashMap<(ConversationId, Author), BTreeSet<(u64, EventId)>>,
     /// Channels containing a wire kind that older peers cannot decode.
     replica_v2: HashSet<ConversationId>,
@@ -129,7 +129,7 @@ impl EventLog {
         self.author_seq.insert((conv, event.author, event.seq), id);
         let set = self.by_conversation.entry(conv).or_default();
         set.insert((event.lamport, id));
-        if event.kind == EventKind::Message {
+        if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
             self.messages_by_author
                 .entry((conv, event.author))
                 .or_default()
@@ -245,7 +245,7 @@ impl EventLog {
         }
     }
 
-    /// Return at most `limit` authored messages after `cursor`, wrapping once.
+    /// Return at most `limit` authored text/file records after `cursor`, wrapping once.
     /// A B-tree range avoids walking or allocating the whole channel history.
     pub fn message_keys_after(
         &self,

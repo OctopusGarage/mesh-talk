@@ -35,6 +35,31 @@ const render = (m: ChatMessage, isChannel = false, isPersonal = false) =>
     }),
   );
 
+it.each(["photo.png", "sticker.webp", "document.pdf"])(
+  "shows member and post-office record custody for outgoing group file %s",
+  async (name) => {
+    await i18n.changeLanguage("en");
+    const html = render(
+      {
+        ...base,
+        replicas: 1,
+        postOfficeCopies: 1,
+        file: {
+          fileConv: "file",
+          name,
+          size: 12,
+          mime: "image/png",
+          media: true,
+        },
+      },
+      true,
+    );
+    expect(html).toContain('data-custody="1"');
+    expect(html).toContain('aria-label="Last confirmed: 1 member copy"');
+    expect(html).toContain('aria-label="Post office confirmed a stored copy"');
+  },
+);
+
 describe("automatic delivery footer", () => {
   it("names a received file offer without claiming file delivery", async () => {
     await i18n.changeLanguage("en");
@@ -152,8 +177,17 @@ describe("automatic delivery footer", () => {
     expect(html).not.toContain("✓");
     expect(html).not.toContain("data-delivery=");
   });
-  it("has explicit automatic-receipt wording in all six locales and hides guessed file metadata", async () => {
-    for (const language of ["en", "es", "ja", "yue", "zh-Hans", "zh-Hant"]) {
+  it("has explicit automatic-receipt wording in all locales and hides guessed file metadata", async () => {
+    for (const language of [
+      "en",
+      "es",
+      "ja",
+      "ko",
+      "pt-BR",
+      "yue",
+      "zh-Hans",
+      "zh-Hant",
+    ]) {
       for (const key of [
         "awaiting",
         "delivered",
@@ -172,7 +206,7 @@ describe("automatic delivery footer", () => {
         expect(
           i18n.getResource(language, "translation", `message.delivery.${key}`),
         ).toBeTruthy();
-      for (const key of ["unknown", "unknownHelp", "help"])
+      for (const key of ["unknown", "unknownHelp", "help", "fileRecordHelp"])
         expect(
           i18n.getResource(language, "translation", `message.custody.${key}`),
         ).toBeTruthy();

@@ -844,6 +844,76 @@ test("linked-device channel history waits for copy confirmation before showing a
   await expect(bubble.locator("[data-delivery]")).toHaveCount(0);
 });
 
+test("group image record discloses member and post-office copies separately from file bytes", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 700 });
+  await enterChat(page);
+  await page.evaluate(() => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+    };
+    const original = scope.__TAURI_INTERNALS__.invoke;
+    scope.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "channel_custody_statuses")
+        return [{ id: "image-record", replicas: 1, post_offices: 1 }];
+      if (command === "file_statuses")
+        return [{ file_conv: "image-bytes", done: 0, total: 1, ready: false }];
+      if (command === "channel_history")
+        return [
+          ...((await original(command, args)) as unknown[]),
+          {
+            id: "image-record",
+            from_me: true,
+            who: "you",
+            text: "",
+            wall_clock: 1_700_000_200_000,
+            reply_to: null,
+            file: {
+              file_conv: "image-bytes",
+              name: "record-photo.png",
+              size: 120,
+              mime: "image/png",
+              media: true,
+            },
+          },
+        ];
+      return original(command, args);
+    };
+  });
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  const bubble = page.getByRole("article", { name: /record-photo/ });
+  const member = bubble.getByRole("button", {
+    name: "Last confirmed: 1 member copy",
+  });
+  const office = bubble.getByRole("button", {
+    name: "Post office confirmed a stored copy",
+  });
+  await expect(member).toBeVisible();
+  await expect(office).toBeVisible();
+  for (const button of [member, office]) {
+    await button.focus();
+    await button.press("Enter");
+    await expect(bubble.getByTestId("message-status")).toContainText(
+      "file message record only",
+    );
+    await expect(bubble.getByTestId("message-status")).toContainText(
+      "do not confirm that all image or file bytes are stored",
+    );
+    await button.press("Escape");
+  }
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+});
+
 test("typed channel File stays pending until canonical metadata commits and original-ID replay stays singular", async ({
   page,
 }) => {

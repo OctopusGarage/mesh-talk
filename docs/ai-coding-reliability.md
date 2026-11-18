@@ -453,6 +453,11 @@ admission before redialing. The [confirming-fanout regression](../crates/mesh-ta
 and [exact-custody failure-path regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
 exercise authenticated closure, incomplete reconciliation, real local policy
 invalidation and positive/negative answers on the replacement connection.
+Include file-message records in the same accepted-event confirmation path and
+bounded custody cursor even when their chunks have a separate transport owner.
+Keep record custody distinct from complete file-byte availability in UI details.
+For mixed-kind indexed pages, bound each covering range before merging so a
+small status page cannot sort the whole retained history.
 
 When replacing fast polling with sparse recovery, preserve the progress that the
 old poll accidentally supplied. A completed record is not active demand, but a

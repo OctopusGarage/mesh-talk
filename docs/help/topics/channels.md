@@ -120,6 +120,11 @@ each opens its own explanation. Member copies do not suppress post-office storag
 These signals do not mean everyone received or read the message. Copies
 on your own linked devices do not count as another member's confirmation.
 
+Images, stickers and attachments use the same icons for their file-message
+records. These confirmations cover the retained message record, not every file
+chunk. The expanded explanation states that distinction; file availability and
+verified saving remain separate.
+
 Your linked devices synchronize these historical confirmations with message
 history enabled. **Copy status unavailable** means this device has not obtained
 the status yet; **No member copy confirmed** means no eligible member copy is

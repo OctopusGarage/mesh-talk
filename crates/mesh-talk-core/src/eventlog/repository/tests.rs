@@ -2277,8 +2277,9 @@ fn indexed_custody_retry_cursor_wraps_once_without_reading_bodies() {
         EventKind::Message,
     );
     let profile = event(&author, 3, vec![], 3, EventKind::Profile);
+    let file = event(&author, 4, vec![], 4, EventKind::FileManifest);
     let mut reference = crate::eventlog::EventLog::default();
-    for row in [&first, &last, &other, &profile] {
+    for row in [&first, &last, &other, &profile, &file] {
         repository.append(row).unwrap();
         reference.append(row.clone()).unwrap();
     }
@@ -2299,6 +2300,18 @@ fn indexed_custody_retry_cursor_wraps_once_without_reading_bodies() {
         }
     }
     assert_eq!(repository.body_read_counts(), (0, 0));
+    assert_eq!(
+        repository
+            .message_keys_after(
+                first.conversation_id,
+                first.author,
+                Some((last.lamport, last.id)),
+                2
+            )
+            .unwrap(),
+        vec![(first.lamport, first.id), (file.lamport, file.id)],
+        "file records share the same bounded fair cursor without including controls or other authors"
+    );
     assert_eq!(
         repository
             .message_keys_after(

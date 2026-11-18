@@ -3127,8 +3127,9 @@ impl Node {
         file: ConversationId,
         members: &[PublicIdentity],
         automatic_inline: bool,
+        confirming: Option<EventId>,
     ) {
-        self.distribute_channel_targets(channel, members, None, false, None)
+        self.distribute_channel_targets(channel, members, None, false, confirming)
             .await;
         if automatic_inline {
             self.distribute_channel_targets(file, members, None, false, None)
@@ -3140,7 +3141,7 @@ impl Node {
             .cloned()
             .collect();
         let _ = self
-            .replicate_to_post_office_targets(channel, recipients.clone())
+            .replicate_to_post_office_targets_confirming(channel, recipients.clone(), confirming)
             .await;
         if automatic_inline {
             let _ = self
@@ -3260,7 +3261,7 @@ impl Node {
             .get(&id)?
             .is_some_and(|event| {
                 event.conversation_id == channel
-                    && event.kind == EventKind::Message
+                    && matches!(event.kind, EventKind::Message | EventKind::FileManifest)
                     && event.author.user_id() == self.user_id()
             });
         let own_signed = self
@@ -3270,7 +3271,7 @@ impl Node {
             .get(&id)?
             .is_some_and(|event| {
                 event.conversation_id == channel
-                    && event.kind == EventKind::Message
+                    && matches!(event.kind, EventKind::Message | EventKind::FileManifest)
                     && own_devices.contains(&event.author.user_id())
             });
         let own_archived = self
@@ -4548,15 +4549,25 @@ mod fanout_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn channel_exact_custody_positive_after_local_stale_history_confirms_second_account() {
-        local_stale_history_custody_fixture(true).await;
+        local_stale_history_custody_fixture(true, false).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn channel_exact_custody_negative_after_local_stale_history_preserves_first_account() {
-        local_stale_history_custody_fixture(false).await;
+        local_stale_history_custody_fixture(false, false).await;
     }
 
-    async fn local_stale_history_custody_fixture(held: bool) {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_exact_custody_file_record_survives_stale_history() {
+        local_stale_history_custody_fixture(true, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_exact_custody_file_record_negative_does_not_claim_copy() {
+        local_stale_history_custody_fixture(false, true).await;
+    }
+
+    async fn local_stale_history_custody_fixture(held: bool, file_record: bool) {
         use crate::{
             identity::account::Account,
             node::test_support::{IndependentPeerRuntime, node_with_files},
@@ -4640,10 +4651,18 @@ mod fanout_tests {
             }).await.expect("cold group metadata must settle before injecting view invalidation");
             source.roster.lock().unwrap().forget(&target.identity.public());
             source.sessions.clear();
-            source.send_channel_message(channel, b"Original retained before unrelated history failure").await.unwrap();
-            let event = source.log.lock().unwrap().message_keys_after(channel,
-                crate::eventlog::event::Author::from_ed25519(source.identity.public().ed25519_pub), None, 2)
-                .unwrap().into_iter().next().unwrap().1;
+            let event = if file_record {
+                let path = dir.path().join("record.bin");
+                std::fs::write(&path, b"file bytes are separate from the message record").unwrap();
+                source.send_file_channel(channel, &path, crate::file::FileKind::File).await.unwrap();
+                source.log.lock().unwrap().events(&channel).unwrap().into_iter()
+                    .find(|event| event.kind == EventKind::FileManifest).unwrap().id
+            } else {
+                source.send_channel_message(channel, b"Original retained before unrelated history failure").await.unwrap();
+                source.log.lock().unwrap().message_keys_after(channel,
+                    crate::eventlog::event::Author::from_ed25519(source.identity.public().ed25519_pub), None, 2)
+                    .unwrap().into_iter().next().unwrap().1
+            };
             assert_eq!(source.channel_custody_count(channel, event).unwrap(), Some(1));
             assert!(first.log.lock().unwrap().get(&event).unwrap().is_some());
             assert!(target.log.lock().unwrap().get(&event).unwrap().is_none());
