@@ -45,6 +45,7 @@ export function requiredBrowserPaths(tier) {
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after rejection and navigation"],
     ["automatic-delivery.spec.ts", "channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator"],
     ["automatic-delivery.spec.ts", "linked-device channel history waits for copy confirmation before showing a check"],
+    ["automatic-delivery.spec.ts", "group image record discloses member and post-office copies separately from file bytes"],
     ["automatic-delivery.spec.ts", "typed channel File stays pending until canonical metadata commits and original-ID replay stays singular"],
     ["media-recovery.spec.ts", "legacy media availability recovery preserves the stable fileConv and full-size actions"],
     ["media-lifecycle.spec.ts", "same-identity disable/re-enable never returns a revoked URL"],
