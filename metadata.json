@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7PVBKV72DGZX8MQ8NW3WMM6",
+  "strategy": "manual-commit",
+  "branch": "fix/media-send-transitions",
+  "checkpoints_count": 3,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 306398,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 21610624,
+    "output_tokens": 43502,
+    "api_call_count": 80,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 41368,
+    "layers": {
+      "betterleaks": 5,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 41445,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
