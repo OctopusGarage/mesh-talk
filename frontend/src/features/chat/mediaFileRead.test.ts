@@ -8,6 +8,7 @@ const fixture = vi.hoisted(() => ({
   readMedia: vi.fn(),
   readFile: vi.fn(),
   current: true,
+  run: 0,
 }));
 vi.mock("@/lib/api", () => ({
   chat: {
@@ -17,16 +18,29 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 vi.mock("@/store/auth", () => ({
-  useAuth: (selector: (state: unknown) => unknown) =>
-    selector({ user: { id: "owner" }, generation: 0 }),
+  useAuth: Object.assign(
+    (selector: (state: unknown) => unknown) =>
+      selector({ user: { id: "owner" }, generation: 0 }),
+    { subscribe: () => () => {} },
+  ),
 }));
 vi.mock("@/store/chat", () => ({
   useChat: Object.assign(
     (selector: (state: unknown) => unknown) =>
-      selector({ runEpoch: 0, identityEpoch: 0, ready: true }),
-    { getState: () => ({ runEpoch: 0 }) },
+      selector({ runEpoch: fixture.run, identityEpoch: 0, ready: true }),
+    {
+      getState: () => ({
+        runEpoch: fixture.run,
+        identityEpoch: 0,
+        ready: true,
+      }),
+      subscribe: () => () => {},
+    },
   ),
-  captureChatOwnership: () => ({ current: () => fixture.current }),
+  captureChatOwnership: () => {
+    const run = fixture.run;
+    return { current: () => fixture.current && fixture.run === run };
+  },
 }));
 vi.mock("@/store/fileAvailability", () => ({
   useFileStatus: () => ({ ready: true }),
@@ -49,6 +63,7 @@ beforeEach(() => {
     revokeObjectURL: revokeUrl,
   });
   fixture.current = true;
+  fixture.run++;
   fixture.readMedia.mockReset().mockRejectedValue(new Error("invalid sticker"));
   fixture.readFile.mockReset().mockRejectedValue(new Error("invalid sticker"));
   createUrl.mockClear();

@@ -143,6 +143,7 @@ fn dispatch_native_key(key: &str) -> Result<(), String> {
         "Enter" => (36, "\r"),
         "Escape" => (53, "\u{1b}"),
         "PageUp" => (116, "\u{f72c}"),
+        "PageDown" => (121, "\u{f72d}"),
         _ => return Err("Unsupported evaluation key".into()),
     };
     let window = application

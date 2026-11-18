@@ -1392,3 +1392,80 @@ fn warm_metadata_reads_reuse_statements_and_observe_current_rows() {
     );
     assert_eq!(repository.body_reads(), 0);
 }
+
+#[test]
+fn ever_history_metadata_survives_clear_for_sent_received_and_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let mut sent =
+        SentStore::from_profile(owner.clone(), &dir.path().join("sent.log"), "pw").unwrap();
+    let mut received =
+        ReceivedStore::from_profile(owner.clone(), &dir.path().join("received.log"), "pw").unwrap();
+    let mut files = ReceivedStore::file_cards_from_profile(
+        owner.clone(),
+        &dir.path().join("received_files.log"),
+        "pw",
+    )
+    .unwrap();
+    assert!(
+        ever_history_conversations(&owner, &[conv(1), conv(2), conv(3)])
+            .unwrap()
+            .is_empty()
+    );
+    sent.record_durable(&super::tests::sent(1)).unwrap();
+    let mut row = super::tests::received(2);
+    row.conversation = conv(2);
+    received.record_durable(&row).unwrap();
+    row.conversation = conv(3);
+    files.record_durable(&row).unwrap();
+    let reads = (sent.body_reads(), received.body_reads(), files.body_reads());
+    assert_eq!(
+        ever_history_conversations(&owner, &[conv(1), conv(2), conv(3)])
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        (sent.body_reads(), received.body_reads(), files.body_reads()),
+        reads
+    );
+    sent.remove_where(|_| true).unwrap();
+    received.remove_where(|_| true).unwrap();
+    files.remove_where(|_| true).unwrap();
+    drop((sent, received, files));
+    drop(owner);
+    let owner = profile(dir.path(), &identity, &account);
+    let result = ever_history_conversations(&owner, &[conv(1), conv(2), conv(3), conv(4)]).unwrap();
+    assert_eq!(result.len(), 3);
+    assert!(!result.contains(&conv(4)));
+    assert!(ever_history_conversations(&owner, &[conv(1); 129]).is_err());
+    owner
+        .database()
+        .transaction(|connection| {
+            connection.execute_batch(
+                "ALTER TABLE transcript_conversations RENAME TO unavailable_conversations",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        ever_history_conversations(&owner, &[conv(1)]).is_err(),
+        "unavailable history metadata must not become false absence"
+    );
+    owner
+        .database()
+        .transaction(|connection| {
+            connection.execute_batch(
+                "ALTER TABLE unavailable_conversations RENAME TO transcript_conversations",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        ever_history_conversations(&owner, &[conv(1)])
+            .unwrap()
+            .contains(&conv(1))
+    );
+}

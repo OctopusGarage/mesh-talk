@@ -73,6 +73,11 @@ import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
 import { ReceiveProgress } from "./ReceiveProgress";
 import { TransferBar } from "./TransferBar";
+import { useTransfers } from "@/store/transfers";
+import {
+  useOutgoingMediaPreview,
+  type OutgoingMediaPreview,
+} from "@/store/outgoingMediaPreviews";
 
 /** A file/media message body: inline media for images/small videos, else a file card with
  * a Save action. Reuses the shared MediaPreview (lazy bytes + revoked blob URLs). */
@@ -86,6 +91,7 @@ function FileBubble({
   isChannel,
   isPersonal,
   readOnly,
+  localPreview,
 }: {
   file: NonNullable<ChatMessage["file"]>;
   mine: boolean;
@@ -96,6 +102,7 @@ function FileBubble({
   isChannel: boolean;
   isPersonal: boolean;
   readOnly: boolean;
+  localPreview?: OutgoingMediaPreview;
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
@@ -115,9 +122,15 @@ function FileBubble({
   const approvalNeeded =
     !mine && (status?.consent === "pending" || status?.consent === "declined");
   const uploadKey =
-    mine && !metadataPending && !isChannel && !isPersonal
+    mine && !readOnly && !metadataPending && !isChannel && !isPersonal
       ? messageId || undefined
       : undefined;
+  // Subscribe only to visibility, leaving byte ticks inside TransferBar.
+  const hasUploadStatus = useTransfers((state) => {
+    if (!uploadKey) return false;
+    const transfer = state.transfers[uploadKey];
+    return !transfer?.delivered && (!!transfer || !!sendKey);
+  });
 
   const saveAs = async () => {
     const lease = captureChatOwnership();
@@ -168,27 +181,35 @@ function FileBubble({
   // opens on click (MediaPreview's lightbox) — the chat doesn't need that clutter under
   // every photo. Media that is too large to preview inline falls through to the file card
   // below, so it stays visible and savable instead of rendering an empty bubble.
-  if (
-    !metadataPending &&
-    !approvalNeeded &&
-    file.fileConv &&
-    file.media &&
-    withinInlineCap(file.name, file.size)
-  ) {
+  if (!approvalNeeded && file.media && withinInlineCap(file.name, file.size)) {
     return (
-      <div data-inline-media="" className="max-w-xs">
+      <div data-inline-media="" className="relative max-w-xs">
         <MediaPreview
           fileConv={file.fileConv}
           name={file.name}
           size={file.size}
           mime={file.mime}
           readOnly={readOnly}
+          localPreview={localPreview}
+          preparing={!!metadataPending && mine && !failed}
+          failed={mine && failed}
+          externalStatus={
+            mine &&
+            !readOnly &&
+            !failed &&
+            (!!metadataPending || hasUploadStatus)
+          }
         />
-        {uploadKey && (
-          <TransferBar
-            transferKey={uploadKey}
-            waitingDirection={sendKey ? "send" : undefined}
-          />
+        {mine && !failed && (metadataPending || uploadKey) && (
+          <div className="pointer-events-none absolute inset-x-3 top-3">
+            <TransferBar
+              variant="media"
+              transferKey={metadataPending ? sendKey : uploadKey}
+              waitingDirection={
+                metadataPending ? "prepare" : sendKey ? "send" : undefined
+              }
+            />
+          </div>
         )}
       </div>
     );
@@ -215,16 +236,29 @@ function FileBubble({
           <div className="truncate text-sm">
             {attachmentLabel(file.name, file.mime, file, t("message.sticker"))}
           </div>
-          <div className="font-mono text-[11px] tabular-nums opacity-70">
-            {metadataPending
-              ? t(
-                  failed
-                    ? "message.fail.unknown"
-                    : "message.delivery.metadataPending",
-                )
-              : readOnly && !available
-                ? t("recovery.mediaUnavailable")
-                : humanSize(file.size)}
+          <div className="min-h-7">
+            {mine && !failed && !readOnly ? (
+              <TransferBar
+                variant="compact"
+                transferKey={metadataPending ? sendKey : uploadKey}
+                waitingDirection={
+                  metadataPending
+                    ? "prepare"
+                    : uploadKey && sendKey
+                      ? "send"
+                      : undefined
+                }
+                idleLabel={humanSize(file.size)}
+              />
+            ) : (
+              <div className="font-mono text-[11px] tabular-nums opacity-70">
+                {failed && metadataPending
+                  ? t("message.fail.unknown")
+                  : readOnly && !available
+                    ? t("recovery.mediaUnavailable")
+                    : humanSize(file.size)}
+              </div>
+            )}
           </div>
         </div>
         <button
@@ -281,15 +315,6 @@ function FileBubble({
           )}
         </button>
       </div>
-      {metadataPending && mine && !failed && (
-        <TransferBar transferKey={sendKey} waitingDirection="prepare" />
-      )}
-      {uploadKey && (
-        <TransferBar
-          transferKey={uploadKey}
-          waitingDirection={sendKey ? "send" : undefined}
-        />
-      )}
       {autoFailure && (
         <div role="alert" className="mt-1 text-xs text-destructive">
           {t("files.couldntSave", { error: autoFailure })}
@@ -420,6 +445,9 @@ export function MessageBubble({
   const installedPacks = usePacks((s) => s.packs);
   const displayedText = m.protection ? t("protectedMessage.label") : m.text;
   const mine = m.fromMe;
+  const localPreview = useOutgoingMediaPreview(
+    mine && !readOnly && !m.protection ? m.clientId : undefined,
+  );
   const isFile = !!m.file;
   // Sticker messages render bubble-less (Telegram-style): just the animation. Fall back to
   // the big emoji char when this build doesn't bundle that sticker (version skew).
@@ -651,7 +679,7 @@ export function MessageBubble({
                           : "rounded-bl-sm border border-border bg-muted text-foreground",
                       ),
                   mentioned && "ring-1 ring-inset ring-signal/65",
-                  m.pending && "opacity-75",
+                  m.pending && !m.file && "opacity-75",
                 )}
               >
                 {m.protection ? (
@@ -662,14 +690,40 @@ export function MessageBubble({
                     mime={m.file?.mime}
                   />
                 ) : mediaSticker ? (
-                  <MediaSticker
-                    key={m.file!.fileConv || m.clientId}
-                    fileConv={m.file!.fileConv}
-                    mime={m.file!.mime}
-                    fallback={mediaSticker.fallback}
-                    label={presentation?.label}
-                    readOnly={readOnly}
-                  />
+                  <div className="relative w-32">
+                    <MediaSticker
+                      key={m.clientId || m.file!.fileConv}
+                      fileConv={m.file!.fileConv}
+                      mime={m.file!.mime}
+                      fallback={mediaSticker.fallback}
+                      label={presentation?.label}
+                      readOnly={readOnly}
+                      localPreview={localPreview}
+                      externalStatus={
+                        mine && !readOnly && !!(m.pending || m.failed)
+                      }
+                    />
+                    {mine &&
+                      !readOnly &&
+                      !m.failed &&
+                      (m.pending || (!isChannel && !isPersonal)) && (
+                        <div className="pointer-events-none absolute inset-x-0 top-20">
+                          <TransferBar
+                            variant="media"
+                            transferKey={
+                              m.metadataPending ? m.clientId : m.id || undefined
+                            }
+                            waitingDirection={
+                              m.pending
+                                ? m.metadataPending
+                                  ? "prepare"
+                                  : "send"
+                                : undefined
+                            }
+                          />
+                        </div>
+                      )}
+                  </div>
                 ) : isSticker ? (
                   sticker ? (
                     <img
@@ -703,6 +757,7 @@ export function MessageBubble({
                     isChannel={isChannel}
                     isPersonal={isPersonal}
                     readOnly={readOnly}
+                    localPreview={localPreview}
                   />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
@@ -880,7 +935,7 @@ export function MessageBubble({
               mine && "flex-row-reverse",
             )}
           >
-            {!(m.file && m.metadataPending) && (
+            {!(m.file && m.metadataPending && !m.file.media) && (
               <span>{t(`message.fail.${m.failReason ?? "unknown"}`)}</span>
             )}
             <button

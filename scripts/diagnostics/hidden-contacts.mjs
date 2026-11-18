@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { verifyNativeBuild } from "../validation/native-build.mjs";
 import { captureNativeEvidence, captureNativeFailure, collectNativeApplicationLogs, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
-import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, cliListenerEndpoint, receiptPeerEndpointContext, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode } from "./native-core-scenarios.mjs";
+import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, cliListenerEndpoint, receiptPeerEndpointContext, signedPeerObservation, nativeWindowsKeyboardScript, nativeControlKeyName, sendNativeLinuxKey, settledSignedInSession, settledPrivacyMode, settledPrivacyConfirmationDismissal, startPrivacyDialogTrace } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -79,7 +79,7 @@ async function until(description, check, timeout = 60000) {
   const deadline = Date.now() + timeout;
   let error;
   while (Date.now() < deadline) {
-    try { const value = await check(); if (value) return value; } catch (e) { error = e; }
+    try { const value = await check(); if (value) return value; } catch (e) { if (e?.code === "ERR_NATIVE_KEY_DISPATCH") throw e; error = e; }
     await delay(250);
   }
   throw new Error(`Timed out: ${description}${error ? ` (${redact(error.message)})` : ""}`);
@@ -109,6 +109,7 @@ const readFileBytes = fileConv => command("POST", "/execute/async", {
   script: "const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('read_file',{fileConv:arguments[0]}).then(buffer=>done({ok:true,bytes:Array.from(new Uint8Array(buffer))}),error=>done({ok:false,error:String(error)}));",
   args: [fileConv],
 }).then(result => { assert.equal(result.ok, true, "production read_file failed"); return result.bytes; });
+let finishPrivacyTrace;
 const selector = id => `[data-testid="${id}"]`;
 const exists = id => execute("return !!document.querySelector(arguments[0]);", [selector(id)]);
 async function element(id) {
@@ -173,30 +174,33 @@ async function fill(id, text) {
   await command("POST", `/element/${el}/value`, { text });
 }
 async function key(value) {
-  const keys = { "\uE004": [48, "{TAB}", "Tab"], "\uE007": [36, "{ENTER}", "Return"], "\uE00C": [53, "{ESC}", "Escape"], "\uE00E": [116, "{PGUP}", "Prior"] };
-  const mapping = keys[value];
-  assert.ok(mapping, "supported native evaluation key");
+  const keyName = nativeControlKeyName(value);
+  assert.ok(keyName, "supported native evaluation key");
+  const application = app;
   const pid = app.pid;
   assert.ok(Number.isInteger(pid) && owned.has(app), "keyboard targets only the owned native application");
   async function input(binary, args) {
     const child = launch(binary, args);
     try { await until("native keyboard helper completion", () => !owned.has(child), process.platform === "win32" ? 60000 : 10000); }
-    catch (error) { throw new Error(`${error.message}; helper pid=${child.pid}; output=${redact(child.output.slice(-2000))}`); }
+    catch (error) {
+      if (process.platform === "linux") await stop(child);
+      throw new Error(`${error.message}; helper pid=${child.pid}; output=${redact(child.output.slice(-2000))}`);
+    }
     assert.equal(child.exitCode, 0, `native keyboard helper failed: ${child.output}`);
     return child.output.trim();
   }
   if (process.platform === "darwin") {
     await focusOwnedWindow();
-    const keyName = { "\uE004": "Tab", "\uE007": "Enter", "\uE00C": "Escape", "\uE00E": "PageUp" }[value];
     await appKitKey(keyName);
   } else if (process.platform === "win32") {
     await input("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", nativeWindowsKeyboardScript(pid, value)]);
   } else {
-    const windows = await input("xdotool", ["search", "--onlyvisible", "--pid", String(pid)]);
-    const window = windows.split("\n")[0];
-    assert.match(window, /^\d+$/);
-    await input("xdotool", ["windowfocus", "--sync", window]);
-    await input("xdotool", ["key", "--window", window, "--clearmodifiers", mapping[2]]);
+    try {
+      await sendNativeLinuxKey({ input, execute, until, current: () => app === application && owned.has(application) }, pid, keyName);
+    } catch (cause) {
+      // Paging polls must never issue another key after a failed dispatch.
+      throw Object.assign(new Error(cause.message, { cause }), { code: "ERR_NATIVE_KEY_DISPATCH" });
+    }
   }
   // Delivery acknowledgement means the native event was queued. Wait for the
   // actual webview to paint before sampling focus or sending the next key.
@@ -334,11 +338,12 @@ try {
   // Real native controls + production IPC + the actual CLI. Browser-mocked
   // privacy.spec.ts is not accepted as evidence for these runtime scenarios.
   await privacySettings();
+  finishPrivacyTrace = await startPrivacyDialogTrace(coreContext);
   assert.equal((await privacyPolicy()).invisible, false);
   await openDialog("invisible-switch");
   await until("invisible cancel default focus", () => execute("return document.activeElement?.getAttribute('data-testid')==='invisible-cancel';"));
   await key("\uE007");
-  await until("invisible cancellation dismissed", async () => !await exists("invisible-confirm"));
+  await settledPrivacyConfirmationDismissal(coreContext);
   assert.equal((await privacyPolicy()).invisible, false);
   await openDialog("invisible-switch");
   await click("invisible-confirm");
@@ -346,6 +351,8 @@ try {
   assert.ok((await observe("list_accounts")).some(a => a.account_id === account), "passive roster remains available");
   const privacyPresentation = await settledPrivacyMode(coreContext);
   await passed("privacy-mode", { ...privacyPresentation, cancelledBeforeCommit: true, durable: await privacyPolicy(), passivePeerRetained: true });
+  report.privacyDialogTrace = await finishPrivacyTrace();
+  finishPrivacyTrace = undefined;
   await openDialog("manage-privacy");
   await settledDialog("privacy-dialog");
   await fill("privacy-search", peerName);
@@ -512,6 +519,7 @@ try {
 } catch (error) {
   report.failure = redact(error.stack ?? error);
   if (error.captureDiagnostics) report.captureDiagnostics = error.captureDiagnostics;
+  try { if (finishPrivacyTrace) report.privacyDialogTrace = await finishPrivacyTrace(); } catch { /* Preserve the original native failure. */ }
   console.error(redact(error.message));
   process.exitCode = 1;
   try {

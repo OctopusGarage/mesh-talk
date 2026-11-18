@@ -15,7 +15,7 @@ test("Linux profile preserves the full instrumented default cohort and old targe
   assert.equal(archive.archiveProfile("macos-remaining").instrumented, false);
 });
 
-test("Linux runtime identity requires the actual hosted Ubuntu ABI cohort", () => {
+function linuxRuntimeFixture() {
   const env = {
     GITHUB_ACTIONS: "true",
     RUNNER_ENVIRONMENT: "github-hosted",
@@ -31,6 +31,48 @@ test("Linux runtime identity requires the actual hosted Ubuntu ABI cohort", () =
     runtimePackages:
       "libc6\t2.43\nlibgtk-3-0t64\t3.24\nlibwebkit2gtk-4.1-0\t2.50\nlibayatana-appindicator3-1\t0.5\nlibrsvg2-2\t2.60\nlibstdc++6\t15\n",
   };
+  return { env, observed };
+}
+
+test("Linux producer and consumer explicitly install every sealed runtime package", () => {
+  const { env, observed } = linuxRuntimeFixture();
+  const sealed = archive.validateLinuxRuntime(env, observed).runtimePackages;
+  for (const [role, filename] of [
+    ["producer", "ci.yml"],
+    ["consumer", "linux-workspace-consumer.yml"],
+  ]) {
+    const workflow = readFileSync(
+      new URL(`../../.github/workflows/${filename}`, import.meta.url),
+      "utf8",
+    ).replace(/\\\r?\n\s*/gu, " ");
+    const installs = [...workflow.matchAll(/^\s*sudo apt-get install -y ([^\r\n]+)$/gmu)];
+    assert.equal(installs.length, 1, `${role} has one existing native dependency owner`);
+    const requested = new Set(
+      installs[0][1].split(/\s+/u).map(value => value.split("=")[0].split(":")[0]),
+    );
+    for (const [name] of sealed) {
+      assert.ok(requested.has(name), `Linux ${role} must explicitly request sealed runtime package: ${name}`);
+    }
+  }
+});
+
+test("Linux package setup preserves strict failures and bounds transient download retries", () => {
+  for (const filename of ["ci.yml", "linux-workspace-consumer.yml", "check-health.yml"]) {
+    const workflow = readFileSync(
+      new URL(`../../.github/workflows/${filename}`, import.meta.url), "utf8",
+    ).replace(/\\\r?\n\s*/gu, " ");
+    for (const phase of ["update", "install"]) {
+      const commands = [...workflow.matchAll(new RegExp(`^\\s*sudo apt-get ${phase} ([^\\r\\n]+)$`, "gmu"))];
+      assert.equal(commands.length, 1, `${filename} retains one ${phase} owner`);
+      assert.match(commands[0][1], /(?:^|\s)-o Acquire::Retries=3(?:\s|$)/u,
+        `${filename} ${phase} must bound failed-file retries`);
+      if (phase === "update") assert.match(commands[0][1], /(?:^|\s)--error-on=any(?:\s|$)/u);
+    }
+  }
+});
+
+test("Linux runtime identity requires the actual hosted Ubuntu ABI cohort", () => {
+  const { env, observed } = linuxRuntimeFixture();
   const identity = archive.validateLinuxRuntime(env, observed);
   assert.equal(identity.kind, "native-linux");
   assert.equal(identity.observation.imageVersion, env.ImageVersion);

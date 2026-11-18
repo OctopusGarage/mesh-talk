@@ -3,6 +3,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const state = vi.hoisted(() => ({
+  current: true,
   url: null as string | null,
   status: undefined as { ready: boolean; unavailable?: boolean } | undefined,
 }));
@@ -11,6 +12,9 @@ vi.mock("react-i18next", async (importOriginal) => ({
   useTranslation: () => ({
     t: (key: string) => (key === "message.sticker" ? "[Sticker]" : key),
   }),
+}));
+vi.mock("@/store/chat", () => ({
+  captureChatOwnership: () => ({ current: () => state.current }),
 }));
 vi.mock("@/store/fileAvailability", () => ({
   useFileStatus: () => state.status,
@@ -26,6 +30,7 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   host = document.createElement("div");
   root = createRoot(host);
+  state.current = true;
   state.url = null;
   state.status = undefined;
 });
@@ -33,7 +38,15 @@ afterEach(async () => {
   await act(async () => root.unmount());
   vi.unstubAllGlobals();
 });
-async function render(readOnly = false, label?: string) {
+async function render(
+  readOnly = false,
+  label?: string,
+  localPreview?: {
+    url: string;
+    current: () => boolean;
+    release: () => void;
+  },
+) {
   await act(async () =>
     root.render(
       createElement(MediaSticker, {
@@ -42,10 +55,45 @@ async function render(readOnly = false, label?: string) {
         fallback: "👋",
         label,
         readOnly,
+        localPreview,
       }),
     ),
   );
 }
+it("keeps the exact selected artwork until the durable sticker has decoded", async () => {
+  const preview = {
+    url: "blob:selected",
+    current: () => true,
+    release: vi.fn(),
+  };
+  await render(false, "Cat hug", preview);
+  expect(host.querySelector('img[src="blob:selected"]')).not.toBeNull();
+  expect(host.textContent).not.toContain("👋");
+  state.status = { ready: true };
+  state.url = "blob:received";
+  await render(false, "Cat hug", preview);
+  const durable = host.querySelector<HTMLImageElement>(
+    'img[src="blob:received"]',
+  )!;
+  expect(durable).not.toBeNull();
+  expect(preview.release).not.toHaveBeenCalled();
+  Object.defineProperties(durable, {
+    naturalWidth: { value: 128 },
+    naturalHeight: { value: 128 },
+  });
+  await act(async () => durable.dispatchEvent(new Event("load")));
+  expect(preview.release).toHaveBeenCalledTimes(1);
+  expect(host.querySelector('img[src="blob:selected"]')).toBeNull();
+});
+
+it("never displays a selected preview after its owner retires", async () => {
+  await render(false, "Cat hug", {
+    url: "blob:retired",
+    current: () => false,
+    release: vi.fn(),
+  });
+  expect(host.querySelector('img[src="blob:retired"]')).toBeNull();
+});
 it("shows the fallback while waiting and the received image with accessible alt when ready", async () => {
   await render();
   expect(host.textContent).toContain("👋");
@@ -92,4 +140,109 @@ it("hides a loaded image once retention makes the bytes unavailable", async () =
   await render();
   expect(host.querySelector("img")).toBeNull();
   expect(host.textContent).toContain("files.unavailable");
+});
+
+it("rejects late sticker decode after source replacement and account retirement", async () => {
+  const preview = {
+    url: "blob:selected-late",
+    current: () => true,
+    release: vi.fn(),
+  };
+  state.status = { ready: true };
+  state.url = "blob:old-sticker";
+  await render(false, "Cat", preview);
+  const old = host.querySelector<HTMLImageElement>(
+    '[data-testid="message-sticker"]',
+  )!;
+  state.url = "blob:new-sticker";
+  await render(false, "Cat", preview);
+  Object.defineProperties(old, {
+    naturalWidth: { value: 128 },
+    naturalHeight: { value: 128 },
+  });
+  await act(async () => old.dispatchEvent(new Event("load")));
+  expect(preview.release).not.toHaveBeenCalled();
+  state.current = false;
+  const next = host.querySelector<HTMLImageElement>(
+    '[data-testid="message-sticker"]',
+  )!;
+  Object.defineProperties(next, {
+    naturalWidth: { value: 128 },
+    naturalHeight: { value: 128 },
+  });
+  await act(async () => next.dispatchEvent(new Event("load")));
+  expect(preview.release).not.toHaveBeenCalled();
+});
+it("keeps selected sticker artwork actionable after durable decode failure", async () => {
+  const preview = {
+    url: "blob:selected-retry",
+    current: () => true,
+    release: vi.fn(),
+  };
+  state.status = { ready: true };
+  state.url = "blob:failed-sticker";
+  await render(false, "Cat", preview);
+  await act(async () =>
+    host
+      .querySelector('[data-testid="message-sticker"]')!
+      .dispatchEvent(new Event("error")),
+  );
+  expect(host.querySelector('img[src="blob:selected-retry"]')).not.toBeNull();
+  expect(host.querySelector("button")?.textContent).toBe("common.retry");
+  expect(preview.release).not.toHaveBeenCalled();
+  await act(async () => host.querySelector("button")!.click());
+  expect(host.querySelector('[data-testid="message-sticker"]')).not.toBeNull();
+});
+
+it("falls back safely when an optional selected sticker cannot decode", async () => {
+  const preview = {
+    url: "blob:selected-invalid",
+    current: () => true,
+    release: vi.fn(),
+  };
+  await render(false, "Cat", preview);
+  await act(async () =>
+    host
+      .querySelector('img[src="blob:selected-invalid"]')!
+      .dispatchEvent(new Event("error")),
+  );
+  expect(host.querySelector('img[src="blob:selected-invalid"]')).toBeNull();
+  expect(host.textContent).toContain("👋");
+  expect(preview.release).not.toHaveBeenCalled();
+});
+
+it("retires an old decoder error when the current source actually displays", async () => {
+  state.status = { ready: true };
+  state.url = "blob:old-error";
+  await render();
+  await act(async () =>
+    host.querySelector("img")!.dispatchEvent(new Event("error")),
+  );
+  expect(host.textContent).toContain("files.imageUnsupported");
+  state.url = "blob:recovered";
+  await render();
+  const img = host.querySelector<HTMLImageElement>(
+    'img[src="blob:recovered"]',
+  )!;
+  Object.defineProperties(img, {
+    naturalWidth: { value: 128 },
+    naturalHeight: { value: 128 },
+  });
+  await act(async () => img.dispatchEvent(new Event("load")));
+  expect(host.textContent).not.toContain("files.imageUnsupported");
+  expect(host.textContent).not.toContain("common.retry");
+});
+
+it("leaves outgoing phase labels to the parent when no optional preview exists", async () => {
+  await act(async () =>
+    root.render(
+      createElement(MediaSticker, {
+        fileConv: "",
+        mime: "image/png",
+        fallback: "👋",
+        externalStatus: true,
+      }),
+    ),
+  );
+  expect(host.textContent).not.toContain("transfer.waiting");
 });

@@ -15,6 +15,9 @@ use crate::transport::session::Session;
 use crate::transport::{MAX_FRAME, TransportError, VerifiedPeer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[cfg(test)]
+type TestFrameObserver = dyn Fn(bool, &[u8]) + Send + Sync;
+
 /// An established, authenticated, encrypted channel to one peer.
 pub struct SecureChannel<S> {
     stream: S,
@@ -25,6 +28,8 @@ pub struct SecureChannel<S> {
     connection_permits: Vec<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
     host_generation: Option<u64>,
     pairing_only: bool,
+    #[cfg(test)]
+    test_frame_observer: Option<std::sync::Arc<TestFrameObserver>>,
 }
 
 #[derive(Clone)]
@@ -34,6 +39,19 @@ struct IoAdmission {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
+    /// Observe completed application frames without changing their serving owner.
+    #[cfg(test)]
+    pub(crate) fn set_test_frame_observer(&mut self, observer: std::sync::Arc<TestFrameObserver>) {
+        self.test_frame_observer = Some(observer);
+    }
+
+    #[cfg(test)]
+    fn observe_test_frame(&self, sent: bool, plaintext: &[u8]) {
+        if let Some(observer) = &self.test_frame_observer {
+            observer(sent, plaintext);
+        }
+    }
+
     /// Cancellation-safe terminal read for a dedicated outstanding watch. Any
     /// byte or EOF terminates the connection; framing must never resume after it.
     pub(crate) async fn watch_disconnect(&mut self) -> Result<(), TransportError> {
@@ -144,6 +162,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             connection_permits: Vec::new(),
             host_generation: None,
             pairing_only: false,
+            #[cfg(test)]
+            test_frame_observer: None,
         })
     }
 
@@ -254,6 +274,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             connection_permits: Vec::new(),
             host_generation: None,
             pairing_only: false,
+            #[cfg(test)]
+            test_frame_observer: None,
         })
     }
 
@@ -349,11 +371,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             .await
             .map_err(|_| TransportError::Noise("policy-gated send timed out".into()))?;
             self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(bytes?);
+            #[cfg(test)]
+            self.observe_test_frame(true, plaintext);
             return Ok(());
         }
         let ct = self.encrypt_if(plaintext, &mut authorize)?;
         write_frame(&mut self.stream, &ct).await?;
         self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(ct.len() as u64 + 4);
+        #[cfg(test)]
+        self.observe_test_frame(true, plaintext);
         Ok(())
     }
 
@@ -384,7 +410,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
         if self.io_admission.as_ref().is_some_and(|a| !(a.check)()) {
             return Err(TransportError::AdmissionDenied);
         }
-        self.session.decrypt(&ct)
+        let plaintext = self.session.decrypt(&ct)?;
+        #[cfg(test)]
+        self.observe_test_frame(false, &plaintext);
+        Ok(plaintext)
     }
 }
 

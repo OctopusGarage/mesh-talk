@@ -22,6 +22,7 @@ import {
   ImageOff,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import type { OutgoingMediaPreview } from "@/store/outgoingMediaPreviews";
 import { attachmentLabel } from "@/lib/directoryAttachment";
 import { saveAttachment } from "@/lib/attachmentSave";
 import { useSavedDownloads } from "@/lib/savedDownloads";
@@ -65,6 +66,10 @@ export function MediaPreview({
   size,
   mime,
   readOnly = false,
+  localPreview,
+  preparing = false,
+  externalStatus = false,
+  failed = false,
 }: {
   fileConv: string;
   name: string;
@@ -75,6 +80,11 @@ export function MediaPreview({
    *  no Save. Used by the history viewer, where media should look like the chat but isn't
    *  clickable. */
   readOnly?: boolean;
+  localPreview?: OutgoingMediaPreview;
+  preparing?: boolean;
+  /** The parent presents outgoing transfer state beside or over this stage. */
+  externalStatus?: boolean;
+  failed?: boolean;
 }) {
   const { t } = useTranslation();
   const displayName = attachmentLabel(
@@ -87,7 +97,7 @@ export function MediaPreview({
   const setError = useChat((s) => s.setError);
   const savedPath = useSavedDownloads()[fileConv];
   const status = useFileStatus(savedPath ? undefined : fileConv);
-  const available = !!savedPath || !!status?.ready;
+  const available = !!fileConv && (!!savedPath || !!status?.ready);
   const video = isVideo(name);
   const withinCap = withinInlineCap(name, size);
   const [explicitOriginal, setExplicitOriginal] = useState<string | null>(null);
@@ -127,6 +137,20 @@ export function MediaPreview({
     url: string;
     width: number;
     height: number;
+    selected?: boolean;
+  } | null>(null);
+  const [failedSelected, setFailedSelected] = useState<string | null>(null);
+  const selectedPreview =
+    !video &&
+    !readOnly &&
+    localPreview?.current() &&
+    failedSelected !== localPreview.url
+      ? localPreview
+      : undefined;
+  const [selectedGeometry, setSelectedGeometry] = useState<{
+    url: string;
+    width: number;
+    height: number;
   } | null>(null);
   const geometry = url
     ? decoded?.url === url
@@ -138,14 +162,19 @@ export function MediaPreview({
     "relative block max-w-full overflow-hidden rounded-lg";
   // A provisional 4:3 frame becomes the actual aspect ratio on the first decode.
   // Reused URLs reserve the decoded geometry immediately on virtualized remounts.
-  const imageStyle: CSSProperties | undefined = geometry
+  const frameGeometry =
+    geometry ??
+    (selectedGeometry?.url === selectedPreview?.url
+      ? selectedGeometry
+      : undefined);
+  const imageStyle: CSSProperties | undefined = frameGeometry
     ? {
         width: Math.min(
-          geometry.width,
+          frameGeometry.width,
           320,
-          (320 * geometry.width) / geometry.height,
+          (320 * frameGeometry.width) / frameGeometry.height,
         ),
-        aspectRatio: `${geometry.width} / ${geometry.height}`,
+        aspectRatio: `${frameGeometry.width} / ${frameGeometry.height}`,
       }
     : undefined;
   const imageSource = useRef<{ fileConv: string; url: string | null } | null>(
@@ -170,7 +199,8 @@ export function MediaPreview({
     if (imageGeometry.size >= 64 && !imageGeometry.has(url))
       imageGeometry.delete(imageGeometry.keys().next().value!);
     imageGeometry.set(url, { width, height });
-    setDecoded({ url, width, height });
+    setDecoded({ url, width, height, selected: !!selectedPreview });
+    if (selectedPreview?.current()) selectedPreview.release();
   };
   const triggerRef = useRef<HTMLButtonElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -504,6 +534,29 @@ export function MediaPreview({
     </div>
   );
 
+  // This source is presentation-only: it never enables Save, lightbox or file readiness.
+  const selectedArtwork =
+    selectedPreview && !geometry ? (
+      <img
+        key={selectedPreview.url}
+        src={selectedPreview.url}
+        onError={() => {
+          if (selectedPreview.current() && imageLease.current())
+            setFailedSelected(selectedPreview.url);
+        }}
+        alt={displayName}
+        draggable={false}
+        data-testid="outgoing-media-preview"
+        onLoad={(event) => {
+          if (!selectedPreview.current() || !imageLease.current()) return;
+          const { naturalWidth: width, naturalHeight: height } =
+            event.currentTarget;
+          if (width && height)
+            setSelectedGeometry({ url: selectedPreview.url, width, height });
+        }}
+        className="absolute inset-0 h-full w-full select-none object-contain"
+      />
+    ) : null;
   // A video we can't preview inline (too large, or an undecodable codec like HEVC). Over-cap
   // media is normally handled by FileBubble's file card; this also covers a decode failure.
   if (video && (!withinCap || videoFailed)) {
@@ -514,23 +567,68 @@ export function MediaPreview({
   }
   // An image the webview couldn't decode (e.g. HEIC outside Safari).
   if (!video && (imgFailed || (previewFailure === fileConv && !url))) {
+    if (selectedArtwork)
+      return (
+        <div>
+          <div
+            className={frameGeometry ? imageFrameClass : frameClass}
+            style={imageStyle}
+          >
+            {selectedArtwork}
+          </div>
+          <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+            <span role="status">
+              {t(imgFailed ? "files.imageUnsupported" : "files.unavailable")}
+            </span>
+            <button
+              type="button"
+              className="rounded px-1 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => {
+                setFailedImageUrl(null);
+                setPreviewFailure(null);
+                setPreviewRetry((value) => value + 1);
+              }}
+            >
+              {t("common.retry")}
+            </button>
+          </div>
+        </div>
+      );
     return unpreviewable(
       imgFailed ? "files.imageUnsupported" : "files.unavailable",
       "file-image-unsupported",
     );
   }
+  if (selectedArtwork && (!available || !url))
+    return (
+      <div
+        className={frameGeometry ? imageFrameClass : frameClass}
+        style={imageStyle}
+      >
+        {selectedArtwork}
+      </div>
+    );
   if (!video && (!available || !url))
     return (
       <div
         className={`${frameClass} flex items-center justify-center p-5`}
         title={displayName}
       >
-        <ReceiveProgress
-          status={status}
-          presentation="image"
-          size={size}
-          preparing={available}
-        />
+        {failed ? (
+          <ImageOff
+            className="h-6 w-6 text-muted-foreground"
+            aria-label={t("message.fail.unknown")}
+          />
+        ) : (
+          !externalStatus && (
+            <ReceiveProgress
+              status={status}
+              presentation="image"
+              size={size}
+              preparing={preparing || available}
+            />
+          )
+        )}
       </div>
     );
   if (!available)
@@ -540,7 +638,7 @@ export function MediaPreview({
         title={displayName}
       >
         <span className="block truncate">{displayName}</span>
-        <ReceiveProgress status={status} />
+        {!externalStatus && !failed && <ReceiveProgress status={status} />}
       </div>
     );
   if (!url)
@@ -677,17 +775,21 @@ export function MediaPreview({
         // Reveal the fully painted image beneath one dissolving surface. Fading
         // both layers would let the wallpaper bleed through halfway through.
         opacity: geometry ? 0 : 1,
-        transition: `opacity ${motionOK ? 180 : 80}ms cubic-bezier(0.22, 1, 0.36, 1)`,
+        transition:
+          decoded?.url === url && decoded.selected
+            ? undefined
+            : `opacity ${motionOK ? 180 : 80}ms cubic-bezier(0.22, 1, 0.36, 1)`,
       }}
     >
-      {!geometry && (
-        <ReceiveProgress
-          status={status}
-          presentation="image"
-          size={size}
-          preparing
-        />
-      )}
+      {selectedArtwork ||
+        (!geometry && !externalStatus && (
+          <ReceiveProgress
+            status={status}
+            presentation="image"
+            size={size}
+            preparing
+          />
+        ))}
     </div>
   );
 
@@ -695,7 +797,7 @@ export function MediaPreview({
   if (readOnly) {
     return (
       <div
-        className={geometry ? imageFrameClass : frameClass}
+        className={frameGeometry ? imageFrameClass : frameClass}
         style={imageStyle}
       >
         <img
@@ -703,6 +805,7 @@ export function MediaPreview({
           src={url}
           alt={displayName}
           data-testid="file-image"
+          aria-hidden={!geometry}
           onLoad={rememberImage}
           onError={failImage}
           className="h-full w-full select-none object-contain"
@@ -717,7 +820,7 @@ export function MediaPreview({
     <>
       <div
         data-inline-image=""
-        className={geometry ? imageFrameClass : frameClass}
+        className={frameGeometry ? imageFrameClass : frameClass}
         style={imageStyle}
       >
         <button
@@ -736,6 +839,7 @@ export function MediaPreview({
             layoutId={layoutId}
             transition={layoutTransition}
             data-testid="file-image"
+            aria-hidden={!geometry}
             onLoad={rememberImage}
             onError={failImage}
             className="h-full w-full select-none object-contain"

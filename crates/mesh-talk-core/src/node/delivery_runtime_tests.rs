@@ -1794,6 +1794,13 @@ async fn late_exact_receipt_releases_peer_lane_before_a_stalled_relay_finishes()
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if control_seen.load(Ordering::SeqCst)
+                && recipient
+                    .delivery
+                    .lock()
+                    .unwrap()
+                    .retry_receipts(8)
+                    .iter()
+                    .any(|receipt| receipt.logical_id == first)
                 && let Some(channel) = sender
                     .checkout_reusable_channel(
                         super::session_pool::SessionProtocol::Sync,
@@ -6675,6 +6682,14 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
         .await
         .unwrap();
     timing.phase("relay-file-flush-card");
+    {
+        let delivery = a.delivery.lock().unwrap();
+        let offer = delivery.message(card).unwrap();
+        assert!(offer.destinations.iter().all(|destination| {
+            destination.receipt_eligible
+                && destination.event.kind == crate::eventlog::EventKind::FileManifest
+        }));
+    }
     // The recipient does not serve application frames yet. Fail the payload
     // exchange after real Noise authentication; without custody, the shared
     // delivery owner must skip receipt control and let the live relay carry
@@ -11190,6 +11205,224 @@ async fn delayed_route_delivery(
     .await;
 }
 
+type SlowRouteObservation = (
+    std::time::Duration,
+    usize,
+    &'static str,
+    Option<ConversationId>,
+    Option<EventId>,
+    bool,
+);
+
+fn validate_slow_route_trace(
+    events: &[SlowRouteObservation],
+    overflow: bool,
+    accepted: usize,
+    binding: (ConversationId, ConversationId, EventId, EventId),
+) -> Result<(), &'static str> {
+    use std::collections::HashSet;
+    let (dm, control, original, logical) = binding;
+    if overflow {
+        return Err("session trace overflowed");
+    }
+    // A failed route may lead to another bounded attempt and empty receipt
+    // poll. Limit simultaneous lifetimes, not cumulative healthy control polls.
+    let mut authenticated = HashSet::new();
+    let mut active = HashSet::new();
+    let mut original_owners = HashSet::new();
+    let mut control_owners = HashSet::new();
+    let mut queries = HashSet::new();
+    let mut positive = HashSet::new();
+    let mut completed = false;
+    for &(_, connection, kind, scope, event, value) in events {
+        if kind == "authenticated" {
+            if !authenticated.insert(connection) {
+                return Err("duplicate connection identity");
+            }
+            active.insert(connection);
+            if active.len() > 2 {
+                return Err("concurrent session budget exceeded");
+            }
+            if authenticated.len() > accepted {
+                return Err("authenticated sessions exceed accepted connections");
+            }
+            continue;
+        }
+        if !active.contains(&connection) {
+            return Err("observation outside authenticated lifetime");
+        }
+        if matches!(kind, "scope_request" | "have_request" | "have_response")
+            && scope != Some(dm)
+            && scope != Some(control)
+        {
+            return Err("unexpected conversation scope");
+        }
+        if matches!(kind, "have_request" | "have_response") && scope != Some(dm) {
+            return Err("Have outside original scope");
+        }
+        let original_scope = scope == Some(dm)
+            && (kind == "scope_request" || kind == "have_request" || kind == "have_response");
+        if original_scope {
+            original_owners.insert(connection);
+            if original_owners.len() > 1 {
+                return Err("original exchange restarted");
+            }
+        }
+        if kind == "scope_request" && scope == Some(control) {
+            control_owners.insert(connection);
+        }
+        if kind == "have_request" && scope == Some(dm) && event == Some(original) {
+            queries.insert(connection);
+        }
+        if kind == "have_response" && scope == Some(dm) {
+            if event != Some(original) || !queries.remove(&connection) {
+                return Err("Have response lacks its exact same-connection query");
+            }
+            if value {
+                positive.insert(connection);
+                completed = true;
+            }
+        }
+        if matches!(kind, "closed" | "teardown") && original_owners.contains(&connection) {
+            // Genuine Delivered can cancel a still-running original. Teardown
+            // is reported separately and never becomes a production restart.
+            let delivered = value && event == Some(logical);
+            if !positive.contains(&connection) && !delivered {
+                return Err("original exchange closed before custody or exact delivery");
+            }
+            completed |= delivered;
+        }
+        if matches!(kind, "closed" | "teardown") {
+            active.remove(&connection);
+        }
+    }
+    if !active.is_empty() {
+        return Err("authenticated session lifetime was not retired");
+    }
+    if original_owners.len() != 1 || !completed {
+        return Err("missing original owner or completion witness");
+    }
+    if control_owners.is_empty() {
+        return Err("missing receipt control scope");
+    }
+    Ok(())
+}
+
+#[test]
+fn slow_route_trace_rejects_original_restarts_without_confusing_control_scopes() {
+    use std::time::Duration;
+    let dm = ConversationId::new([1; 32]);
+    let control = ConversationId::new([2; 32]);
+    let original = EventId::new([3; 32]);
+    let logical = EventId::new([4; 32]);
+    let observation = |connection, kind, scope, event, value| {
+        (Duration::ZERO, connection, kind, scope, event, value)
+    };
+    let healthy = vec![
+        observation(1, "authenticated", None, None, false),
+        observation(1, "scope_request", Some(dm), None, false),
+        observation(2, "authenticated", None, None, false),
+        observation(2, "scope_request", Some(control), None, false),
+        observation(1, "have_request", Some(dm), Some(original), false),
+        observation(1, "have_response", Some(dm), Some(original), true),
+        observation(2, "closed", None, Some(logical), false),
+        observation(3, "authenticated", None, None, false),
+        observation(3, "scope_request", Some(control), None, false),
+        observation(1, "closed", None, Some(logical), false),
+        observation(3, "teardown", None, Some(logical), true),
+    ];
+    let validate = |events: &[SlowRouteObservation], overflow, accepted| {
+        validate_slow_route_trace(events, overflow, accepted, (dm, control, original, logical))
+    };
+    assert_eq!(validate(&healthy, false, 3), Ok(()));
+    let mut restarted = healthy.clone();
+    restarted[3] = observation(2, "scope_request", Some(dm), None, false);
+    assert_eq!(
+        validate(&restarted, false, 2),
+        Err("original exchange restarted")
+    );
+    let mut premature = healthy.clone();
+    premature.insert(4, observation(1, "closed", None, Some(logical), false));
+    assert_eq!(
+        validate(&premature, false, 3),
+        Err("original exchange closed before custody or exact delivery")
+    );
+    let mut wrong_event = healthy.clone();
+    wrong_event[5].4 = Some(EventId::new([9; 32]));
+    assert_eq!(
+        validate(&wrong_event, false, 3),
+        Err("Have response lacks its exact same-connection query")
+    );
+    let mut wrong_connection = healthy.clone();
+    wrong_connection[5].1 = 2;
+    assert!(validate(&wrong_connection, false, 3).is_err());
+    assert_eq!(validate(&healthy, true, 3), Err("session trace overflowed"));
+    assert_eq!(
+        validate(&healthy, false, 2),
+        Err("authenticated sessions exceed accepted connections")
+    );
+    let mut excess_control = healthy.clone();
+    excess_control.insert(4, observation(4, "authenticated", None, None, false));
+    excess_control.insert(
+        5,
+        observation(4, "scope_request", Some(control), None, false),
+    );
+    assert_eq!(
+        validate(&excess_control, false, 4),
+        Err("concurrent session budget exceeded")
+    );
+    let mut sequential_controls = healthy.clone();
+    for connection in 4..=6 {
+        sequential_controls.extend([
+            observation(connection, "authenticated", None, None, false),
+            observation(connection, "scope_request", Some(control), None, false),
+            observation(connection, "closed", None, Some(logical), true),
+        ]);
+    }
+    assert_eq!(validate(&sequential_controls, false, 6), Ok(()));
+    // Replay the observed four-session failure: two completed empty control
+    // polls preceded the sole original and its final receipt-control pull.
+    let observed_serial = vec![
+        observation(1, "authenticated", None, None, false),
+        observation(1, "scope_request", Some(control), None, false),
+        observation(1, "closed", None, Some(logical), false),
+        observation(2, "authenticated", None, None, false),
+        observation(2, "scope_request", Some(control), None, false),
+        observation(2, "closed", None, Some(logical), false),
+        observation(3, "authenticated", None, None, false),
+        observation(3, "scope_request", Some(dm), None, false),
+        observation(3, "have_request", Some(dm), Some(original), false),
+        observation(3, "have_response", Some(dm), Some(original), true),
+        observation(3, "closed", None, Some(logical), false),
+        observation(4, "authenticated", None, None, false),
+        observation(4, "scope_request", Some(control), None, false),
+        observation(4, "teardown", None, Some(logical), true),
+    ];
+    assert_eq!(validate(&observed_serial, false, 4), Ok(()));
+    assert_eq!(
+        validate(&healthy[..healthy.len() - 1], false, 3),
+        Err("authenticated session lifetime was not retired")
+    );
+    let mut wrong_scope = healthy.clone();
+    wrong_scope[3].3 = Some(ConversationId::new([9; 32]));
+    assert_eq!(
+        validate(&wrong_scope, false, 3),
+        Err("unexpected conversation scope")
+    );
+    let canceled_after_delivery = vec![
+        observation(1, "authenticated", None, None, false),
+        observation(1, "scope_request", Some(dm), None, false),
+        observation(2, "authenticated", None, None, false),
+        observation(2, "scope_request", Some(control), None, false),
+        observation(1, "closed", None, Some(logical), true),
+        observation(2, "teardown", None, Some(logical), true),
+    ];
+    assert_eq!(validate(&canceled_after_delivery, false, 2), Ok(()));
+    let mut wrong_delivery = canceled_after_delivery;
+    wrong_delivery[4].4 = Some(EventId::new([9; 32]));
+    assert!(validate(&wrong_delivery, false, 2).is_err());
+}
+
 async fn delayed_route_delivery_with_budget(
     initial_delay: std::time::Duration,
     frame_delay: std::time::Duration,
@@ -11197,6 +11430,54 @@ async fn delayed_route_delivery_with_budget(
     recipient_inbound_only: bool,
 ) {
     use std::time::{Duration, Instant};
+    #[derive(Default, Debug)]
+    struct Trace {
+        events: Vec<SlowRouteObservation>,
+        overflow: bool,
+    }
+    fn record(trace: &Arc<Mutex<Trace>>, observation: SlowRouteObservation) {
+        let mut trace = trace.lock().unwrap();
+        if trace.events.len() < 128 {
+            trace.events.push(observation);
+        } else {
+            trace.overflow = true;
+        }
+    }
+    struct SessionLifetime {
+        trace: Arc<Mutex<Trace>>,
+        start: Instant,
+        connection: usize,
+        sender: Arc<Node>,
+        logical: Arc<Mutex<Option<EventId>>>,
+        teardown: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for SessionLifetime {
+        fn drop(&mut self) {
+            let logical = *self.logical.lock().unwrap();
+            let delivered = logical.is_some_and(|id| {
+                self.sender.delivery_status(id) == Some(DeliveryStatus::Delivered)
+            });
+            record(
+                &self.trace,
+                (
+                    self.start.elapsed(),
+                    self.connection,
+                    if self.teardown.load(std::sync::atomic::Ordering::SeqCst) {
+                        "teardown"
+                    } else {
+                        "closed"
+                    },
+                    None,
+                    logical,
+                    delivered,
+                ),
+            );
+        }
+    }
+    let trace = Arc::new(Mutex::new(Trace::default()));
+    let logical = Arc::new(Mutex::new(None));
+    let teardown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let trace_start = Instant::now();
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
@@ -11232,23 +11513,108 @@ async fn delayed_route_delivery_with_budget(
     a.initiate_contact_locally(&b.account_id()).await.unwrap();
     let backend = bl.local_addr().unwrap();
     let mut tasks = tokio::task::JoinSet::new();
+    // The fixture, rather than cancellable accept tasks, retains recipient
+    // sessions and proxy forwarding until their destruction is joined.
+    let fixture_sessions = Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new()));
     tasks.spawn(a.clone().run_accept_loop(al));
     if recipient_inbound_only {
         let recipient = b.clone();
+        let sender = a.clone();
+        let trace = trace.clone();
+        let logical = logical.clone();
+        let teardown = teardown.clone();
+        let fixture_sessions = fixture_sessions.clone();
         tasks.spawn(async move {
-            let mut connections = tokio::task::JoinSet::new();
+            let mut next_connection = 0;
             loop {
-                tokio::select! {
-                    result = bl.accept() => {
-                        let (stream, _) = result.unwrap();
-                        let recipient = recipient.clone();
-                        connections.spawn(async move {
-                            if let Ok(channel) = recipient.privacy_accept(stream).await {
-                                recipient.serve_connection(channel).await;
-                            }
-                        });
+                // Never hold the session-owner guard across accept or IO.
+                let (stream, _) = bl.accept().await.unwrap();
+                {
+                    let mut connections = fixture_sessions.lock().await;
+                    while let Some(result) = connections.try_join_next() {
+                        result.expect("fixture session must not panic");
                     }
-                    _ = connections.join_next(), if !connections.is_empty() => {}
+                    let recipient = recipient.clone();
+                    next_connection += 1;
+                    let connection = next_connection;
+                    let trace = trace.clone();
+                    let sender = sender.clone();
+                    let logical = logical.clone();
+                    let teardown = teardown.clone();
+                    connections.spawn(async move {
+                        if let Ok(mut channel) = recipient.privacy_accept(stream).await {
+                            record(
+                                &trace,
+                                (
+                                    trace_start.elapsed(),
+                                    connection,
+                                    "authenticated",
+                                    None,
+                                    None,
+                                    false,
+                                ),
+                            );
+                            let _lifetime = SessionLifetime {
+                                trace: trace.clone(),
+                                start: trace_start,
+                                connection,
+                                sender,
+                                logical,
+                                teardown,
+                            };
+                            channel.set_test_frame_observer(Arc::new(move |sent, bytes| {
+                                if sent {
+                                    if let Some((scope, event, stored)) =
+                                        super::session::durable_have_response_for_test(bytes)
+                                    {
+                                        record(
+                                            &trace,
+                                            (
+                                                trace_start.elapsed(),
+                                                connection,
+                                                "have_response",
+                                                Some(scope),
+                                                Some(event),
+                                                stored,
+                                            ),
+                                        );
+                                    }
+                                } else if let Some((scope, event)) =
+                                    super::session::durable_have_query_for_test(bytes)
+                                {
+                                    record(
+                                        &trace,
+                                        (
+                                            trace_start.elapsed(),
+                                            connection,
+                                            "have_request",
+                                            Some(scope),
+                                            Some(event),
+                                            false,
+                                        ),
+                                    );
+                                } else if let Some(scope) =
+                                    super::session::fingerprint_request_conversation(bytes).or_else(
+                                        || super::session::round_request_conversation(bytes),
+                                    )
+                                {
+                                    record(
+                                        &trace,
+                                        (
+                                            trace_start.elapsed(),
+                                            connection,
+                                            "scope_request",
+                                            Some(scope),
+                                            None,
+                                            false,
+                                        ),
+                                    );
+                                }
+                            }));
+                            // Keep production protocol dispatch, admission and completion.
+                            recipient.serve_connection(channel).await;
+                        }
+                    });
                 }
             }
         });
@@ -11264,33 +11630,41 @@ async fn delayed_route_delivery_with_budget(
             streams.push(stream); // Simulate a proxy accepting the departed LAN route.
         }
     });
+    let proxy_sessions = fixture_sessions.clone();
     tasks.spawn(async move {
-        let mut connections = tokio::task::JoinSet::new();
         loop {
-            tokio::select! {
-                result = proxy.accept() => {
-                    let (client, _) = result.unwrap();
-                    accepted_by_proxy.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    connections.spawn(async move {
-                        // Routed authentication can legitimately exceed three seconds.
-                        tokio::time::sleep(initial_delay).await;
-                        let server = tokio::net::TcpStream::connect(backend).await.unwrap();
-                        let (client_read, client_write) = client.into_split();
-                        let (server_read, server_write) = server.into_split();
-                        let forward = |mut input: tokio::net::tcp::OwnedReadHalf, mut output: tokio::net::tcp::OwnedWriteHalf| async move {
+            let (client, _) = proxy.accept().await.unwrap();
+            {
+                let mut connections = proxy_sessions.lock().await;
+                while let Some(result) = connections.try_join_next() {
+                    result.expect("fixture session must not panic");
+                }
+                accepted_by_proxy.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                connections.spawn(async move {
+                    // Routed authentication can legitimately exceed three seconds.
+                    tokio::time::sleep(initial_delay).await;
+                    let server = tokio::net::TcpStream::connect(backend).await.unwrap();
+                    let (client_read, client_write) = client.into_split();
+                    let (server_read, server_write) = server.into_split();
+                    let forward =
+                        |mut input: tokio::net::tcp::OwnedReadHalf,
+                         mut output: tokio::net::tcp::OwnedWriteHalf| async move {
                             use tokio::io::{AsyncReadExt, AsyncWriteExt};
                             let mut buffer = vec![0u8; 65536];
                             loop {
                                 let count = input.read(&mut buffer).await?;
-                                if count == 0 { return output.shutdown().await; }
+                                if count == 0 {
+                                    return output.shutdown().await;
+                                }
                                 tokio::time::sleep(frame_delay).await;
                                 output.write_all(&buffer[..count]).await?;
                             }
                         };
-                        let _ = tokio::try_join!(forward(client_read, server_write), forward(server_read, client_write));
-                    });
-                }
-                _ = connections.join_next(), if !connections.is_empty() => {}
+                    let _ = tokio::try_join!(
+                        forward(client_read, server_write),
+                        forward(server_read, client_write)
+                    );
+                });
             }
         }
     });
@@ -11302,6 +11676,10 @@ async fn delayed_route_delivery_with_budget(
     .await
     .expect("local enqueue remains independent of network latency")
     .unwrap();
+    *logical.lock().unwrap() = Some(id);
+    let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .id;
     let result = tokio::time::timeout(total_budget, async {
         let message = incoming.recv().await.unwrap();
         assert_eq!(message.text, b"hotspot handoff");
@@ -11321,18 +11699,55 @@ async fn delayed_route_delivery_with_budget(
         (received, start.elapsed())
     })
     .await;
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
+    // Cleanup cancellation is labelled separately from production retirement.
+    teardown.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                assert!(error.is_cancelled(), "fixture owner panicked: {error}");
+            }
+        }
+        let mut connections = fixture_sessions.lock().await;
+        connections.abort_all();
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                assert!(error.is_cancelled(), "fixture session panicked: {error}");
+            }
+        }
+    })
+    .await
+    .expect("fixture owners and all nested IO sessions must retire within the cleanup watchdog");
+    if recipient_inbound_only {
+        eprintln!(
+            "slow route accepted={} logical={id:?} original={original:?} result={result:?} trace={:?}",
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            trace.lock().unwrap()
+        );
+        assert!(
+            !trace.lock().unwrap().overflow,
+            "bounded session trace must remain complete"
+        );
+    }
     let (received, confirmed) = result.expect("automatic delivery and authenticated receipt must progress over the slow valid route without waiting for the stale route");
     if recipient_inbound_only {
         assert!(
             confirmed > Duration::from_secs(15),
             "fixture must exercise an exchange beyond the former fixed deadline"
         );
-        assert!(
-            accepted.load(std::sync::atomic::Ordering::SeqCst) <= 2,
-            "slow but progressing exchanges must not restart their authenticated connections"
+        let trace = trace.lock().unwrap();
+        let dm =
+            super::conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
+        let control = super::delivery_receipt::delivery_conversation_id(
+            &a.identity.public(),
+            &b.identity.public(),
         );
+        validate_slow_route_trace(
+            &trace.events,
+            trace.overflow,
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            (dm, control, original, id),
+        ).expect("slow progress must preserve the exact original owner; distinct control scopes retain their bounded opportunities");
     }
     eprintln!("handoff received={received:?} confirmed={confirmed:?}");
 }
@@ -11392,6 +11807,310 @@ async fn automatic_send_collects_receipt_when_recipient_can_only_serve_inbound_c
         result.is_ok(),
         "an accepted outgoing message must collect its authenticated receipt over the reachable path without requiring a reverse dial or unrelated background history sweep"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_receipt_recovery_is_independent_of_stalled_dm_history() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::HeldMessages).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_manifest_receipt_recovery_is_independent_of_stalled_dm_history() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::HeldManifest).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_dm_send_progresses_while_receipt_history_is_stalled() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::HeldReceipts).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_first_send_rechecks_receipts_after_early_empty_control_round() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::EmptyReceiptsFirst).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReceiptScopeCase {
+    HeldMessages,
+    HeldManifest,
+    HeldReceipts,
+    EmptyReceiptsFirst,
+}
+
+async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
+    let holds_messages = matches!(
+        case,
+        ReceiptScopeCase::HeldMessages | ReceiptScopeCase::HeldManifest
+    );
+    use super::test_support::IndependentPeerRuntime;
+    use futures_util::FutureExt;
+    use std::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        time::Duration,
+    };
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let sender_identity = DeviceIdentity::generate();
+    let recipient_identity = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let recipient_account = Account::generate();
+    let sender_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sender_proof = Announce::new_with_account(
+        &sender_identity,
+        &sender_account,
+        "Sender",
+        sender_listener.local_addr().unwrap().port(),
+    );
+    let recipient_proof = Announce::new_with_account(
+        &recipient_identity,
+        &recipient_account,
+        "Inbound-only recipient",
+        recipient_listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(
+        sender_dir.path(),
+        sender_identity,
+        sender_account,
+        &recipient_proof,
+    );
+    let (recipient, mut incoming) = node(
+        recipient_dir.path(),
+        recipient_identity,
+        recipient_account,
+        &sender_proof,
+    );
+    sender.set_post_office_enabled(false);
+    recipient.set_post_office_enabled(false);
+    let dm = super::conversation::dm_conversation_id(
+        &sender.identity.public(),
+        &recipient.identity.public(),
+    );
+    let control = super::delivery_receipt::delivery_conversation_id(
+        &sender.identity.public(),
+        &recipient.identity.public(),
+    );
+    let armed = Arc::new(AtomicBool::new(false));
+    let held_requests = Arc::new(AtomicUsize::new(0));
+    let control_requests = Arc::new(AtomicUsize::new(0));
+    let empty_controls = Arc::new(AtomicUsize::new(0));
+    let exact_have = Arc::new(AtomicUsize::new(0));
+    let empty_ready = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    // The recipient has a real independent host and receive admission, but
+    // never runs a delivery producer or makes a reverse connection.
+    let mut recipient_host = IndependentPeerRuntime::start_multithreaded_with(
+        recipient.clone(), recipient_listener, {
+            let armed = armed.clone(); let held_requests = held_requests.clone();
+            let control_requests = control_requests.clone(); let release = release.clone(); let entered = entered.clone();
+            let empty_controls = empty_controls.clone(); let exact_have = exact_have.clone(); let empty_ready = empty_ready.clone();
+            move |node, listener| async move {
+                let mut connections = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        accepted = listener.accept() => {
+                            let (stream, _) = accepted.unwrap();
+                            let node = node.clone(); let armed = armed.clone();
+                            let held_requests = held_requests.clone(); let control_requests = control_requests.clone();
+                            let release = release.clone(); let entered = entered.clone();
+                            let empty_controls = empty_controls.clone(); let exact_have = exact_have.clone(); let empty_ready = empty_ready.clone();
+                            let Some(permit) = node.runtime_work.admit() else { return; };
+                            connections.spawn(permit.track(async move {
+                                let Ok(mut channel) = node.privacy_accept(stream).await else { return; };
+                                let store = node.sync_store(channel.peer_identity());
+                                let Some(_reception) = node.request_reception_scope(&store, &channel) else { return; };
+                                while let Ok(bytes) = channel.recv().await {
+                                    let scope = super::session::fingerprint_request_conversation(&bytes)
+                                        .or_else(|| super::session::round_request_conversation(&bytes));
+                                    let active = armed.load(Ordering::SeqCst);
+                                    if active && scope == Some(control) && holds_messages {
+                                        // Make the real held-history witness precede
+                                        // receipt service, rather than racing TCP.
+                                        loop {
+                                            let ready = entered.notified(); tokio::pin!(ready); ready.as_mut().enable();
+                                            if held_requests.load(Ordering::SeqCst) > 0 { break; }
+                                            ready.await;
+                                        }
+                                    }
+                                    if scope == Some(control) { control_requests.fetch_add(1, Ordering::SeqCst); }
+                                    if active && ((scope == Some(dm) && holds_messages)
+                                        || (scope == Some(control) && case == ReceiptScopeCase::HeldReceipts)) {
+                                        held_requests.fetch_add(1, Ordering::SeqCst);
+                                        entered.notify_waiters();
+                                        // No store guard spans the injected wait.
+                                        release.notified().await;
+                                    }
+                                    if active && scope == Some(dm) && case == ReceiptScopeCase::EmptyReceiptsFirst {
+                                        loop {
+                                            let ready = empty_ready.notified(); tokio::pin!(ready); ready.as_mut().enable();
+                                            if empty_controls.load(Ordering::SeqCst) > 0 { break; }
+                                            ready.await;
+                                        }
+                                    }
+                                    let early_empty = active && scope == Some(control)
+                                        && case == ReceiptScopeCase::EmptyReceiptsFirst
+                                        && empty_controls.load(Ordering::SeqCst) == 0;
+                                    if early_empty { assert!(node.delivery.lock().unwrap().retry_receipts(8).is_empty()); }
+                                    let have = super::session::durable_have_query_for_test(&bytes);
+                                    match super::session::serve_wire_bytes(&mut channel, &store, &bytes).await {
+                                        Ok(super::session::Served::Handled(conversation)) => {
+                                            if !node.dispatch_received_sync_work(&store) { node.emit_new_messages(conversation); }
+                                            if early_empty {
+                                                empty_controls.fetch_add(1, Ordering::SeqCst);
+                                                empty_ready.notify_waiters();
+                                            }
+                                            if have.is_some_and(|(scope, event)| scope == dm && node.log.lock().unwrap().get(&event).unwrap().is_some()) {
+                                                exact_have.fetch_add(1, Ordering::SeqCst);
+                                            }
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                            }));
+                        }
+                        result = connections.join_next(), if !connections.is_empty() => {
+                            if let Some(Err(error)) = result { assert!(error.is_cancelled(), "recipient serving failed: {error}"); }
+                        }
+                    }
+                }
+            }
+        }).await;
+    recipient_host.launch();
+    let mut sender_host = IndependentPeerRuntime::start_multithreaded_with(
+        sender.clone(),
+        sender_listener,
+        |node, _listener| node.run_delivery_loop(),
+    )
+    .await;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let body = b"Already received; recover only its genuine receipt";
+        let mut file = None;
+        let mut id = if case == ReceiptScopeCase::HeldManifest {
+            recipient.set_attachment_global_auto(false).unwrap();
+            let source = sender_dir.path().join("pending-consent.bin");
+            std::fs::write(&source, b"unavailable until recipient consent").unwrap();
+            let (id, conversation) = sender.enqueue_file_to_account(
+                &recipient.account_id(), &source, crate::file::FileKind::File,
+            ).await.unwrap();
+            file = Some(conversation);
+            id
+        } else {
+            sender.enqueue_to_account(&recipient.account_id(), body, None).await.unwrap()
+        };
+        let mut message = sender.delivery.lock().unwrap().message(id).unwrap().clone();
+        assert_eq!(message.destinations.len(), 1);
+        let mut destination = message.destinations[0].clone();
+        assert_eq!(destination.event.conversation_id, dm);
+        let peer = sender.routing_peer(&recipient.user_id()).unwrap();
+        if case != ReceiptScopeCase::EmptyReceiptsFirst {
+            // Retain the original through real transport before holding any
+            // history. Never fabricate or manually install its receipt.
+            assert!(tokio::time::timeout(Duration::from_secs(30), sender.transfer_delivery_destination(
+                &peer, &destination, dm)).await.unwrap());
+            if let Some(file) = file {
+                assert_eq!(destination.event.kind, crate::eventlog::EventKind::FileManifest);
+                assert!(recipient.read_file(file).is_err(), "card receipt does not establish available bytes");
+                assert_eq!(recipient.attachment_consent_status(file).unwrap(), Some(super::ReceiveDecision::Pending),
+                    "file consent remains pending before receipt recovery");
+            } else {
+                assert_eq!(tokio::time::timeout(Duration::from_secs(3), incoming.recv()).await.unwrap().unwrap().text, body);
+            }
+            assert_eq!(recipient.log.lock().unwrap().get(&destination.event.id).unwrap().unwrap(), destination.event);
+            let receipt = recipient.delivery.lock().unwrap().retry_receipts(8).into_iter()
+                .find(|receipt| receipt.original_event_id == destination.event.id).expect("durable plaintext must produce the original recipient receipt");
+            assert_eq!(receipt.logical_id, id);
+            assert_eq!(receipt.destination.event.conversation_id, control);
+            assert_eq!(receipt.destination.device, sender.identity.public());
+            assert_eq!(receipt.destination.account.as_deref(), Some(sender.account_id().as_str()));
+            let opened = super::delivery_receipt::open_receipt(&sender.identity, &sender.account_id(),
+                &recipient_proof, &receipt.destination.event).unwrap();
+            assert!(opened.authenticate(&message).is_some());
+            assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+            assert_eq!(control_requests.load(Ordering::SeqCst), 0);
+            if case == ReceiptScopeCase::HeldReceipts {
+                // Retire setup through its genuine healthy receipt, leaving
+                // just one fresh destination for the reverse-stall control.
+                sender.transfer_delivery_destination(&peer, &destination, control).await;
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while sender.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }).await.expect("setup receipt must retire the first exact intent before the fresh send");
+                id = sender.enqueue_to_account(&recipient.account_id(), body, None).await.unwrap();
+                message = sender.delivery.lock().unwrap().message(id).unwrap().clone();
+                destination = message.destinations[0].clone();
+                assert!(recipient.log.lock().unwrap().get(&destination.event.id).unwrap().is_none());
+            }
+        } else {
+            assert!(recipient.delivery.lock().unwrap().retry_receipts(8).is_empty());
+            assert!(recipient.log.lock().unwrap().get(&destination.event.id).unwrap().is_none());
+        }
+        let have_before = exact_have.load(Ordering::SeqCst);
+        let controls_before = control_requests.load(Ordering::SeqCst);
+        sender.sessions.clear();
+        armed.store(true, Ordering::SeqCst);
+        sender_host.launch();
+        if case != ReceiptScopeCase::EmptyReceiptsFirst {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let changed = entered.notified(); tokio::pin!(changed); changed.as_mut().enable();
+                    if held_requests.load(Ordering::SeqCst) > 0 { break; }
+                    changed.await;
+                }
+            }).await.expect("the production owner must reach the exact authenticated history fault");
+        }
+        if !holds_messages {
+            let received = tokio::time::timeout(Duration::from_secs(3), incoming.recv()).await
+                .expect("fresh ordinary DM must progress without waiting for receipt history").unwrap();
+            assert_eq!(received.text, body);
+            assert_eq!(received.message_id, Some(id));
+        }
+        let receipt = recipient.delivery.lock().unwrap().retry_receipts(8).into_iter()
+            .find(|receipt| receipt.original_event_id == destination.event.id).unwrap();
+        let opened = super::delivery_receipt::open_receipt(&sender.identity, &sender.account_id(),
+            &recipient_proof, &receipt.destination.event).unwrap();
+        assert!(opened.authenticate(&message).is_some());
+        if case == ReceiptScopeCase::HeldReceipts {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while exact_have.load(Ordering::SeqCst) <= have_before {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("fresh original must obtain actual durable Have while receipt history stays held");
+            assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting), "durable custody is not receipt delivery");
+            assert!(sender.log.lock().unwrap().get(&receipt.destination.event.id).unwrap().is_none());
+        } else {
+            let recovered = tokio::time::timeout(Duration::from_secs(3), async {
+                while sender.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await;
+            assert!(recovered.is_ok(), "a genuine queued recipient receipt must recover independently; control_requests={}", control_requests.load(Ordering::SeqCst));
+            assert_eq!(sender.log.lock().unwrap().get(&receipt.destination.event.id).unwrap().unwrap(), receipt.destination.event);
+            if case == ReceiptScopeCase::EmptyReceiptsFirst {
+                assert_eq!(empty_controls.load(Ordering::SeqCst), 1);
+                assert!(control_requests.load(Ordering::SeqCst) >= controls_before + 2,
+                    "a first empty control result must be followed by a bounded post-original receipt round");
+            }
+        }
+        assert!(control_requests.load(Ordering::SeqCst) > controls_before);
+        if let Some(file) = file {
+            assert!(recipient.read_file(file).is_err(), "manifest receipt must not grant consent or download bytes");
+            assert_eq!(recipient.attachment_consent_status(file).unwrap(), Some(super::ReceiveDecision::Pending),
+                "manifest receipt must preserve the recipient's pending consent");
+            assert!(!sender.outgoing_file_progress(id).unwrap().delivered,
+                "card delivery is separate from complete file delivery");
+        }
+    }).catch_unwind().await;
+    // Release fault providers before joining actual hosts and receive work,
+    // including after the target assertion fails. Do not inspect success after
+    // releasing the hold: cleanup traffic is not recovery evidence.
+    release.notify_waiters();
+    sender_host.stop().await;
+    recipient_host.stop().await;
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
 }
 
 #[tokio::test]

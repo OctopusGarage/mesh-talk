@@ -1,3 +1,7 @@
+import {
+  resetOutgoingMediaPreviews,
+  pruneOutgoingMediaPreviews,
+} from "./outgoingMediaPreviews";
 import { createRosterObservation } from "@/lib/rosterObservation";
 import { presence as rosterPresenceApi } from "@/lib/api/diagnostics";
 import type { RosterTicket } from "@/lib/syncInvalidation";
@@ -24,7 +28,12 @@ import { stickerPackId, stickerById } from "@/lib/stickerPacks";
 import { snapshotSticker } from "@/lib/stickerMedia";
 import { mentionsName } from "@/lib/mentions";
 import { useAuth } from "./auth";
-import { createRosterRefresh } from "./rosterRefresh";
+import {
+  createContactExpiry,
+  createRosterRefresh,
+  createContactHistoryRefresh,
+  UNKNOWN_SENDER_REPAIR_MS,
+} from "./rosterRefresh";
 import {
   notifySyncInvalidation,
   setPushStateSupport,
@@ -199,6 +208,7 @@ function applyVerifiedIdentity(
     const replacedScope =
       invalidateScope ||
       (state.myAccountId !== "" && state.myAccountId !== acct);
+    if (replacedScope) resetOutgoingMediaPreviews();
     const hydrated = sameScope
       ? state
       : mergeReception(
@@ -339,6 +349,7 @@ async function pollUntilReady(
               );
         if (superseded() || performance.now() >= deadline) return false;
         if (startup === null && get().startupId !== null) {
+          resetOutgoingMediaPreviews();
           resetChatFileAvailability();
           set((state) => ({
             ...invalidateConversationIdentity(state),
@@ -354,6 +365,7 @@ async function pollUntilReady(
             Boolean(startup.account_id && startup.device_id);
           const changed = get().startupId !== startup.startup_id;
           if ((changed || !hasIdentity) && get().myAccountId) {
+            resetOutgoingMediaPreviews();
             resetChatFileAvailability();
             set((state) => ({
               ...invalidateConversationIdentity(state),
@@ -504,6 +516,7 @@ export interface ChatState
     path: string,
     media: boolean,
     expiresAtMs?: number | null,
+    localPreview?: Blob,
   ) => Promise<void>;
   admitImage: (
     path: string,
@@ -714,9 +727,62 @@ let publishedIdentityObservation = 0;
 // Qualification for skipping a descriptive account read, never an authority cache.
 let publishedAccountRoster: {
   projection: string;
-  observation: number;
   current(): boolean;
 } | null = null;
+// One publication order for account-list reads initiated by either discovery,
+// full reconciliation, or a contact deadline/first committed message.
+let accountObservationFloor = 0;
+function visibleAccountRows(rows: AccountInfo[], state: ChatState) {
+  return rows.filter((row) => {
+    const personal =
+      state.personalConversationStates[`account:${row.account_id}`];
+    return !(personal?.hidden && personal.local_cleanup_complete);
+  });
+}
+const refreshContactRows = createRosterRefresh({
+  capture: () => captureChat(useChat.getState),
+  refresh: async (hasPending) => {
+    const get = useChat.getState;
+    const lease = captureChat(get);
+    const observation = ++rosterObservationSequence;
+    const current = () =>
+      lease.current() &&
+      get().ready &&
+      !hasPending() &&
+      observation >= accountObservationFloor;
+    try {
+      const rows = await readWithDeadline(() => chat.listAccounts());
+      if (!current()) return;
+      const identity = await readWithDeadline(() =>
+        chat.ownerIdentity(lease.owner!),
+      );
+      const state = get();
+      if (
+        !current() ||
+        identity.owner !== lease.owner ||
+        identity.account_id !== state.myAccountId ||
+        identity.device_id !== state.myId ||
+        (identity.runtime_id !== undefined &&
+          identity.runtime_id !== state.deliveryRuntime)
+      )
+        return;
+      accountObservationFloor = observation;
+      const accounts = visibleAccountRows(rows, state);
+      if (JSON.stringify(accounts) !== JSON.stringify(state.accounts))
+        useChat.setState({ accounts });
+    } catch {
+      // Retain the last published list. Activation and the existing recovery
+      // refresh retry an unavailable native snapshot without a hot deadline.
+    }
+  },
+});
+function requestContactRoster(): Promise<void> {
+  if (!useChat.getState().ready) return Promise.resolve();
+  accountObservationFloor = ++rosterObservationSequence;
+  return refreshContactRows();
+}
+const contactHistoryHints = createContactHistoryRefresh(requestContactRoster);
+
 function accountRosterProjection(peers: PeerInfo[]): string {
   return JSON.stringify(
     peers
@@ -761,6 +827,7 @@ async function refreshRosterSnapshot(
     ) {
       // Runtime/account replacement can happen without a host logout. Invalidate
       // old in-flight conversation work; the run's owned ticker performs fresh boot.
+      resetOutgoingMediaPreviews();
       resetChatFileAvailability();
       rawSet((state) => ({
         ...invalidateConversationIdentity(state),
@@ -840,19 +907,14 @@ async function refreshRosterSnapshot(
     // Reusing accounts only observes presence. It must not supersede a pending
     // full account read of durable metadata independent of discovery facts.
     const publishAccounts =
-      listedAccounts !== null &&
-      (!publishedAccountRoster?.current() ||
-        observation >= publishedAccountRoster.observation);
+      listedAccounts !== null && observation >= accountObservationFloor;
     const peers = publishObservation ? peersSnapshot : get().peers;
-    const accounts = (
+    const accounts = visibleAccountRows(
       publishAccounts && listedAccounts !== null
         ? listedAccounts
-        : get().accounts
-    ).filter((account) => {
-      const personal =
-        get().personalConversationStates[`account:${account.account_id}`];
-      return !(personal?.hidden && personal.local_cleanup_complete);
-    });
+        : get().accounts,
+      get(),
+    );
     setPushStateSupport(identity.supports_push_state ? lease.owner : null);
     const channelWork = presenceOnly
       ? Promise.resolve()
@@ -862,12 +924,13 @@ async function refreshRosterSnapshot(
     // Polling returns fresh arrays even when discovery has not changed. Preserve
     // the previous references so sidebar subscribers do not redraw every tick.
     if (publishObservation) publishedRosterObservation = observation;
-    if (publishAccounts)
+    if (publishAccounts) {
+      accountObservationFloor = observation;
       publishedAccountRoster = {
         projection: accountRosterProjection(peersSnapshot),
-        observation,
         current: lease.current,
       };
+    }
     const previous = get();
     const rosterChanged =
       JSON.stringify([previous.peers, previous.accounts]) !==
@@ -973,6 +1036,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   setError: (msg) => rawSet({ error: msg }),
 
   resetForLock: () => {
+    resetOutgoingMediaPreviews();
     publishedAccountRoster = null;
     setPushStateSupport(null);
     lastUnknownSenderRefresh = 0;
@@ -1145,6 +1209,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   },
 
   start: () => {
+    resetOutgoingMediaPreviews();
     rawSet((s) => ({ runEpoch: s.runEpoch + 1 }));
     const lease = captureChat(get, false);
     const set = guardedSet(rawSet, lease.current);
@@ -1367,17 +1432,32 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           notifyIncomingFileDismissed(file.fileConv);
       },
     });
+    const contactExpiry = createContactExpiry(() => {
+      if (lease.current() && get().ready) requestContactRoster();
+    });
+    const observeContactDeadline = () =>
+      contactExpiry.observe(
+        lease.current() && get().ready ? get().accounts : [],
+      );
     const expire = expiry.refresh;
     const stopExpiryObservation = useChat.subscribe((state, previous) => {
+      if (
+        state.accounts !== previous.accounts ||
+        state.ready !== previous.ready
+      )
+        observeContactDeadline();
       if (
         state.messages !== previous.messages ||
         state.intents !== previous.intents ||
         state.ledger !== previous.ledger ||
         state.incomingFiles !== previous.incomingFiles ||
         state.searchTarget !== previous.searchTarget
-      )
+      ) {
+        pruneOutgoingMediaPreviews();
         expiry.schedule();
+      }
     });
+    observeContactDeadline();
     const resumeReception = () => {
       if (
         typeof document === "undefined" ||
@@ -1542,7 +1622,12 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           !lease.current() ||
           !state.ready ||
           e.owner !== lease.owner ||
-          e.account_id !== state.myAccountId ||
+          e.account_id !== state.myAccountId
+        )
+          return;
+        if (e.destination.kind === "account")
+          state.onAccountMessageCommitted?.(e.destination.id);
+        if (
           !state.active ||
           e.destination.kind !== state.active.kind ||
           e.destination.id !== state.active.id
@@ -1616,6 +1701,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       stopControlDemand();
       if (controlTimer !== undefined) clearTimeout(controlTimer);
       stopExpiryObservation();
+      contactExpiry.stop();
       expiry.stop();
       if (typeof window !== "undefined") {
         window.removeEventListener("focus", expire);
@@ -1627,6 +1713,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       }
       unlisten();
       if (get().runEpoch === lease.run) {
+        resetOutgoingMediaPreviews();
         stopChatCalls();
         rawSet((s) => ({
           runEpoch: s.runEpoch + 1,
@@ -1658,6 +1745,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       );
       if (!lease.current() || get().myAccountId !== expectedAccount)
         return false;
+      // A snapshot read before the explicit deletion cannot reopen its row.
+      accountObservationFloor = ++rosterObservationSequence;
       if (clearHistory)
         useDrafts
           .getState()
@@ -1738,6 +1827,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   refreshChannels: (channelId = null) => channelRefresh.request(channelId),
 
   refreshRoster: () => rosterRefresh(),
+  onAccountMessageCommitted: (account, senderDevice) => {
+    const state = get();
+    if (!state.ready || account === state.myAccountId) return;
+    if (
+      account &&
+      state.accounts.some(
+        (row) =>
+          row.account_id === account && row.contact_expires_at_ms == null,
+      )
+    )
+      return;
+    if (account) contactHistoryHints.observe("account", account);
+    else if (senderDevice) contactHistoryHints.observe("device", senderDevice);
+    else void requestContactRoster();
+  },
 
   open: async (c, target) => {
     const lease = captureChat(get);
@@ -2001,17 +2105,25 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     // Local transfer gives the bubble sole retry ownership, including native failure.
     return (await admission) ? "accepted" : "failed";
   },
-  sendFile: async (path, media, expiresAtMs) => {
+  sendFile: async (path, media, expiresAtMs, localPreview) => {
     const lease = captureChat(get);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    await sendIntent(rawSet, get, c, {
-      kind: "file",
-      path,
-      media,
-      expiresAtMs,
-    });
+    const sending = beginSendIntent(
+      rawSet,
+      get,
+      c,
+      {
+        kind: "file",
+        path,
+        media,
+        expiresAtMs,
+      },
+      { localPreview },
+    );
+    localPreview = undefined;
+    if (sending) await sending;
   },
 
   toggleReaction: async (target, emoji, remove) => {
@@ -2205,17 +2317,27 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           convKey(get().active!) !== convKey(c)
         )
           return;
-        const sending = beginSendIntent(rawSet, get, c, {
-          kind: "file",
-          path: stagedPath,
-          media: true,
-          expiresAtMs,
-          stickerMedia: {
-            name: snapshot.name,
-            size: snapshot.bytes.length,
-            mime: snapshot.mime,
+        const sending = beginSendIntent(
+          rawSet,
+          get,
+          c,
+          {
+            kind: "file",
+            path: stagedPath,
+            media: true,
+            expiresAtMs,
+            stickerMedia: {
+              name: snapshot.name,
+              size: snapshot.bytes.length,
+              mime: snapshot.mime,
+            },
           },
-        });
+          {
+            localPreview: new Blob([new Uint8Array(snapshot.bytes)], {
+              type: snapshot.mime,
+            }),
+          },
+        );
         if (!sending) return;
         // The ordinary file intent owns this immutable path through retry.
         transferred = true;
@@ -2405,22 +2527,22 @@ function queueUnknownUnread(set: Set, sender: string) {
       },
     };
   });
+  // Device-to-account proof for unread attribution is independent of the
+  // durable contact list. Preserve one throttled discovery repair on a burst.
+  const now = Date.now();
+  if (now - lastUnknownSenderRefresh > UNKNOWN_SENDER_REPAIR_MS) {
+    lastUnknownSenderRefresh = now;
+    void presenceRosterRefresh();
+  }
 }
 
 function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   // Route to the sender's account conversation (multi-device aware).
   const peer = get().peers.find((p) => p.user_id === e.from);
   const accountId = e.from_account ?? peer?.account_id;
+  get().onAccountMessageCommitted?.(accountId ?? undefined, e.from);
   if (!accountId) {
-    // Unknown sender (not yet discovered). Throttle: a burst from an undiscovered account
-    // would otherwise fire one roster refresh (3 invokes) per message. The 4s interval
-    // poll also covers this.
     queueUnknownUnread(set, e.from);
-    const now = Date.now();
-    if (now - lastUnknownSenderRefresh > 2000) {
-      lastUnknownSenderRefresh = now;
-      void get().refreshRoster();
-    }
     return;
   }
   const conv: Conversation = {
@@ -2499,6 +2621,10 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
     e.own_device ||
     e.from === get().myId ||
     Boolean(peer?.account_id && peer.account_id === get().myAccountId);
+  // Files carry a device ID. The native account list can already know a
+  // durable contact even when discovery has no binding for its sender here.
+  if (!e.is_channel && !own)
+    get().onAccountMessageCommitted?.(peer?.account_id ?? undefined, e.from);
   const key = e.is_channel
     ? `channel:${e.conv}`
     : peer?.account_id
@@ -2546,14 +2672,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
       ].slice(0, INCOMING_FILES_CAP),
     }));
   if (!key) {
-    if (!e.is_channel && !own) {
-      queueUnknownUnread(set, e.from);
-      const now = Date.now();
-      if (now - lastUnknownSenderRefresh > 2000) {
-        lastUnknownSenderRefresh = now;
-        void get().refreshRoster();
-      }
-    }
+    if (!e.is_channel && !own) queueUnknownUnread(set, e.from);
     return;
   }
   const isActive = get().active !== null && convKey(get().active!) === key;
@@ -2562,6 +2681,13 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
 }
 
 useChat.subscribe((state, previous) => {
+  if (
+    state.runEpoch !== previous.runEpoch ||
+    state.identityEpoch !== previous.identityEpoch ||
+    state.myAccountId !== previous.myAccountId ||
+    (previous.ready && !state.ready)
+  )
+    contactHistoryHints.reset();
   if (
     state.unreadOwner !== previous.unreadOwner ||
     state.myAccountId !== previous.myAccountId ||
@@ -2587,6 +2713,8 @@ useAuth.subscribe((state, previous) => {
   if (
     state.user?.id !== previous.user?.id ||
     state.generation !== previous.generation
-  )
+  ) {
+    contactHistoryHints.reset();
     flushReceptionPersistence();
+  }
 });

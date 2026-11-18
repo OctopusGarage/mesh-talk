@@ -88,7 +88,7 @@ test("capability pilots link maintained domain and architecture rules", () => {
   );
 });
 
-test("outgoing capability selects tests for acceptance projection and retired frontend owners", () => {
+test("outgoing capability selects acceptance, owner retirement and pixel-budget tests", () => {
   const plan = select(
     "frontend/src/store/outgoingIntent.ts",
     "frontend-outgoing",
@@ -117,17 +117,30 @@ test("outgoing capability selects tests for acceptance projection and retired fr
       "Channel durable IDs settle acceptance independently of fanout and custody",
       "projects member and post-office custody separately for exact channel IDs",
     ],
+    [
+      "Outgoing static previews inspect bounded PNG/JPEG headers before creating a decoder; oversized or unknown geometry retains preparation without changing the send.",
+      {
+        path: "src/features/chat/attachments/conversationIntake.test.ts",
+        title: "sends oversized-pixel images without creating an optimistic original decode",
+      },
+    ],
   ]);
   assert.deepEqual(
     owner("frontend-outgoing").capability.invariants.map(({ name }) => name),
     [...obligations.keys()],
   );
-  for (const title of obligations.values()) {
+  for (const obligation of obligations.values()) {
+    const { path, title } = typeof obligation === "string"
+      ? { path: testPath, title: obligation }
+      : obligation;
+    assert.ok(plan.frontend.includes(path), `Unselected outgoing obligation: ${path}`);
     assert.ok(
-      source.includes(`it("${title}",`),
+      (path === testPath ? source : read(`frontend/${path}`)).includes(`it("${title}",`),
       `Missing executable outgoing obligation: ${title}`,
     );
   }
+  assert.ok(plan.frontend.includes("src/lib/imageDimensions.test.ts"),
+    "header format and decoded-pixel boundary controls remain selected");
   assert.ok(
     plan.frontend.includes("src/store/chat.test.ts"),
     "chat composition remains a declared consumer",

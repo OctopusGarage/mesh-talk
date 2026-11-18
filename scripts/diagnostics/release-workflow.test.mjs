@@ -112,7 +112,9 @@ if [[ "$1" == --preserve-env=* ]]; then
 fi
 if [[ "$1 $2" == 'apt-get update' ]]; then
   # APT can return success after a transient index failure unless told otherwise.
-  if [[ "$3" == '--error-on=any' ]]; then exit "$APT_UPDATE_STATUS"; fi
+  for argument in "$@"; do
+    if [[ "$argument" == '--error-on=any' ]]; then exit "$APT_UPDATE_STATUS"; fi
+  done
   exit 0
 fi
 if [[ "$1 $2" == 'apt-get install' ]]; then exit 0; fi
@@ -152,7 +154,9 @@ exit 91
       const lines = success.calls.trim().split("\n");
       assert.equal(lines.length, 3, job);
       assert.match(lines[0], /^--preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS .* scripts\/ci\/ubuntu-apt-source\.mjs$/);
-      assert.equal(lines[1], "apt-get update --error-on=any");
+      assert.equal(lines[1], job === "platform"
+        ? "apt-get update -o Acquire::Retries=3 --error-on=any"
+        : "apt-get update --error-on=any");
       assert.match(lines[2], /^apt-get install -y /);
     }
   } finally {

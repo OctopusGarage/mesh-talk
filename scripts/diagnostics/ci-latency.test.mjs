@@ -248,10 +248,14 @@ test("browser and native dependency installation use the same Linux-only prepara
     );
     const updates = [...workflow.matchAll(/sudo apt-get update([^\n]*)/g)];
     assert.ok(updates.length > 0, name);
-    for (const update of updates) assert.equal(update[1], " --error-on=any", name);
+    for (const update of updates) assert.equal(
+      update[1],
+      name === "ci.yml" ? " -o Acquire::Retries=3 --error-on=any" : " --error-on=any",
+      name,
+    );
   }
   const consumer = await readFile(new URL("../../.github/workflows/linux-workspace-consumer.yml", import.meta.url), "utf8");
-  assert.match(consumer, /sudo apt-get update --error-on=any\n/);
+  assert.match(consumer, /sudo apt-get update -o Acquire::Retries=3 --error-on=any\n/);
 });
 
 test("only auxiliary diagnostic transport is optional; acceptance artifacts stay mandatory", () => {
