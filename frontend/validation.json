@@ -818,6 +818,10 @@
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
+            "name": "A discovery contact deadline and the first accepted direct text or file recheck native contact visibility without reading conversation bodies. An older account read cannot remove a newly chatted contact. Backfill from the same eligible account or unmapped device shares a bounded two-second trailing recheck and cannot prevent an in-flight result from publishing.",
+            "reference": "docs/privacy-controls.md#network-privacy-and-contact-lists"
+          },
+          {
             "name": "The thirty-second identity boot window includes native read waits; failure retains bounded background recovery without crossing owner/run lifetimes",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },

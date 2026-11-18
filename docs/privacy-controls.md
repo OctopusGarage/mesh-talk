@@ -182,13 +182,49 @@ local contact lists and direct-message search. It keeps their history and does
 not stop their messages or calls. Shared groups are unchanged. This is a local
 view setting, separate from invisible mode.
 
-Right-click an offline contact and choose **Delete contact** to remove it from
-this device's contact list and permanently erase its local message history after
-confirmation. This cannot be undone; other devices keep their own history.
-Deletion survives restarts and is separate from Hidden contacts. Verified identity
-bindings remain intact. Fresh online discovery adds the contact back without
-restoring deleted history. Deletion does not block new messages or change shared
-groups. The app checks presence again before deleting.
+Right-click a contact and choose **Delete contact** to remove the chat through
+account-private controls shared with certified linked devices. The confirmation
+dialog optionally requests history cleanup; each device confirms its own cleanup,
+and completed erasure cannot be undone. Other accounts keep their own copies.
+Deletion survives restarts and is separate from Hidden contacts. Discovery alone
+does not reopen a removed chat; a new incoming message can make it visible again.
+Deletion does not block new messages, revoke verified identities or change shared
+groups. See [personal conversation removal](../CONTEXT.md#conversations-and-history).
+
+### Discovered contacts without chat history
+
+A discovered account that has never had durable sent messages, received messages
+or file cards disappears from local contact lists 24 hours after its first local
+roster observation. The clock belongs to the local profile and current account;
+continuous discovery, name changes, extra devices and application restarts do not
+renew it. Existing installations start that clock on their first observation after
+upgrade because discovery heartbeat timestamps cannot establish an account's age.
+Deadlines use the device's wall clock. Once an expiry is committed, later clock
+corrections or restarts do not make that never-chatted contact visible again.
+
+Any durable message or file history protects the account, including after local
+history is cleared or pruned: the authenticated transcript conversation index
+retains that historical fact. History erased before that index existed cannot be
+reconstructed. New incoming messages can make an expired contact visible again.
+This automatic presentation policy never publishes personal contact deletion,
+erases history or verified identities, or changes discovery, routing and delivery.
+
+The host checks indexed conversation metadata in batches of at most 128 without
+reading message bodies. Its separate local journal retains first-observation
+clocks, completed-expiry markers and sticky observed-history flags for up to 4096 accounts per local
+profile/account, at most 512 KiB on read. Expired and history-protected keys remain
+to prevent rediscovery from renewing their clocks. At capacity, new
+untracked contacts remain visible; storage and eligibility-query failures also
+preserve visible contacts. Recovery never replaces unreadable journal data with
+an empty clock set. Unchanged roster observations do not write the journal. The
+frontend schedules only the earliest pending deadline and refreshes after expiry
+or a first committed direct message/file;
+there is no recurring expiry maintenance task after pending work is gone.
+Repeated backfill from an unmapped device shares a two-second leading/trailing
+refresh window with at most 256 device hints and one pending deadline. The first
+message from a distinct device still triggers prompt eligibility checking; an
+in-flight read can publish while same-device receipts continue. Drained work
+leaves no timer. Device hints never establish account identity or history.
 
 ## Limits
 

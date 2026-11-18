@@ -138,3 +138,70 @@ test("failed deletion preserves the row and allows retry", async ({ page }) => {
   await page.getByTestId("delete-contact-confirm").click();
   await expect(page.getByTestId(`conversation-row-${carol}`)).toHaveCount(0);
 });
+
+test("never-chatted contact expires at its native deadline and returns after a first message", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await login(page);
+  await page.evaluate(async (account) => {
+    const win = window as unknown as {
+      __emptyContactHistory: boolean;
+      __contactMutations: string[];
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const invoke = win.__TAURI_INTERNALS__.invoke;
+    const deadline = Date.now() + 1000;
+    win.__emptyContactHistory = false;
+    win.__contactMutations = [];
+    win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "delete_contact" || cmd === "owner_clear_account_history")
+        win.__contactMutations.push(cmd);
+      const result = await invoke(cmd, args);
+      if (cmd !== "list_accounts") return result;
+      return (result as Array<{ account_id: string }>).flatMap((row) => {
+        if (row.account_id !== account || win.__emptyContactHistory)
+          return [row];
+        return Date.now() < deadline
+          ? [{ ...row, contact_expires_at_ms: deadline }]
+          : [];
+      });
+    };
+    const path = "/src/store/chat.ts";
+    const { useChat } = await import(/* @vite-ignore */ path);
+    await useChat.getState().refreshRoster();
+  }, carol);
+  await expect(page.getByTestId(`conversation-row-${carol}`)).toBeVisible();
+  await page.clock.runFor(1001);
+  await expect(page.getByTestId(`conversation-row-${carol}`)).toHaveCount(0);
+  await expect(page.getByTestId(`conversation-row-${bob}`)).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __contactMutations: string[] })
+          .__contactMutations,
+    ),
+  ).toEqual([]);
+  await page.evaluate((account) => {
+    const win = window as unknown as {
+      __emptyContactHistory: boolean;
+      __mockInject: (conv: string, text: string, who: string) => void;
+    };
+    win.__emptyContactHistory = true;
+    win.__mockInject(
+      `acc:${account}`,
+      "first conversation after expiry",
+      "device_carol_3333",
+    );
+  }, carol);
+  await expect(page.getByTestId(`conversation-row-${carol}`)).toBeVisible();
+  await page.getByTestId(`conversation-row-${carol}`).click();
+  await expect(
+    page.getByRole("log").getByText("first conversation after expiry"),
+  ).toBeVisible();
+});

@@ -145,6 +145,40 @@ it("keeps durable acceptance when presentation hydration rejects", async () => {
   expect(store.getState().setError).not.toHaveBeenCalled();
 });
 
+it("cannot refresh a replacement contact owner from an accepted-message subscriber", async () => {
+  const store = session();
+  const replacement = vi.fn();
+  invoke.mockResolvedValue("accepted");
+  const stop = store.subscribe((state) => {
+    if (
+      state.identityEpoch === 0 &&
+      state.messages[key]?.some((row) => row.id === "accepted")
+    )
+      store.setState({
+        identityEpoch: 1,
+        myAccountId: "replacement",
+        onAccountMessageCommitted: replacement,
+      });
+  });
+  try {
+    const accepted = await beginSendIntent(
+      store.setState,
+      store.getState,
+      conversation,
+      {
+        kind: "text",
+        text: "hello",
+        replyTo: null,
+      },
+    );
+    expect(store.getState().myAccountId).toBe("replacement");
+    expect(replacement).not.toHaveBeenCalled();
+    expect(accepted).toBe(false);
+  } finally {
+    stop();
+  }
+});
+
 it("ignores acceptance completed after its owner generation retires", async () => {
   const store = session();
   let finish!: (id: string) => void;

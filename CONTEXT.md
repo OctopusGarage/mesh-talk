@@ -74,6 +74,8 @@ _Avoid_: user, contact, member as interchangeable names.
 **Contact**:
 An account represented in local conversation/contact state. Contact visibility
 is separate from discovery, delivery permission and channel membership.
+Automatic [never-chatted contact expiry](docs/privacy-controls.md#discovered-contacts-without-chat-history)
+is a local presentation policy, distinct from personal conversation removal.
 _Avoid_: online peer, accepted member.
 
 **Desktop session**:
