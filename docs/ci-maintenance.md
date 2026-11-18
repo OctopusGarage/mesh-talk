@@ -762,12 +762,12 @@ uninstrumented remaining-workspace consumers plus native Host coverage.
 The Linux consumers restore no Rust cache, install no frontend dependencies and
 compile no Cargo targets. They install the producer's exact Rust version,
 matching LLVM tools, pinned prebuilt Nextest/llvm-cov and required Tauri runtime
-packages. Explicitly request every package sealed by the Linux runtime identity,
-including `libc6`; producer development dependencies can upgrade a package whose
-older runner-image copy otherwise satisfies consumer runtime dependencies. Keep
-exact package equality as an admission gate. The installer contract in
-`linux-workspace-cli.test.mjs` compares consumer requests with the validated runtime
-identity; a subsequent repository-version change still rejects execution. `scripts/ci/linux-workspace.sh` independently captures a successful
+packages. Both producer and consumer dependency installers explicitly request every
+package sealed by the Linux runtime identity, including `libc6`. Preinstalled
+runner-image copies can remain older when only development or runtime dependencies
+are requested. Keep exact package equality as an admission gate. The installer
+contract in `linux-workspace-cli.test.mjs` compares both roles with the validated
+runtime identity; a subsequent repository-version change still rejects execution. `scripts/ci/linux-workspace.sh` independently captures a successful
 `cargo llvm-cov show-env --sh` before evaluation; failed environment discovery
 cannot admit execution. Fixture shell phases use a dedicated literal interpreter
 launch; ordinary Node/Cargo argv stays on a separate boundary. Keep derived paths

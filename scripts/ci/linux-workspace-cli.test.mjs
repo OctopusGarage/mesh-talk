@@ -34,20 +34,25 @@ function linuxRuntimeFixture() {
   return { env, observed };
 }
 
-test("Linux consumer explicitly installs every sealed runtime package", () => {
+test("Linux producer and consumer explicitly install every sealed runtime package", () => {
   const { env, observed } = linuxRuntimeFixture();
   const sealed = archive.validateLinuxRuntime(env, observed).runtimePackages;
-  const workflow = readFileSync(
-    new URL("../../.github/workflows/linux-workspace-consumer.yml", import.meta.url),
-    "utf8",
-  ).replace(/\\\r?\n\s*/gu, " ");
-  const installs = [...workflow.matchAll(/^\s*sudo apt-get install -y ([^\r\n]+)$/gmu)];
-  assert.equal(installs.length, 1, "the existing runtime dependency owner is explicit");
-  const requested = new Set(
-    installs[0][1].split(/\s+/u).map(value => value.split("=")[0].split(":")[0]),
-  );
-  for (const [name] of sealed) {
-    assert.ok(requested.has(name), `Linux consumer must explicitly request sealed runtime package: ${name}`);
+  for (const [role, filename] of [
+    ["producer", "ci.yml"],
+    ["consumer", "linux-workspace-consumer.yml"],
+  ]) {
+    const workflow = readFileSync(
+      new URL(`../../.github/workflows/${filename}`, import.meta.url),
+      "utf8",
+    ).replace(/\\\r?\n\s*/gu, " ");
+    const installs = [...workflow.matchAll(/^\s*sudo apt-get install -y ([^\r\n]+)$/gmu)];
+    assert.equal(installs.length, 1, `${role} has one existing native dependency owner`);
+    const requested = new Set(
+      installs[0][1].split(/\s+/u).map(value => value.split("=")[0].split(":")[0]),
+    );
+    for (const [name] of sealed) {
+      assert.ok(requested.has(name), `Linux ${role} must explicitly request sealed runtime package: ${name}`);
+    }
   }
 });
 
