@@ -57,7 +57,7 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: |
           sudo apt-get update --error-on=any
-          sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0t64 libayatana-appindicator3-1 librsvg2-2 libstdc++6 gdb
+          sudo apt-get install -y libc6 libwebkit2gtk-4.1-0 libgtk-3-0t64 libayatana-appindicator3-1 librsvg2-2 libstdc++6 gdb
       - name: Measure Linux consumer storage
         id: storage
         if: ${{ steps.scope.outputs.full == 'true' }}
