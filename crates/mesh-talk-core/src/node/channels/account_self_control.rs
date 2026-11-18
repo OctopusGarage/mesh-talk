@@ -2818,7 +2818,9 @@ pub(in crate::node) mod tests {
         }
         let admission_started = std::time::Instant::now();
         let operation_budget = std::time::Duration::from_secs(8);
+        let mut admission_attempts = 0usize;
         let admitted = loop {
+            admission_attempts += 1;
             let result = reference.submit_account_group_operation_if(
                 &shared.account_id(), id, group, operation.clone(), |commit| {
                     if let Some(hold) = request_hold.as_ref() {
@@ -2847,7 +2849,33 @@ pub(in crate::node) mod tests {
                     );
                     assert!(
                         admission_started.elapsed() < operation_budget,
-                        "selected metadata must become ready within the original operation deadline"
+                        "selected metadata must become ready within the original operation deadline; attempts={admission_attempts}; requester_raw_membership_metadata_revision={:?}; requester_projection={:?}; requester_source={:?}; requester_access={:?}; failure_time_bounded_trace={:?}",
+                        {
+                            let log = reference.log.lock().unwrap();
+                            let repository = log.repository().unwrap();
+                            (
+                                repository.has_kind(&group, EventKind::MembershipChange),
+                                repository.metadata(&group),
+                                repository.source_revision(),
+                            )
+                        },
+                        reference
+                            .channel_checkpoints
+                            .published_projection(group)
+                            .map(|projection| projection.map(|projection| (
+                                projection.state.is_some(),
+                                projection.authority.current_event().is_some()
+                            ))),
+                        reference
+                            .channel_checkpoints
+                            .source_binding(group)
+                            .map(|source| source.map(|source| (source.job, source.revision))),
+                        reference.account_group_access(group).map(|access| (
+                            access.role,
+                            access.execution,
+                            access.sources.len()
+                        )),
+                        trace.lock().unwrap().iter().cloned().collect::<Vec<_>>()
                     );
                     // The synchronous API retains no intent on Pending. Retry
                     // the same identity after yielding to its existing worker;

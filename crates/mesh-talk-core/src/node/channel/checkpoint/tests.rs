@@ -2167,6 +2167,470 @@ fn channel_owner_query_preserves_later_unobserved_ownership_loss() {
 }
 
 #[test]
+fn channel_decision_restarts_stale_ancestry_after_safe_append() {
+    use crate::eventlog::{
+        repository::order::{CausalOrder, OrderReadiness, OrderWorkBudget},
+        sync::network::PreparationBudget,
+    };
+    use crate::node::channel::graph::{
+        AuthorityGraph,
+        preparing::{DecisionBinding, PreparingGraph},
+    };
+    let fixture = Fixture::new(2);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let before = repository
+        .order_generation(&fixture.channel, CausalOrder::Logical)
+        .unwrap()
+        .unwrap();
+    let event = fixture.messages[0].id;
+    let open = |revision| {
+        PreparingGraph::open(
+            fixture.store.profile.clone(),
+            repository,
+            DecisionBinding {
+                job: before.job,
+                source_job: before.job,
+                revision,
+                channel: fixture.channel,
+                event,
+            },
+            PreparationBudget::default(),
+        )
+        .unwrap()
+    };
+    let old = open(before.source_revision);
+    for _ in 0..32 {
+        if old.prepare().unwrap() {
+            break;
+        }
+    }
+    assert!(!old.descends(event, fixture.genesis).unwrap());
+    assert!(old.pending());
+    let selection: Vec<u8> = fixture
+        .store
+        .profile
+        .database()
+        .read(|c| {
+            c.query_row(
+                "SELECT selection FROM channel_decision_work WHERE job=?1 AND channel=?2",
+                params![before.job.as_slice(), fixture.channel.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    let id: [u8; 16] = selection.clone().try_into().unwrap();
+    let tail = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        1001,
+        vec![fixture.messages.last().unwrap().id],
+        1001,
+        1001,
+        EventKind::Message,
+        vec![1],
+    );
+    repository.append(&tail).unwrap();
+    for _ in 0..128 {
+        if repository
+            .order_step(
+                &fixture.channel,
+                CausalOrder::Logical,
+                OrderWorkBudget::default(),
+            )
+            .unwrap()
+            .readiness
+            == OrderReadiness::Ready
+        {
+            break;
+        }
+    }
+    let current = repository
+        .order_generation(&fixture.channel, CausalOrder::Logical)
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.job, before.job);
+    assert!(current.source_revision > before.source_revision);
+    assert!(matches!(
+        repository.resume_ancestor_selection(id),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(old.prepare(), Err(LogError::StaleCursor)));
+    let fresh = open(current.source_revision);
+    assert!(
+        !fresh
+            .prepare()
+            .expect("a current decision must release its obsolete child query")
+    );
+    assert!(fresh.work().rows > 0 && fresh.work().rows <= PreparationBudget::default().rows);
+    assert!(fresh.work().bytes > 0 && fresh.work().bytes <= PreparationBudget::default().bytes);
+    let (cleared, retired): (bool, bool) = fixture.store.profile.database().read(|c| {
+        Ok((c.query_row("SELECT selection IS NULL AND child IS NULL AND ancestor IS NULL FROM channel_decision_work WHERE job=?1 AND channel=?2",
+            params![before.job.as_slice(), fixture.channel.as_bytes().as_slice()], |row| row.get(0))?,
+            c.query_row("SELECT retired FROM event_ancestry_queries WHERE query=?1", [selection.as_slice()], |row| row.get(0))?))
+    }).unwrap();
+    assert!(cleared && retired);
+    for (child, ancestor, expected) in [
+        (event, fixture.genesis, true),
+        (fixture.genesis, event, false),
+    ] {
+        let mut observed = None;
+        for _ in 0..128 {
+            let turn = open(current.source_revision);
+            if !turn.prepare().unwrap() {
+                continue;
+            }
+            let answer = turn.descends(child, ancestor).unwrap();
+            if !turn.pending() {
+                observed = Some(answer);
+                break;
+            }
+        }
+        assert_eq!(
+            observed,
+            Some(expected),
+            "repair must recompute genuine ancestry"
+        );
+    }
+    // An already-pending graph suppresses writes; a fresh stale capture must
+    // still fail its source guard before it can publish an answer.
+    old.save_predicate(b"late", None, Some(true)).unwrap();
+    assert!(matches!(
+        open(before.source_revision).save_predicate(b"late", None, Some(true)),
+        Err(LogError::StaleCursor)
+    ));
+    let published: bool = fixture.store.profile.database().read(|c| {
+        c.query_row("SELECT EXISTS(SELECT 1 FROM channel_decision_answers WHERE job=?1 AND channel=?2 AND key=?3)",
+            params![before.job.as_slice(), fixture.channel.as_bytes().as_slice(), b"late".as_slice()], |row| row.get(0)).map_err(Into::into)
+    }).unwrap();
+    assert!(!published);
+}
+
+#[test]
+fn channel_decision_missing_ancestry_recomputes_without_an_answer() {
+    use crate::eventlog::sync::network::PreparationBudget;
+    use crate::node::channel::graph::{AuthorityGraph, preparing::PreparingGraph};
+    for partial_cleanup in [false, true] {
+        let (fixture, binding, id) =
+            pending_channel_decision_fixture(if partial_cleanup { 520 } else { 2 });
+        let repository = fixture.log.repository().unwrap();
+        if partial_cleanup {
+            let selection = repository.resume_ancestor_selection(id).unwrap().unwrap();
+            let mut marks = 0i64;
+            for _ in 0..16 {
+                let step = repository
+                    .ancestor_selection_step_with_budget(
+                        &selection,
+                        crate::eventlog::repository::order::OrderWorkBudget {
+                            vertices: 128,
+                            edges: 512,
+                            bytes: 128 * 1024,
+                        },
+                    )
+                    .unwrap();
+                marks = fixture
+                    .store
+                    .profile
+                    .database()
+                    .read(|c| {
+                        c.query_row(
+                            "SELECT COUNT(*) FROM event_ancestry_marks WHERE query=?1",
+                            [id.as_slice()],
+                            |row| row.get(0),
+                        )
+                        .map_err(Into::into)
+                    })
+                    .unwrap();
+                assert!(!step.complete, "the interrupted walk must still be pending");
+                if marks > 512 {
+                    break;
+                }
+            }
+            assert!(marks > 512, "real ancestry must exceed one cleanup chunk");
+        }
+        repository.retire_ancestor_selection(id).unwrap();
+        let remaining: i64 = fixture
+            .store
+            .profile
+            .database()
+            .read(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM event_ancestry_marks WHERE query=?1",
+                    [id.as_slice()],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(remaining > 0, partial_cleanup);
+        let retired_without_metadata: bool = fixture.store.profile.database().read(|c| {
+        c.query_row("SELECT EXISTS(SELECT 1 FROM event_ancestry_queries WHERE query=?1 AND retired=1) AND NOT EXISTS(SELECT 1 FROM event_ancestry_selection WHERE query=?1)", [id.as_slice()], |row| row.get(0)).map_err(Into::into)
+    }).unwrap();
+        assert_eq!(retired_without_metadata, partial_cleanup);
+        assert!(repository.resume_ancestor_selection(id).unwrap().is_none());
+        let repaired = PreparingGraph::open(
+            fixture.store.profile.clone(),
+            repository,
+            binding,
+            PreparationBudget {
+                rows: 1,
+                edges: 1,
+                bytes: 256,
+            },
+        )
+        .unwrap();
+        assert!(!repaired.prepare().unwrap());
+        assert_eq!((repaired.work().rows, repaired.work().bytes), (1, 256));
+        let mut observed = None;
+        for _ in 0..128 {
+            let turn = PreparingGraph::open(
+                fixture.store.profile.clone(),
+                repository,
+                binding,
+                PreparationBudget::default(),
+            )
+            .unwrap();
+            if !turn.prepare().unwrap() {
+                continue;
+            }
+            let answer = turn.descends(binding.event, fixture.genesis).unwrap();
+            if !turn.pending() {
+                observed = Some(answer);
+                break;
+            }
+        }
+        assert_eq!(
+            observed,
+            Some(true),
+            "missing scratch cannot become false ancestry evidence"
+        );
+    }
+}
+
+#[test]
+fn channel_decision_stale_ancestry_repair_preserves_query_scope() {
+    use crate::eventlog::sync::network::PreparationBudget;
+    use crate::node::channel::graph::preparing::PreparingGraph;
+    for (column, length) in [
+        ("store_uuid", 16),
+        ("domain", 16),
+        ("conversation", 32),
+        ("job", 16),
+        ("conversation", 1),
+    ] {
+        let (fixture, binding, id) = pending_channel_decision_fixture(2);
+        let repository = fixture.log.repository().unwrap();
+        fixture.store.profile.database().transaction(|c| {
+            c.execute(&format!("UPDATE event_ancestry_selection SET {column}=zeroblob({length}) WHERE query=?1"), [id.as_slice()])?;
+            Ok(())
+        }).unwrap();
+        let rejected = |error: LogError| matches!(error, LogError::StaleCursor);
+        assert!(
+            repository
+                .resume_ancestor_selection(id)
+                .is_err_and(rejected)
+        );
+        let graph = PreparingGraph::open(
+            fixture.store.profile.clone(),
+            repository,
+            binding,
+            PreparationBudget::default(),
+        )
+        .unwrap();
+        assert!(
+            graph.prepare().is_err_and(rejected),
+            "a mismatched {column} is not a repairable child"
+        );
+        let (selection, retired): (Vec<u8>, bool) = fixture
+            .store
+            .profile
+            .database()
+            .read(|c| {
+                Ok((
+                    c.query_row(
+                        "SELECT selection FROM channel_decision_work WHERE job=?1 AND channel=?2",
+                        params![
+                            binding.job.as_slice(),
+                            binding.channel.as_bytes().as_slice()
+                        ],
+                        |row| row.get(0),
+                    )?,
+                    c.query_row(
+                        "SELECT retired FROM event_ancestry_queries WHERE query=?1",
+                        [id.as_slice()],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(selection, id);
+        assert!(
+            !retired,
+            "a stale caller must not retire another query scope"
+        );
+    }
+}
+
+#[test]
+fn channel_decision_stale_ancestry_reset_rolls_back_retirement_on_lost_update() {
+    use crate::eventlog::{
+        repository::order::{CausalOrder, OrderReadiness, OrderWorkBudget},
+        sync::network::PreparationBudget,
+    };
+    use crate::node::channel::graph::preparing::PreparingGraph;
+    let (fixture, mut binding, id) = pending_channel_decision_fixture(2);
+    let repository = fixture.log.repository().unwrap();
+    repository
+        .append(&Event::new(
+            &fixture.sender,
+            fixture.channel,
+            1001,
+            vec![fixture.messages.last().unwrap().id],
+            1001,
+            1001,
+            EventKind::Message,
+            vec![1],
+        ))
+        .unwrap();
+    for _ in 0..128 {
+        if repository
+            .order_step(
+                &fixture.channel,
+                CausalOrder::Logical,
+                OrderWorkBudget::default(),
+            )
+            .unwrap()
+            .readiness
+            == OrderReadiness::Ready
+        {
+            break;
+        }
+    }
+    let current = repository
+        .order_generation(&fixture.channel, CausalOrder::Logical)
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.job, binding.source_job);
+    binding.revision = current.source_revision;
+    fixture.store.profile.database().transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER block_decision_reset BEFORE UPDATE OF selection ON channel_decision_work WHEN NEW.selection IS NULL BEGIN SELECT RAISE(IGNORE); END;")?;
+        Ok(())
+    }).unwrap();
+    let graph = PreparingGraph::open(
+        fixture.store.profile.clone(),
+        repository,
+        binding,
+        PreparationBudget::default(),
+    )
+    .unwrap();
+    assert!(matches!(graph.prepare(), Err(LogError::StaleCursor)));
+    let (selection, retired): (Vec<u8>, bool) = fixture
+        .store
+        .profile
+        .database()
+        .read(|c| {
+            Ok((
+                c.query_row(
+                    "SELECT selection FROM channel_decision_work WHERE job=?1 AND channel=?2",
+                    params![
+                        binding.job.as_slice(),
+                        binding.channel.as_bytes().as_slice()
+                    ],
+                    |row| row.get(0),
+                )?,
+                c.query_row(
+                    "SELECT retired FROM event_ancestry_queries WHERE query=?1",
+                    [id.as_slice()],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(selection, id);
+    assert!(
+        !retired,
+        "a rejected pointer update must roll back child retirement"
+    );
+    fixture
+        .store
+        .profile
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER block_decision_reset;")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        !graph.prepare().unwrap(),
+        "releasing the veto must permit the bounded reset"
+    );
+}
+
+fn pending_channel_decision_fixture(
+    count: usize,
+) -> (
+    Fixture,
+    crate::node::channel::graph::preparing::DecisionBinding,
+    [u8; 16],
+) {
+    use crate::eventlog::sync::network::PreparationBudget;
+    use crate::node::channel::graph::{
+        AuthorityGraph,
+        preparing::{DecisionBinding, PreparingGraph},
+    };
+    let fixture = Fixture::new(count);
+    fixture.project();
+    let source = fixture
+        .store
+        .source_binding(fixture.channel)
+        .unwrap()
+        .unwrap();
+    let binding = DecisionBinding {
+        job: source.job,
+        source_job: source.job,
+        revision: source.revision,
+        channel: fixture.channel,
+        event: fixture.messages[count - 2].id,
+    };
+    let graph = PreparingGraph::open(
+        fixture.store.profile.clone(),
+        fixture.log.repository().unwrap(),
+        binding,
+        PreparationBudget::default(),
+    )
+    .unwrap();
+    let mut ready = false;
+    for _ in 0..32 {
+        if graph.prepare().unwrap() {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready);
+    assert!(!graph.descends(binding.event, fixture.genesis).unwrap());
+    assert!(graph.pending());
+    let selection: Vec<u8> = fixture
+        .store
+        .profile
+        .database()
+        .read(|c| {
+            c.query_row(
+                "SELECT selection FROM channel_decision_work WHERE job=?1 AND channel=?2",
+                params![
+                    binding.job.as_slice(),
+                    binding.channel.as_bytes().as_slice()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    drop(graph);
+    (fixture, binding, selection.try_into().unwrap())
+}
+
+#[test]
 fn channel_decision_replacement_rejects_old_predicate_publication() {
     use crate::eventlog::sync::network::PreparationBudget;
     use crate::node::channel::graph::{AuthorityGraph, preparing::PreparingGraph};

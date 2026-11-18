@@ -182,10 +182,13 @@ impl<'a> PreparingGraph<'a> {
             } = old;
             if let Some(selection) = selection {
                 let id = identity(&selection)?;
-                let selection = self
-                    .repository
-                    .resume_ancestor_selection(id)?
-                    .ok_or(LogError::StaleCursor)?;
+                let selection = match self.repository.resume_ancestor_selection(id) {
+                    Ok(Some(selection)) => selection,
+                    Ok(None) | Err(LogError::StaleCursor) => {
+                        return self.discard_stale_selection(id);
+                    }
+                    Err(error) => return Err(error),
+                };
                 let step = self.repository.ancestor_selection_step_with_budget(
                     &selection,
                     OrderWorkBudget {
@@ -253,6 +256,30 @@ impl<'a> PreparingGraph<'a> {
         }
         Ok(true)
     }
+    fn discard_stale_selection(&self, id: [u8; 16]) -> Result<bool, LogError> {
+        self.profile.database().transaction(|c| {
+            self.guard(c)?;
+            self.repository.retire_ancestor_selection_in_scope_on(c, id, self.channel, self.source_job)?;
+            let changed = c.execute(
+                "UPDATE channel_decision_work SET selection=NULL,child=NULL,ancestor=NULL
+                 WHERE job=?1 AND channel=?2 AND event=?3 AND source_job=?4 AND selection=?5 AND retired=0",
+                params![self.job.as_slice(), self.channel.as_bytes().as_slice(), self.event.as_bytes().as_slice(), self.source_job.as_slice(), id.as_slice()],
+            )?;
+            if changed != 1 {
+                return Err(LogError::StaleCursor);
+            }
+            Ok(())
+        })?;
+        // One fixed-size continuation reset. Its historical marks are reclaimed
+        // separately by the existing bounded cleanup owner.
+        self.work.set(PreparationStep {
+            rows: 1,
+            bytes: 256,
+            ..Default::default()
+        });
+        Ok(false)
+    }
+
     pub(in crate::node) fn complete_on(&self, c: &Connection) -> Result<(), LogError> {
         self.guard(c)?;
         c.execute("UPDATE channel_decision_work SET retired=1 WHERE job=?1 AND channel=?2 AND event=?3 AND source_job=?4",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),self.event.as_bytes().as_slice(),self.source_job.as_slice()])?;

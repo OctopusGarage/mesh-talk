@@ -2949,6 +2949,11 @@ source guard. Ordinary appends therefore cannot make the two consumers restart
 each other's graph work. Legacy future-cut changes retire those answers through
 the existing bounded cleanup owner. Cold preparation yields between bounded
 turns so other runtime work can progress.
+An unfinished ancestry selection retains its stricter exact source revision.
+After a safe append, the current decision owner atomically retires and clears
+only its obsolete cached selection, charges a bounded pending turn, and reissues
+the real ancestry query. Old parent bindings and mismatched query scopes remain
+stale; discarding scratch never publishes a predicate answer.
 The node retains at most four scoped history-view owners and two independent
 receive-only owners, with at most 16 selected outgoing history IDs and 64 recent
 result hints per exchange. Receive-only owners never acquire a history view;

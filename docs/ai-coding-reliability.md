@@ -1095,6 +1095,16 @@ The [forwarding owner](message-forwarding.md#source-admission-and-lifecycle) tes
 signed rename that needs preparation, plus dissolution and same-user/different-key
 controls that must never produce a message or send receipt.
 
+A current parent preparation can retain a child cursor whose stricter source
+revision has expired. Retire and clear only that cached child under the parent's
+current guard and exact-pointer comparison, then recompute through its existing
+bounded owner. Repeatedly propagating the same stale child is not recovery, and
+loosening the child's fence is not authorization. The
+[decision ancestry controls](../crates/mesh-talk-core/src/node/channel/checkpoint/tests.rs)
+cover safe appends, missing scratch, genuine positive/negative answers and
+rejected query scopes; the existing real self-control Noise scenarios retain
+their original operation deadline.
+
 An asynchronous prepare/commit API must revisit mutable prerequisites after
 expensive staging yields. A later synchronous commit allowance cannot finish an
 arbitrary intervening control tail. Recheck cheap expiry and caller admission
