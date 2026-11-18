@@ -537,6 +537,26 @@ existing authentication/recovery path.
 
 Transport awaits must not retain ordinary store/roster mutex guards. Network tasks use owned snapshots, bounded work and cancellation-safe ownership. Privacy generation checks revoke retained sessions and in-flight publication after a policy transition; directory queries additionally validate their captured directory/preference generation before publishing results. Startup applies network preferences before disclosure or delivery producers run.
 
+Receipt-control and ordinary DM-history scopes progress concurrently within the
+existing accepted-destination owner, so either scope may complete while the other
+is blocked. Only exact authenticated recipient receipts establish Delivered;
+ordinary Have and opaque relay custody remain separate evidence. An empty early
+receipt round cannot settle a fresh send: after positive original custody, retain
+the existing bounded post-original control pull while that exact work remains.
+Own-account copies and receipt transfers do not add a parallel receipt query.
+
+One eligible destination can own two direct scope exchanges, plus its existing
+relay alternative (at most two simultaneous offices from a four-candidate batch).
+The one verified-peer reconciliation owner polls two distinct direct scopes
+alongside its existing serial relay lane. Both relay calls drain the same
+pairwise mailbox and retain their separate subsequent local projections; they
+are not duplicated concurrently. Each relay pull visits its existing
+at-most-four office candidates serially, not a new parallel fanout. Route racing still admits at most two candidates per dial, and all these
+owners share the unchanged eight total/seven outbound TCP slots and admission
+waits. No new producer, durable queue, timer or independent deadline is added;
+actual connections retain their permits until retirement. These are concurrency
+bounds, not guarantees of progress while unrelated owners exhaust capacity.
+
 ### Runtime delivery observations
 
 The delivery runtime can attach an optional local observation to the existing

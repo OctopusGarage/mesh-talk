@@ -1794,6 +1794,13 @@ async fn late_exact_receipt_releases_peer_lane_before_a_stalled_relay_finishes()
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if control_seen.load(Ordering::SeqCst)
+                && recipient
+                    .delivery
+                    .lock()
+                    .unwrap()
+                    .retry_receipts(8)
+                    .iter()
+                    .any(|receipt| receipt.logical_id == first)
                 && let Some(channel) = sender
                     .checkout_reusable_channel(
                         super::session_pool::SessionProtocol::Sync,
@@ -11392,6 +11399,274 @@ async fn automatic_send_collects_receipt_when_recipient_can_only_serve_inbound_c
         result.is_ok(),
         "an accepted outgoing message must collect its authenticated receipt over the reachable path without requiring a reverse dial or unrelated background history sweep"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_receipt_recovery_is_independent_of_stalled_dm_history() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::HeldMessages).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_dm_send_progresses_while_receipt_history_is_stalled() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::HeldReceipts).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_first_send_rechecks_receipts_after_early_empty_control_round() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::EmptyReceiptsFirst).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReceiptScopeCase {
+    HeldMessages,
+    HeldReceipts,
+    EmptyReceiptsFirst,
+}
+
+async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
+    use super::test_support::IndependentPeerRuntime;
+    use futures_util::FutureExt;
+    use std::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        time::Duration,
+    };
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let sender_identity = DeviceIdentity::generate();
+    let recipient_identity = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let recipient_account = Account::generate();
+    let sender_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sender_proof = Announce::new_with_account(
+        &sender_identity,
+        &sender_account,
+        "Sender",
+        sender_listener.local_addr().unwrap().port(),
+    );
+    let recipient_proof = Announce::new_with_account(
+        &recipient_identity,
+        &recipient_account,
+        "Inbound-only recipient",
+        recipient_listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(
+        sender_dir.path(),
+        sender_identity,
+        sender_account,
+        &recipient_proof,
+    );
+    let (recipient, mut incoming) = node(
+        recipient_dir.path(),
+        recipient_identity,
+        recipient_account,
+        &sender_proof,
+    );
+    sender.set_post_office_enabled(false);
+    recipient.set_post_office_enabled(false);
+    let dm = super::conversation::dm_conversation_id(
+        &sender.identity.public(),
+        &recipient.identity.public(),
+    );
+    let control = super::delivery_receipt::delivery_conversation_id(
+        &sender.identity.public(),
+        &recipient.identity.public(),
+    );
+    let armed = Arc::new(AtomicBool::new(false));
+    let held_requests = Arc::new(AtomicUsize::new(0));
+    let control_requests = Arc::new(AtomicUsize::new(0));
+    let empty_controls = Arc::new(AtomicUsize::new(0));
+    let exact_have = Arc::new(AtomicUsize::new(0));
+    let empty_ready = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    // The recipient has a real independent host and receive admission, but
+    // never runs a delivery producer or makes a reverse connection.
+    let mut recipient_host = IndependentPeerRuntime::start_multithreaded_with(
+        recipient.clone(), recipient_listener, {
+            let armed = armed.clone(); let held_requests = held_requests.clone();
+            let control_requests = control_requests.clone(); let release = release.clone(); let entered = entered.clone();
+            let empty_controls = empty_controls.clone(); let exact_have = exact_have.clone(); let empty_ready = empty_ready.clone();
+            move |node, listener| async move {
+                let mut connections = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        accepted = listener.accept() => {
+                            let (stream, _) = accepted.unwrap();
+                            let node = node.clone(); let armed = armed.clone();
+                            let held_requests = held_requests.clone(); let control_requests = control_requests.clone();
+                            let release = release.clone(); let entered = entered.clone();
+                            let empty_controls = empty_controls.clone(); let exact_have = exact_have.clone(); let empty_ready = empty_ready.clone();
+                            let Some(permit) = node.runtime_work.admit() else { return; };
+                            connections.spawn(permit.track(async move {
+                                let Ok(mut channel) = node.privacy_accept(stream).await else { return; };
+                                let store = node.sync_store(channel.peer_identity());
+                                let Some(_reception) = node.request_reception_scope(&store, &channel) else { return; };
+                                while let Ok(bytes) = channel.recv().await {
+                                    let scope = super::session::fingerprint_request_conversation(&bytes)
+                                        .or_else(|| super::session::round_request_conversation(&bytes));
+                                    let active = armed.load(Ordering::SeqCst);
+                                    if active && scope == Some(control) && case == ReceiptScopeCase::HeldMessages {
+                                        // Make the real held-history witness precede
+                                        // receipt service, rather than racing TCP.
+                                        loop {
+                                            let ready = entered.notified(); tokio::pin!(ready); ready.as_mut().enable();
+                                            if held_requests.load(Ordering::SeqCst) > 0 { break; }
+                                            ready.await;
+                                        }
+                                    }
+                                    if scope == Some(control) { control_requests.fetch_add(1, Ordering::SeqCst); }
+                                    if active && ((scope == Some(dm) && case == ReceiptScopeCase::HeldMessages)
+                                        || (scope == Some(control) && case == ReceiptScopeCase::HeldReceipts)) {
+                                        held_requests.fetch_add(1, Ordering::SeqCst);
+                                        entered.notify_waiters();
+                                        // No store guard spans the injected wait.
+                                        release.notified().await;
+                                    }
+                                    if active && scope == Some(dm) && case == ReceiptScopeCase::EmptyReceiptsFirst {
+                                        loop {
+                                            let ready = empty_ready.notified(); tokio::pin!(ready); ready.as_mut().enable();
+                                            if empty_controls.load(Ordering::SeqCst) > 0 { break; }
+                                            ready.await;
+                                        }
+                                    }
+                                    let early_empty = active && scope == Some(control)
+                                        && case == ReceiptScopeCase::EmptyReceiptsFirst
+                                        && empty_controls.load(Ordering::SeqCst) == 0;
+                                    if early_empty { assert!(node.delivery.lock().unwrap().retry_receipts(8).is_empty()); }
+                                    let have = super::session::durable_have_query_for_test(&bytes);
+                                    match super::session::serve_wire_bytes(&mut channel, &store, &bytes).await {
+                                        Ok(super::session::Served::Handled(conversation)) => {
+                                            if !node.dispatch_received_sync_work(&store) { node.emit_new_messages(conversation); }
+                                            if early_empty {
+                                                empty_controls.fetch_add(1, Ordering::SeqCst);
+                                                empty_ready.notify_waiters();
+                                            }
+                                            if have.is_some_and(|(scope, event)| scope == dm && node.log.lock().unwrap().get(&event).unwrap().is_some()) {
+                                                exact_have.fetch_add(1, Ordering::SeqCst);
+                                            }
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                            }));
+                        }
+                        result = connections.join_next(), if !connections.is_empty() => {
+                            if let Some(Err(error)) = result { assert!(error.is_cancelled(), "recipient serving failed: {error}"); }
+                        }
+                    }
+                }
+            }
+        }).await;
+    recipient_host.launch();
+    let mut sender_host = IndependentPeerRuntime::start_multithreaded_with(
+        sender.clone(),
+        sender_listener,
+        |node, _listener| node.run_delivery_loop(),
+    )
+    .await;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let body = b"Already received; recover only its genuine receipt";
+        let mut id = sender.enqueue_to_account(&recipient.account_id(), body, None).await.unwrap();
+        let mut message = sender.delivery.lock().unwrap().message(id).unwrap().clone();
+        assert_eq!(message.destinations.len(), 1);
+        let mut destination = message.destinations[0].clone();
+        assert_eq!(destination.event.conversation_id, dm);
+        let peer = sender.routing_peer(&recipient.user_id()).unwrap();
+        if case != ReceiptScopeCase::EmptyReceiptsFirst {
+            // Retain the original through real transport before holding any
+            // history. Never fabricate or manually install its receipt.
+            assert!(tokio::time::timeout(Duration::from_secs(30), sender.transfer_delivery_destination(
+                &peer, &destination, dm)).await.unwrap());
+            assert_eq!(tokio::time::timeout(Duration::from_secs(3), incoming.recv()).await.unwrap().unwrap().text, body);
+            assert_eq!(recipient.log.lock().unwrap().get(&destination.event.id).unwrap().unwrap(), destination.event);
+            let receipt = recipient.delivery.lock().unwrap().retry_receipts(8).into_iter()
+                .find(|receipt| receipt.original_event_id == destination.event.id).expect("durable plaintext must produce the original recipient receipt");
+            assert_eq!(receipt.logical_id, id);
+            assert_eq!(receipt.destination.event.conversation_id, control);
+            assert_eq!(receipt.destination.device, sender.identity.public());
+            assert_eq!(receipt.destination.account.as_deref(), Some(sender.account_id().as_str()));
+            let opened = super::delivery_receipt::open_receipt(&sender.identity, &sender.account_id(),
+                &recipient_proof, &receipt.destination.event).unwrap();
+            assert!(opened.authenticate(&message).is_some());
+            assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+            assert_eq!(control_requests.load(Ordering::SeqCst), 0);
+            if case == ReceiptScopeCase::HeldReceipts {
+                // Retire setup through its genuine healthy receipt, leaving
+                // just one fresh destination for the reverse-stall control.
+                sender.transfer_delivery_destination(&peer, &destination, control).await;
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while sender.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }).await.expect("setup receipt must retire the first exact intent before the fresh send");
+                id = sender.enqueue_to_account(&recipient.account_id(), body, None).await.unwrap();
+                message = sender.delivery.lock().unwrap().message(id).unwrap().clone();
+                destination = message.destinations[0].clone();
+                assert!(recipient.log.lock().unwrap().get(&destination.event.id).unwrap().is_none());
+            }
+        } else {
+            assert!(recipient.delivery.lock().unwrap().retry_receipts(8).is_empty());
+            assert!(recipient.log.lock().unwrap().get(&destination.event.id).unwrap().is_none());
+        }
+        let have_before = exact_have.load(Ordering::SeqCst);
+        let controls_before = control_requests.load(Ordering::SeqCst);
+        sender.sessions.clear();
+        armed.store(true, Ordering::SeqCst);
+        sender_host.launch();
+        if case != ReceiptScopeCase::EmptyReceiptsFirst {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let changed = entered.notified(); tokio::pin!(changed); changed.as_mut().enable();
+                    if held_requests.load(Ordering::SeqCst) > 0 { break; }
+                    changed.await;
+                }
+            }).await.expect("the production owner must reach the exact authenticated history fault");
+        }
+        if case != ReceiptScopeCase::HeldMessages {
+            let received = tokio::time::timeout(Duration::from_secs(3), incoming.recv()).await
+                .expect("fresh ordinary DM must progress without waiting for receipt history").unwrap();
+            assert_eq!(received.text, body);
+            assert_eq!(received.message_id, Some(id));
+        }
+        let receipt = recipient.delivery.lock().unwrap().retry_receipts(8).into_iter()
+            .find(|receipt| receipt.original_event_id == destination.event.id).unwrap();
+        let opened = super::delivery_receipt::open_receipt(&sender.identity, &sender.account_id(),
+            &recipient_proof, &receipt.destination.event).unwrap();
+        assert!(opened.authenticate(&message).is_some());
+        if case == ReceiptScopeCase::HeldReceipts {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while exact_have.load(Ordering::SeqCst) <= have_before {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("fresh original must obtain actual durable Have while receipt history stays held");
+            assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting), "durable custody is not receipt delivery");
+            assert!(sender.log.lock().unwrap().get(&receipt.destination.event.id).unwrap().is_none());
+        } else {
+            let recovered = tokio::time::timeout(Duration::from_secs(3), async {
+                while sender.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await;
+            assert!(recovered.is_ok(), "a genuine queued recipient receipt must recover independently; control_requests={}", control_requests.load(Ordering::SeqCst));
+            assert_eq!(sender.log.lock().unwrap().get(&receipt.destination.event.id).unwrap().unwrap(), receipt.destination.event);
+            if case == ReceiptScopeCase::EmptyReceiptsFirst {
+                assert_eq!(empty_controls.load(Ordering::SeqCst), 1);
+                assert!(control_requests.load(Ordering::SeqCst) >= controls_before + 2,
+                    "a first empty control result must be followed by a bounded post-original receipt round");
+            }
+        }
+        assert!(control_requests.load(Ordering::SeqCst) > controls_before);
+    }).catch_unwind().await;
+    // Release fault providers before joining actual hosts and receive work,
+    // including after the target assertion fails. Do not inspect success after
+    // releasing the hold: cleanup traffic is not recovery evidence.
+    release.notify_waiters();
+    sender_host.stop().await;
+    recipient_host.stop().await;
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
 }
 
 #[tokio::test]

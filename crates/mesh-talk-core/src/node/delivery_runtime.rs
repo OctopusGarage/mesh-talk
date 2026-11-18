@@ -3061,11 +3061,16 @@ impl Node {
         tokio::time::timeout(super::route_timing::MAX_CONTROL_DEADLINE, async {
             let (direct, relay) = tokio::join!(
                 async {
-                    let messages = Box::pin(self.pull_delivery_scope(peer, dm, false)).await;
-                    let receipts = Box::pin(self.pull_delivery_scope(peer, conv, false)).await;
+                    let (messages, receipts) = tokio::join!(
+                        Box::pin(self.pull_delivery_scope(peer, dm, false)),
+                        Box::pin(self.pull_delivery_scope(peer, conv, false)),
+                    );
                     messages.combine(receipts)
                 },
                 async {
+                    // Each relay call drains the same pairwise mailbox; conv
+                    // only selects its subsequent local projection. Preserve
+                    // serial relay drains instead of duplicating them in flight.
                     let messages = Box::pin(self.pull_delivery_scope(peer, dm, true)).await;
                     let receipts = Box::pin(self.pull_delivery_scope(peer, conv, true)).await;
                     messages.combine(receipts)
@@ -3241,24 +3246,61 @@ impl Node {
             if let Some(peer) = direct_peer {
                 let outcome = self
                     .adaptive_control_timeout(&peer.public, async {
-                        let held = self
-                            .transfer_delivery_destination(
-                                &peer,
-                                destination,
-                                destination.event.conversation_id,
-                            )
-                            .await;
-                        self.emit_new_messages(destination.event.conversation_id);
-                        if held {
+                        let messages = async {
+                            let held = self
+                                .transfer_delivery_destination(
+                                    &peer,
+                                    destination,
+                                    destination.event.conversation_id,
+                                )
+                                .await;
+                            self.emit_new_messages(destination.event.conversation_id);
+                            held
+                        };
+                        let receipts = || async {
                             let control = super::delivery_receipt::delivery_conversation_id(
                                 &self.identity.public(),
                                 &peer.public,
                             );
-                            self.transfer_delivery_destination(&peer, destination, control)
-                                .await;
+                            Box::pin(self.transfer_delivery_destination(
+                                &peer,
+                                destination,
+                                control,
+                            ))
+                            .await;
                             self.emit_new_messages(control);
+                        };
+                        if destination.receipt_eligible {
+                            // Existing receipt evidence must not wait behind
+                            // ordinary history, and new messages must not wait
+                            // behind receipt history. Both scopes remain owned
+                            // by this one deadline/cancellation boundary and
+                            // the shared TCP capacity. Only receipt validation
+                            // may retire this exact destination as delivered.
+                            let held = tokio::join!(Box::pin(messages), receipts()).0;
+                            if held
+                                && self
+                                    .delivery
+                                    .lock()
+                                    .expect("delivery lock not poisoned")
+                                    .contains_work_event(destination.event.id)
+                            {
+                                // The early independent control round can finish
+                                // empty before this first send creates a receipt.
+                                // Preserve the existing post-send control pull
+                                // inside this same bounded owner.
+                                receipts().await;
+                            }
+                            held
+                        } else {
+                            // Own copies and receipt transfers do not acquire
+                            // another parallel receipt-recovery exchange.
+                            let held = messages.await;
+                            if held {
+                                receipts().await;
+                            }
+                            held
                         }
-                        held
                     })
                     .await;
                 timed_out = outcome.is_none();

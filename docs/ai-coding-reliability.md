@@ -435,6 +435,18 @@ and [runtime controls](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs
 retain real held connections, pending retries, storage recovery and a fixed repair
 that continuous irrelevant observations cannot postpone.
 
+Receipt recovery and ordinary message history need independently polled scopes
+inside their existing delivery owner. Serial receipt-first ordering merely
+reverses a dependency: a held receipt query must not prevent a fresh original
+from arriving. An early empty control round can precede creation of the new
+receipt; preserve bounded post-original recovery before parking exact custody
+as quiet. Keep both scopes under the same cancellation/deadline owner, without
+retaining store guards or increasing TCP capacity. The real inbound-only
+[receipt-scope regressions](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+require a genuine pre-existing authenticated receipt through held ordinary
+history, fresh plaintext through held control history without false Delivered,
+and first-send confirmation after a deliberately early empty control round.
+
 Do not encode failed, unchanged and completed work as one empty-result boolean
 when their retry policies differ. A qualified unchanged result needs fresh exact
 source and authority evidence after all awaited stages; a denied or incomplete
