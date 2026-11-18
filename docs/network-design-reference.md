@@ -1339,7 +1339,8 @@ Replica custody counts and exact-have checks are historical copy evidence. They 
 Message-confirming fanout preserves the actual synchronization error for the
 existing coalesced group-control retry owner. An authenticated connection that
 closes, a stale source, capacity deferral or an incomplete round is not a successful
-fanout. A `NoProgress` result can coexist with possession of the selected message:
+fanout. A `NoProgress` result or local `Store(StaleCursor)` can coexist with
+possession of the selected message:
 retire the failed connection and reception admission, then make one independent
 exact-have check over a usable pinned connection inside the original peer deadline.
 Never continue the partially consumed protocol connection after an error.

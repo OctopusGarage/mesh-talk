@@ -3556,7 +3556,14 @@ impl Node {
             drop(_reception);
             drop(store);
             drop(conn);
-            if matches!(error, super::session::SessionError::NoProgress) {
+            // A locally invalidated history view says nothing about this
+            // peer's retained copy. Query it independently, just as for an
+            // incomplete reconciliation, without acknowledging the failed round.
+            if matches!(
+                error,
+                super::session::SessionError::NoProgress
+                    | super::session::SessionError::Store(LogError::StaleCursor)
+            ) {
                 self.recheck_channel_custody_peer(channel, event_id, peer)
                     .await;
             }
@@ -4537,6 +4544,165 @@ mod fanout_tests {
             source.channel_custody_count(channel, event).unwrap(),
             Some(0)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_exact_custody_positive_after_local_stale_history_confirms_second_account() {
+        local_stale_history_custody_fixture(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_exact_custody_negative_after_local_stale_history_preserves_first_account() {
+        local_stale_history_custody_fixture(false).await;
+    }
+
+    async fn local_stale_history_custody_fixture(held: bool) {
+        use crate::{
+            identity::account::Account,
+            node::test_support::{IndependentPeerRuntime, node_with_files},
+        };
+        use futures_util::FutureExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let mut listeners = Vec::new();
+        let mut identities = Vec::new();
+        let mut accounts = Vec::new();
+        let mut proofs = Vec::new();
+        for _ in 0..3 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let identity = DeviceIdentity::generate();
+            let account = Account::generate();
+            proofs.push(Announce::new_with_account(
+                &identity,
+                &account,
+                "exact holder",
+                listener.local_addr().unwrap().port(),
+            ));
+            listeners.push(listener);
+            identities.push(identity);
+            accounts.push(account);
+        }
+        let nodes: Vec<_> = identities
+            .into_iter()
+            .zip(accounts)
+            .enumerate()
+            .map(|(index, (identity, account))| {
+                node_with_files(
+                    &dir.path().join(format!("stale-{index}")),
+                    identity,
+                    account,
+                    &proofs[0],
+                )
+                .0
+            })
+            .collect();
+        for node in &nodes {
+            for proof in &proofs {
+                node.roster.lock().unwrap().update(
+                    proof,
+                    Ipv4Addr::LOCALHOST.into(),
+                    &node.user_id(),
+                );
+            }
+        }
+        let mut hosts = Vec::new();
+        for (node, listener) in nodes.iter().cloned().zip(listeners) {
+            let mut host = IndependentPeerRuntime::start_multithreaded_with(
+                node,
+                listener,
+                |node, listener| node.run_inbound_connections_for_test(listener),
+            )
+            .await;
+            host.launch();
+            hosts.push(host);
+        }
+        let source = &nodes[0];
+        let first = &nodes[1];
+        let target = &nodes[2];
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let channel = source.create_channel("Exact custody independent of stale history",
+                vec![first.identity.public(), target.identity.public()]).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let mut local = true;
+                    for node in [source, target] {
+                        match node.prepare_account_group_fanout(channel).await {
+                            Ok(()) => {}
+                            Err(NodeError::Log(LogError::StaleCursor)) => { local = false; continue; }
+                            Err(error) => panic!("cold exact-holder preparation failed: {error}"),
+                        }
+                        local &= node.account_group_access(channel).unwrap().execution
+                            == crate::node::AccountGroupExecution::Local;
+                    }
+                    if local { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("cold group metadata must settle before injecting view invalidation");
+            source.roster.lock().unwrap().forget(&target.identity.public());
+            source.sessions.clear();
+            source.send_channel_message(channel, b"Original retained before unrelated history failure").await.unwrap();
+            let event = source.log.lock().unwrap().message_keys_after(channel,
+                crate::eventlog::event::Author::from_ed25519(source.identity.public().ed25519_pub), None, 2)
+                .unwrap().into_iter().next().unwrap().1;
+            assert_eq!(source.channel_custody_count(channel, event).unwrap(), Some(1));
+            assert!(first.log.lock().unwrap().get(&event).unwrap().is_some());
+            assert!(target.log.lock().unwrap().get(&event).unwrap().is_none());
+            if held {
+                target.roster.lock().unwrap().forget(&source.identity.public());
+                target.sessions.clear();
+                target.pull_channel_from_members(channel, 0, false).await;
+                assert!(target.log.lock().unwrap().get(&event).unwrap().is_some(),
+                    "positive custody must be backed by a real member pull and retained original");
+            }
+            for node in &nodes {
+                for proof in &proofs { node.roster.lock().unwrap().update(proof, Ipv4Addr::LOCALHOST.into(), &node.user_id()); }
+            }
+            let group_members = source.channel_members(channel);
+            let peer = source.routing_peer(&target.user_id()).unwrap();
+            let invalidations = Arc::new(AtomicUsize::new(0));
+            *source.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+                let weak = Arc::downgrade(source);
+                let expected = target.identity.public();
+                let invalidations = invalidations.clone();
+                move |peer, phase| {
+                    if peer == expected && phase == "network_view_captured" && invalidations.load(Ordering::SeqCst) < 2 {
+                        let node = weak.upgrade().unwrap();
+                        let profile = node.device_sync_policy().profile;
+                        // Invalidate the actual finite source view through a real
+                        // private policy revision. Group grant, wrapper and
+                        // sharing policy remain unchanged.
+                        node.set_device_sync_category(crate::node::SyncCategory::Profile, !profile).unwrap();
+                        invalidations.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+            let failure = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT,
+                source.sync_and_confirm_custody_admitted(channel, event, &peer)).await.unwrap();
+            assert!(matches!(failure, Err(super::super::session::SessionError::Store(LogError::StaleCursor))),
+                "the helper must preserve the actual local stale-view failure: {failure:?}");
+            let distribution = source.distribute_channel_targets_outcome(channel,
+                &[target.identity.public()], None, false, Some(event)).await;
+            assert!(distribution.failed && distribution.deferred,
+                "independent exact custody must not falsely finish the interrupted history/control round");
+            assert_eq!(invalidations.load(Ordering::SeqCst), 2);
+            assert_eq!(source.channel_members(channel), group_members);
+            assert_eq!(target.log.lock().unwrap().get(&event).unwrap().is_some(), held,
+                "the failed whole-history exchange must not copy or delete the exact target");
+            assert_eq!(source.channel_custody_count(channel, event).unwrap(), Some(1 + usize::from(held)),
+                "a stale unrelated history view cannot suppress independent exact holder evidence");
+            let observations = source.channel_custody_observations(channel, event);
+            assert!(observations.iter().any(|meta| matches!(&meta.key,
+                crate::node::account_documents::AccountDocumentKey::ChannelCustody { holder, .. }
+                    if holder == &target.user_id()) && meta.tombstone != held),
+                "both positive and negative answers require a fresh authenticated exact observation");
+        }).catch_unwind().await;
+        source.account_client_test_hook.lock().unwrap().take();
+        for host in hosts {
+            host.stop().await;
+        }
+        if let Err(error) = outcome {
+            std::panic::resume_unwind(error);
+        }
     }
 
     async fn custody_notification_probe_fixture(sync: bool) {

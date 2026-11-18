@@ -402,6 +402,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::channel_custody::",
+            "channel_exact_custody_",
             "node::account_documents::",
             "node::account_group::tests::message_action_reference::current_thread_peer_runtime_cannot_authenticate_while_its_worker_is_held",
             "node::account_group::tests::message_action_reference::multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
