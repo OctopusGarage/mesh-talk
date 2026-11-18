@@ -329,6 +329,15 @@
     "source_unscoped": "Signed discovery (network scope unspecified)"
   },
   "message": {
+    "source": {
+      "sender": "Received from the sender",
+      "member": "Received from another member",
+      "post_office": "Received from a post office",
+      "linked_device": "Received from a linked device",
+      "unknown": "Reception source unknown",
+      "help": "How this message or file card first reached this device. This does not describe the full route, file downloads, delivery or reading.",
+      "unknownHelp": "How this message or file card first reached this device was not recorded. Older or imported history may have no source."
+    },
     "sticker": "[Sticker]",
     "recalledSummary": "[Message recalled]",
     "expiresIn": "Expires in {{time}} after sending; removed on both sides",

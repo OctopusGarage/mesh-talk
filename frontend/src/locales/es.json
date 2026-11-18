@@ -329,6 +329,15 @@
     "source_unscoped": "Descubrimiento firmado (ámbito de red no determinado)"
   },
   "message": {
+    "source": {
+      "sender": "Recibido del remitente",
+      "member": "Recibido de otro miembro",
+      "post_office": "Recibido de una oficina postal",
+      "linked_device": "Recibido de un dispositivo vinculado",
+      "unknown": "Origen de recepción desconocido",
+      "help": "Cómo llegó por primera vez este mensaje o ficha de archivo a este dispositivo. No describe la ruta completa, las descargas, la entrega ni la lectura.",
+      "unknownHelp": "No se registró cómo llegó por primera vez este mensaje o ficha de archivo. El historial antiguo o importado puede no tener un origen."
+    },
     "sticker": "[Sticker]",
     "recalledSummary": "[Mensaje retirado]",
     "expiresIn": "Caduca en {{time}} tras el envío; se elimina en ambos lados",

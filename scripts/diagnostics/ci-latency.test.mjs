@@ -259,7 +259,7 @@ test("only auxiliary diagnostic transport is optional; acceptance artifacts stay
     "check-health.yml": ["health-diagnostics-", "frontend-coverage-"],
     "ci.yml": ["runner-storage-", "native-crash-linux-", "test-timing-", "macos-remaining-producer-log-"],
     "linux-workspace-consumer.yml": ["native-crash-linux-", "runner-storage-"],
-    "sanitizers.yml": ["runner-storage-"],
+    "sanitizers.yml": ["runner-storage-", "asan-build-diagnostics-"],
     "mutants.yml": ["runner-storage-"],
     "hidden-contacts-native.yml": ["runner-storage-"],
     "release.yml": ["runner-storage-"],
@@ -681,7 +681,15 @@ test("frontend audits share the lockfile-installed tool and policy", () => {
   for (const source of [audit, local]) assert.doesNotMatch(source, /npx[^\n]*audit-ci|npm (?:exec|install)[^\n]*audit-ci/u);
   assert.deepEqual(frontend("audit-ci.json"), {
     "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
-    high: true, allowlist: [], "report-type": "summary",
+    high: true,
+    allowlist: [{
+      "GHSA-fc5q-39xc-vjpf": {
+        active: true,
+        expiry: "2026-12-18T00:00:00Z",
+        notes: "No patched picomatch release; build/test-only via Vite/Vitest, absent from production dependencies. Globs come from reviewed repository configuration, not messaging input. Upgrade and remove when upstream publishes a fix; review before expiry. See docs/ci-maintenance.md#frontend-dependency-audit-exceptions.",
+      },
+    }],
+    "report-type": "summary",
   });
 });
 
@@ -934,4 +942,21 @@ test("reduced UI acceptance still requires source and health checks", () => {
     const run = spawnSync("bash", ["-e", "-c", script], { env: { ...process.env, HEALTH: result } });
     assert.equal(run.status === 0, result === "success");
   }
+});
+
+test("macOS native notification coverage is appended once after defaults and before upload", () => {
+  const source = read("ci.yml");
+  const native = source.split("  macos-native:\n")[1].split("  macos-remaining-build:\n")[0];
+  const control = step(native, "Verify native notification submission without prompting");
+  assert.ok(control);
+  assert.match(control, /steps\.scope\.outputs\.full == 'true'/u);
+  assert.doesNotMatch(control, /continue-on-error/u);
+  assert.match(control, /CARGO_TARGET_DIR: \$\{\{ github\.workspace \}\}\/target\/llvm-cov-target/u);
+  assert.match(control, /CARGO_LLVM_COV_TARGET_DIR: \$\{\{ github\.workspace \}\}\/target\/llvm-cov-target/u);
+  assert.match(control, /coverage_environment="\$\(cargo llvm-cov show-env --sh\)"/u);
+  assert.ok(control.indexOf("notification-native.mjs") < control.indexOf("cargo llvm-cov report --lcov"));
+  assert.equal(source.split("\n").filter(line => line.trim() === "cargo llvm-cov report --lcov --output-path lcov.info").length, 1);
+  assert.ok(native.indexOf("name: Test + coverage (macOS)") < native.indexOf("name: Verify native notification"));
+  assert.ok(native.indexOf("name: Verify native notification") < native.indexOf("name: Upload coverage to Codecov"));
+  assert.match(native, /--test-concurrency=1 [^\n]*scripts\/ci\/notification-native\.test\.mjs/u);
 });

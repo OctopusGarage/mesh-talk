@@ -4,7 +4,6 @@
 use crate::settings::SettingsState;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, Runtime};
-use tauri_plugin_notification::NotificationExt;
 
 /// How many characters of a message body we surface in a notification preview.
 const PREVIEW_LEN: usize = 80;
@@ -189,13 +188,7 @@ fn notify_if_unfocused<R: Runtime>(
         return;
     };
 
-    if let Err(e) = app_handle
-        .notification()
-        .builder()
-        .title(&title)
-        .body(&body)
-        .show()
-    {
+    if let Err(e) = crate::notifications::send(app_handle, &title, &body) {
         log::warn!("Failed to show notification: {e}");
     }
 }
@@ -312,6 +305,8 @@ pub fn emit_call_signal<R: Runtime>(
 
 #[derive(serde::Serialize, Clone)]
 pub struct DmReceivedEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_via: Option<mesh_talk_core::node::ReceivedVia>,
     pub protection: Option<mesh_talk_core::node::MessageProtection>,
     pub message_id: Option<String>,
     pub from_account: Option<String>,
@@ -323,6 +318,8 @@ pub struct DmReceivedEvent {
 
 #[derive(serde::Serialize, Clone)]
 pub struct ChannelMessageEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_via: Option<mesh_talk_core::node::ReceivedVia>,
     pub protection: Option<mesh_talk_core::node::MessageProtection>,
     pub channel_id: String, // hex
     pub channel_name: String,
@@ -417,6 +414,8 @@ impl<R: Runtime> ProgressThrottle<R> {
 
 #[derive(serde::Serialize, Clone)]
 pub struct FileReceivedEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_via: Option<mesh_talk_core::node::ReceivedVia>,
     pub protection: Option<mesh_talk_core::node::MessageProtection>,
     pub expires_at_ms: Option<u64>,
     pub conv: String, // hex (channel id for a channel file; the DM conv otherwise)
@@ -439,6 +438,7 @@ pub struct FileReceivedEvent {
 
 pub(crate) fn dm_event(dm: mesh_talk_core::node::ReceivedDm) -> DmReceivedEvent {
     DmReceivedEvent {
+        received_via: dm.received_via,
         protection: dm.protection,
         message_id: dm.message_id.map(|id| id.to_hex()),
         from_account: dm.from_account,
@@ -457,6 +457,7 @@ pub(crate) fn channel_event(
     msg: mesh_talk_core::node::ReceivedChannelMessage,
 ) -> ChannelMessageEvent {
     ChannelMessageEvent {
+        received_via: msg.received_via,
         protection: msg.protection,
         channel_id: hex::encode(msg.channel_id.as_bytes()),
         channel_name: msg.channel_name,
@@ -481,6 +482,7 @@ pub(crate) fn channel_event(
 
 pub(crate) fn file_event(file: mesh_talk_core::node::ReceivedFile) -> FileReceivedEvent {
     FileReceivedEvent {
+        received_via: file.received_via,
         protection: file.protection,
         expires_at_ms: file.expires_at_ms,
         conv: hex::encode(file.conv.as_bytes()),
@@ -691,6 +693,32 @@ fn publish_file_received<R: Runtime>(
 
 #[cfg(test)]
 mod notification_policy_tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unavailable_native_provider_is_best_effort_at_the_unfocused_message_boundary() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        assert!(crate::notifications::send(app.handle(), "Fixture", "Message").is_err());
+        assert!(
+            super::notification_payload(
+                &crate::settings::AppSettings::default(),
+                false,
+                &super::NotificationContext::default(),
+                super::NotificationTarget::File,
+                "Fixture",
+                "Message",
+            )
+            .is_some()
+        );
+        super::notify_if_unfocused(
+            app.handle(),
+            super::NotificationTarget::File,
+            "Fixture",
+            "Message",
+        );
+    }
+
     use super::*;
     use tauri::Listener;
 
@@ -927,6 +955,7 @@ mod notification_policy_tests {
             emit_dm_received(
                 app.handle(),
                 ReceivedDm {
+                    received_via: None,
                     message_id: identity,
                     protection: None,
                     from_account: account,
@@ -974,6 +1003,7 @@ mod notification_policy_tests {
             app.handle(),
             "owner",
             mesh_talk_core::node::ReceivedFile {
+                received_via: None,
                 protection: Some(mesh_talk_core::node::MessageProtection::Authenticate),
                 expires_at_ms: None,
                 conv: mesh_talk_core::eventlog::ConversationId::new([1; 32]),
@@ -1003,6 +1033,32 @@ mod notification_policy_tests {
     }
 
     #[test]
+    fn reception_source_json_preserves_categories_and_omits_unknown() {
+        use mesh_talk_core::node::{ReceivedDm, ReceivedVia};
+        for (source, expected) in [
+            (None, None),
+            (Some(ReceivedVia::Sender), Some("sender")),
+            (Some(ReceivedVia::Member), Some("member")),
+            (Some(ReceivedVia::PostOffice), Some("post_office")),
+            (Some(ReceivedVia::LinkedDevice), Some("linked_device")),
+        ] {
+            let event = dm_event(ReceivedDm {
+                received_via: source,
+                message_id: None,
+                from_account: None,
+                from: "sender".into(),
+                from_name: "Sender".into(),
+                text: Vec::new(),
+                protection: None,
+                reply_to: None,
+            });
+            let json = serde_json::to_value(event).unwrap();
+            assert_eq!(json.get("received_via").and_then(|v| v.as_str()), expected);
+            assert_eq!(json.get("received_via").is_none(), source.is_none());
+        }
+    }
+
+    #[test]
     fn protected_dm_event_never_emits_plaintext() {
         let app = tauri::test::mock_app();
         let settings = SettingsState::default();
@@ -1020,6 +1076,7 @@ mod notification_policy_tests {
         emit_dm_received(
             app.handle(),
             mesh_talk_core::node::ReceivedDm {
+                received_via: None,
                 message_id: Some(mesh_talk_core::eventlog::EventId::new([3; 32])),
                 from_account: None,
                 from: "sender".into(),

@@ -43,6 +43,43 @@ async fn fixture(modern: bool) -> Fixture {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_group_send_confirms_two_external_accounts_with_multiple_devices() {
+    let fixture = fixture(true).await;
+    let source = &fixture.nodes[0];
+    let account = source.account_id();
+    let operation = source.new_account_group_operation_id(&account).unwrap();
+    source
+        .submit_account_group_text_if(
+            &account,
+            operation,
+            fixture.group,
+            crate::node::AccountGroupTextInput {
+                text: b"Three accounts require two external confirmations".to_vec(),
+                reply_to: None,
+                expires_at_ms: None,
+                protection: None,
+            },
+            |commit| commit(),
+        )
+        .unwrap();
+    source.maintain_account_group_operations().await;
+    let status = source
+        .account_group_operation_status(&account, operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
+    let event = status.primary_event.unwrap();
+    assert_eq!(
+        source.channel_custody_count(fixture.group, event).unwrap(),
+        Some(2),
+        "three accepted accounts must confirm both external accounts, counting sibling devices once"
+    );
+    for member in &fixture.nodes[1..] {
+        assert!(member.log.lock().unwrap().get(&event).unwrap().is_some());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_invitation_runs_in_existing_data_workers_and_reuses_its_original_id() {
     let mut fixture = fixture(true).await;
     let owner = fixture.nodes[0].clone();

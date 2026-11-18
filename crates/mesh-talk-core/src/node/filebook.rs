@@ -17,6 +17,8 @@ mod work;
 /// A received file announcement, surfaced to the application.
 #[derive(Debug, Clone)]
 pub struct ReceivedFile {
+    /// Local first-ingress observation; absent for unknown or imported history.
+    pub received_via: Option<super::ReceivedVia>,
     pub protection: Option<super::MessageProtection>,
     /// Absolute authenticated send-time deadline, if selected.
     pub expires_at_ms: Option<u64>,

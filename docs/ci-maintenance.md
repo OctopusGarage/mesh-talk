@@ -406,6 +406,30 @@ artifacts. GitHub's download action reports a digest mismatch as a warning;
 the evidence consumer must explicitly reject it. See [artifact validation](https://docs.github.com/en/actions/tutorials/store-and-share-data#validating-artifacts)
 for the platform behavior.
 
+## Frontend dependency audit exceptions
+
+The existing `frontend/audit-ci.json` owner blocks high and critical advisories,
+including development dependencies. An unfixable advisory may have an exact-ID,
+expiring exception only after checking the available upstream release and the
+affected consumer boundary. Record the exposure, mitigation and removal condition;
+do not allowlist a package name, skip development dependencies or lower severity.
+The frontend maintainer must recheck upstream and remove the exception when a
+fixed compatible release is available, or reassess the risk before expiry.
+
+[GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
+affects repeated extglob matching in picomatch through 4.0.7, with no patched
+release currently published. This project uses it only through Vite/Vitest and
+their development tooling; it is absent from the production dependency graph.
+Matcher patterns come from reviewed repository/tool configuration, not received
+messages, user search or file-transfer content. Builds and tests must continue
+using trusted repository configuration; this exception does not authorize passing
+untrusted patterns into these tools. The exact advisory exception expires on
+2026-12-18 UTC. It accepts the remaining build/test denial-of-service risk; it does
+not fix the upstream parser. Requalify with `npm ls picomatch --all`,
+`npm ls picomatch --omit=dev --all`, `npm audit --omit=dev`, and the complete
+`npm run audit:ci` from `frontend/`; the first command identifies all consumers,
+while the production-only audit cannot replace the full gate.
+
 ## Refactor coverage without losing its meaning
 
 Two executions are redundant only when their requirement, inputs, platform and
@@ -592,6 +616,13 @@ Upgrade this CI toolchain dependency through a reviewed PR with the full native
 Linux union and real clean/use-after-free controls on all eight runners; a local
 stable archive-protocol fixture does not qualify instrumentation or a cache hit.
 
+ASan's archive producer admits two Cargo compiler jobs, including LLVM jobserver
+work, on the hosted Linux runner. Apply this bound only at the compile step after
+cache restoration to retain the compatible dependency cohort. The CLI rejects an
+unbounded producer; consumer execution remains serial and every instrumentation
+control and inventory requirement stays intact. Compare actual peak available
+memory, swap and compilation time before revisiting this bound. Memory pressure
+is an observed resource risk, not proof of an earlier runner-disconnection cause.
 ASan compiles its core library once into an official Nextest archive, then runs
 eight serial partitions. Runners 1–6 use Nextest `hash:ID/6`, excluding the
 four exact reserved test names owned by `scripts/ci/asan.mjs`. Runner 7 executes
@@ -623,8 +654,41 @@ rejection after real extraction and interrupted partial writes while preserving
 unrelated native build outputs. Record image
 rollout metadata separately from actual compiler/runtime compatibility; incidental
 image version changes must not reject otherwise identical compatible inputs.
+The ASan producer keeps bounded compile stdout/stderr and command lifecycle
+receipts in a separate diagnostic artifact. Its resource observer samples fixed
+kernel memory, swap, OOM and pressure counters, system load and workspace free
+space every thirty seconds, at most 720 times. It retires its timer when work
+settles, including cancellation; resource-observer read/write/live-output failures
+never replace the compiler outcome or qualify an archive. Raw command receipts
+retain the process owner's mandatory local write policy; receipt creation failure
+rejects compilation admission. Only auxiliary upload transport is optional.
+Live samples supplement the
+artifact, but total runner loss can prevent both log finalization and upload.
+Missing observations do not prove resource exhaustion or exclude it. Compare
+actual observations before changing compiler concurrency or instrumentation.
 Attempt-bound archives and receipts require a complete sanitizer-workflow rerun
 when recovering a failed attempt; do not mix a previous producer with new shards.
+
+macOS Host coverage additionally executes the existing ignored notification
+control from an ad-hoc signed temporary bundle. The CLI admits only a disposable
+hosted macOS runner, exact current-source instrumented Host-library metadata and
+one actual passing case. It forces authorization requests off, verifies fresh
+native not-determined authorization before and after submission and compares
+product delivery against an independently constructed native reference request.
+Distinct title/body pairs share the original eight-second observation window;
+both absent must wait through the window, while asymmetric delivery fails. A
+not-determined authorization snapshot alone cannot establish Notification Center
+absence across runner images. Explicit operator delivery expectations stay
+unchanged. The control preserves the current LLVM profile destination and regenerates LCOV before Codecov upload. The
+post-control step explicitly binds both Cargo and llvm-cov target directories to
+`target/llvm-cov-target`: `show-env` otherwise defaults to `target`, unlike the
+default `llvm-cov nextest` cohort. The real instrumented notification protocol
+fixture verifies default-test profiles survive the sourced environment and gain
+native-control counters in the regenerated report. The shared
+command owner bounds the whole control and retires children before successful
+private-bundle cleanup. Failed controls retain their private bundle for the disposable
+VM to retire rather than delete files under uncertain work. Portable/Mach-O protocol fixtures do not qualify real OS authorization;
+operator grant, revocation and visible alert evidence remain separate.
 
 Retain fresh process/context isolation, owned temporary directories, dynamically
 allocated ports where supported, and deterministic cleanup. Keep compile jobs,

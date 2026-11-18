@@ -93,6 +93,7 @@ export function fromHistoryItem(h: HistoryItem): ChatMessage {
       ? { fileMessageAliases: h.file_message_aliases }
       : {}),
     fromMe: h.from_me,
+    receivedVia: h.received_via,
     who: h.who,
     text: h.protection ? "" : h.text,
     protection: h.protection,
@@ -241,6 +242,7 @@ export function reconcileMessages(
       const old = m.id ? known.find((p) => p.id === m.id) : undefined;
       return {
         ...m,
+        // Preserve local arrival timing; history owns reception provenance.
         receivedAt: old?.receivedAt ?? m.receivedAt,
         arrivalKind: old?.arrivalKind ?? m.arrivalKind,
         clientId: old?.clientId,

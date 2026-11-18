@@ -718,8 +718,9 @@ sequenceDiagram
   participant B as Recipient B
   participant P as Optional post office P
   A->>Local: Accept immutable outgoing work
-  A->>B: Authenticated direct sync when a route exists
-  opt Relay sending permitted and destination still outstanding
+  par Direct route exists
+    A->>B: Authenticated direct sync
+  and Relay sending permitted and destination still outstanding
     A->>P: Recipient-encrypted opaque custody
   end
   B->>B: Validate and durably install received content
@@ -729,7 +730,7 @@ sequenceDiagram
 
 1. Discovery or an authorized known-contact route supplies a candidate. Transport verifies full identity/account binding.
 2. Account-addressed work can include multiple per-device destinations and own-device copies. A single account conversation in the UI does not collapse their delivery obligations.
-3. Direct transfer is attempted first; a completed TCP/sync exchange is not sufficient to mark the recipient delivered. While exact destination work remains, relay-enabled custody may also be attempted.
+3. When permitted routes exist, direct transfer and post-office custody run concurrently; recipient presence is not a prerequisite for relay upload. Immediate best-effort delivery reuses the background worker's bounded exchange rules, with one maximum control deadline across its entire network fanout. Expiry drops unfinished channels and leaves the immutable destinations queued for recovery; synchronous local recovery and lookup are outside this network deadline. A completed TCP/sync exchange or relay copy is not sufficient to mark the recipient delivered.
 4. The recipient validates cryptographic and conversation authority, installs its receive transition and produces eligible confirmation. The sender validates and durably applies it.
 5. Retries retain immutable event identity. A stale work snapshot must recheck outstanding state before opening another relay connection. A confirmed destination does not retire another device's work.
 
@@ -1335,6 +1336,18 @@ If all six are accepted members with the needed keys, B can serve A's retained e
 
 Replica custody counts and exact-have checks are historical copy evidence. They are not a lease guaranteeing a holder will remain online forever, a human read receipt, or proof that every group destination received the event.
 
+Message-confirming fanout preserves the actual synchronization error for the
+existing coalesced group-control retry owner. An authenticated connection that
+closes, a stale source, capacity deferral or an incomplete round is not a successful
+fanout. A `NoProgress` result can coexist with possession of the selected message:
+retire the failed connection and reception admission, then make one independent
+exact-have check over a usable pinned connection inside the original peer deadline.
+Never continue the partially consumed protocol connection after an error.
+A positive exact answer updates member-copy evidence without declaring all
+group controls synchronized. The same bounded per-group revision remains subject
+to its existing one-to-300-second failure backoff; no per-message retry queue is
+added. A negative or unavailable answer cannot produce a confirmed copy.
+
 Linked devices share the sender account's copy observations through the existing
 certified private account-document channel. Versioned records bind each claim to
 its exact channel, event and holder, including negative rechecks. They carry an
@@ -1373,6 +1386,42 @@ Post-office observations remain a separate historical aggregate: one missing
 recipient wrapper or a connection timeout cannot retract another wrapper's
 confirmed copy at the same office. Unsupported custody exchange is exposed as
 requiring an upgrade, even while the older supported domains continue.
+
+### Device-local reception source
+
+[Reception source](../CONTEXT.md#acceptance-and-delivery) names the authenticated
+application peer at the first retained ingress, independently of live versus
+catch-up timing. The message footer distinguishes the sender account, another
+member, a post office and a linked device. A routed connection pinned to a member
+remains a member/sender source even when a network proxy carries its bytes.
+This observation does not describe the complete forwarding chain, establish
+custody at the source today, or identify the source of downloaded attachment bytes.
+
+The ordinary guarded receive owner records this small observation in the same
+SQL transaction as a newly accepted message or file offer. Rejected events and
+duplicates cannot create or replace it. Uninvited ancestry records an origin only
+when the authorized batch commits. Sender classification uses exact device
+identity or a verified common account; infrastructure and linked-device roles
+remain separate. Optional historical imports carry no invented ingress evidence.
+
+Pending observations reference retained encrypted events and cascade on event
+reclamation. First plaintext reception moves the observation to an account-fenced
+transcript child in its existing transaction; erasure cascades with that row.
+An account DM's validated canonical-conversation projection retains the exact
+signed event identity across this move. Existing messages without evidence show
+an unknown source, and private history sync does not copy another device's source.
+Reopen, duplicate alias and missing-source handling preserve the first observation.
+Native history resolves the complete validated alias bundle and owns its source,
+including unknown. Frontend receipt times describe only locally observed entries.
+Neither this timing nor cached messages can override the projection or supply a
+missing source, even when a later receipt uses the canonical logical-message ID.
+Plaintext-only transcript reception without raw ingress evidence remains valid:
+it leaves the source unknown without requiring a raw-event repository.
+
+Reads are bounded metadata lookups on selected history/receipt rows. There is no
+new background loop, timer, retained body or network request. Startup performs
+only optional schema validation/creation; accepted traffic performs constant-size
+metadata work, and completed traffic returns to the existing idle state.
 
 ### Cost-aware group attachment sharing
 
@@ -2900,6 +2949,11 @@ source guard. Ordinary appends therefore cannot make the two consumers restart
 each other's graph work. Legacy future-cut changes retire those answers through
 the existing bounded cleanup owner. Cold preparation yields between bounded
 turns so other runtime work can progress.
+An unfinished ancestry selection retains its stricter exact source revision.
+After a safe append, the current decision owner atomically retires and clears
+only its obsolete cached selection, charges a bounded pending turn, and reissues
+the real ancestry query. Old parent bindings and mismatched query scopes remain
+stale; discarding scratch never publishes a predicate answer.
 The node retains at most four scoped history-view owners and two independent
 receive-only owners, with at most 16 selected outgoing history IDs and 64 recent
 result hints per exchange. Receive-only owners never acquire a history view;
@@ -3099,14 +3153,23 @@ Only after validation rejects retired session-only evidence is durable progress
 attached to the current runtime. Completed finite repair attempts additionally
 retain at most 64 lightweight scheduling fingerprints in the existing upload
 cache: each holds a key of at most 256 bytes, a 32-byte hash, captured privacy
-generation and fixed five-minute expiry. They retain no event, receipt body,
-parent mapping, view or compaction lease. A freshly authenticated receipt from
+generation, the captured local receive-repair/source revisions and fixed five-minute
+expiry. They retain no event, receipt body, parent mapping, view or compaction lease. A freshly authenticated receipt from
 the same runtime may preserve its exact inactive spent bitmap after heavy-owner
 eviction only when this evidence still matches. Restart, changed policy or
 repair state, missing evidence and expiry retain cold normalization: clear spent
 work and drop inactive repair hints. Existing pending-witness, remote-window and
 destructive-epoch checks still precede work. Explicit invalidation of all repair
 owners clears these fingerprints; identical observations never renew their deadline.
+A blocked pending child consults this evidence before another body GET, retaining
+its durable pending ID. Reuse requires its exact pending witness/spent bit, current
+remote mailbox identity and unchanged mailbox revision, nondecreasing remote
+commit cut, current local dependency/source revisions and fresh receive permission.
+Capture local revisions before the attempt and compare them again before recording
+quiet work; a parent arriving during completion cannot become an unchanged baseline.
+Local or remote parent arrival, policy changes, restart, missing evidence and the
+original five-minute deadline restore normal retry. These hints never acknowledge
+admission or delivery and do not retain child or parent payloads.
 Hot repair progress keeps its existing lease and generation checks. Each owner
 also fences cold warming with a reset epoch, including invalidation while its
 receipt is still empty. Recording completed work rechecks the actual lease under

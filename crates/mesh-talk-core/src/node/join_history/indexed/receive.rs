@@ -212,6 +212,7 @@ impl Node {
             if !reopening && self.channel_incoming.is_legacy() {
                 let body = MessageBody::decode(&row.plaintext);
                 let _ = self.channel_incoming.send(ReceivedChannelMessage {
+                    received_via: None,
                     channel_id: channel,
                     channel_name: name.clone(),
                     from: row.from.clone(),

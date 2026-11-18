@@ -149,10 +149,41 @@ impl PersistentEventLog {
             Backend::Indexed(repository) => repository.append(&event),
         }
     }
+    pub(crate) fn append_durable_observed(
+        &mut self,
+        event: Event,
+        observe: impl FnOnce(
+            &rusqlite::Connection,
+            super::repository::EventDomainId,
+            &Event,
+        ) -> Result<(), LogError>,
+    ) -> Result<AppendOutcome, LogError> {
+        match &mut self.backend {
+            // Standalone legacy logs have no local SQL observation owner.
+            Backend::Legacy(log) => log.append_durable(event),
+            Backend::Indexed(repository) => repository.append_observed(&event, observe),
+        }
+    }
     pub(crate) fn append_channel_batch_atomic(&mut self, events: &[Event]) -> Result<(), LogError> {
         match &mut self.backend {
             Backend::Legacy(log) => log.append_channel_batch_atomic(events),
             Backend::Indexed(repository) => repository.append_channel_batch_atomic(events),
+        }
+    }
+    pub(crate) fn append_channel_batch_observed(
+        &mut self,
+        events: &[Event],
+        observe: impl FnMut(
+            &rusqlite::Connection,
+            super::repository::EventDomainId,
+            &Event,
+        ) -> Result<(), LogError>,
+    ) -> Result<(), LogError> {
+        match &mut self.backend {
+            Backend::Legacy(log) => log.append_channel_batch_atomic(events),
+            Backend::Indexed(repository) => {
+                repository.append_channel_batch_observed(events, observe)
+            }
         }
     }
     pub fn has(&self, id: &EventId) -> Result<bool, LogError> {

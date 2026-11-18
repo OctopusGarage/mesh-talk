@@ -72,7 +72,21 @@ impl Node {
         {
             return Ok(None);
         }
+        let aliases = self
+            .file_message_identities
+            .lock()
+            .expect("file identities lock")
+            .aliases(entry.conversation, event_id)?;
         Ok(Some(ReceivedFile {
+            received_via: if metadata.own_device {
+                None
+            } else {
+                self.reception_effects.received_file_via(
+                    entry.conversation,
+                    entry.event_id,
+                    &aliases,
+                )?
+            },
             protection: manifest.protection(),
             expires_at_ms: crate::expiry::deadline(&entry.plaintext),
             conv: if is_channel {

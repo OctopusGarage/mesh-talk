@@ -123,9 +123,12 @@ test("ASan workflow retains required name as strict full-union check with one ar
   const storage = workflow.split(/^      - /mu).find(step => step.startsWith("name: Preserve runner storage measurements\n"));
   assert.match(storage, /uses: actions\/upload-artifact@/u);
   assert.match(storage, /name: runner-storage-/u);
-  // Only this auxiliary transport may fail; compilation, controls, execution,
+  // Only the two explicit auxiliary transports may fail; compilation, controls, execution,
   // source-bound archives and the complete union remain mandatory.
-  const acceptance = workflow.replace(storage, storage.replace(/^        continue-on-error: true\n/mu, ""));
+  const diagnostics = workflow.split(/^      - /mu).find(step => step.startsWith("name: Preserve ASan build diagnostics\n"));
+  assert.match(diagnostics, /uses: actions\/upload-artifact@/u);
+  assert.match(diagnostics, /name: asan-build-diagnostics-/u);
+  const acceptance = [storage, diagnostics].reduce((source, step) => source.replace(step, step.replace(/^        continue-on-error: true\n/mu, "")), workflow);
   assert.doesNotMatch(acceptance, /continue-on-error|timeout-minutes|--exclude|--skip/u);
   const config = readFileSync(new URL("../../.config/nextest-asan.toml", import.meta.url), "utf8");
   assert.equal(config.match(/^nextest-version = "([^"]+)"$/mu)?.[1], versions.nextest);
@@ -293,4 +296,96 @@ test("ASan producer installs the declared reviewed nightly once before strict co
   assert.ok(producer.indexOf("asan.mjs cohort") < producer.indexOf("Swatinem/rust-cache"));
   assert.match(producer, /shared-key: sanitizers-shards/u);
   for (const [key, value] of [["RUSTFLAGS", "-Zsanitizer=address"], ["RUSTDOCFLAGS", "-Zsanitizer=address"], ["ASAN_OPTIONS", "detect_leaks=1"], ["RUST_TEST_THREADS", "1"]]) assert.ok(workflow.includes(`  ${key}: "${value}"`));
+});
+
+test("ASan build observation is bounded, retires its timer and preserves the work result", { timeout: 5000 }, async t => {
+  const { observeBuild } = await import(owner);
+  assert.equal(typeof observeBuild, "function", "missing bounded ASan build observation");
+  const directory = temporary(t);
+  const emitted = [];
+  let count = 0, reachedLimit;
+  const limited = new Promise(resolve => { reachedLimit = resolve; });
+  const result = await observeBuild(directory, async () => {
+    // Model actual admitted work independently of the unreferenced observer.
+    // Node 22's test watchdog does not keep a promise-only fixture alive.
+    const workOwner = setInterval(() => {}, 1000);
+    try { await limited; return "compiled"; }
+    finally { clearInterval(workOwner); }
+  }, { intervalMs: 5, maxSamples: 3, sample: () => ({ availableBytes: ++count }), emit: row => { emitted.push(row); if (row.event === "limit") reachedLimit(); } });
+  assert.equal(result, "compiled");
+  const rows = readFileSync(path.join(directory, "resources.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(rows.map(row => row.event), ["sample", "sample", "sample", "limit", "finished"]);
+  assert.equal(rows.at(-1).outcome, "success");
+  assert.equal(count, 3);
+  assert.deepEqual(emitted, rows);
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(emitted.length, rows.length, "diagnostic timer survived the build");
+});
+
+test("ASan diagnostic failures cannot replace a compile failure or success", async t => {
+  const { observeBuild } = await import(owner);
+  assert.equal(typeof observeBuild, "function", "missing bounded ASan build observation");
+  const failure = new Error("original compiler failure");
+  const root = temporary(t);
+  const sample = () => { throw Object.assign(new Error("private diagnostic details"), { code: "EACCES" }); };
+  await assert.rejects(observeBuild(root, async () => { throw failure; }, { sample, emit: () => {} }), error => error === failure);
+  const rows = readFileSync(path.join(root, "resources.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(rows[0].error, "EACCES");
+  assert.equal(rows.at(-1).outcome, "failure");
+  assert.doesNotMatch(JSON.stringify(rows), /private diagnostic details/u);
+  const unwritable = path.join(root, "file"); writeFileSync(unwritable, "not a directory");
+  assert.equal(await observeBuild(unwritable, async () => 42, { emit: () => { throw Error("closed output"); } }), 42);
+});
+
+test("ASan build diagnostics retain bounded host observations and always upload separately from the sealed archive", async () => {
+  const { buildResourceSample } = await import(owner);
+  assert.equal(typeof buildResourceSample, "function", "missing real resource sampler");
+  const sample = buildResourceSample();
+  assert.ok(sample.memory.totalBytes > 0);
+  assert.ok(sample.diskAvailableBytes >= 0);
+  assert.ok(JSON.stringify(sample).length < 8192);
+  const workflow = readFileSync(new URL("../../.github/workflows/sanitizers.yml", import.meta.url), "utf8");
+  const producer = workflow.split("  cohort:\n")[1].split("  shards:\n")[0];
+  assert.match(producer, /name: Preserve ASan build diagnostics\n\s+if: always\(\)/u);
+  assert.match(producer, /path: tmp\/asan-build-diagnostics\//u);
+});
+
+test("ASan observation retires after actual command failure and cancellation with raw compile evidence", { timeout: 15000 }, async t => {
+  const { observeBuild } = await import(owner);
+  const { command } = await import("../ci/windows-coverage.mjs");
+  const root = temporary(t);
+  for (const mode of ["failure", "cancel"]) {
+    const directory = path.join(root, mode); mkdirSync(directory);
+    const controller = new AbortController();
+    let cancel;
+    const emitted = [];
+    try {
+      await assert.rejects(observeBuild(directory, () => command(["-e", mode === "failure" ? 'console.error("compiler failed"); process.exit(19)' : 'console.log("ready"); setInterval(() => {}, 1000)'], {
+        binary: process.execPath, signal: controller.signal,
+        receipt: path.join(directory, "compile"), progress: path.join(directory, "progress.jsonl"),
+      }), { intervalMs: 10, emit: row => {
+        emitted.push(row);
+        if (mode === "cancel" && !cancel && existsSync(path.join(directory, "compile.jsonl")) && readFileSync(path.join(directory, "compile.jsonl"), "utf8").includes("ready")) cancel = setTimeout(() => controller.abort(), 1);
+      } }), mode === "failure" ? /failed: 19/u : /interrupted/u);
+    } finally { clearTimeout(cancel); }
+    const before = emitted.length;
+    await new Promise(resolve => setTimeout(resolve, 35));
+    assert.equal(emitted.length, before, "timer still running after child retirement");
+    assert.equal(emitted.at(-1).outcome, "failure");
+    const progress = readFileSync(path.join(directory, "progress.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(progress.at(-1).event, "closed");
+    assert.equal(progress.at(-1).failed, true);
+    assert.ok(existsSync(path.join(directory, "compile.log")));
+  }
+});
+
+test("ASan bounds compiler concurrency after cache restoration while preserving eight serial consumers", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/sanitizers.yml", import.meta.url), "utf8");
+  const producer = workflow.split("  cohort:\n")[1].split("  shards:\n")[0];
+  const build = producer.split(/^      - /mu).find(step => step.startsWith("name: Compile and seal the ASan core archive once\n"));
+  assert.match(build, /^          CARGO_BUILD_JOBS: "2"$/mu, "ASan compiler work must leave memory headroom on the hosted producer");
+  assert.equal(workflow.match(/CARGO_BUILD_JOBS:/gu)?.length, 1, "compiler bound belongs only to archive production, after cache restoration");
+  assert.ok(producer.indexOf("Swatinem/rust-cache") < producer.indexOf("CARGO_BUILD_JOBS:"));
+  assert.match(workflow, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/u);
+  assert.match(workflow, /RUST_TEST_THREADS: "1"/u);
 });

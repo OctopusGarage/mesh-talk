@@ -390,6 +390,22 @@ needed. Distinguish observation deadlines, admission refusal and transport failu
 Preserve the owner-defined retry policy and original operation identity. Do not
 reset the overall budget on every attempt or increase it just to hide a hang.
 
+Immediate best-effort sends must reuse the bounded delivery exchange owner;
+wrapping only the background retry leaves the public send waiting indefinitely
+after a peer authenticates but stops replying. Direct and relay alternatives
+must progress independently, with one network deadline across the immediate
+fanout. Deadline cancellation drops unfinished channels without confirming or
+discarding the accepted intent. The `immediate_delivery_` regressions in
+[delivery runtime tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+hold real authenticated requests, require relay custody before releasing the
+direct peer, then qualify socket closure and restored capacity after expiry.
+Their virtual clock advances only the network deadline; synchronous recovery
+and storage lookups remain outside that interruptibility evidence.
+When moving a caller onto this shared exchange, revalidate its file consumers.
+The consented-file relay fallback in the same test owner rejects receipt control
+after failed payload custody, keeps the accepted card pending, then verifies the
+real relayed offer, consent, encrypted chunks and final recipient bytes.
+
 Check cancellation cleanup and late completion as well as elapsed time. Async
 timers cannot interrupt a thread blocked in a synchronous mutex, native call or
 filesystem syscall. Such a path also needs R01–R03. Budget values remain in the
@@ -426,6 +442,15 @@ round cannot earn it. Preserve existing callers' result meaning through an
 additive internal observation, and keep delivery/custody proof independent. The
 same profile publisher controls exercise warm relay publication with unavailable
 direct delivery; mailbox controls retain source-change and relay-reset recovery.
+Do not discard a sync error while returning a successful byte count to the
+distribution owner. Whole-history `NoProgress` can coexist with an exact retained
+message. Preserve the failed control revision and its existing backoff while a
+fresh authenticated exact-have query independently qualifies that copy within the
+original deadline. Retire the old protocol connection and actual reception
+admission before redialing. The [confirming-fanout regression](../crates/mesh-talk-core/src/node/channels.rs)
+and [exact-custody failure-path regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+exercise authenticated closure, incomplete reconciliation and positive/negative
+answers on the replacement connection.
 
 When replacing fast polling with sparse recovery, preserve the progress that the
 old poll accidentally supplied. A completed record is not active demand, but a
@@ -1070,6 +1095,16 @@ The [forwarding owner](message-forwarding.md#source-admission-and-lifecycle) tes
 signed rename that needs preparation, plus dissolution and same-user/different-key
 controls that must never produce a message or send receipt.
 
+A current parent preparation can retain a child cursor whose stricter source
+revision has expired. Retire and clear only that cached child under the parent's
+current guard and exact-pointer comparison, then recompute through its existing
+bounded owner. Repeatedly propagating the same stale child is not recovery, and
+loosening the child's fence is not authorization. The
+[decision ancestry controls](../crates/mesh-talk-core/src/node/channel/checkpoint/tests.rs)
+cover safe appends, missing scratch, genuine positive/negative answers and
+rejected query scopes; the existing real self-control Noise scenarios retain
+their original operation deadline.
+
 An asynchronous prepare/commit API must revisit mutable prerequisites after
 expensive staging yields. A later synchronous commit allowance cannot finish an
 arbitrary intervening control tail. Recheck cheap expiry and caller admission
@@ -1115,6 +1150,12 @@ remain unknown; reconcile or retry according to the owning idempotency contract.
 Process a late definite refusal without fabricating a protocol terminal state.
 Do not turn failed readback into an empty successful save or resend an accepted
 message because optional roster, preview or notification work failed.
+Preserve independent successful observations in presentation. Member custody and
+post-office custody can both exist; a fallback expression must not hide one when
+the other becomes positive. The [delivery footer regressions](../frontend/src/features/chat/deliveryFooter.test.ts)
+cover simultaneous confirmations and absent relay evidence; the mounted
+[status disclosures](../frontend/src/features/chat/DeliveryDetails.test.ts) cover
+late confirmation, independent explanations and removal of stale relay status.
 Durable local erasure must classify its target from canonical identity, not an
 enumeration of display projections. A ready history observation is not a lease
 on subsequent projection readiness, and a generic mutation retry can repeat work
@@ -1129,6 +1170,34 @@ regression in [delivery tests](../crates/mesh-talk-core/src/node/delivery_runtim
 qualifies the real read failure, verifies text removal and suppression, and
 retains the unrelated live file. File erasure still revokes its keys before
 physical removal, and reconciliation still rejects stale revisions.
+
+Native permission observations and the operation they describe must share the
+same application identity and native provider. Do not query one notification API
+while sending through another that can substitute a process-wide bundle identity.
+The [notification owner](../src-tauri/src/notifications.rs) shares the macOS center
+between observation, explicit prompting and delivery; its unavailable-identity
+and request-content regressions cover rejection and distinct delivery IDs.
+Contradictory native fields must remain unknown, not an inferred grant or denial.
+The macOS status regression includes enabled alerts alongside denied/undetermined
+authorization, and the opt-in bundled control observes permission and actual
+Notification Center delivery as independent assertions.
+The [hosted notification control](../scripts/ci/notification-native.mjs) runs the
+current instrumented Host test from an isolated bundle without authorization
+requests. Its raw native before/after authorization and delivery assertions remain
+separate: not-determined authorization does not establish Notification Center
+absence. Compare product delivery against an independently built native reference
+in the same observation window; reject either asymmetric result, and observe both
+absent through the original deadline. Neither fixture may reuse the other's request
+builder as its oracle. The prompt guard must reject forbidden intent before invoking
+the native API.
+A portable metadata/signing fixture is not OS authorization evidence.
+The [native completion adapters](../src-tauri/src/notifications/mac_callbacks.rs)
+keep callback completion separate from permission grants and retain only their
+reply sender. Real block invocations cover native errors and successful completion,
+plus late replies after observer retirement and release of the captured sender;
+these unit tests never request OS permission or submit an OS notification.
+Packaged authorization, revocation and actual alert presentation still require
+native evidence; neither a dismissed banner nor a valid signature proves permission.
 
 Keep inspection affordances separate from mutation permissions, and propagate
 the containing view's restrictions into nested inspectors. Opening a reader must
@@ -1149,12 +1218,45 @@ no overlapping mutation and correct late settlement. See
 
 ## R08: Durable state and failure semantics
 
+Before replacing an installed application, fetch and compare the intended source
+base with the current integration branch and inspect persisted schema compatibility.
+A locally successful build can still downgrade an installed reader. Never delete
+or recreate a newer database to make an older reader start. The
+[pack storage owner](../frontend/src/store/packs.ts) and its
+[storage regressions](../frontend/src/store/packs.test.ts) own catalog migration;
+verify installed appearance and retained library contents after replacement,
+not only a clean-profile startup. Keep source freshness and schema compatibility
+as separate evidence from signature validity and notification authorization.
+
 **Failure pattern:** a read-modify-write race loses another update; optimistic
 success precedes durable acceptance; retries duplicate writes; a failed/corrupt
 read is silently treated as empty state; cleanup after a partial failure destroys
 recoverable user data.
 
 Identify the commit point, serialization owner and restart/replay behavior.
+Keep local ingress evidence separate from message authorship and arrival timing.
+Capture it from the authenticated application peer at raw acceptance; transfer
+it with the canonical transcript commit, never infer it from a catch-up flag or
+copy another device's route during history import. Preserve an unknown first
+alias instead of borrowing a later alias's known source. Frontend receipt times
+cover only its observed subset; even a known logical-message ID need not be the
+first retained alias. The native canonical history projection owns both known
+and unknown ingress. The [reception reconciliation regressions](../frontend/src/store/reception.test.ts)
+omit the first alias from the ledger and retain the later alias's timestamp,
+unread state and identity while accepting the native source, including unknown. The
+[history reload tests](../frontend/src/store/conversationHistory.test.ts) also seed
+an existing message cache so presentation reconciliation cannot restore a
+superseded source while preserving local arrival timing. The
+[origin owner regressions](../crates/mesh-talk-core/src/node/reception_effects/origins.rs)
+cover rollback, duplicate stability, canonical DM relocation, reopen, account
+replacement and cascaded reclamation; real receive-loop assertions cover sender,
+member and post-office paths.
+Optional ingress projection must do no writes when there is no captured source.
+Standalone plaintext reception must not acquire a raw-event repository dependency
+through a child table's foreign keys. The [transcript installation regression](../crates/mesh-talk-core/src/node/transcript_repository/tests.rs)
+omits that raw owner, requires an unknown source and proves its intended failure
+injection is reached before checking rollback; an earlier SQL error cannot stand
+in for that boundary.
 Prepare expensive work separately, then compare expected revision and lifetime
 under the owning commit guard. Preserve operation IDs, ordering, atomic replacement
 and existing compatibility rules. Multi-store changes are not automatically one
@@ -1655,6 +1757,15 @@ must recover normally. The [mailbox receipt regression](../crates/mesh-talk-core
 fixed-capacity admission after a completed repair; the adjacent fingerprint tests
 cover changed inputs, capacity and the original deadline. This evidence never
 restores a compaction lease, cached parent body or permission.
+Consult completed negative work before downloading its blocked child again, not
+only before the subsequent historical scan. Bind the hint to local dependency/source
+revisions captured before the attempt and rechecked at publication, as well as
+remote revision, pending witness and current policy. An unrelated checkpoint save
+must not absorb a concurrent parent arrival into a new quiet baseline. The
+`incremental_receive_restart_preserves_child_pending_and_repairs_missing_inner`
+[loopback regression](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
+requires zero unchanged child-body fetches, retained pending recovery across restart,
+and prompt recovery after local or remote parent arrival.
 
 Apply the same rule to terminal preparation: check the live selection, source
 and actual export cursor before entering a write guard. The
@@ -1751,6 +1862,22 @@ the returned draft at preparation and publication boundaries. The existing
 reject changed titles before dispatch or publication; a successful API call alone
 does not establish that the visible result follows the release convention.
 
+Timer-observation fixtures must own their held work independently of an
+unreferenced diagnostic timer. A pending Promise and a test watchdog do not
+necessarily keep the supported Node runtime alive. The [ASan observer controls](../scripts/diagnostics/asan.test.mjs)
+retain an independently referenced work handle until the sampling limit is
+observed, then verify timer retirement and real child failure/cancellation.
+Qualify these lifecycle tests on CI's Node major; a newer local test runner can
+mask missing work ownership.
+
+Release preflight fixtures must own their version inputs and curated notes rather
+than read the checkout's live changelog. The development target can legitimately
+advance before Stable notes exist. The [preflight regression](../scripts/diagnostics/release-preflight.test.mjs)
+provides exact-version fixture notes to reach published-release rejection, while
+its independent missing-notes control must still reject before remote access or
+build-output publication. An earlier unrelated rejection does not exercise the
+intended release guard.
+
 When replacing a background owner, inspect every producer started by the actual
 runtime. A lower-level loop can become quiet while a legacy sibling keeps
 scanning the same durable facts. Exercise the production parent with unchanged
@@ -1797,6 +1924,19 @@ one-axis or two-axis zero translation while preserving the exact wheel-anchor,
 drag-clamp and cancellation checks; reproduce the old assertion failure against
 the upgraded DOM implementation before changing it.
 
+A queue-priority fixture must stage competing authenticated source changes when
+its setup requires one specific source to interrupt a live page. Otherwise a valid
+same-source Wake can replace that page before the intended cross-source branch.
+The [queued-control fixture](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)
+holds A's real receiver before Wake commit, verifies its epoch/revision and live
+original read, then releases it only after B's validated prefix and A's exact
+protected resume exist. The same owned sender must receive its actual WakeAck
+after release. Establish its authenticated receiving boundary before arming the
+natural read, so preparation does not wait on transport admission while that
+exact read must remain live. Keep all production hosts, page/terminal assertions
+and deadlines;
+a queued-frame observation is neither a committed Wake nor permission to skip work.
+
 Scope fixture transformations and assertions to the owning configuration table,
 not globally unique text. Test the same valid value in an unrelated profile and
 verify that it stays unchanged. The [Nextest fixture owner](../scripts/diagnostics/test-fixtures/nextest.mjs)
@@ -1842,7 +1982,12 @@ metadata and archive-only missing-symbol controls in
 this boundary. Portable filesystem fixtures must construct native paths with the
 platform path owner while retaining exact identity and escape checks; the
 [archive diagnostics](../scripts/diagnostics/windows-coverage.test.mjs) own those
-controls. Local execution does not replace actual Windows qualification.
+controls. Executable selectors must reuse that owner's supported Cargo layouts
+instead of reimplementing a `debug/deps` assumption. The
+[native notification protocol regression](../scripts/ci/notification-native.test.mjs)
+qualifies Cargo v2 metadata, signed Mach-O execution and genuine counters from the
+relocated binary, with malformed and escaping paths rejected. Local execution
+does not replace actual Windows qualification.
 
 Read transient browser state with one nonwaiting DOM snapshot when an outer
 assertion already owns readiness. Attachment waits nested inside that assertion
@@ -1851,6 +1996,11 @@ can exhaust its budget before any decode or geometry observation. The
 preparation before releasing media and checks an absent row through a snapshot-only
 observer; retain its exact geometry and cache assertions. Keep independent
 negative controls outside the journey's active retention window.
+DOMRect measurements are floating-point values. Preserve required dimensions and
+row stability with explicit subpixel comparison precision rather than exact
+numeric equality; do not widen the visible layout allowance or readiness deadline.
+The [media-recovery fixture](../frontend/e2e/media-recovery.spec.ts) owns this
+cross-browser geometry boundary together with its full-size image actions.
 The [group reading-anchor fixture](../frontend/e2e/group-reception.spec.ts) also
 samples the log and row through one nonwaiting page evaluation, returning pending
 when either is absent. Keep its existing assertion budget and exact ID/offset,
@@ -2173,6 +2323,9 @@ Post-login browser notice, retry and backup assertions first await the existing
 [chat-shell readiness owner](../frontend/e2e/helpers/session.ts). Lazy startup
 uses its existing platform budget; content and action assertions retain their
 original behavior deadlines after that boundary.
+Reapply that same readiness boundary after cold reload and sign-in, including
+the [hidden-contact persistence scenario](../frontend/e2e/hidden-contacts.spec.ts);
+readiness from the previous document cannot qualify the restarted chat shell.
 
 Negative idle assertions must consume startup JoinSet results and retained wakes,
 then invalidate the old idle marker when the target event is observed. Await the
@@ -2408,7 +2561,10 @@ requires two packaged builds with different code identities. Verify actual promp
 not merely the absence of an explicit authentication call.
 
 Record the tested source, command, environment, count and outcome. Reassess
-consumers after merging new callers or changing a shared helper. Static scans,
+consumers after merging new callers or changing a shared helper. Execute the
+existing affected plan's consumer selections, including standalone stores; a
+manually narrowed owner suite does not establish the complete affected gate.
+Static scans,
 passing unit tests and browser IPC mocks do not establish native OS behavior or
 the absence of every deadlock. Cancelled, interrupted, empty and unavailable runs
 remain distinct from passes. Completed individual commands do not turn a cancelled

@@ -10,6 +10,22 @@ import { releaseInputs } from "../release/preflight.mjs";
 import { releaseSourceChecks, releaseSourceWorkflows } from "../ci/required-checks.mjs";
 import { requireSourceChecks as requireProvenSourceChecks, waitForSourceChecks } from "../release/check-source-checks.mjs";
 
+function copyVersionInputs(root) {
+  for (const file of [
+    "Cargo.toml",
+    "Cargo.lock",
+    "package.json",
+    "package-lock.json",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "src-tauri/tauri.conf.json",
+    ...rustPackages.map((p) => `${p.directory}/Cargo.toml`),
+  ]) {
+    mkdirSync(dirname(join(root, file)), { recursive: true });
+    writeFileSync(join(root, file), readFileSync(resolve(file)));
+  }
+}
+
 const inputs = { ref: "refs/tags/v0.1.6", runId: "123", version: "0.1.6", desktopVersion: "0.1.6", existingRelease: null };
 
 test("preflight enforces matching versions and never overwrites public releases", () => {
@@ -32,14 +48,16 @@ test("tag preflight finds a published release even when GitHub's tag endpoint re
   const currentVersion = readVersion();
   const root = mkdtempSync(join(tmpdir(), "mesh-talk-release-preflight-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  copyVersionInputs(root);
+  writeFileSync(join(root, "CHANGELOG.md"), `# Changelog\n\n## ${currentVersion}\n\n- Independent preflight fixture notes.\n`);
   mkdirSync(join(root, "bin"));
   writeFileSync(join(root, "bin", "gh"), `#!${process.execPath}\nconst args = process.argv.slice(2); if (args.some(arg => arg.includes('/compare/'))) process.stdout.write(JSON.stringify({status:'identical'})); else if (args.some(arg => arg.includes('/releases/tags/'))) { console.error('gh: Not Found (HTTP 404)'); process.exit(1); } else process.stdout.write(require('node:child_process').execFileSync('jq', ['-cr', args[args.indexOf('--jq') + 1]], {input:JSON.stringify([{id:42,tag_name:'v${currentVersion}',draft:false}]),encoding:'utf8'}));\n`, { mode: 0o755 });
   const output = join(root, "output.txt");
   const result = spawnSync(process.execPath, [resolve("scripts/release/preflight.mjs")], {
-    cwd: resolve("."), encoding: "utf8", env: { ...process.env, PATH: `${join(root, "bin")}${delimiter}${process.env.PATH}`, GITHUB_REF: `refs/tags/v${currentVersion}`, GITHUB_RUN_ID: "123", GITHUB_REPOSITORY: "owner/repo", GITHUB_SHA: "a".repeat(40), GITHUB_OUTPUT: output },
+    cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(root, "bin")}${delimiter}${process.env.PATH}`, GITHUB_REF: `refs/tags/v${currentVersion}`, GITHUB_RUN_ID: "123", GITHUB_REPOSITORY: "owner/repo", GITHUB_SHA: "a".repeat(40), GITHUB_OUTPUT: output },
   });
   assert.notEqual(result.status, 0, result.stdout);
-  assert.match(result.stderr, /published/);
+  assert.match(result.stderr, /cannot overwrite a published release/);
   assert.equal(existsSync(output), false);
 });
 
@@ -122,19 +140,7 @@ test(
   (t) => {
     const root = mkdtempSync(join(tmpdir(), "mesh-curated-preflight-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
-    for (const file of [
-      "Cargo.toml",
-      "Cargo.lock",
-      "package.json",
-      "package-lock.json",
-      "frontend/package.json",
-      "frontend/package-lock.json",
-      "src-tauri/tauri.conf.json",
-      ...rustPackages.map((p) => `${p.directory}/Cargo.toml`),
-    ]) {
-      mkdirSync(dirname(join(root, file)), { recursive: true });
-      writeFileSync(join(root, file), readFileSync(resolve(file)));
-    }
+    copyVersionInputs(root);
     writeFileSync(
       join(root, "CHANGELOG.md"),
       "# Changelog\n\n## 0.0.1\n\n- Old version.\n",

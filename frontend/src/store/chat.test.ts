@@ -3134,6 +3134,29 @@ describe("incoming events", () => {
     stop();
   });
 
+  it("keeps the first DM ingress category across duplicate callbacks", async () => {
+    const stop = await boot();
+    try {
+      const event = {
+        from: "dev1",
+        from_name: "Alice",
+        text: "one message",
+        reply_to: null,
+        message_id: "logical-source",
+        from_account: "acctA",
+      };
+      captured.current!.onDm({ ...event, received_via: "post_office" });
+      captured.current!.onDm({ ...event, received_via: "sender" });
+      expect(
+        useChat.getState().ledger["account:acctA"]["logical-source"]
+          .receivedVia,
+      ).toBe("post_office");
+      expect(useChat.getState().unread["account:acctA"]).toBe(1);
+    } finally {
+      stop();
+    }
+  });
+
   it("counts one logical DM once when duplicate delivery callbacks arrive", async () => {
     const stop = await boot();
     const event = {

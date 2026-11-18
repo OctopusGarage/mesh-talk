@@ -284,6 +284,14 @@ impl EventRepository {
     /// One already caller-bounded batch for a new conversation. No all-history
     /// validator or shadow log: earlier inserts are visible inside this SQL tx.
     pub(crate) fn append_channel_batch_atomic(&self, events: &[Event]) -> Result<(), LogError> {
+        self.append_channel_batch_observed(events, |_, _, _| Ok(()))
+    }
+
+    pub(crate) fn append_channel_batch_observed(
+        &self,
+        events: &[Event],
+        mut observe: impl FnMut(&Connection, EventDomainId, &Event) -> Result<(), LogError>,
+    ) -> Result<(), LogError> {
         let Some(first) = events.first() else {
             return Ok(());
         };
@@ -300,7 +308,9 @@ impl EventRepository {
                         "channel batch spans conversations".into(),
                     ));
                 }
-                self.append_on(tx, event)?;
+                if self.append_on(tx, event)? == AppendOutcome::Appended {
+                    observe(tx, self.domain, event)?;
+                }
             }
             #[cfg(test)]
             if let Some(hook) = self.before_mutation.lock().unwrap().take() {

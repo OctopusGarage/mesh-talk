@@ -88,6 +88,39 @@ impl GuardedSyncStore<'_> {
 }
 
 impl Node {
+    /// Local first ingress follows the authenticated application peer. A bridge
+    /// proxy's network address does not turn a member connection into relay custody.
+    fn incoming_origin(
+        &self,
+        peer: &PublicIdentity,
+        event: &Event,
+    ) -> Option<super::reception_effects::IngressOrigin> {
+        use super::reception_effects::{IngressOrigin, ReceivedVia};
+        if !matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
+            return None;
+        }
+        let via = if self.device_is_post_office(peer) {
+            ReceivedVia::PostOffice
+        } else if *peer == self.identity.public() || self.certified_sibling(peer) {
+            ReceivedVia::LinkedDevice
+        } else if event.author.ed25519_pub() == &peer.ed25519_pub {
+            ReceivedVia::Sender
+        } else {
+            let sender_account = self
+                .historical_author(event.author.ed25519_pub())
+                .and_then(|proof| proof.account_id());
+            if sender_account.is_some() && sender_account == self.account_id_for_device(peer) {
+                ReceivedVia::Sender
+            } else {
+                ReceivedVia::Member
+            }
+        };
+        Some(IngressOrigin {
+            via,
+            peer_device: peer.user_id(),
+        })
+    }
+
     pub(in crate::node) fn retire_prepared_sync_views(
         &self,
     ) -> Option<tokio::task::JoinHandle<()>> {
@@ -596,6 +629,18 @@ impl GuardedSyncStore<'_> {
             Err(error) => return Some(Err(error)),
         };
         if let Some(allowed) = approved {
+            // Resolve public/account evidence before taking the privacy fence.
+            // The append observer below performs SQL only, inside its existing tx.
+            let origins: HashMap<_, _> = pending
+                .events
+                .iter()
+                .filter(|event| allowed.contains(&event.id))
+                .filter_map(|event| {
+                    self.node
+                        .incoming_origin(&self.peer, event)
+                        .map(|origin| (event.id, origin))
+                })
+                .collect();
             // The proof itself and every committed ancestor have passed both the
             // event-log integrity check and the channel membership projection.
             let guard = self
@@ -630,7 +675,14 @@ impl GuardedSyncStore<'_> {
                 .log
                 .lock()
                 .expect("log lock not poisoned")
-                .append_channel_batch_atomic(&accepted)
+                .append_channel_batch_observed(&accepted, |c, domain, event| {
+                    if let Some(origin) = origins.get(&event.id) {
+                        self.node
+                            .reception_effects
+                            .record_origin_on(c, domain, event, origin)?;
+                    }
+                    Ok(())
+                })
                 .map(|()| AppendOutcome::Appended);
             if result.is_err() {
                 self.denied = true;
@@ -1728,6 +1780,21 @@ impl SyncStore for GuardedSyncStore<'_> {
                 }
             }
         }
+        let new_origin =
+            if !known_file && matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
+                // This is only an observation-cost gate. Append still verifies the
+                // exact event and decides duplicate admission inside its transaction.
+                let retained = {
+                    let log = self.node.log.lock().expect("log lock not poisoned");
+                    log.has(&event.id)?
+                };
+                !retained
+            } else {
+                false
+            };
+        let origin = new_origin
+            .then(|| self.node.incoming_origin(&self.peer, &event))
+            .flatten();
         // Own-author backfill may compete with an accepted local reservation.
         // Delivery precedes privacy/log locks, matching enqueue's lock order.
         let mut delivery = if event.author.ed25519_pub() == &self.node.identity.public().ed25519_pub
@@ -1783,7 +1850,13 @@ impl SyncStore for GuardedSyncStore<'_> {
             ));
         }
         let conversation = event.conversation_id;
-        let result = if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
+        let result = if let Some(origin) = origin {
+            log.append_durable_observed(event, |c, domain, event| {
+                self.node
+                    .reception_effects
+                    .record_origin_on(c, domain, event, &origin)
+            })
+        } else if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
             log.append_durable(event)
         } else {
             log.append(event)
@@ -1800,6 +1873,87 @@ impl SyncStore for GuardedSyncStore<'_> {
 
 #[cfg(test)]
 mod causal_export_tests {
+    #[tokio::test]
+    async fn ingress_source_uses_authenticated_peer_and_verified_account_binding() {
+        use crate::{
+            discovery::Announce,
+            eventlog::{ConversationId, Event, EventKind},
+            identity::{account::Account, device::DeviceIdentity},
+            node::{AccountDevice, ReceivedVia},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let sender = DeviceIdentity::generate();
+        let sender_account = Account::generate();
+        let sender_proof = Announce::new_with_account(&sender, &sender_account, "sender", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &sender_proof,
+        );
+        let sender_sibling = DeviceIdentity::generate();
+        let sender_sibling_proof =
+            Announce::new_with_account(&sender_sibling, &sender_account, "sender sibling", 10);
+        let member = DeviceIdentity::generate();
+        let member_proof = Announce::new_with_account(&member, &Account::generate(), "member", 11);
+        let office = DeviceIdentity::generate();
+        let office_proof = Announce::new_post_office(&office, "office", 12);
+        let sibling = DeviceIdentity::generate();
+        let sibling_proof = Announce::new_with_account(&sibling, &node.account, "linked", 13);
+        node.account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: sibling.public(),
+                certificate: node.account.certify(&sibling.public().ed25519_pub),
+            })
+            .unwrap();
+        for proof in [
+            &sender_sibling_proof,
+            &member_proof,
+            &office_proof,
+            &sibling_proof,
+        ] {
+            node.roster.lock().unwrap().update(
+                proof,
+                "127.0.0.1".parse().unwrap(),
+                &node.user_id(),
+            );
+        }
+        let event = Event::new(
+            &sender,
+            ConversationId::new([209; 32]),
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Message,
+            vec![],
+        );
+        for (proof, expected) in [
+            (&sender_proof, ReceivedVia::Sender),
+            (&sender_sibling_proof, ReceivedVia::Sender),
+            (&member_proof, ReceivedVia::Member),
+            (&office_proof, ReceivedVia::PostOffice),
+            (&sibling_proof, ReceivedVia::LinkedDevice),
+        ] {
+            let source = node.incoming_origin(&proof.public(), &event).unwrap();
+            assert_eq!(source.via, expected);
+            assert_eq!(source.peer_device, proof.user_id);
+        }
+        let control = Event::new(
+            &sender,
+            event.conversation_id,
+            2,
+            vec![event.id],
+            2,
+            2,
+            EventKind::Profile,
+            vec![],
+        );
+        assert!(node.incoming_origin(&sender.public(), &control).is_none());
+    }
+
     #[tokio::test]
     async fn rejected_account_authority_never_exposes_a_v4_requirement_to_legacy_members() {
         use crate::channel::ChannelMeta;

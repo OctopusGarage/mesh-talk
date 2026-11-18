@@ -1998,6 +1998,11 @@ impl Node {
                         let _ =
                             self.channel_incoming
                                 .send(super::channel::ReceivedChannelMessage {
+                                    received_via: if metadata.own_device {
+                                        None
+                                    } else {
+                                        self.reception_effects.received_via(conv, entry.event_id)?
+                                    },
                                     channel_id: conv,
                                     channel_name: name.clone(),
                                     from: entry.from,
@@ -2051,6 +2056,7 @@ impl Node {
                 let _ = self
                     .channel_incoming
                     .send(super::channel::ReceivedChannelMessage {
+                        received_via: None,
                         channel_id: conv,
                         channel_name: name,
                         from: metadata.from_device,

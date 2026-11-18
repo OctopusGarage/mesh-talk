@@ -45,6 +45,8 @@ pub struct HistoryFileInfo {
 /// One merged history line (sent or received) for display.
 #[derive(Serialize)]
 pub struct HistoryItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_via: Option<mesh_talk_core::node::ReceivedVia>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub file_message_aliases: Vec<String>,
     pub protection: Option<mesh_talk_core::node::MessageProtection>,
@@ -72,6 +74,7 @@ impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
             Some(hex::encode(h.id.as_bytes()))
         };
         HistoryItem {
+            received_via: if h.from_me { None } else { h.received_via },
             file_message_aliases: h
                 .file_message_aliases
                 .iter()
@@ -207,8 +210,39 @@ mod protected_projection_tests {
     use super::*;
 
     #[test]
+    fn reception_source_history_projection_is_local_and_optional() {
+        use mesh_talk_core::node::{HistoryEntry, ReceivedVia};
+        for (from_me, source, expected) in [
+            (false, None, None),
+            (false, Some(ReceivedVia::PostOffice), Some("post_office")),
+            (true, Some(ReceivedVia::Member), None),
+        ] {
+            let item = HistoryItem::from(HistoryEntry {
+                received_via: source,
+                expires_at_ms: None,
+                id: mesh_talk_core::eventlog::EventId::new([1; 32]),
+                file_message_aliases: Vec::new(),
+                from_me,
+                who: "sender".into(),
+                text: Vec::new(),
+                protection: None,
+                wall_clock: 1,
+                reply_to: None,
+                file: None,
+                recalled: false,
+                recalled_text: None,
+                sticker: None,
+            });
+            let json = serde_json::to_value(item).unwrap();
+            assert_eq!(json.get("received_via").and_then(|v| v.as_str()), expected);
+            assert_eq!(json.get("received_via").is_none(), expected.is_none());
+        }
+    }
+
+    #[test]
     fn protected_history_redacts_live_and_recalled_text_defensively() {
         let mut item = HistoryItem::from(mesh_talk_core::node::HistoryEntry {
+            received_via: None,
             expires_at_ms: None,
             id: mesh_talk_core::eventlog::EventId::new([1; 32]),
             from_me: true,

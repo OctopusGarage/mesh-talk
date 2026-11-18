@@ -323,57 +323,86 @@ it("starts with independent history snapshots for each session", () => {
   expect(second.deleted).toEqual({});
 });
 
-it("commits recovered history with historical arrival metadata while preserving live arrivals", async () => {
-  const { receiveIdentity, receptionPatch } = await import("./reception");
-  const store = session();
-  const channel: Conversation = { kind: "channel", id: "team", name: "Team" };
-  const channelKey = "channel:team";
-  store.setState({
-    active: channel,
-    cacheOrder: [channelKey],
-    historyBaselines: [channelKey],
-  });
-  store.setState(
-    receptionPatch(
-      store.getState(),
-      receiveIdentity(store.getState(), channelKey, {
-        event_id: "live",
-        arrival_kind: "live",
-        received_at: 42,
-      }),
-    ),
-  );
-  const committed: Array<
-    Array<{ id: string | null; arrivalKind?: string; receivedAt?: number }>
-  > = [];
-  const stop = store.subscribe((next, previous) => {
-    if (next.messages[channelKey] !== previous.messages[channelKey])
-      committed.push(next.messages[channelKey]);
-  });
-  invoke.mockImplementation((command: string) =>
-    Promise.resolve(
-      command === "channel_history" ? [row("recovered"), row("live")] : [],
-    ),
-  );
-  try {
-    await reloadConversation(store.setState, store.getState);
-    expect(committed).toHaveLength(1);
-    expect(committed[0]).toEqual([
-      expect.objectContaining({ id: "recovered", arrivalKind: "history_sync" }),
-      expect.objectContaining({
-        id: "live",
-        arrivalKind: "live",
-        receivedAt: 42,
-      }),
-    ]);
-    expect(store.getState().unreadIds[channelKey]).toEqual([
-      "live",
-      "recovered",
-    ]);
-  } finally {
-    stop();
-  }
-});
+it.each([undefined, "sender"] as const)(
+  "commits native source %s over cached messages while preserving arrival metadata",
+  async (receivedVia) => {
+    const { receiveIdentity, receptionPatch } = await import("./reception");
+    const store = session();
+    const channel: Conversation = { kind: "channel", id: "team", name: "Team" };
+    const channelKey = "channel:team";
+    store.setState({
+      active: channel,
+      cacheOrder: [channelKey],
+      historyBaselines: [channelKey],
+      messages: {
+        [channelKey]: [
+          {
+            id: "live",
+            fromMe: false,
+            who: "Friend",
+            text: "live",
+            wallClock: 1,
+            replyTo: null,
+            receivedVia: "member",
+            receivedAt: 42,
+            arrivalKind: "live",
+          },
+        ],
+      },
+    });
+    store.setState(
+      receptionPatch(
+        store.getState(),
+        receiveIdentity(store.getState(), channelKey, {
+          event_id: "live",
+          arrival_kind: "live",
+          received_at: 42,
+          received_via: "member",
+        }),
+      ),
+    );
+    const committed: Array<
+      Array<{ id: string | null; arrivalKind?: string; receivedAt?: number }>
+    > = [];
+    const stop = store.subscribe((next, previous) => {
+      if (next.messages[channelKey] !== previous.messages[channelKey])
+        committed.push(next.messages[channelKey]);
+    });
+    invoke.mockImplementation((command: string) =>
+      Promise.resolve(
+        command === "channel_history"
+          ? [
+              { ...row("recovered"), received_via: "post_office" },
+              { ...row("live"), received_via: receivedVia },
+            ]
+          : [],
+      ),
+    );
+    try {
+      await reloadConversation(store.setState, store.getState);
+      expect(committed).toHaveLength(1);
+      expect(committed[0]).toEqual([
+        expect.objectContaining({
+          id: "recovered",
+          arrivalKind: "history_sync",
+          receivedVia: "post_office",
+        }),
+        expect.objectContaining({
+          id: "live",
+          arrivalKind: "live",
+          receivedAt: 42,
+          receivedVia,
+        }),
+      ]);
+      expect(store.getState().unreadIds[channelKey]).toEqual([
+        "live",
+        "recovered",
+      ]);
+    } finally {
+      stop();
+    }
+  },
+);
 
 it("refreshes exact context independently without replacing recent history or unread coverage", async () => {
   const store = session();

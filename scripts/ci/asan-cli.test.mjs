@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 const [owner, root, mode] = process.argv.slice(2);
-const { runPartition, verifyAsanUnion, partitionArgs, verifySmoke, produceArchive, reuseArchive, verifyArchive } = await import(pathToFileURL(owner));
+const { runPartition, verifyAsanUnion, partitionArgs, verifySmoke, produceArchive, reuseArchive, verifyArchive, observeBuild } = await import(pathToFileURL(owner));
 const { command: runLogged } = await import(pathToFileURL(path.join(path.dirname(owner), "windows-coverage.mjs")));
 process.chdir(root);
 const identity = JSON.parse(process.env.MESH_ASAN_PROTOCOL_IDENTITY);
@@ -26,7 +26,8 @@ const archiveDirectory = path.join(root, "archive");
 const archiveIdentity = () => ({ ...identity, archive: JSON.parse(readFileSync(path.join(root, "build-output.json"))) });
 const reuse = output => reuseArchive(archiveDirectory, path.join(root, output), archiveIdentity(), { env: { ...process.env, CARGO_NET_OFFLINE: "true" } });
 if (mode === "run") {
- const archive = await produceArchive(archiveDirectory, { buildArgs, identity });
+ const diagnostics = path.join(root, "compile-diagnostics");
+ const archive = await observeBuild(diagnostics, () => produceArchive(archiveDirectory, { buildArgs, identity, diagnostics }));
  writeFileSync(path.join(root, "build-output.json"), JSON.stringify(archive));
  rmSync(path.join(root, "target"), { recursive: true });
  const bundles = [];
@@ -36,6 +37,10 @@ if (mode === "run") {
   if (existsSync(path.join(root, "target"))) throw Error("consumer compiled instead of reusing archive");
  }
  writeFileSync(path.join(root, "summary.json"), JSON.stringify(verifyAsanUnion(bundles, archiveIdentity())));
+} else if (mode === "invalid-diagnostics") {
+ const diagnostics = path.join(root, "invalid-diagnostics");
+ mkdirSync(path.join(diagnostics, "compile.log"), { recursive: true });
+ await produceArchive(path.join(root, "no-admission"), { buildArgs, identity, diagnostics });
 } else if (mode === "fail") {
  await runPartition(1, path.join(root, "failed"), { ...await reuse("failed"), identity: archiveIdentity() });
 } else if (mode === "changed") {
@@ -101,7 +106,18 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
   const run = (mode, environment = env) => spawnSync(process.execPath, [path.join(root, "driver.mjs"), path.join(root, "scripts/ci/asan.mjs"), root, mode], { cwd: root, env: environment, encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024 });
   const accepted = run("run");
   assert.equal(accepted.status, 0, `${accepted.error ?? ""}\n${accepted.stdout}\n${accepted.stderr}`);
+  const diagnosticRows = readFileSync(path.join(root, "compile-diagnostics/resources.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(diagnosticRows.at(-1).outcome, "success");
+  assert.ok(readFileSync(path.join(root, "compile-diagnostics/compile.log"), "utf8").includes("archive"));
+  const progress = readFileSync(path.join(root, "compile-diagnostics/progress.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(progress.at(-1).event, "closed");
+  assert.equal(progress.at(-1).failed, false);
   assert.deepEqual(JSON.parse(readFileSync(path.join(root, "summary.json"))), { totalTests: 37, executedTests: 36, ignoredTests: 1, shards: 8 });
+  const noAdmission = run("invalid-diagnostics");
+  assert.equal(noAdmission.status, 1);
+  assert.match(noAdmission.stderr, /EISDIR/u);
+  assert(!existsSync(path.join(root, "no-admission/core.tar.zst")), "missing command receipts must reject before compilation");
+  assert(!existsSync(path.join(root, "no-admission/archive.json")));
   for (const shard of [1, 2, 3, 4, 5, 6, 7, 8]) {
     const evidence = path.join(root, "evidence", String(shard));
     const files = readdirSync(evidence, { withFileTypes: true });

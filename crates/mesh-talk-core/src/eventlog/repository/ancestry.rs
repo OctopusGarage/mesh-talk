@@ -702,6 +702,38 @@ impl EventRepository {
             Ok(n.max(1))
         })
     }
+    /// A current consumer may discard an obsolete cached child, but cannot
+    /// retire another store/domain/conversation's query through a stale ID.
+    /// The caller retains its own source guard and cached-pointer CAS in this tx.
+    pub(crate) fn retire_ancestor_selection_in_scope_on(
+        &self,
+        c: &Connection,
+        id: [u8; 16],
+        conversation: ConversationId,
+        job: [u8; 16],
+    ) -> Result<(), LogError> {
+        self.require_active_on(c, &conversation)?;
+        let owned: bool = c.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM event_ancestry_queries WHERE query=?1)
+             OR (EXISTS(SELECT 1 FROM event_ancestry_queries WHERE query=?1 AND retired=1)
+                 AND NOT EXISTS(SELECT 1 FROM event_ancestry_selection WHERE query=?1))
+             OR EXISTS(SELECT 1 FROM event_ancestry_selection s JOIN event_order_current o
+             ON o.domain=s.domain AND o.conversation=s.conversation AND o.order_kind=0 AND o.job=s.job
+             WHERE s.query=?1 AND s.store_uuid=?2 AND s.domain=?3 AND s.conversation=?4 AND s.job=?5
+             AND s.revision>=0 AND s.revision<=o.source_revision)",
+            params![id.as_slice(), self.store_uuid.as_slice(), self.domain.0.as_slice(), conversation.as_bytes().as_slice(), job.as_slice()],
+            |row| row.get(0),
+        )?;
+        if !owned {
+            return Err(LogError::StaleCursor);
+        }
+        c.execute(
+            "UPDATE event_ancestry_queries SET retired=1 WHERE query=?1 AND retired=0",
+            [id.as_slice()],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn retire_ancestor_selection(&self, id: [u8; 16]) -> Result<(), LogError> {
         self.database.transaction(|c| {
             c.execute(

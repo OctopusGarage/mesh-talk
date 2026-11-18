@@ -1164,11 +1164,18 @@
     },
     {
       "id": "desktop-notification-permission",
-      "paths": ["src-tauri/src/notifications.rs"],
+      "paths": [
+        "src-tauri/src/notifications.rs",
+        "src-tauri/src/notifications/",
+        "src-tauri/src/events.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["notifications::tests::"]
+          "filters": [
+            "notifications::tests::",
+            "notifications::mac_callbacks::tests::"
+          ]
         }
       ],
       "frontend": [
@@ -1180,11 +1187,11 @@
         "guide": "docs/settings.md#system-notification-permission",
         "invariants": [
           {
-            "name": "Unsupported queries and failed observations are unknown, never assumed authorization",
+            "name": "macOS observation, explicit authorization and delivery share one native center and bundle identity; unsupported queries and failed observations are unknown, never assumed authorization",
             "reference": "docs/settings.md#system-notification-permission"
           },
           {
-            "name": "Only explicit actions may prompt or open fixed system-settings destinations",
+            "name": "Only explicit actions may prompt or open fixed system-settings destinations; the hosted native control preserves not-determined authorization before and after submission, compares product delivery against an independently constructed native reference under the same observation deadline, and cannot infer Notification Center absence from authorization alone",
             "reference": "docs/settings.md#system-notification-permission"
           }
         ]
@@ -1553,7 +1560,11 @@
     },
     {
       "id": "desktop-notification-permission-acceptance",
-      "paths": ["src-tauri/src/notifications.rs"],
+      "paths": [
+        "src-tauri/src/notifications.rs",
+        "src-tauri/src/notifications/",
+        "src-tauri/src/events.rs"
+      ],
       "browser": ["e2e/notification-permission.spec.ts"],
       "native": ["host"]
     },

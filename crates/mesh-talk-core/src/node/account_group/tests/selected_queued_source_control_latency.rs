@@ -1042,6 +1042,12 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let setup_wake_min_revision = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let a_setup_comparison = Arc::new(Mutex::new(QueuedSetupComparison::default()));
     let first_hold_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Pay B's protected prefix and A's exact resume before committing other
+    // genuine A changes, which can legitimately select a same-source branch.
+    let queued_a_wakes = Arc::new(Semaphore::new(0));
+    let queued_a_wakes_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _release_queued_a_wakes = ReleaseQueuedReads(queued_a_wakes.clone());
+    let queued_a_wake_observed = Arc::new(Mutex::new(QueuedSetupWakes::default()));
     let first_rejections = Arc::new(Mutex::new([0_u64; 6]));
     let setup_wake_ready = Arc::new(Semaphore::new(0));
     let _release_setup_wake = ReleaseQueuedReads(setup_wake_ready.clone());
@@ -1108,6 +1114,10 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     }));
     *reference.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let b_setup_wake_observed = b_setup_wake_observed.clone();
+        let queued_a_wake_observed = queued_a_wake_observed.clone();
+        let queued_a_wakes = queued_a_wakes.clone();
+        let queued_a_wakes_armed = queued_a_wakes_armed.clone();
+        let peer_a = a.identity.public();
         let trace = trace.clone();
         let peer = b.identity.public();
         let writer = b.user_id();
@@ -1118,6 +1128,10 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let intent_entered = intent_entered.clone();
         move |observed, frame| {
             let b_setup_wake_observed = b_setup_wake_observed.clone();
+            let queued_a_wake_observed = queued_a_wake_observed.clone();
+            let queued_a_wakes = queued_a_wakes.clone();
+            let queued_a_wakes_armed = queued_a_wakes_armed.clone();
+            let peer_a = peer_a.clone();
             let trace = trace.clone();
             let peer = peer.clone();
             let writer = writer.clone();
@@ -1127,6 +1141,22 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             let intent_held = intent_held.clone();
             let intent_entered = intent_entered.clone();
             Box::pin(async move {
+                if observed == peer_a
+                    && queued_a_wakes_armed.load(std::sync::atomic::Ordering::Acquire)
+                    && !queued_a_wakes.is_closed()
+                    && let AccountHistoryFrame::Wake {
+                        epoch, revision, ..
+                    } = &frame
+                {
+                    queued_a_wake_observed.lock().unwrap().frame(
+                        tokio::task::id(),
+                        *epoch,
+                        *revision,
+                    );
+                    // SessionReady authenticated the frame; actual Wake commit
+                    // and WakeAck remain behind this owned preparation gate.
+                    let _ = queued_a_wakes.acquire().await;
+                }
                 if observed == peer
                     && let AccountHistoryFrame::Wake {
                         epoch, revision, ..
@@ -1169,6 +1199,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     }));
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let causal_trace = causal_trace.clone();
+        let queued_a_wake_observed = queued_a_wake_observed.clone();
         let b_setup_wake_observed = b_setup_wake_observed.clone();
         let b2_publication = b2_publication.clone();
         let b_page_progress = b_page_progress.clone();
@@ -1218,6 +1249,15 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                 record_b_trace(&causal_trace, clock, "requester_phase", phase.clone());
             }
             if peer == peer_a {
+                if let Some(revision) = phase
+                    .strip_prefix("wake_received revision=")
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    queued_a_wake_observed
+                        .lock()
+                        .unwrap()
+                        .committed(tokio::task::id(), revision);
+                }
                 if phase.starts_with("wake_received ")
                     || phase.starts_with("control_task ")
                     || phase.starts_with("control_cancel ")
@@ -1980,6 +2020,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     );
     assert!(!reference.channel_can_manage(group_b).unwrap());
 
+    let mut queued_a_sender = Box::pin(send_boundary_wake(&a, &reference));
     let (first_task, first_task_lifetime) = super::cold_account_setup(async {
         // A real setup Wake may replace an active natural comparison. Let
         // that exact signed comparison and its pair finish while the hold is
@@ -2028,6 +2069,26 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                 && reference.account_document_meta(&key) == a.account_document_meta(&key)
         }).await;
         record_b_trace(&causal_trace, clock, "B_setup_receiver_retired", format!("epoch={} requested_revision={b_setup_revision} accepted={:?} task={:?}", hex::encode(b_setup_epoch), b_setup_wake_observed.lock().unwrap().receipt(b_setup_epoch, b_setup_revision), b_readiness.lock().unwrap().task));
+        queued_a_wakes_armed.store(true, std::sync::atomic::Ordering::Release);
+        // Force the intermittent interference through its real sender. Observe the
+        // authenticated receiver and retain the sender until its actual WakeAck.
+        a.note_account_local_change();
+        let expected_a_wake = a.account_wake_token_for_test();
+        super::cold_account_setup(async {
+            tokio::select! {
+                token = queued_a_sender.as_mut() => {
+                    panic!("the gated Wake cannot acknowledge before receiver commit: {token:?}");
+                }
+                _ = super::observe_account_fixture_condition(|| {
+                    queued_a_wake_observed.lock().unwrap().receiving.values()
+                        .any(|(epoch, revision)| *epoch == expected_a_wake.0 && *revision >= expected_a_wake.1)
+                }) => {}
+            }
+        }).await.unwrap();
+        assert!(
+            futures_util::poll!(queued_a_sender.as_mut()).is_pending(),
+            "the held receiver must retain the same sender before its WakeAck"
+        );
         setup_wake_ready.close();
         first_hold_armed.store(true, std::sync::atomic::Ordering::Release);
         reference.request_sibling_pull_for_test(&a.identity.public());
@@ -2048,10 +2109,22 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         })
         .unwrap();
     let first_active = pages.lock().unwrap().is_active(first_task);
-    assert!(
-        first_active && first_task_lifetime.strong_count() > 0,
-        "the exact natural A hold must remain live at canonical B publication"
-    );
+    if !first_active || first_task_lifetime.strong_count() == 0 {
+        let observed = pages.lock().unwrap().summary();
+        let setup = setup_trace.lock().unwrap().clone();
+        let phases = trace
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(16)
+            .cloned()
+            .collect::<Vec<_>>();
+        let receiving = queued_a_wake_observed.lock().unwrap().receiving.clone();
+        panic!(
+            "the exact natural A hold must remain live at canonical B publication; task={first_task:?} ledger_active={first_active}; receiving={receiving:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}"
+        );
+    }
     let keys = super::cold_account_setup(async {
         record_setup_milestone(&setup_trace, clock, "B2_publication_begin", format!("first_A_task={first_task:?}"));
         let publication_phase = b2_publication.lock().unwrap().as_ref().map(|publication| publication.started_at);
@@ -2107,6 +2180,21 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             panic!("B protected partial page must be queued before A resumes: {error:?}; B_named_input_ready={named_ready} B_global_scope_settled={ready} B_partial={}; causal={:?}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire), causal_trace.lock().unwrap().clone());
         })
         .unwrap();
+    // B's validated prefix and A's exact protected resume now exist. Release
+    // queued A changes and finish the same sender before starting demand.
+    queued_a_wakes.close();
+    let (epoch, revision) = super::cold_account_setup(queued_a_sender.as_mut())
+        .await
+        .unwrap();
+    drop(queued_a_sender);
+    assert!(
+        queued_a_wake_observed
+            .lock()
+            .unwrap()
+            .receipt(epoch, revision)
+            .is_some(),
+        "release must commit the actual queued A Wake before its sender ACK"
+    );
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));
     let saved = saved_after
         .lock()

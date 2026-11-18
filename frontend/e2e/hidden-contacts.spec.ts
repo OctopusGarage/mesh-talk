@@ -43,6 +43,7 @@ test("hide requires confirmation, persists across restart and restores history",
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("a strong password");
   await page.getByTestId("login-submit").click();
+  await waitForChatShell(page);
   await expect(
     page.getByTestId("conversation-row-acc_carol_cccc3333"),
   ).toBeVisible();

@@ -1580,6 +1580,10 @@ Portable/report artifact orchestration belongs to
 reimplementing platform counts and result policy. The optional-pack job retains
 built-asset absence and ES2021 syntax validation. Its two browser scenarios and
 coverage execute once in the full Linux matrix, with actual inventory proof.
+Adding cases to a portable-included spec changes the strict scenario inventory
+even when a targeted Playwright run passes. Update `requiredBrowserPaths` and its
+diagnostic assertions together, then run the existing `portable-browser-reporting`
+Node selectors against real Playwright discovery before publication.
 
 Successful shard uploads contain the raw Playwright blob (including its
 attachments) and structured JSON results, without a second copy of

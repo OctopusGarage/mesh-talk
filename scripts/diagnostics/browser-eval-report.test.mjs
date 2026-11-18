@@ -7,13 +7,19 @@ import { requiredBrowserPaths } from "../evals/browser-report.mjs";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 85], ["extended", 86]]) {
+  for (const [tier, count] of [["core", 95], ["extended", 96]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[0] === "browser-error-evidence.spec.ts" && path[1] === "browser evidence retains nested causes and preserves the strict error gate"));
     assert.ok(paths.some(path => path[0] === "portable-core.spec.ts" && path[1] === "presence waits for node readiness without showing a startup failure"));
     assert.ok(paths.some(path => path[1] === "city avatar thumbnails load after scrolling the gallery"));
-    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 16);
+    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 26);
+    for (const size of ["390x560", "1280x720"]) {
+      for (const source of ["sender", "member", "post_office", "linked_device", "unknown"]) {
+        const title = `received-message source ${source} stays accessible at ${size}`;
+        assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts" && path[1] === title).length, 1);
+      }
+    }
     for (const kind of ["text", "sticker", "file card"]) assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts" && path[1] === `${kind} stays Awaiting until explicit authoritative mock projection`).length, 1);
     assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "typed channel File stays pending until canonical metadata commits and original-ID replay stays singular"));
     assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "a scoped native delivery invalidation refreshes status without a polling response"));
