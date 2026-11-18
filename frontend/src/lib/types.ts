@@ -224,6 +224,8 @@ export interface ChannelMembersInfo {
 
 export interface AccountInfo {
   account_id: string;
+  /** Native deadline for rechecking a discovered contact with no chat history. */
+  contact_expires_at_ms?: number | null;
   device_count: number;
   names: string[];
 }

@@ -6682,6 +6682,14 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
         .await
         .unwrap();
     timing.phase("relay-file-flush-card");
+    {
+        let delivery = a.delivery.lock().unwrap();
+        let offer = delivery.message(card).unwrap();
+        assert!(offer.destinations.iter().all(|destination| {
+            destination.receipt_eligible
+                && destination.event.kind == crate::eventlog::EventKind::FileManifest
+        }));
+    }
     // The recipient does not serve application frames yet. Fail the payload
     // exchange after real Noise authentication; without custody, the shared
     // delivery owner must skip receipt control and let the live relay carry
@@ -11407,6 +11415,11 @@ async fn automatic_receipt_recovery_is_independent_of_stalled_dm_history() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_manifest_receipt_recovery_is_independent_of_stalled_dm_history() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::HeldManifest).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_dm_send_progresses_while_receipt_history_is_stalled() {
     receipt_scope_progress_fixture(ReceiptScopeCase::HeldReceipts).await;
 }
@@ -11419,11 +11432,16 @@ async fn automatic_first_send_rechecks_receipts_after_early_empty_control_round(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReceiptScopeCase {
     HeldMessages,
+    HeldManifest,
     HeldReceipts,
     EmptyReceiptsFirst,
 }
 
 async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
+    let holds_messages = matches!(
+        case,
+        ReceiptScopeCase::HeldMessages | ReceiptScopeCase::HeldManifest
+    );
     use super::test_support::IndependentPeerRuntime;
     use futures_util::FutureExt;
     use std::{
@@ -11506,7 +11524,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                                     let scope = super::session::fingerprint_request_conversation(&bytes)
                                         .or_else(|| super::session::round_request_conversation(&bytes));
                                     let active = armed.load(Ordering::SeqCst);
-                                    if active && scope == Some(control) && case == ReceiptScopeCase::HeldMessages {
+                                    if active && scope == Some(control) && holds_messages {
                                         // Make the real held-history witness precede
                                         // receipt service, rather than racing TCP.
                                         loop {
@@ -11516,7 +11534,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                                         }
                                     }
                                     if scope == Some(control) { control_requests.fetch_add(1, Ordering::SeqCst); }
-                                    if active && ((scope == Some(dm) && case == ReceiptScopeCase::HeldMessages)
+                                    if active && ((scope == Some(dm) && holds_messages)
                                         || (scope == Some(control) && case == ReceiptScopeCase::HeldReceipts)) {
                                         held_requests.fetch_add(1, Ordering::SeqCst);
                                         entered.notify_waiters();
@@ -11567,7 +11585,19 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
     .await;
     let outcome = std::panic::AssertUnwindSafe(async {
         let body = b"Already received; recover only its genuine receipt";
-        let mut id = sender.enqueue_to_account(&recipient.account_id(), body, None).await.unwrap();
+        let mut file = None;
+        let mut id = if case == ReceiptScopeCase::HeldManifest {
+            recipient.set_attachment_global_auto(false).unwrap();
+            let source = sender_dir.path().join("pending-consent.bin");
+            std::fs::write(&source, b"unavailable until recipient consent").unwrap();
+            let (id, conversation) = sender.enqueue_file_to_account(
+                &recipient.account_id(), &source, crate::file::FileKind::File,
+            ).await.unwrap();
+            file = Some(conversation);
+            id
+        } else {
+            sender.enqueue_to_account(&recipient.account_id(), body, None).await.unwrap()
+        };
         let mut message = sender.delivery.lock().unwrap().message(id).unwrap().clone();
         assert_eq!(message.destinations.len(), 1);
         let mut destination = message.destinations[0].clone();
@@ -11578,7 +11608,14 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
             // history. Never fabricate or manually install its receipt.
             assert!(tokio::time::timeout(Duration::from_secs(30), sender.transfer_delivery_destination(
                 &peer, &destination, dm)).await.unwrap());
-            assert_eq!(tokio::time::timeout(Duration::from_secs(3), incoming.recv()).await.unwrap().unwrap().text, body);
+            if let Some(file) = file {
+                assert_eq!(destination.event.kind, crate::eventlog::EventKind::FileManifest);
+                assert!(recipient.read_file(file).is_err(), "card receipt does not establish available bytes");
+                assert_eq!(recipient.attachment_consent_status(file).unwrap(), Some(super::ReceiveDecision::Pending),
+                    "file consent remains pending before receipt recovery");
+            } else {
+                assert_eq!(tokio::time::timeout(Duration::from_secs(3), incoming.recv()).await.unwrap().unwrap().text, body);
+            }
             assert_eq!(recipient.log.lock().unwrap().get(&destination.event.id).unwrap().unwrap(), destination.event);
             let receipt = recipient.delivery.lock().unwrap().retry_receipts(8).into_iter()
                 .find(|receipt| receipt.original_event_id == destination.event.id).expect("durable plaintext must produce the original recipient receipt");
@@ -11623,7 +11660,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                 }
             }).await.expect("the production owner must reach the exact authenticated history fault");
         }
-        if case != ReceiptScopeCase::HeldMessages {
+        if !holds_messages {
             let received = tokio::time::timeout(Duration::from_secs(3), incoming.recv()).await
                 .expect("fresh ordinary DM must progress without waiting for receipt history").unwrap();
             assert_eq!(received.text, body);
@@ -11657,6 +11694,13 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
             }
         }
         assert!(control_requests.load(Ordering::SeqCst) > controls_before);
+        if let Some(file) = file {
+            assert!(recipient.read_file(file).is_err(), "manifest receipt must not grant consent or download bytes");
+            assert_eq!(recipient.attachment_consent_status(file).unwrap(), Some(super::ReceiveDecision::Pending),
+                "manifest receipt must preserve the recipient's pending consent");
+            assert!(!sender.outgoing_file_progress(id).unwrap().delivered,
+                "card delivery is separate from complete file delivery");
+        }
     }).catch_unwind().await;
     // Release fault providers before joining actual hosts and receive work,
     // including after the target assertion fails. Do not inspect success after

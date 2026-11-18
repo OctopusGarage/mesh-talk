@@ -145,6 +145,40 @@ it("keeps durable acceptance when presentation hydration rejects", async () => {
   expect(store.getState().setError).not.toHaveBeenCalled();
 });
 
+it("cannot refresh a replacement contact owner from an accepted-message subscriber", async () => {
+  const store = session();
+  const replacement = vi.fn();
+  invoke.mockResolvedValue("accepted");
+  const stop = store.subscribe((state) => {
+    if (
+      state.identityEpoch === 0 &&
+      state.messages[key]?.some((row) => row.id === "accepted")
+    )
+      store.setState({
+        identityEpoch: 1,
+        myAccountId: "replacement",
+        onAccountMessageCommitted: replacement,
+      });
+  });
+  try {
+    const accepted = await beginSendIntent(
+      store.setState,
+      store.getState,
+      conversation,
+      {
+        kind: "text",
+        text: "hello",
+        replyTo: null,
+      },
+    );
+    expect(store.getState().myAccountId).toBe("replacement");
+    expect(replacement).not.toHaveBeenCalled();
+    expect(accepted).toBe(false);
+  } finally {
+    stop();
+  }
+});
+
 it("ignores acceptance completed after its owner generation retires", async () => {
   const store = session();
   let finish!: (id: string) => void;
@@ -1520,4 +1554,91 @@ it("rechecks channel custody after an invalidation during an older one-copy read
     postOfficeCopies: 1,
   });
   expect(store.getState().statusBusy).toBe(false);
+});
+
+it("retains local preview before native admission without adding Blob to intent", async () => {
+  const { getOutgoingMediaPreview, resetOutgoingMediaPreviews } =
+    await import("./outgoingMediaPreviews");
+  const create = vi.fn(() => "blob:outgoing");
+  vi.stubGlobal("URL", { createObjectURL: create, revokeObjectURL: vi.fn() });
+  const store = session();
+  let resolve!: (value: unknown) => void;
+  invoke.mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" });
+  const sending = beginSendIntent(
+    store.setState,
+    store.getState,
+    conversation,
+    { kind: "file", path: "/tmp/image.png", media: true },
+    { localPreview: blob },
+  );
+  const intent = Object.values(store.getState().intents)[0];
+  expect(getOutgoingMediaPreview(intent.message.clientId)?.url).toBe(
+    "blob:outgoing",
+  );
+  expect(create).toHaveBeenCalledWith(blob);
+  expect(Object.values(intent)).not.toContain(blob);
+  expect(Object.values(intent.payload)).not.toContain(blob);
+  resolve({ id: "event", fileConv: "file" });
+  await sending;
+  expect(store.getState().messages[key][0].clientId).toBe(
+    intent.message.clientId,
+  );
+  store.setState({ messages: { [key]: [] }, intents: {} });
+  expect(getOutgoingMediaPreview(intent.message.clientId)).toBeUndefined();
+  store.setState({ identityEpoch: 1 });
+  expect(getOutgoingMediaPreview(intent.message.clientId)).toBeUndefined();
+  resetOutgoingMediaPreviews();
+  vi.unstubAllGlobals();
+});
+
+it("never creates local previews for protected file intents", async () => {
+  const create = vi.fn();
+  vi.stubGlobal("URL", { createObjectURL: create, revokeObjectURL: vi.fn() });
+  const store = session();
+  invoke.mockResolvedValue({ id: "protected", fileConv: "secret" });
+  await beginSendIntent(
+    store.setState,
+    store.getState,
+    conversation,
+    {
+      kind: "file",
+      path: "/tmp/private.png",
+      media: true,
+      protection: "authenticate",
+    },
+    { localPreview: new Blob(["secret"], { type: "image/png" }) },
+  );
+  expect(create).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+it("never dispatches a file whose row retires during optional preview creation", () => {
+  const store = session();
+  const revoke = vi.fn();
+  vi.stubGlobal("URL", {
+    createObjectURL: () => {
+      store.setState({ messages: { [key]: [] }, intents: {} });
+      return "blob:cancelled-preview";
+    },
+    revokeObjectURL: revoke,
+  });
+  invoke.mockClear();
+  const sending = beginSendIntent(
+    store.setState,
+    store.getState,
+    conversation,
+    { kind: "file", path: "/tmp/cancelled.png", media: true },
+    { localPreview: new Blob(["image"], { type: "image/png" }) },
+  );
+  expect(sending).toBeNull();
+  expect(invoke).not.toHaveBeenCalled();
+  expect(store.getState().intents).toEqual({});
+  expect(revoke).toHaveBeenCalledExactlyOnceWith("blob:cancelled-preview");
+  vi.unstubAllGlobals();
 });

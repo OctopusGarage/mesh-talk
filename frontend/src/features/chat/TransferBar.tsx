@@ -10,9 +10,13 @@ import { useTransfer } from "@/store/transfers";
 export function TransferBar({
   transferKey,
   waitingDirection,
+  variant = "default",
+  idleLabel,
 }: {
   transferKey: string | undefined;
   waitingDirection?: "prepare" | "send";
+  variant?: "default" | "compact" | "media";
+  idleLabel?: string;
 }) {
   const { t } = useTranslation();
   const tr = useTransfer(transferKey);
@@ -56,6 +60,13 @@ export function TransferBar({
             minutes: Math.ceil(tr.etaSeconds / 60),
           })
       : null;
+  if (!active && idleLabel)
+    return (
+      <span className="font-mono text-[11px] tabular-nums opacity-70">
+        {idleLabel}
+      </span>
+    );
+  const compact = variant !== "default";
   return (
     <AnimatePresence initial={false}>
       {active && (
@@ -65,15 +76,33 @@ export function TransferBar({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
-          className="px-3 py-1.5"
+          className={
+            variant === "media"
+              ? "rounded-full border border-white/20 bg-background/90 px-3 py-2 text-foreground shadow-sm backdrop-blur-md"
+              : compact
+                ? "min-w-0 py-0.5"
+                : "px-3 py-1.5"
+          }
         >
-          <div className="mb-1 flex justify-between text-xs">
-            <span className="text-muted-foreground">{verb}</span>
+          <div className="mb-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px]">
+            <span
+              title={verb}
+              className={
+                variant === "media"
+                  ? "min-w-0 flex-1 truncate text-muted-foreground"
+                  : "text-muted-foreground"
+              }
+            >
+              {verb}
+            </span>
+            {compact && eta && (
+              <span className="text-muted-foreground">{eta}</span>
+            )}
             {pct !== undefined && (
               <span className="font-mono text-signal tabular-nums">{pct}%</span>
             )}
           </div>
-          {eta && (
+          {eta && !compact && (
             <div className="mb-1 text-[11px] text-muted-foreground">{eta}</div>
           )}
           <span className="sr-only" role="status" aria-live="polite">
@@ -86,7 +115,11 @@ export function TransferBar({
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={pct}
-            className="h-1 w-full overflow-hidden rounded-full bg-muted"
+            className={
+              compact
+                ? "h-0.5 w-full overflow-hidden rounded-full bg-muted"
+                : "h-1 w-full overflow-hidden rounded-full bg-muted"
+            }
           >
             <div
               className="transfer-progress h-full w-full origin-left rounded-full bg-signal"

@@ -174,3 +174,26 @@ impl TranscriptRepository {
         })
     }
 }
+
+/// Sticky fact: clearing rows updates these summaries but never removes their
+/// existence. Bounded indexed metadata only; no plaintext bodies are hydrated.
+pub(in crate::node) fn ever_history_conversations(
+    profile: &crate::storage::profile::context::ProfileStorage,
+    conversations: &[ConversationId],
+) -> Result<std::collections::HashSet<ConversationId>, LogError> {
+    if conversations.len() > 128 {
+        return Err(LogError::InvalidPageBudget);
+    }
+    if conversations.is_empty() {
+        return Ok(Default::default());
+    }
+    profile.database().read(|connection| {
+        let placeholders = std::iter::repeat_n("?", conversations.len()).collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT DISTINCT conversation FROM transcript_conversations WHERE kind IN (1,2,3) AND conversation IN ({placeholders})");
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(rusqlite::params_from_iter(conversations.iter().map(|id|id.as_bytes().as_slice())))?;
+        let mut result = std::collections::HashSet::new();
+        while let Some(row)=rows.next()? { result.insert(ConversationId::new(blob(row,0)?)); }
+        Ok(result)
+    })
+}

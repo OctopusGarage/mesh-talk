@@ -538,14 +538,18 @@ existing authentication/recovery path.
 Transport awaits must not retain ordinary store/roster mutex guards. Network tasks use owned snapshots, bounded work and cancellation-safe ownership. Privacy generation checks revoke retained sessions and in-flight publication after a policy transition; directory queries additionally validate their captured directory/preference generation before publishing results. Startup applies network preferences before disclosure or delivery producers run.
 
 Receipt-control and ordinary DM-history scopes progress concurrently within the
-existing accepted-destination owner, so either scope may complete while the other
+existing retained-destination recovery owner, so either scope may complete while the other
 is blocked. Only exact authenticated recipient receipts establish Delivered;
 ordinary Have and opaque relay custody remain separate evidence. An empty early
 receipt round cannot settle a fresh send: after positive original custody, retain
 the existing bounded post-original control pull while that exact work remains.
+Immediate best-effort flush retains payload-custody-before-control ordering,
+including file offers: a failed payload cannot start a receipt-control exchange.
+Retained automatic recovery independently polls all receipt-eligible originals,
+including genuine manifest cards with unavailable bytes and pending consent.
 Own-account copies and receipt transfers do not add a parallel receipt query.
 
-One eligible destination can own two direct scope exchanges, plus its existing
+One eligible retained destination can own two direct scope exchanges, plus its existing
 relay alternative (at most two simultaneous offices from a four-candidate batch).
 The one verified-peer reconciliation owner polls two distinct direct scopes
 alongside its existing serial relay lane. Both relay calls drain the same

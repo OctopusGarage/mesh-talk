@@ -91,3 +91,91 @@ it.each([false, true])(
     expect(html).not.toContain("lucide-smile-plus");
   },
 );
+
+it.each([true, false])(
+  "keeps pending image metadata in its media stage (fromMe=%s)",
+  (fromMe) => {
+    const html = renderToStaticMarkup(
+      createElement(MessageBubble, {
+        m: {
+          id: null,
+          clientId: "pending-image",
+          who: "author",
+          text: "",
+          wallClock: Date.now(),
+          fromMe,
+          replyTo: null,
+          pending: true,
+          metadataPending: true,
+          file: {
+            name: "photo.png",
+            size: 0,
+            mime: "image/png",
+            fileConv: "",
+            media: true,
+          },
+        },
+        parent: null,
+        showAuthor: false,
+        isChannel: false,
+        reactions: [],
+        selfReactionId: "me",
+        myName: "Me",
+        onReply: vi.fn(),
+        onReact: vi.fn(),
+        onRetry: vi.fn(),
+        onDelete: vi.fn(),
+        onRecall: vi.fn(),
+        onReEdit: vi.fn(),
+      }),
+    );
+    expect(html).toContain('data-inline-media=""');
+    expect(html).not.toContain('aria-label="Save"');
+    if (fromMe) {
+      expect(html).toContain("Preparing");
+      expect(html).not.toContain("opacity-75");
+      expect(html).not.toContain("Waiting for file");
+    }
+  },
+);
+
+it.each([false, true])(
+  "preserves loading feedback for a historical outgoing image (readOnly=%s)",
+  (readOnly) => {
+    const html = renderToStaticMarkup(
+      createElement(MessageBubble, {
+        m: {
+          id: "old-image",
+          who: "author",
+          text: "",
+          wallClock: 1,
+          fromMe: true,
+          replyTo: null,
+          file: {
+            name: "photo.png",
+            size: 100,
+            mime: "image/png",
+            fileConv: "old-file",
+            media: true,
+          },
+        },
+        parent: null,
+        showAuthor: false,
+        isChannel: false,
+        readOnly,
+        reactions: [],
+        selfReactionId: "me",
+        myName: "Me",
+        onReply: vi.fn(),
+        onReact: vi.fn(),
+        onRetry: vi.fn(),
+        onDelete: vi.fn(),
+        onRecall: vi.fn(),
+        onReEdit: vi.fn(),
+      }),
+    );
+    expect(html).toContain('data-inline-media=""');
+    expect(html).toContain('role="status"');
+    expect(html).not.toContain("backdrop-blur-md");
+  },
+);

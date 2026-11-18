@@ -156,7 +156,9 @@ export function DeliveryFooter({
       {showTime && (
         <span data-testid="message-time">{formatTime(message.wallClock)}</span>
       )}
-      {message.pending && <span>{` · ${t("message.sending")}`}</span>}
+      {message.pending && (!message.file || message.protection) && (
+        <span>{` · ${t("message.sending")}`}</span>
+      )}
       {showSource && (
         <MessageStatus
           key={`${detailsKey}:source:${source}`}
