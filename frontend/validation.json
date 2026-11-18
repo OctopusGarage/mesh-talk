@@ -746,9 +746,11 @@
       "paths": [
         "frontend/src/store/outgoingIntent.ts",
         "frontend/src/store/outgoingIntent.test.ts",
+        "frontend/src/store/outgoingMediaPreviews.ts",
+        "frontend/src/store/outgoingMediaPreviews.test.ts",
         "frontend/e2e/file-send-progress.spec.ts"
       ],
-      "frontend": ["src/store/outgoingIntent.test.ts"],
+      "frontend": ["src/store/outgoingIntent.test.ts", "src/store/outgoingMediaPreviews.test.ts"],
       "escalation": [
         "File approval/progress changes require e2e/file-send-progress.spec.ts, including file-offer receipt before approval and byte completion."
       ],
