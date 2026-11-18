@@ -443,14 +443,21 @@ additive internal observation, and keep delivery/custody proof independent. The
 same profile publisher controls exercise warm relay publication with unavailable
 direct delivery; mailbox controls retain source-change and relay-reset recovery.
 Do not discard a sync error while returning a successful byte count to the
-distribution owner. Whole-history `NoProgress` can coexist with an exact retained
-message. Preserve the failed control revision and its existing backoff while a
-fresh authenticated exact-have query independently qualifies that copy within the
+distribution owner. Whole-history `NoProgress` or local `Store(StaleCursor)` can
+coexist with an exact retained message. A stale source view invalidates the
+history comparison, not the remote holder's independent evidence. Preserve the
+failed control revision and its existing backoff while a fresh authenticated
+exact-have query independently qualifies that copy within the
 original deadline. Retire the old protocol connection and actual reception
 admission before redialing. The [confirming-fanout regression](../crates/mesh-talk-core/src/node/channels.rs)
 and [exact-custody failure-path regressions](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
-exercise authenticated closure, incomplete reconciliation and positive/negative
-answers on the replacement connection.
+exercise authenticated closure, incomplete reconciliation, real local policy
+invalidation and positive/negative answers on the replacement connection.
+Include file-message records in the same accepted-event confirmation path and
+bounded custody cursor even when their chunks have a separate transport owner.
+Keep record custody distinct from complete file-byte availability in UI details.
+For mixed-kind indexed pages, bound each covering range before merging so a
+small status page cannot sort the whole retained history.
 
 When replacing fast polling with sparse recovery, preserve the progress that the
 old poll accidentally supplied. A completed record is not active demand, but a

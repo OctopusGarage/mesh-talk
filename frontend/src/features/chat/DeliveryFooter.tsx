@@ -80,7 +80,6 @@ export function DeliveryFooter({
     message.fromMe &&
     isChannel &&
     message.id &&
-    !message.file &&
     !message.pending &&
     !message.failed
       ? message.replicas === undefined && message.postOfficeCopies === undefined
@@ -225,6 +224,7 @@ export function DeliveryFooter({
                     ? "message.custody.postOfficeHelp"
                     : "message.custody.help",
               )}
+              {message.file && ` ${t("message.custody.fileRecordHelp")}`}
             </p>
           )}
         </MessageStatus>
@@ -238,7 +238,12 @@ export function DeliveryFooter({
             custody={1}
             icon={<Inbox className="h-3 w-3" aria-hidden="true" />}
           >
-            {() => <p>{t("message.custody.postOfficeHelp")}</p>}
+            {() => (
+              <p>
+                {t("message.custody.postOfficeHelp")}
+                {message.file && ` ${t("message.custody.fileRecordHelp")}`}
+              </p>
+            )}
           </MessageStatus>
         )}
     </div>

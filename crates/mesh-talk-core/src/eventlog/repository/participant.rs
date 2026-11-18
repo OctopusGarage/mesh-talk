@@ -136,8 +136,15 @@ impl EventRepository {
             let select = |condition: &str, remaining: usize| -> Result<Vec<_>, LogError> {
                 let mut selected = Vec::new();
                 if remaining == 0 { return Ok(selected); }
+                // Each covering kind range reads at most the remaining page.
+                // Bound both inputs before merging; a mixed-kind ORDER BY over
+                // the whole history would defeat the custody scan budget.
+                let range = |kind: EventKind| format!(
+                    "SELECT lamport,id FROM retained_events WHERE domain=?1 AND conversation=?2 AND author=?3 AND kind={} AND {condition} ORDER BY lamport,id LIMIT ?6", kind as u8
+                );
                 let mut statement = c.prepare_cached(&format!(
-                    "SELECT lamport,id FROM retained_events WHERE domain=?1 AND conversation=?2 AND author=?3 AND kind=0 AND {condition} ORDER BY lamport,id LIMIT ?6"
+                    "SELECT lamport,id FROM ({}) UNION ALL SELECT lamport,id FROM ({}) ORDER BY lamport,id LIMIT ?6",
+                    range(EventKind::Message), range(EventKind::FileManifest)
                 ))?;
                 let mut rows = statement.query(params![
                     self.domain.0.as_slice(), conversation.as_bytes().as_slice(),

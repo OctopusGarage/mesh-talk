@@ -517,6 +517,38 @@ it("projects member and post-office custody separately for exact channel IDs", a
   });
 });
 
+it("queries and projects custody for exact outgoing group file records", async () => {
+  const store = session();
+  const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
+  store.setState({
+    active: channel,
+    messages: {
+      "channel:group": [
+        {
+          ...row("manifest"),
+          file: {
+            fileConv: "bytes",
+            name: "photo.png",
+            size: 12,
+            mime: "image/png",
+            media: true,
+          },
+        },
+      ],
+    },
+  });
+  invoke.mockResolvedValue([{ id: "manifest", replicas: 2, post_offices: 1 }]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(invoke).toHaveBeenCalledWith("channel_custody_statuses", {
+    channelId: "group",
+    ids: ["manifest"],
+  });
+  expect(store.getState().messages["channel:group"][0]).toMatchObject({
+    replicas: 2,
+    postOfficeCopies: 1,
+  });
+});
+
 it("preserves channel message references for unchanged custody while applying decreases and unknowns", async () => {
   const store = session();
   const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
@@ -1459,4 +1491,33 @@ it("evicts old payload-heavy conversations before reaching the conversation coun
     state.messages["account:recent"],
   );
   expect(patch.cacheOrder).toEqual(["account:recent", "account:active"]);
+});
+
+it("rechecks channel custody after an invalidation during an older one-copy read", async () => {
+  const store = session();
+  const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
+  store.setState({
+    active: channel,
+    messages: {
+      "channel:group": [{ ...row("event"), replicas: 1, postOfficeCopies: 1 }],
+    },
+  });
+  let release!: (value: unknown[]) => void;
+  invoke.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  invoke.mockResolvedValue([{ id: "event", replicas: 2, post_offices: 1 }]);
+  const older = refreshDeliveryStatuses(store.setState, store.getState);
+  await refreshDeliveryStatuses(store.setState, store.getState, channel, true);
+  release([{ id: "event", replicas: 1, post_offices: 1 }]);
+  await older;
+  expect(invoke).toHaveBeenCalledTimes(2);
+  expect(store.getState().messages["channel:group"][0]).toMatchObject({
+    replicas: 2,
+    postOfficeCopies: 1,
+  });
+  expect(store.getState().statusBusy).toBe(false);
 });

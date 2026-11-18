@@ -114,7 +114,7 @@ export async function refreshDeliveryStatuses(
       const ids = [
         ...new Set(
           (get().messages[key] ?? [])
-            .filter((m) => m.fromMe && m.id && !m.file)
+            .filter((m) => m.fromMe && m.id)
             .map((m) => m.id!),
         ),
       ];
@@ -139,7 +139,7 @@ export async function refreshDeliveryStatuses(
         if (!current) return { messages: s.messages };
         let changed = false;
         const next = current.map((m) => {
-          if (!m.fromMe || m.file || !m.id || !requestedIds.has(m.id)) return m;
+          if (!m.fromMe || !m.id || !requestedIds.has(m.id)) return m;
           const counts = replicas.get(m.id);
           if (
             m.replicas === counts?.members &&

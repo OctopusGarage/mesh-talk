@@ -7593,3 +7593,58 @@ it("retires the event ticket when the same account runtime generation changes be
     vi.useRealTimers();
   }
 });
+
+it("updates an existing one-copy group row to two on a native delivery invalidation", async () => {
+  let replicas = 1;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "channel_custody_statuses")
+      return Promise.resolve([
+        { id: "confirmed-group-message", replicas, post_offices: 1 },
+      ]);
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    useChat.setState({
+      active: { kind: "channel", id: "team", name: "Team" },
+      messages: {
+        "channel:team": [
+          {
+            id: "confirmed-group-message",
+            fromMe: true,
+            who: "me",
+            text: "hello",
+            replyTo: null,
+            wallClock: 1,
+            replicas: 1,
+            postOfficeCopies: 1,
+          },
+        ],
+      },
+    });
+    const before = useChat.getState().messages["channel:team"][0];
+    replicas = 2;
+    captured.current!.onStateChanged({
+      owner: "host",
+      device_id: "me",
+      account_id: "myacct",
+      kind: "delivery",
+    });
+    await vi.waitFor(() =>
+      expect(useChat.getState().messages["channel:team"][0].replicas).toBe(2),
+    );
+    expect(useChat.getState().messages["channel:team"][0]).not.toBe(before);
+    expect(
+      useChat.getState().messages["channel:team"][0].postOfficeCopies,
+    ).toBe(1);
+  } finally {
+    stop();
+  }
+});

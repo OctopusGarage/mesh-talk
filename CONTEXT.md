@@ -357,6 +357,8 @@ from an opaque post-office copy whose holder cannot decrypt channel content.
 Displayed copy confirmations count distinct external member accounts, excluding
 the sender's linked devices. The sender account can share its historical
 observations privately across devices; unknown status is separate from zero.
+For images, stickers and attachments, this status covers the retained file-message
+record; it does not establish complete attachment-byte availability.
 _Avoid_: post-office membership, global archive.
 
 **Join-history copy**:
