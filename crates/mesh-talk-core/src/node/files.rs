@@ -1172,8 +1172,16 @@ impl Node {
             }
         };
         if let Some(members) = members {
-            self.distribute_channel_file(channel, file, &members, automatic_inline, confirming)
-                .await;
+            // This owner retains the complete bounded network fanout. Keep its
+            // future off callers' stacks without detaching work or admission.
+            Box::pin(self.distribute_channel_file(
+                channel,
+                file,
+                &members,
+                automatic_inline,
+                confirming,
+            ))
+            .await;
         }
     }
 
