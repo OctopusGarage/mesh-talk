@@ -117,14 +117,25 @@ test("outgoing capability selects tests for acceptance projection and retired fr
       "Channel durable IDs settle acceptance independently of fanout and custody",
       "projects member and post-office custody separately for exact channel IDs",
     ],
+    [
+      "Outgoing static previews inspect bounded PNG/JPEG headers before creating a decoder; oversized or unknown geometry retains preparation without changing the send.",
+      {
+        path: "src/lib/imageDimensions.test.ts",
+        title: "admits static PNG headers only within the native decoded-pixel ceiling",
+      },
+    ],
   ]);
   assert.deepEqual(
     owner("frontend-outgoing").capability.invariants.map(({ name }) => name),
     [...obligations.keys()],
   );
-  for (const title of obligations.values()) {
+  for (const obligation of obligations.values()) {
+    const { path, title } = typeof obligation === "string"
+      ? { path: testPath, title: obligation }
+      : obligation;
+    assert.ok(plan.frontend.includes(path), `Unselected outgoing obligation: ${path}`);
     assert.ok(
-      source.includes(`it("${title}",`),
+      (path === testPath ? source : read(`frontend/${path}`)).includes(`it("${title}",`),
       `Missing executable outgoing obligation: ${title}`,
     );
   }
