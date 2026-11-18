@@ -56,6 +56,21 @@ test("Linux producer and consumer explicitly install every sealed runtime packag
   }
 });
 
+test("Linux package setup preserves strict failures and bounds transient download retries", () => {
+  for (const filename of ["ci.yml", "linux-workspace-consumer.yml", "check-health.yml"]) {
+    const workflow = readFileSync(
+      new URL(`../../.github/workflows/${filename}`, import.meta.url), "utf8",
+    ).replace(/\\\r?\n\s*/gu, " ");
+    for (const phase of ["update", "install"]) {
+      const commands = [...workflow.matchAll(new RegExp(`^\\s*sudo apt-get ${phase} ([^\\r\\n]+)$`, "gmu"))];
+      assert.equal(commands.length, 1, `${filename} retains one ${phase} owner`);
+      assert.match(commands[0][1], /(?:^|\s)-o Acquire::Retries=3(?:\s|$)/u,
+        `${filename} ${phase} must bound failed-file retries`);
+      if (phase === "update") assert.match(commands[0][1], /(?:^|\s)--error-on=any(?:\s|$)/u);
+    }
+  }
+});
+
 test("Linux runtime identity requires the actual hosted Ubuntu ABI cohort", () => {
   const { env, observed } = linuxRuntimeFixture();
   const identity = archive.validateLinuxRuntime(env, observed);
