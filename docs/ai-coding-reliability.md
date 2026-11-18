@@ -1874,8 +1874,9 @@ retains delivery evidence without logging its private observation tuples.
 
 A dismissed modal may still own its closing focus scope. Before reopening the
 same confirmation, wait for its trigger to regain focus as well as for the old
-content to leave the DOM. The [native privacy cancellation controls](../scripts/diagnostics/native-core-scenarios.test.mjs)
-exercise mounted, unmounted-but-unsettled and fully restored phases; a generic
+content and rendered closing modal surfaces to leave the DOM. A closing overlay
+can outlive both content and returned focus. The [native privacy cancellation controls](../scripts/diagnostics/native-core-scenarios.test.mjs)
+exercise mounted, focus-pending, closing-overlay and fully retired phases; a generic
 click retry must not replace this lifecycle acknowledgement.
 
 External publication metadata must follow the owning contract even when an API

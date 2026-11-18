@@ -594,18 +594,74 @@ test("privacy cancellation waits for returned trigger focus before reopening", a
   const { settledPrivacyCancellation } = await import("./native-core-scenarios.mjs");
   let phase = 0;
   const c = {
-    execute: async (script) => Function("document", script)({
+    execute: async (script) => Function("document", "getComputedStyle", "innerWidth", "innerHeight", script)({
       querySelector: () => phase === 0 ? {} : null,
+      querySelectorAll: () => {
+        const outer = { state: "open", getBoundingClientRect: () => ({ left: 0, top: 0, right: 1040, bottom: 720, width: 1040, height: 720 }) };
+        const closing = { ...outer, state: "closed" };
+        const unrelated = { state: "closed", getBoundingClientRect: () => ({ left: 20, top: 20, right: 120, bottom: 80, width: 100, height: 60 }) };
+        return [outer, unrelated, ...(phase === 2 ? [closing] : [])].filter(e => e.state === "closed");
+      },
       activeElement: { getAttribute: () => phase === 1 ? "elsewhere" : "invisible-switch" },
-    }),
+    }, () => ({ position: "fixed", display: "block", visibility: "visible" }), 1040, 720),
     until: async (_label, poll) => {
       assert.equal(await poll(), false, "mounted confirmation is pending");
       phase = 1;
       assert.equal(await poll(), false, "removed content is not yet returned focus");
       phase = 2;
-      assert.equal(await poll(), true);
+      assert.equal(await poll(), false, "returned focus cannot outlive an unretired closing modal overlay");
+      phase = 3;
+      assert.equal(await poll(), true, "retired confirmation backdrop does not wait for the open settings backdrop or unrelated closed controls");
     },
   };
-  assert.deepEqual(await settledPrivacyCancellation(c), { confirmationDismissed: true, triggerFocusRestored: true });
+  assert.deepEqual(await settledPrivacyCancellation(c), { confirmationDismissed: true, triggerFocusRestored: true, closingSurfacesRetired: true });
   await assert.rejects(settledPrivacyCancellation({ execute: async () => false, until: async (_label, poll) => { assert.equal(await poll(), false); throw new Error("trigger focus never returned"); } }), /trigger focus never returned/);
+});
+
+
+test("privacy dialog diagnostics are bounded, content-free and retire their exact owner", async () => {
+  const { startPrivacyDialogTrace } = await import("./native-core-scenarios.mjs");
+  const handlers = new Map(), observers = [], host = {};
+  let state = "open", focus = "invisible-cancel", clock = 0;
+  const document = {
+    body: {},
+    querySelector: () => state === "absent" ? null : { closest: () => ({ getAttribute: () => state }) },
+    get activeElement() { return { getAttribute: () => focus }; },
+    addEventListener: (type, handler) => { assert.ok(!handlers.has(type)); handlers.set(type, handler); },
+    removeEventListener: (type, handler) => { assert.equal(handlers.get(type), handler); handlers.delete(type); },
+  };
+  class Observer {
+    constructor(callback) { this.callback = callback; this.disconnected = 0; observers.push(this); }
+    observe(body) { assert.equal(body, document.body); }
+    disconnect() { this.disconnected++; }
+  }
+  const c = { execute: async script => Function("window", "document", "MutationObserver", "performance", script)(host, document, Observer, { now: () => clock++ }) };
+  const first = await startPrivacyDialogTrace(c);
+  const finish = await startPrivacyDialogTrace(c);
+  assert.equal(observers[0].disconnected, 1, "replacement retires the previous observer");
+  assert.deepEqual(await first(), [], "stale cleanup cannot stop a replacement trace");
+  assert.equal(handlers.size, 6);
+  const target = { getAttribute: () => "invisible-cancel" };
+  handlers.get("keydown")({ target, key: "PRIVATE-KEY-TEXT" });
+  handlers.get("keydown")({ target: { getAttribute: () => "login-password" }, key: "Enter" });
+  assert.equal(host.__nativePrivacyDialogTrace.events.length, 2, "unrelated input is not observed");
+  assert.equal(host.__nativePrivacyDialogTrace.events.at(-1).key, null);
+  assert.ok(!JSON.stringify(host.__nativePrivacyDialogTrace.events).includes("PRIVATE-KEY-TEXT"));
+  handlers.get("keydown")({ target, key: "Enter" });
+  assert.equal(host.__nativePrivacyDialogTrace.events.at(-1).key, "Enter");
+  handlers.get("pointerdown")({ target: { getAttribute: () => "PRIVATE-UNRELATED-ID" } });
+  assert.equal(host.__nativePrivacyDialogTrace.events.at(-1).target, null);
+  assert.ok(!JSON.stringify(host.__nativePrivacyDialogTrace.events).includes("PRIVATE-UNRELATED-ID"));
+  for (let i = 0; i < 100; i++) handlers.get("click")({ target });
+  state = "absent"; focus = "invisible-switch";
+  observers[1].callback();
+  const trace = await finish();
+  assert.equal(trace.length, 48);
+  assert.deepEqual(trace.at(-1), { at: clock - 1, kind: "state", target: null, key: null, state: "absent", focus });
+  assert.ok(trace.every((event, i) => i === 0 || event.at > trace[i - 1].at));
+  assert.ok(!JSON.stringify(trace).includes("PRIVATE-KEY-TEXT"));
+  assert.equal(handlers.size, 0);
+  assert.equal(observers[1].disconnected, 1);
+  assert.equal(host.__nativePrivacyDialogTrace, undefined);
+  assert.deepEqual(await finish(), []);
 });

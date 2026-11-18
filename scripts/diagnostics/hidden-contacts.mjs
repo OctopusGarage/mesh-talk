@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { verifyNativeBuild } from "../validation/native-build.mjs";
 import { captureNativeEvidence, captureNativeFailure, collectNativeApplicationLogs, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
-import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, cliListenerEndpoint, receiptPeerEndpointContext, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode, settledPrivacyCancellation } from "./native-core-scenarios.mjs";
+import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, cliListenerEndpoint, receiptPeerEndpointContext, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode, settledPrivacyCancellation, startPrivacyDialogTrace } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -109,6 +109,7 @@ const readFileBytes = fileConv => command("POST", "/execute/async", {
   script: "const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('read_file',{fileConv:arguments[0]}).then(buffer=>done({ok:true,bytes:Array.from(new Uint8Array(buffer))}),error=>done({ok:false,error:String(error)}));",
   args: [fileConv],
 }).then(result => { assert.equal(result.ok, true, "production read_file failed"); return result.bytes; });
+let finishPrivacyTrace;
 const selector = id => `[data-testid="${id}"]`;
 const exists = id => execute("return !!document.querySelector(arguments[0]);", [selector(id)]);
 async function element(id) {
@@ -334,6 +335,7 @@ try {
   // Real native controls + production IPC + the actual CLI. Browser-mocked
   // privacy.spec.ts is not accepted as evidence for these runtime scenarios.
   await privacySettings();
+  finishPrivacyTrace = await startPrivacyDialogTrace(coreContext);
   assert.equal((await privacyPolicy()).invisible, false);
   await openDialog("invisible-switch");
   await until("invisible cancel default focus", () => execute("return document.activeElement?.getAttribute('data-testid')==='invisible-cancel';"));
@@ -346,6 +348,8 @@ try {
   assert.ok((await observe("list_accounts")).some(a => a.account_id === account), "passive roster remains available");
   const privacyPresentation = await settledPrivacyMode(coreContext);
   await passed("privacy-mode", { ...privacyPresentation, cancelledBeforeCommit: true, durable: await privacyPolicy(), passivePeerRetained: true });
+  report.privacyDialogTrace = await finishPrivacyTrace();
+  finishPrivacyTrace = undefined;
   await openDialog("manage-privacy");
   await settledDialog("privacy-dialog");
   await fill("privacy-search", peerName);
@@ -512,6 +516,7 @@ try {
 } catch (error) {
   report.failure = redact(error.stack ?? error);
   if (error.captureDiagnostics) report.captureDiagnostics = error.captureDiagnostics;
+  try { if (finishPrivacyTrace) report.privacyDialogTrace = await finishPrivacyTrace(); } catch { /* Preserve the original native failure. */ }
   console.error(redact(error.message));
   process.exitCode = 1;
   try {
