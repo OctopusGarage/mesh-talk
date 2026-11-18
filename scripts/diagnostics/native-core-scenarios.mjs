@@ -408,6 +408,12 @@ export async function settledIncomingAttachment(c, fileConv, fileName, backendRe
   });
 }
 
+/** Cancellation is complete after the old focus scope returns to its trigger. */
+export async function settledPrivacyCancellation(c) {
+  await c.until("invisible cancellation restores its trigger", () => c.execute("return !document.querySelector('[data-testid=invisible-confirm]') && document.activeElement?.getAttribute('data-testid')==='invisible-switch';"));
+  return { confirmationDismissed: true, triggerFocusRestored: true };
+}
+
 export async function settledPrivacyMode(c) {
   await c.until("invisible confirmation fully dismissed", () => c.execute("return !document.querySelector('[data-testid=invisible-confirm]');"));
   await c.settledDialog("settings-dialog");

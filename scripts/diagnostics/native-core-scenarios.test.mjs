@@ -588,3 +588,24 @@ test("attachment failure snapshot uses read-only IPC and excludes message bodies
   const pending = await attachmentFailureContext({ ...c, peer: { output: "file sent to recipient\n" } }, { senderDevice: "sender", fileName: "attachment.txt", outputOffset: 23 });
   assert.equal(pending.send.accepted, false, "stale CLI output cannot qualify this send");
 });
+
+
+test("privacy cancellation waits for returned trigger focus before reopening", async () => {
+  const { settledPrivacyCancellation } = await import("./native-core-scenarios.mjs");
+  let phase = 0;
+  const c = {
+    execute: async (script) => Function("document", script)({
+      querySelector: () => phase === 0 ? {} : null,
+      activeElement: { getAttribute: () => phase === 1 ? "elsewhere" : "invisible-switch" },
+    }),
+    until: async (_label, poll) => {
+      assert.equal(await poll(), false, "mounted confirmation is pending");
+      phase = 1;
+      assert.equal(await poll(), false, "removed content is not yet returned focus");
+      phase = 2;
+      assert.equal(await poll(), true);
+    },
+  };
+  assert.deepEqual(await settledPrivacyCancellation(c), { confirmationDismissed: true, triggerFocusRestored: true });
+  await assert.rejects(settledPrivacyCancellation({ execute: async () => false, until: async (_label, poll) => { assert.equal(await poll(), false); throw new Error("trigger focus never returned"); } }), /trigger focus never returned/);
+});

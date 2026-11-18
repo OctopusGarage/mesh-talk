@@ -126,11 +126,13 @@ export function useAttachmentIntake(
       return outcome === "accepted";
     }
     const sendFile = useChat.getState().sendFile;
-    if (localPreview)
-      await sendFile(path, media, policy.expiresAtSend?.(), localPreview);
-    else if (policy.expiresAtSend)
-      await sendFile(path, media, policy.expiresAtSend());
-    else await sendFile(path, media);
+    const sending = localPreview
+      ? sendFile(path, media, policy.expiresAtSend?.(), localPreview)
+      : policy.expiresAtSend
+        ? sendFile(path, media, policy.expiresAtSend())
+        : sendFile(path, media);
+    localPreview = undefined;
+    await sending;
     if (current()) policy.onHandoff?.();
     return true;
   }
@@ -163,14 +165,16 @@ export function useAttachmentIntake(
         : ext.toLowerCase() === "jpg" || ext.toLowerCase() === "jpeg"
           ? "image/jpeg"
           : `image/${ext.toLowerCase()}`;
-      const localPreview =
+      let localPreview =
         !policy.protection &&
         image &&
         bytes.byteLength <= 3 * 1024 ** 2 &&
         canPreviewStaticImage(bytes, previewMime)
           ? new Blob([new Uint8Array(bytes)], { type: previewMime })
           : undefined;
-      return await handoff(path, media, current, policy, localPreview);
+      const sending = handoff(path, media, current, policy, localPreview);
+      localPreview = undefined;
+      return await sending;
     } catch (error) {
       // Refused before intent transfer: staging still owns this temporary source.
       await chat.deleteTempFile(path).catch(() => {});

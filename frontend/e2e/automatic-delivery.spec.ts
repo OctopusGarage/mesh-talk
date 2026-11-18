@@ -946,9 +946,10 @@ test("typed channel File stays pending until canonical metadata commits and orig
     .getByTestId("message-bubble")
     .filter({ hasText: "account-group-upload.bin" });
   await expect(bubble).toHaveCount(1);
-  await expect(
-    bubble.getByText("File details pending", { exact: true }),
-  ).toBeVisible();
+  const preparation = bubble.getByRole("progressbar", { name: /Preparing/ });
+  await expect(preparation).toBeVisible();
+  await expect(preparation).not.toHaveAttribute("aria-valuenow", /.+/);
+  await expect(bubble.getByText("0 B", { exact: true })).toHaveCount(0);
   await expect(
     page.getByText(
       "The result is unconfirmed. Check this operation before retrying.",
@@ -963,9 +964,7 @@ test("typed channel File stays pending until canonical metadata commits and orig
       window as unknown as { __mockReleaseDeferred(): void }
     ).__mockReleaseDeferred(),
   );
-  await expect(
-    bubble.getByText("File details pending", { exact: true }),
-  ).toHaveCount(0);
+  await expect(preparation).toHaveCount(0);
   await expect(bubble.getByText("123 B", { exact: true })).toBeVisible();
   const result = await page.evaluate(async () => {
     const host = window as unknown as {

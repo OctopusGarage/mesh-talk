@@ -88,7 +88,7 @@ test("capability pilots link maintained domain and architecture rules", () => {
   );
 });
 
-test("outgoing capability selects tests for acceptance projection and retired frontend owners", () => {
+test("outgoing capability selects acceptance, owner retirement and pixel-budget tests", () => {
   const plan = select(
     "frontend/src/store/outgoingIntent.ts",
     "frontend-outgoing",
@@ -120,8 +120,8 @@ test("outgoing capability selects tests for acceptance projection and retired fr
     [
       "Outgoing static previews inspect bounded PNG/JPEG headers before creating a decoder; oversized or unknown geometry retains preparation without changing the send.",
       {
-        path: "src/lib/imageDimensions.test.ts",
-        title: "admits static PNG headers only within the native decoded-pixel ceiling",
+        path: "src/features/chat/attachments/conversationIntake.test.ts",
+        title: "sends oversized-pixel images without creating an optimistic original decode",
       },
     ],
   ]);
@@ -139,6 +139,8 @@ test("outgoing capability selects tests for acceptance projection and retired fr
       `Missing executable outgoing obligation: ${title}`,
     );
   }
+  assert.ok(plan.frontend.includes("src/lib/imageDimensions.test.ts"),
+    "header format and decoded-pixel boundary controls remain selected");
   assert.ok(
     plan.frontend.includes("src/store/chat.test.ts"),
     "chat composition remains a declared consumer",

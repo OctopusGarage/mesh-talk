@@ -2032,6 +2032,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       },
       { localPreview },
     );
+    localPreview = undefined;
     if (sending) await sending;
   },
 

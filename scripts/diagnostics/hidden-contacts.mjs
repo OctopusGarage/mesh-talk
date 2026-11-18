@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { verifyNativeBuild } from "../validation/native-build.mjs";
 import { captureNativeEvidence, captureNativeFailure, collectNativeApplicationLogs, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
-import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, cliListenerEndpoint, receiptPeerEndpointContext, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode } from "./native-core-scenarios.mjs";
+import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, cliListenerEndpoint, receiptPeerEndpointContext, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode, settledPrivacyCancellation } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -338,7 +338,7 @@ try {
   await openDialog("invisible-switch");
   await until("invisible cancel default focus", () => execute("return document.activeElement?.getAttribute('data-testid')==='invisible-cancel';"));
   await key("\uE007");
-  await until("invisible cancellation dismissed", async () => !await exists("invisible-confirm"));
+  await settledPrivacyCancellation(coreContext);
   assert.equal((await privacyPolicy()).invisible, false);
   await openDialog("invisible-switch");
   await click("invisible-confirm");
