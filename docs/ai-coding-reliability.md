@@ -1893,7 +1893,10 @@ Native key injection needs an observed matching press and release before another
 key-dependent action. A helper exit or rendered frame does not establish release;
 focus may move to `BODY` when the activated control unmounts. Validate the owned
 application and its focused client before using global input on an isolated test
-display. Verify the normalized client without assigning raw focus to that
+display. Visible PID matches include unmanaged tooltip windows; select the unique
+visible, PID-owned client from the bounded window-manager client list, and require
+its active and normalized focus IDs to agree. Missing, malformed, over-budget or
+ambiguous ownership must reject input rather than fall back to enumeration order. Verify the normalized client without assigning raw focus to that
 client: GTK may own keyboard focus through its input-only child. A foreground
 check must not overwrite that widget focus, and foreign focus must reject input.
 Keep both edges on the same input path: an explicit X11 target can change

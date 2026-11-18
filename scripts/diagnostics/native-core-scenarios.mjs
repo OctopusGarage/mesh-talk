@@ -85,16 +85,56 @@ export function nativeControlKeyName(value) {
 
 // The Linux fixture runs on its own X11 display. Verify the normalized client
 // window immediately before a fresh xdotool invocation with an empty window stack.
-// Preserve GTK's raw child focus; foreground verification must not reassign it.
+// Intersect visible PID matches with the managed clients: GTK tooltips share the
+// PID but are not the main window. Preserve GTK's raw child focus.
 const linuxKeyScript = `
 pid=$1
 symbol=$2
-windows=$(xdotool search --onlyvisible --pid "$pid")
-window=$(printf '%s\n' "$windows" | head -n 1)
-case "$window" in ''|*[!0-9]*) echo 'Missing owned X11 window' >&2; exit 1;; esac
-if ! kill -0 "$pid" || [ "$(xdotool getwindowpid "$window")" != "$pid" ] || [ "$(xdotool getwindowfocus)" != "$window" ]; then
-  echo 'Owned application does not own X11 input focus' >&2
-  exit 1
+set -f
+validate_x11_ids() {
+  ids_seen=' '
+  ids_count=0
+  for id in $1; do
+    case "$id" in ''|0*|*[!0-9]*|???????????*) return 1;; esac
+    [ "$id" -le 4294967295 ] || return 1
+    case "$ids_seen" in *" $id "*) return 1;; esac
+    ids_seen="$ids_seen$id "
+    ids_count=$((ids_count + 1))
+    [ "$ids_count" -le "$2" ] || return 1
+  done
+}
+windows=$(xdotool search --onlyvisible --pid "$pid" --limit 33)
+if ! validate_x11_ids "$windows" 32; then
+  echo 'Malformed or over-budget X11 visible window list' >&2; exit 1
+fi
+# Format-32 values occupy native longs in xprop; 136 bytes observes 17 on LP64.
+property=$(xprop -root -len 136 -notype -f _NET_CLIENT_LIST 32c '=$0+\\n' _NET_CLIENT_LIST)
+case "$property" in _NET_CLIENT_LIST=*) ;; *) echo 'Missing X11 managed client list' >&2; exit 1;; esac
+managed=$(printf '%s\\n' "$property" | cut -d= -f2- | tr ',' ' ')
+if ! validate_x11_ids "$managed" 16; then
+  echo 'Malformed or over-budget X11 managed client list' >&2; exit 1
+fi
+window=''
+for candidate in $managed; do
+  visible=false
+  for shown in $windows; do
+    if [ "$shown" = "$candidate" ]; then visible=true; fi
+  done
+  if [ "$visible" = true ] && [ "$(xdotool getwindowpid "$candidate" 2>/dev/null)" = "$pid" ]; then
+    if [ -n "$window" ]; then echo 'Ambiguous owned X11 managed windows' >&2; exit 1; fi
+    window=$candidate
+  fi
+done
+if [ -z "$window" ]; then echo 'Missing owned X11 managed main window' >&2; exit 1; fi
+if ! kill -0 "$pid" 2>/dev/null; then echo 'Owned X11 process is not live' >&2; exit 1; fi
+if [ "$(xdotool getwindowpid "$window")" != "$pid" ]; then
+  echo 'Owned X11 main window PID changed' >&2; exit 1
+fi
+if [ "$(xdotool getactivewindow)" != "$window" ]; then
+  echo 'Owned X11 main window is not active' >&2; exit 1
+fi
+if [ "$(xdotool getwindowfocus)" != "$window" ]; then
+  echo 'Owned X11 main window lacks keyboard focus' >&2; exit 1
 fi
 exec xdotool key --clearmodifiers "$symbol"`;
 

@@ -70,34 +70,81 @@ test("a failed or replaced Linux key observer releases only its own listeners", 
   assert.equal(listeners.size, 0);
 });
 
-test("Linux X11 input preserves owned widget focus and rejects foreign focus before a fresh key", { skip: process.platform === "win32" }, async () => {
+test("Linux X11 input selects the unique managed main window despite visible tooltips", { skip: process.platform === "win32" }, async () => {
   const { sendNativeLinuxKey } = await import("./native-core-scenarios.mjs");
-  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { mkdtemp, mkdir, writeFile, readFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { execFileSync } = await import("node:child_process");
   const dir = await mkdtemp(join(tmpdir(), "mesh-fixture-x11-"));
   try {
+    const numericCwd = join(dir, "numeric-cwd");
+    await mkdir(numericCwd);
+    await writeFile(join(numericCwd, "17"), "");
     const lines = [
       "#!/bin/sh", 'case "$1" in',
-      'search) [ "$*" = "search --onlyvisible --pid $OWNED_PID" ] && echo 17;;',
+      'search) [ "$*" = "search --onlyvisible --pid $OWNED_PID --limit 33" ] || exit 1; printf "%s\\n" "$VISIBLE_WINDOWS";;',
       'windowfocus|windowactivate) echo "Unexpected focus mutation" >&2; exit 1;;',
-      'getwindowpid) [ "$2" = 17 ] && echo "$CLIENT_PID";;',
+      'getwindowpid) case "$2" in 17) echo "$CLIENT_PID";; 29) echo "$OWNED_PID";; *) echo "$FOREIGN_PID";; esac;;',
       'getwindowfocus) echo "$FOCUSED_WINDOW";;',
-      'key) echo "$*";;',
+      'getactivewindow) echo "$ACTIVE_WINDOW";;',
+      'key) printf "key\\n" >> "$KEY_MARKER"; echo "$*";;',
       '*) exit 1;;', 'esac',
     ];
     await writeFile(join(dir, "xdotool"), lines.join("\n") + "\n", { mode: 0o755 });
-    for (const [focus, pid, admitted] of [["17", process.pid, true], ["19", process.pid, false], ["17", process.pid + 1, false]]) {
+    // xprop advances format-32 data by native long size, not wire CARD32 size.
+    // The actual LP64 probe returned only 9 IDs for -len 68 and all 17 for 136.
+    await writeFile(join(dir, "xprop"), String.raw`#!/bin/sh
+[ "$#" -eq 9 ] || exit 1
+[ "$1" = -root ] && [ "$2" = -len ] && [ "$3" -gt 0 ] && [ "$3" -le 256 ] && [ "$4" = -notype ] && [ "$5" = -f ] && [ "$6" = _NET_CLIENT_LIST ] && [ "$7" = 32c ] && [ "$9" = _NET_CLIENT_LIST ] || exit 1
+printf '%s\n' "$MANAGED_LINE" | awk -v bytes="$3" '
+  { eq=index($0,"="); if (!eq) { print; next }
+    printf "%s", substr($0,1,eq); count=split(substr($0,eq+1),ids,","); cap=int((bytes+7)/8);
+    for (i=1;i<=count && i<=cap;i++) { if(i>1)printf ","; printf "%s",ids[i] }
+    printf "\n"
+  }'
+`, { mode: 0o755 });
+    const owner = process.pid;
+    const cases = [
+      ["tooltip first", "29\n17", "17", "17", "17", owner, true],
+      ["main first", "17\n29", "17", "17", "17", owner, true],
+      ["foreign managed client", "29\n17", "19, 17", "17", "17", owner, true],
+      ["main last in full managed budget", "29\n17", [...Array.from({ length: 15 }, (_, i) => i + 1000), 17].join(", "), "17", "17", owner, true],
+      ["conflicting owner beyond short read", "29\n17", [17, ...Array.from({ length: 15 }, (_, i) => i + 1000), 29].join(", "), "17", "17", owner, false],
+      ["foreign keyboard focus", "29\n17", "17", "19", "17", owner, false],
+      ["foreign active client", "29\n17", "17", "17", "19", owner, false],
+      ["wrong process", "29\n17", "17", "17", "17", owner + 1, false],
+      ["unmanaged tooltip only", "29", "17", "29", "17", owner, false],
+      ["ambiguous managed windows", "29\n17", "17, 29", "17", "17", owner, false],
+      ["missing managed clients", "29\n17", "", "17", "17", owner, false],
+      ["malformed managed clients", "29\n17", "17, not-a-window", "17", "17", owner, false],
+      ["managed wildcard is not a filename", "17", "*", "17", "17", owner, false],
+      ["visible wildcard is not a filename", "*", "17", "17", "17", owner, false],
+      ["malformed visible window", "17\nnot-a-window", "17", "17", "17", owner, false],
+      ["missing property", "17", "[missing]", "17", "17", owner, false],
+      ["duplicate managed clients", "29\n17", "17, 17", "17", "17", owner, false],
+      ["duplicate visible IDs", "17\n17", "17", "17", "17", owner, false],
+      ["too many managed clients", "29\n17", Array.from({ length: 17 }, (_, i) => i + 17).join(", "), "17", "17", owner, false],
+      ["too many visible windows", Array.from({ length: 33 }, (_, i) => i + 17).join("\n"), "17", "17", "17", owner, false],
+      ["non-window ID", "29\n17", "0", "17", "17", owner, false],
+      ["out-of-range window ID", "29\n17", "4294967296", "17", "17", owner, false],
+    ];
+    for (const [name, visible, managed, focus, active, pid, admitted] of cases) {
+      const marker = join(dir, `key-${cases.findIndex(c => c[0] === name)}`);
       const { c, edge } = linuxKeyFixture();
       const dispatch = sendNativeLinuxKey({ ...c, input: (bin, args) => {
-        const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, FOCUSED_WINDOW: focus, CLIENT_PID: String(pid), OWNED_PID: String(process.pid) };
-        const output = execFileSync(bin, args, { encoding: "utf8", stdio: "pipe", env });
+        const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, VISIBLE_WINDOWS: visible, MANAGED_LINE: managed === "[missing]" ? "_NET_CLIENT_LIST: no such atom" : `_NET_CLIENT_LIST=${managed}`, FOCUSED_WINDOW: focus, ACTIVE_WINDOW: active, CLIENT_PID: String(pid), OWNED_PID: String(owner), FOREIGN_PID: String(owner + 1), KEY_MARKER: marker };
+        const output = execFileSync(bin, args, { encoding: "utf8", stdio: "pipe", env, cwd: numericCwd });
         assert.equal(output.trim(), "key --clearmodifiers Return");
         edge("keydown"); edge("keyup");
-      } }, process.pid, "Enter");
-      if (admitted) await dispatch;
-      else await assert.rejects(dispatch, /does not own X11 input focus/);
+      } }, owner, "Enter");
+      if (admitted) {
+        await dispatch;
+        assert.equal(await readFile(marker, "utf8"), "key\n", name);
+      } else {
+        await assert.rejects(dispatch, /X11/, name);
+        await assert.rejects(readFile(marker), { code: "ENOENT" }, `${name} must not send any key`);
+      }
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
