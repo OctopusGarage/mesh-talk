@@ -21,6 +21,7 @@ function archiveUri(uri) {
   }
   const paths = {
     "azure.archive.ubuntu.com": "ubuntu",
+    "us-east-2.ec2.archive.ubuntu.com": "ubuntu",
     "archive.ubuntu.com": "ubuntu",
     "security.ubuntu.com": "ubuntu",
     "ports.ubuntu.com": "ubuntu-ports",

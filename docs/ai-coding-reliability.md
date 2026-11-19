@@ -2005,8 +2005,11 @@ cached indexes. Release preparation must reuse the
 [hosted Ubuntu source owner](../scripts/ci/ubuntu-apt-source.mjs), reject any index
 refresh error before installing dependencies, and preserve repository signing and
 architecture. Any download-mirror change belongs in that owner, with exact origin
-validation and separate normal/ports paths; it must not replace Ubuntu's signing
-authority or disable freshness checks. The [release workflow regression](../scripts/diagnostics/release-workflow.test.mjs)
+validation and separate normal/ports paths. Include each exact hosted origin
+observed in installation evidence (including regional EC2 sources), and exercise
+direct sources and referenced mirror lists with lookalike-host negative controls;
+a successful no-op preparation does not prove a source was covered. It must not
+replace Ubuntu's signing authority or disable freshness checks. The [release workflow regression](../scripts/diagnostics/release-workflow.test.mjs)
 executes its shell boundaries with preparation/index failures and proves that
 installation does not follow. Fixture success does not establish runner DNS or
 signed hosted release acceptance.
