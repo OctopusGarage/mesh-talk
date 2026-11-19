@@ -356,9 +356,6 @@ mod tests {
             .unwrap()[&info.account_id]["online"],
             true
         );
-        rescan_peers(app.state::<AppState>(), state.clone())
-            .await
-            .unwrap();
 
         let (remote_id, remote_account, remote_port) = remote_host
             .start(
@@ -426,6 +423,60 @@ mod tests {
             .unwrap()[&remote_account]["online"],
             true
         );
+
+        // Qualify explicit probes before triggering ambient scans or unrelated
+        // channel publication; their original send and peer budgets remain unchanged.
+        for host in ["", "example.com/path", "host name", "127.0.0.1:47474"] {
+            assert!(
+                probe_peer_endpoint(app.state::<AppState>(), state.clone(), host.into(), None)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            probe_peer_endpoint(
+                app.state::<AppState>(),
+                state.clone(),
+                "127.0.0.1".into(),
+                Some(0)
+            )
+            .await
+            .is_err()
+        );
+        // IPC success promises a queued query, not a reply from an arbitrary
+        // service. Own its endpoint and observe the actual wire command.
+        let witness = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_port = witness.local_addr().unwrap().port();
+        let probe_app = app.handle().clone();
+        let observer = host.observer;
+        host.handle
+            .spawn(async move {
+                assert_ne!(std::thread::current().id(), observer);
+                probe_peer_endpoint(
+                    probe_app.state::<AppState>(),
+                    probe_app.state::<NodeState>(),
+                    " 127.0.0.1 ".into(),
+                    Some(target_port),
+                )
+                .await
+            })
+            .await
+            .unwrap()
+            .expect("manual IPC must send to its owned loopback witness");
+        let mut packet = [0u8; 65];
+        let (length, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            witness.recv_from(&mut packet),
+        )
+        .await
+        .expect("owned IPC query must reach its requested endpoint")
+        .unwrap();
+        assert_eq!(length, 64);
+        assert!(mesh_talk_core::discovery::query::decode_query(&packet[..length]).is_some());
+
+        rescan_peers(app.state::<AppState>(), state.clone())
+            .await
+            .unwrap();
 
         let node = managed.0.write().await.as_ref().unwrap().handle();
         let public = managed
@@ -584,54 +635,6 @@ mod tests {
             changed.get("groups").is_some(),
             "profile changes invalidate the group projection hint"
         );
-
-        for host in ["", "example.com/path", "host name", "127.0.0.1:47474"] {
-            assert!(
-                probe_peer_endpoint(app.state::<AppState>(), state.clone(), host.into(), None)
-                    .await
-                    .is_err()
-            );
-        }
-        assert!(
-            probe_peer_endpoint(
-                app.state::<AppState>(),
-                state.clone(),
-                "127.0.0.1".into(),
-                Some(0)
-            )
-            .await
-            .is_err()
-        );
-        // IPC success promises a queued query, not a reply from an arbitrary
-        // service. Own its endpoint and observe the actual wire command.
-        let witness = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let target_port = witness.local_addr().unwrap().port();
-        let probe_app = app.handle().clone();
-        let observer = host.observer;
-        host.handle
-            .spawn(async move {
-                assert_ne!(std::thread::current().id(), observer);
-                probe_peer_endpoint(
-                    probe_app.state::<AppState>(),
-                    probe_app.state::<NodeState>(),
-                    " 127.0.0.1 ".into(),
-                    Some(target_port),
-                )
-                .await
-            })
-            .await
-            .unwrap()
-            .expect("manual IPC must send to its owned loopback witness");
-        let mut packet = [0u8; 65];
-        let (length, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            witness.recv_from(&mut packet),
-        )
-        .await
-        .expect("owned IPC query must reach its requested endpoint")
-        .unwrap();
-        assert_eq!(length, 64);
-        assert!(mesh_talk_core::discovery::query::decode_query(&packet[..length]).is_some());
 
         // A valid input still preserves the specific Core disclosure denial.
         // An unrelated socket timeout must not satisfy this error control.
