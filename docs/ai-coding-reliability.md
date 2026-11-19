@@ -194,7 +194,11 @@ is exercised by the real maintenance-hold Noise regression in
 alongside stalled-handshake retirement and the single-worker negative control.
 Custom protocol and failed-initial-custody recovery fixtures must retain that
 same independent host and retirement owner, including separate reactors for both
-full-host participants and the synchronous history observer. The single-participant
+full-host participants and the synchronous history observer. Desktop diagnostics likewise
+keep caller-thread inventory observations on the observer while each actual
+participant and its network commands retain their own two-worker reactor.
+Keep real probes, original deadlines and actual shutdown/join evidence; this
+qualifies execution ownership without identifying every historical OS send stall. The single-participant
 connection-limit/retirement fixture likewise uses the production two-worker host;
 retain its seven-slot saturation, original admission/retirement bounds and actual
 socket closure checks, alongside the held-worker positive and single-thread
@@ -280,6 +284,12 @@ exclusive-open failures fatal rather than retrying around a live owner. The
 [cached-route restart fixture](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
 awaits both original runtimes before asserting that an offline cached route is
 not fresh presence; retirement's held-writer controls retain lease exclusion.
+Direct Node fixtures must also close work admission, join their accept owners,
+drain actual admitted children/blocking captures, and consume `close_profile`
+before reopening storage. Aborting and joining only the accept-loop parent does
+not certify that its children released the profile. The
+[retired-metadata recovery fixture](../crates/mesh-talk-core/src/node/unrestricted_messages_tests.rs)
+retains durable history/search/backup assertions across that exact boundary.
 
 A UI read watchdog retires observation, not the native operation. Coalesce a
 same-owner/query refresh against the original promise until settlement, retaining
@@ -2455,7 +2465,12 @@ qualify separate setup and admitted repair cancellation: setup cannot consume th
 progress budget, and that budget must still cancel actual owned work.
 
 A storage fault fixture must fail the currently selected persistence owner and
-observe that failure before asserting recovery. A hook on a neighboring journal
+observe that failure before asserting recovery. An unchanged cached proof is a
+valid no-write result, so a disk fault must precede a genuinely new certified
+identity or changed commit. The real UDP/cache fixture in
+[desktop peer queries](../src-tauri/src/chat_commands/account.rs) warms the old
+proof, preserves its no-write result, then injects a new signed proof and verifies
+its exact identity after storage recovery. A hook on a neighboring journal
 cannot certify the actual commit failed merely because both use the same logger.
 
 A bounded positive observer may keep waiting on the owning API's explicit pending

@@ -474,6 +474,7 @@
     {
       "id": "core-startup-identity",
       "paths": [
+        "crates/mesh-talk-core/src/node/unrestricted_messages_tests.rs",
         "crates/mesh-talk-core/src/node/participant_runtime.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/runtime_startup.rs",
@@ -492,6 +493,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "node::unrestricted_messages_tests::",
             "node::participant_runtime_tests::routed_inventory_",
             "shared_local_repair_actual_owners",
             "startup_identity_precedes_blocked_durable_store_and_matches_runtime",

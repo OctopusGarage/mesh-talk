@@ -235,6 +235,7 @@
     {
       "id": "desktop-discovery-origin",
       "paths": [
+        "src-tauri/src/chat_commands/diagnostics.rs",
         "src-tauri/src/chat_commands/account.rs",
         "src-tauri/src/chat_commands/presence.rs",
         "src-tauri/src/owner_commands.rs",
@@ -250,7 +251,14 @@
             "owner_commands::tests::registered_roster_",
             "owner_commands::tests::registered_conditional_presence_returns_unchanged_only_for_applied_revision",
             "settings::tests::",
-            "chat_commands::diagnostics::tests::diagnostics_expose_a_live_runtime_and_reject_invalid_manual_targets"
+            "chat_commands::diagnostics::tests::"
+          ]
+        },
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
+            "current_thread_peer_runtime_cannot_authenticate_while_its_worker_is_held"
           ]
         }
       ],
@@ -273,7 +281,7 @@
         ]
       },
       "escalation": [
-        "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment."
+        "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment. Real cache error controls must introduce a new certified proof after the storage fault, preserve unchanged-proof no-write success and verify exact recovered identity. Diagnostics fixtures retain independent participant reactors and caller-thread inventory assertions, original probe deadlines and actual stop/join cleanup."
       ],
       "consumers": ["frontend-discovery-origin"]
     },
