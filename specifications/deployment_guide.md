@@ -303,7 +303,7 @@ After `make dev`, run this from the repository root when installing locally
 without Developer ID credentials:
 
 ```bash
-python3 scripts/build-retention.py run --archive bundle -- node frontend/node_modules/@tauri-apps/cli/tauri.js build \
+python3 scripts/build-retention.py run -- node frontend/node_modules/@tauri-apps/cli/tauri.js build \
   --config '{"bundle":{"macOS":{"signingIdentity":"-","entitlements":null,"hardenedRuntime":false}}}'
 ```
 
