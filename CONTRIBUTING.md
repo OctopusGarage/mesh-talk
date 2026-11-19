@@ -16,6 +16,9 @@ in the PR rather than maintaining separate copies of product facts.
 
 ## Development setup
 
+Install the [source build prerequisites](specifications/deployment_guide.md#prerequisites)
+first, including Python 3.11+ and Node.js 22.12+.
+
 ```bash
 git clone https://github.com/OctopusGarage/mesh-talk.git
 cd mesh-talk

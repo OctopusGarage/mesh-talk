@@ -454,6 +454,12 @@ impl SessionPool {
         key: PeerEndpointKey,
         priority: AuthenticationPriority,
     ) -> Result<AuthenticationLease, TransportError> {
+        // This gate waits for an authentication owner, not merely a TCP
+        // permit. That owner can spend the outbound admission budget followed
+        // by a valid slow Noise handshake. Keep the wait bounded by those
+        // stages; the enclosing caller deadline still cancels it earlier.
+        let admission_wait =
+            CAPACITY_WAIT + self.authentication_timeout(&key.identity, key.address);
         let gate = {
             let mut gates = self.authentication_gates.lock().unwrap();
             gates.retain(|(_, gate)| gate.strong_count() > 0);
@@ -488,7 +494,7 @@ impl SessionPool {
             ticket,
             queued: true,
         };
-        tokio::time::timeout(CAPACITY_WAIT, waiter.wait())
+        tokio::time::timeout(admission_wait, waiter.wait())
             .await
             .map_err(|_| TransportError::Noise("peer authentication capacity busy".into()))
     }
@@ -1869,6 +1875,36 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn authentication_waiter_survives_valid_slow_owner_without_consuming_tcp() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let owner = pool.authentication_admission(key.clone()).await.unwrap();
+        let waiter = pool.authentication_admission(key.clone());
+        tokio::pin!(waiter);
+        tokio::select! {
+            result = &mut waiter => panic!("valid owner must retain queued competitor: {}", result.is_ok()),
+            _ = tokio::time::sleep(Duration::from_millis(2100)) => {}
+        }
+        assert!(
+            pool.authentication_gates.lock().unwrap()[0]
+                .1
+                .upgrade()
+                .unwrap()
+                .state
+                .lock()
+                .unwrap()
+                .active
+        );
+        assert_eq!(pool.outbound.available_permits(), MAX_DIRECTION_CONNECTIONS);
+        drop(owner);
+        let successor = waiter
+            .await
+            .expect("valid slow authentication must hand off admission");
+        drop(successor);
+        assert!(pool.authentication_admission(key).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn authentication_gates_scope_both_identity_keys_endpoint_and_generation() {
         let pool = SessionPool::default();
         let key = authentication_key(1);
@@ -1886,9 +1922,15 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let started = tokio::time::Instant::now();
         assert!(
             pool.authentication_admission(key.clone()).await.is_err(),
             "a duplicate waits for bounded admission without another owner"
+        );
+        assert_eq!(
+            started.elapsed(),
+            CAPACITY_WAIT + pool.authentication_timeout(&key.identity, key.address),
+            "a stalled owner cannot retain a waiter beyond one bounded admission/authentication budget"
         );
         assert_eq!(pool.outbound.available_permits(), MAX_DIRECTION_CONNECTIONS);
         drop(owner);

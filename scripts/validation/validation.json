@@ -288,6 +288,10 @@
         "guide": "docs/testing-feedback-loop.md#completion-and-retirement-evidence",
         "invariants": [
           {
+            "name": "Documented source setup fetches locked dependencies without compiling ungenerated frontend resources; desktop development and packaging use the installed local Tauri CLI without relying on an ambient Cargo subcommand.",
+            "reference": "specifications/deployment_guide.md#gui-version-deployment"
+          },
+          {
             "name": "Preserve command status only after verified owned-scope retirement; persist lease retirement requirements before detached admission, and never recover unknown ownership from PID death alone. Cancellation and unverifiable cleanup cannot admit later work or create successful reusable evidence.",
             "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
           },
@@ -586,6 +590,8 @@
         "scripts/evals/browser-report.mjs",
         "scripts/evals/portable-runner.mjs",
         "scripts/diagnostics/browser-eval-report.test.mjs",
+        "scripts/ci/ui-runner.mjs",
+        "scripts/diagnostics/ui-runner.test.mjs",
         "scripts/evals/chromium-evidence.mjs",
         "scripts/diagnostics/chromium-evidence.test.mjs",
         "frontend/e2e/helpers/portable-evidence.ts",
@@ -594,6 +600,7 @@
         "scripts/diagnostics/playwright-artifacts.test.mjs"
       ],
       "node": [
+        "scripts/diagnostics/ui-runner.test.mjs",
         "scripts/diagnostics/browser-eval-report.test.mjs",
         "scripts/diagnostics/chromium-evidence.test.mjs",
         "scripts/diagnostics/trace-evidence.test.mjs",

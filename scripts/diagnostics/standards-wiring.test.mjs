@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   copyFileSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -69,21 +70,98 @@ test(
   },
 );
 
+test(
+  "documented source setup and desktop startup work without prebuilt UI assets or a global Tauri CLI",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const root = fixture(t);
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    mkdirSync(join(root, "frontend/node_modules/@tauri-apps/cli"), {
+      recursive: true,
+    });
+    copyFileSync(resolve("Makefile"), join(root, "Makefile"));
+    const log = join(root, "commands.jsonl");
+    for (const [tool, source] of [
+      [
+        "cargo",
+      '#!/bin/sh\n[ "$*" = "fetch --locked --target fixture-native-host" ] || { echo "setup must fetch only native locked dependencies without compiling the unbuilt desktop or requiring cargo-tauri" >&2; exit 41; }\n',
+      ],
+      ["npm", '#!/bin/sh\n[ "$1" = ci ] || exit 42\n'],
+    ["rustc", '#!/bin/sh\nprintf "host: fixture-native-host\\n"\n'],
+    ]) {
+      writeFileSync(join(bin, tool), source);
+      chmodSync(join(bin, tool), 0o755);
+    }
+    for (const file of ["setup-hooks.sh", "install-auto-clean-macos.sh"]) {
+      writeFileSync(join(root, "scripts", file), "#!/bin/sh\nexit 0\n");
+      chmodSync(join(root, "scripts", file), 0o755);
+    }
+    writeFileSync(
+      join(root, "frontend/node_modules/@tauri-apps/cli/tauri.js"),
+      'require("node:fs").appendFileSync(process.env.MESH_DEV_COMMAND_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");\n',
+    );
+    writeFileSync(
+      join(root, "scripts/build-retention.py"),
+      'import subprocess, sys\nsys.exit(subprocess.call(sys.argv[sys.argv.index("--") + 1:]))\n',
+    );
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      MESH_DEV_COMMAND_LOG: log,
+    };
+    for (const target of ["dev", "tauri-dev", "tauri-build"]) {
+      const run = spawnSync("make", [target, "MANAGED_BUILD="], {
+        cwd: root,
+        env,
+        encoding: "utf8",
+      });
+      assert.equal(run.status, 0, `${target}: ${run.stdout}\n${run.stderr}`);
+    }
+    assert.deepEqual(
+      readFileSync(log, "utf8").trim().split("\n").map(JSON.parse),
+      [["dev"], ["build"]],
+    );
+  },
+);
+
 test("Health Linux owns full-source standards after dependencies", () => {
-  const workflow = readFileSync(resolve(".github/workflows/check-health.yml"), "utf8");
+  const workflow = readFileSync(
+    resolve(".github/workflows/check-health.yml"),
+    "utf8",
+  );
   const platform = workflow.split("  platform:\n")[1].split("  source:\n")[0];
   const steps = platform.split(/^      - /m);
-  const gate = steps.find(value => value.startsWith("name: Check full-source standards and hygiene\n"));
+  const gate = steps.find((value) =>
+    value.startsWith("name: Check full-source standards and hygiene\n"),
+  );
   assert.ok(gate, "full-source standards must have one canonical Health gate");
-  assert.match(gate, /if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(runner\.os == 'Linux'\) \}\}/u);
-  assert.match(gate, /run: \|\n          node scripts\/validation\/standards\.mjs\n          node scripts\/check-repository-hygiene\.mjs/u);
+  assert.match(
+    gate,
+    /if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(runner\.os == 'Linux'\) \}\}/u,
+  );
+  assert.match(
+    gate,
+    /run: \|\n          node scripts\/validation\/standards\.mjs\n          node scripts\/check-repository-hygiene\.mjs/u,
+  );
   assert.match(platform, /node-version: '22'/u);
   assert.match(platform, /shell: bash/u);
-  assert.ok(platform.indexOf("uses: actions/setup-node@") < platform.indexOf("name: Install frontend dependencies"));
-  const install = steps.findIndex(value => value.startsWith("name: Install frontend dependencies\n"));
-  assert.match(steps[install], /working-directory: frontend\n        run: npm ci/u);
+  assert.ok(
+    platform.indexOf("uses: actions/setup-node@") <
+      platform.indexOf("name: Install frontend dependencies"),
+  );
+  const install = steps.findIndex((value) =>
+    value.startsWith("name: Install frontend dependencies\n"),
+  );
+  assert.match(
+    steps[install],
+    /working-directory: frontend\n        run: npm ci/u,
+  );
   assert.equal(steps[install + 1], gate);
-  assert.equal((platform.match(/node scripts\/validation\/standards\.mjs/gu) ?? []).length, 1);
+  assert.equal(
+    (platform.match(/node scripts\/validation\/standards\.mjs/gu) ?? []).length,
+    1,
+  );
 });
 
 test("composition owners retain conservative unit selections and mandatory browser boundaries", async () => {

@@ -108,8 +108,10 @@ The website offers the same choices. Help articles are currently written in Engl
 
 ### Build from source
 
-Install stable Rust, Node.js 22+, and the [Tauri prerequisites](specifications/deployment_guide.md)
-for your platform, then:
+Install stable Rust, Node.js 22.12+ with npm, Python 3.11+, GNU Make, and the
+[Tauri prerequisites](specifications/deployment_guide.md#prerequisites) for your
+platform. On Windows, run the Make commands in Git Bash with Make and Python
+available on `PATH`. Then:
 
 ```bash
 git clone https://github.com/OctopusGarage/mesh-talk.git
@@ -118,7 +120,15 @@ make dev
 make tauri-dev
 ```
 
-`make tauri-build` packages the desktop app. The UI-free Rust core also runs as a
+`make dev` prepares locked Rust and frontend dependencies and configures contributor
+hooks. The Tauri CLI comes from those local dependencies; no global `cargo-tauri`
+installation is needed. `make tauri-dev` runs the development app with hot reload
+and keeps its terminal open; it does not install the app.
+
+To install a source build, run `make tauri-build` instead of `make tauri-dev` and
+open the package under `target/release/bundle/`. On macOS, open the generated DMG
+and drag the app to Applications; use the EXE/MSI on Windows or DEB/RPM/AppImage on
+Linux. The first build can take several minutes. The UI-free Rust core also runs as a
 headless node, with a separate keystore for each instance:
 
 ```bash

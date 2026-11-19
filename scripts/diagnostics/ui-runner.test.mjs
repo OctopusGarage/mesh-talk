@@ -125,3 +125,38 @@ test("a killed POSIX browser cannot borrow stale or mismatched cooperative clean
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test("balanced discovery fails closed and preserves original shard identity without double filtering", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mesh-ui-balanced-"));
+  const previous = process.env.MESH_UI_BALANCED_PARTITION;
+  process.env.MESH_UI_BALANCED_PARTITION = "1";
+  const fixture = { suites: [{ specs: ["a", "b"].map(id => ({ id, file: "fixture.spec.ts", title: id, tests: [{ projectName: "chromium" }] })) }] };
+  try {
+    for (const failure of ["discovery", "selection", null]) {
+      const commands = [];
+      const result = await runUi(["--workers=1", "--retries=0", "--shard=1/2", "--reporter=list"], { directory, deadline: Date.now() + 10000, execute: async (command, { env }) => {
+        commands.push(command);
+        assert.equal(env.MESH_UI_SHARD, "1/2");
+        if (command.includes("--list")) {
+          assert.ok(!command.some(value => value.startsWith("--shard=")));
+          if (failure === "discovery") return { code: 1 };
+          const selected = command.some(value => value.startsWith("--test-list="));
+          const report = structuredClone(fixture);
+          if (selected && failure !== "selection") report.suites[0].specs.pop();
+          await writeFile(env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(report));
+          return { code: 0 };
+        }
+        assert.ok(command.some(value => value.startsWith("--test-list=")));
+        assert.ok(!command.some(value => value.startsWith("--shard=")));
+        assert.ok(command.includes("--workers=1") && command.includes("--retries=0") && command.includes("--reporter=list"));
+        return { code: 0 };
+      } });
+      assert.equal(result.success, failure === null);
+      assert.equal(result.shard, "1/2");
+      assert.equal(commands.length, failure === "discovery" ? 1 : failure === "selection" ? 2 : 3);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.MESH_UI_BALANCED_PARTITION; else process.env.MESH_UI_BALANCED_PARTITION = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
+});

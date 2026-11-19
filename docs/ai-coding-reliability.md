@@ -435,6 +435,16 @@ and [runtime controls](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs
 retain real held connections, pending retries, storage recovery and a fixed repair
 that continuous irrelevant observations cannot postpone.
 
+A serialized admission deadline must cover the work performed by its active
+owner. Reusing a shorter TCP-capacity timeout for an authentication gate can
+repeatedly discard a healthy route just before a valid slow handshake releases
+it. Derive that wait from the route's bounded authentication and TCP-admission
+budgets, retain the caller's outer deadline, and consume no TCP permit while
+queued. The [session pool regression](../crates/mesh-talk-core/src/node/session_pool.rs)
+`authentication_waiter_survives_valid_slow_owner_without_consuming_tcp` holds the
+original owner beyond the generic capacity wait and checks handoff; the same
+module retains bounded saturation, cancellation and priority-fairness controls.
+
 Distinct direct receipt and message-history scopes need independent polling
 inside their existing delivery owner; shared opaque-mailbox pulls remain serial. Serial receipt-first ordering merely
 reverses a dependency: a held receipt query must not prevent a fresh original
@@ -2297,7 +2307,13 @@ proof of completion. Preserve bounded owner-phase diagnostics through recovery
 without extending the measured deadline or warming away the required cold work.
 
 A progressing serial test partition can exhaust its job watchdog without a hung
-case. The Windows archive owner uses eight native serial execution partitions,
+case. Equal case counts do not imply equal cost when a runner groups cases by
+worker options before sharding. The [Chromium inventory owner](../scripts/evals/chromium-evidence.mjs)
+and UI runner spread macOS cases before those groups form, validate the real CLI's
+selected identities, and preserve source/shard metadata. Prove the complete
+once-only union and keep failure/cancellation evidence; listing success alone
+does not qualify hosted execution or merged reports.
+The Windows archive owner uses eight native serial execution partitions,
 with direct required checks and the existing sealed once-only inventory contract.
 Exercise actual pinned archive consumers and omission/duplication/failed-execution
 controls. Preserve watchdogs, product assertions and full coverage. The existing
@@ -2628,6 +2644,12 @@ from Keychain on success and failure. Their controls cover stale local passwords
 retired writes and locking during provider replacement; native acceptance additionally
 requires two packaged builds with different code identities. Verify actual prompts,
 not merely the absence of an explicit authentication call.
+
+Validate documented bootstrap commands from a clean source checkout, without
+ignored build assets or ambient global tools. Dependency setup must not compile
+a consumer before its generated inputs exist. The [source build owner](../specifications/deployment_guide.md#gui-version-deployment)
+and `standards-wiring.test.mjs` cover dependency preparation and local CLI dispatch;
+real development launch and package generation remain separate acceptance evidence.
 
 Record the tested source, command, environment, count and outcome. Reassess
 consumers after merging new callers or changing a shared helper. Execute the

@@ -19,6 +19,38 @@ export function validateShardLayout(os, shards, total, shard, platform = process
   assert.ok(shards.includes(shard), "Unknown Chromium partition");
 }
 
+/** Allocate full public CLI listings before Playwright groups worker-scoped options. */
+export function fullCaseInventory(report) {
+  assert.deepEqual(report.errors ?? [], [], "Playwright listing failed");
+  const cases = [];
+  function visit(suite, parents = []) {
+    for (const spec of suite.specs ?? []) {
+      assert.ok(Array.isArray(spec.tests) && spec.tests.length > 0, "Malformed discovered case");
+      for (const test of spec.tests) {
+        const titles = [...parents, spec.title];
+        const parts = [test.projectName, spec.file, ...titles];
+        assert.ok(parts.every(value => typeof value === "string" && value && !/[\n\r›]/.test(value)), "Malformed test-list identity");
+        assert.ok(typeof spec.id === "string" && spec.id, "Missing case ID");
+        cases.push({ id: spec.id, line: `[${test.projectName}] › ${spec.file} › ${titles.join(" › ")}` });
+      }
+    }
+    for (const child of suite.suites ?? []) visit(child, [...parents, child.title]);
+  }
+  for (const suite of report.suites ?? []) visit(suite);
+  assert.ok(cases.length > 0, "Empty full-suite inventory");
+  for (const field of ["id", "line"]) assert.equal(new Set(cases.map(value => value[field])).size, cases.length, `Duplicate case ${field}`);
+  return cases.sort((a, b) => a.line < b.line ? -1 : a.line > b.line ? 1 : 0);
+}
+
+export function balancedCasePartition(report, shard) {
+  assert.match(shard, /^[1-9]\d*\/[1-9]\d*$/);
+  const [current, total] = shard.split("/").map(Number);
+  assert.ok(current <= total, "Invalid partition");
+  const inventory = fullCaseInventory(report);
+  assert.ok(total <= inventory.length, "Empty partition");
+  return inventory.filter((_, index) => index % total === current - 1);
+}
+
 export function selectPortableReport(report) {
   const required = new Set(requiredBrowserPaths("core").map(path => JSON.stringify(path)));
   const selected = { errors: report.errors, stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 0 }, suites: [], paths: [] };

@@ -107,10 +107,10 @@ frontend-build:
 .PHONY: install-deps frontend-install check lint fix format
 
 install-deps:
-	$(MANAGED_BUILD) cargo build
+	$(MANAGED_BUILD) cargo fetch --locked --target "$$(rustc -vV | sed -n 's/^host: //p')"
 
 frontend-install:
-	cd frontend && npm install
+	cd frontend && npm ci
 
 check:
 	chmod +x scripts/check-health.sh
@@ -132,7 +132,7 @@ format:
 .PHONY: tauri-dev tauri-build
 
 tauri-dev:
-	$(MANAGED_BUILD) cargo tauri dev
+	$(MANAGED_BUILD) node frontend/node_modules/@tauri-apps/cli/tauri.js dev
 
 tauri-build:
 	python3 scripts/build-retention.py run --archive bundle -- node frontend/node_modules/@tauri-apps/cli/tauri.js build

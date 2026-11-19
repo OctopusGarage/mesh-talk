@@ -1,5 +1,7 @@
+import assert from "node:assert/strict";
+import { balancedCasePartition, fullCaseInventory } from "../evals/chromium-evidence.mjs";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -24,9 +26,32 @@ export async function runUi(args, {
   process.on("SIGTERM", abort);
   process.on("SIGINT", abort);
   const timer = setTimeout(() => { timedOut = true; abort(); }, Math.max(1, deadline - Date.now()));
+  const shard = args.find(arg => arg.startsWith("--shard="))?.slice(8) ?? null;
+  const env = { ...process.env, MESH_UI_INVOCATION_ID: invocation, MESH_UI_EVIDENCE_DIR: directory, MESH_UI_SHARD: shard ?? "" };
   let outcome;
   try {
-    outcome = await execute(command, { cwd: process.cwd(), env: { ...process.env, MESH_UI_INVOCATION_ID: invocation, MESH_UI_EVIDENCE_DIR: directory },
+    if (process.env.MESH_UI_BALANCED_PARTITION === "1") {
+      assert.ok(shard, "Balanced execution requires a shard identity");
+      const base = [process.execPath, resolve("node_modules/@playwright/test/cli.js"), "test"];
+      const listing = join(directory, "listing.json");
+      const selectedListing = join(directory, "selected-listing.json");
+      const listPath = join(directory, "selected-tests.txt");
+      const common = args.filter(arg => !arg.startsWith("--shard=") && !arg.startsWith("--reporter="));
+      const list = async (path, extra = []) => {
+        await rm(path, { force: true });
+        const result = await execute([...base, ...common, ...extra, "--list", "--reporter=json"], {
+          cwd: process.cwd(), env: { ...env, PLAYWRIGHT_JSON_OUTPUT_FILE: path },
+          terminationSignal: "SIGINT", signal: controller.signal, logPath: `${path}.log`, onOutput });
+        assert.ok(result.code === 0 && !result.error && !result.cleanupUnverified && !controller.signal.aborted, "Playwright inventory discovery failed");
+        return JSON.parse(await readFile(path, "utf8"));
+      };
+      const selected = balancedCasePartition(await list(listing), shard);
+      await writeFile(listPath, selected.map(value => value.line).join("\n") + "\n");
+      assert.deepEqual(fullCaseInventory(await list(selectedListing, [`--test-list=${listPath}`])), selected, "Selected CLI inventory differs from partition");
+      await writeFile(join(directory, "partition.json"), JSON.stringify({ sourceSha: env.EVAL_SOURCE_SHA, shard, cases: selected }));
+      command = [...base, ...args.filter(arg => !arg.startsWith("--shard=")), `--test-list=${listPath}`];
+    }
+    outcome = await execute(command, { cwd: process.cwd(), env,
       terminationSignal: "SIGINT", logPath: join(directory, "execution.log"), signal: controller.signal, onOutput });
   } catch (error) {
     outcome = { code: 1, error: error.message };
@@ -36,7 +61,6 @@ export async function runUi(args, {
     process.off("SIGINT", abort);
   }
   const sourceSha = process.env.EVAL_SOURCE_SHA ?? null;
-  const shard = args.find(arg => arg.startsWith("--shard="))?.slice(8) ?? null;
   if (process.platform !== "win32" && (controller.signal.aborted || outcome.code !== 0 || outcome.error || outcome.signal || outcome.forcedRetirement)) {
     let proof;
     try { proof = JSON.parse(await readFile(join(directory, `${invocation}-teardown.json`), "utf8")); } catch {}
@@ -59,7 +83,7 @@ export default class UiProgressReporter {
     this.records = 0;
     this.harnessErrors = 0;
     this.identity = { invocation: process.env.MESH_UI_INVOCATION_ID ?? null, sourceSha: process.env.EVAL_SOURCE_SHA ?? null,
-      shard: process.argv.find(arg => arg.startsWith("--shard="))?.slice(8) ?? null };
+      shard: process.env.MESH_UI_SHARD || (process.argv.find(arg => arg.startsWith("--shard="))?.slice(8) ?? null) };
   }
   record(event, data = {}) {
     // Each bounded record represents lifecycle evidence, never acceptance.

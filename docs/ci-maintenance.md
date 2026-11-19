@@ -596,6 +596,22 @@ counts: tracing modes can produce distinct worker groups and uneven tails.
 Shuffle may reorder work only after shard allocation; verify its actual effect
 before treating it as rebalancing. Preserve required trace evidence and evaluate
 the complete DAG under the global runner quota.
+macOS Chromium retains eight serial runners and four admission slots, but allocates
+its complete public CLI inventory by sorted project/file/full-title round robin
+before Playwright groups worker-scoped trace options. Equal contiguous case counts
+can concentrate expensive trace-enabled journeys in one partition while seven
+others finish much earlier. The existing UI runner discovers the full listing,
+writes a supported `--test-list`, then independently lists that selection and
+requires exact case IDs and titles before execution. Discovery shares the original
+absolute job deadline and fails closed on errors, empty/malformed or duplicate
+identities, or a changed selection. Remove native `--shard` after preselection to
+avoid filtering twice; preserve its original identity in progress and teardown
+receipts and retain all eight current-attempt artifact collectors. Linux and
+Windows retain their existing native allocation. Keep the union/listing regression
+in `chromium-evidence.test.mjs`, the owner failure controls in `ui-runner.test.mjs`,
+and measure hosted setup, listing, execution and evidence overhead before claiming
+an improvement. Listing conservation establishes selection, not browser acceptance.
+
 For a wall-time target, calculate both the dependency critical path and the
 aggregate runner work divided by the constrained pool's available slots.
 Scheduling alone cannot beat that capacity bound; added shard setup consumes

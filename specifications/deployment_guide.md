@@ -24,9 +24,17 @@ Before deploying Mesh-Talk, ensure you have the following tools installed:
 
 ### Node.js and npm
 
-- Node.js 22 or newer (the version used by CI)
+- Node.js 22.12 or newer
 - npm (comes with Node.js)
 - Installation: https://nodejs.org/
+
+### Source build helpers
+
+- Python 3.11 or newer (`python3`), used by the managed build/cache owner.
+- GNU Make for the commands below. On Windows, use Git Bash with Make and
+  `python3` available on `PATH`, alongside the MSVC toolchain.
+- The Tauri CLI is installed locally by `make dev`; a global `cargo-tauri`
+  installation is not required.
 
 ### Platform-Specific Dependencies
 
@@ -207,24 +215,27 @@ The GUI version of Mesh-Talk provides a desktop application with a graphical int
    cd mesh-talk
    ```
 
-2. Install frontend dependencies:
+2. Prepare locked Rust and frontend dependencies from the repository root:
 
    ```bash
-   cd frontend
-   npm install
-   cd ..
+   make dev
    ```
 
 3. Build the GUI version for your platform:
    ```bash
-   cd src-tauri
-   cargo tauri build
+   make tauri-build
    ```
 
 Desktop builds start without optional avatar, theme, or sticker packs and animated
 Noto sticker files. Packs can be installed later from the marketplace or local ZIPs.
 No edition flag is required. See
 [`docs/CUSTOMIZATION_PACKS.md`](../docs/CUSTOMIZATION_PACKS.md).
+
+For development with hot reload, use `make tauri-dev` after setup and keep its
+terminal open. It starts the frontend server and desktop process; install the
+package produced by `make tauri-build` when you want an application in your OS's
+normal application location. Setup fetches Rust dependencies without compiling
+the desktop before its frontend resources exist.
 
 ### Build Options
 
@@ -233,19 +244,19 @@ You can customize the build with the following options:
 - Build for a specific platform:
 
   ```bash
-  cargo tauri build --target x86_64-apple-darwin    # macOS
-  cargo tauri build --target x86_64-pc-windows-msvc # Windows
-  cargo tauri build --target x86_64-unknown-linux-gnu # Linux
+  node frontend/node_modules/@tauri-apps/cli/tauri.js build --target x86_64-apple-darwin    # macOS
+  node frontend/node_modules/@tauri-apps/cli/tauri.js build --target x86_64-pc-windows-msvc # Windows
+  node frontend/node_modules/@tauri-apps/cli/tauri.js build --target x86_64-unknown-linux-gnu # Linux
   ```
 
 - Create a debug build:
   ```bash
-  cargo tauri build --debug
+  node frontend/node_modules/@tauri-apps/cli/tauri.js build --debug
   ```
 
 ### Installation Packages
 
-After building from `src-tauri/`, installation packages are under the workspace
+Run these commands from the repository root. Installation packages are under the workspace
 `target/release/bundle/` (or `target/<triple>/release/bundle/` for an explicit
 target). The release workflow packages each target into a ZIP with
 checksums and verification artifacts:

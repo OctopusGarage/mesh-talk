@@ -3539,9 +3539,13 @@ timeout, caller retirement and route races. Priority changes neither identity
 validation nor connection capacity, and confers no account or group authority.
 
 The gate registry retains at most 256 live keys, prunes only expired weak entries
-and never evicts an active owner into a duplicate gate. Gate acquisition uses
-the existing two-second capacity wait; the actual handshake retains its adaptive
-route deadline. Dropping a waiter, race loser or caller releases its owned state.
+and never evicts an active owner into a duplicate gate. Gate acquisition waits
+for at most the exact route's adaptive authentication deadline plus the two-second outbound TCP capacity wait. This bounds waiting
+for one live owner through both stages without prematurely discarding a valid
+slow route. Generic TCP capacity admission retains its two-second wait; the
+actual handshake retains its adaptive route deadline. The caller's enclosing
+control deadline can retire the waiter earlier. Dropping a waiter, race loser or
+caller releases its owned state.
 Network/session clearing cannot discard an active gate; old work must retire or
 cancel before another request for that same key begins. These hints authorize
 neither peer identity nor recipient delivery. Repeated unreachable probes must

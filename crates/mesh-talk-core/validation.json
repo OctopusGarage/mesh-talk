@@ -712,6 +712,10 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
+            "name": "Per-route authentication admission covers one adaptive handshake plus outbound TCP admission while retaining caller deadlines, queue fairness and cancellation; queued callers consume no TCP permits and never evict an active owner.",
+            "reference": "docs/network-design-reference.md"
+          },
+          {
             "name": "A failed unchanged historical endpoint waits five minutes across background callers; cancellation and local pressure do not learn remote failure. Exact identity/endpoint, privacy/network generations, fresh discovery and successful authentication retain prompt recovery.",
             "reference": "docs/network-design-reference.md"
           },
