@@ -2675,7 +2675,13 @@ or internal retries do not bound lock waits, flowing transfers, extraction and
 retirement. The [UI command owner](../scripts/ci/ui-runner.mjs) records pinned
 installer/browser provenance and separate bounded setup logs; its real child
 controls in `ui-runner.test.mjs` require cancellation/timeout retirement and reject
-uncertain cleanup. Missing historical logs cannot identify the stalled phase;
+uncertain cleanup. Standalone process fixtures must clear an inherited outer
+process-group ownership marker in their own child environment. Nested execution
+intentionally retains its lease until that outer owner retires; a fixture that
+keeps the outer test runner alive cannot also await its retirement. Exercise the
+fixture CLI through the real outer stage, as Health does, without changing the
+parent environment or weakening production nested ownership.
+Missing historical logs cannot identify the stalled phase;
 a successful dry run proves argument/provenance handling, not hosted availability.
 
 Record the tested source, command, environment, count and outcome. Reassess
