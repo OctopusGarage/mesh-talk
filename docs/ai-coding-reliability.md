@@ -2681,6 +2681,10 @@ intentionally retains its lease until that outer owner retires; a fixture that
 keeps the outer test runner alive cannot also await its retirement. Exercise the
 fixture CLI through the real outer stage, as Health does, without changing the
 parent environment or weakening production nested ownership.
+Keep browser-catalog provenance fixtures independent of installed system packages:
+on Linux the pinned installer's `--with-deps --dry-run` audits package availability
+and can fail before an otherwise valid catalog check. Retain `--with-deps` in
+actual installation and its command-contract test.
 Missing historical logs cannot identify the stalled phase;
 a successful dry run proves argument/provenance handling, not hosted availability.
 

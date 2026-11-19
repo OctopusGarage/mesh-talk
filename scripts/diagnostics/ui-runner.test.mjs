@@ -240,9 +240,12 @@ test("pinned installer dry run preserves WebKit revision provenance without down
   let output = "";
   try {
     const result = await prepareBrowser("webkit", { directory, frontend, deadline: Date.now() + 12000, onOutput(chunk) { output += chunk; },
-      execute: (command, options) => execute([...command, "--dry-run"], { ...options, env: { ...options.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } }),
+      // Provenance needs the real pinned browser catalog, not a host package
+      // audit: on Linux --with-deps --dry-run fails for missing system packages.
+      // The production command contract above still requires --with-deps.
+      execute: (command, options) => execute([...command.filter(arg => arg !== "--with-deps"), "--dry-run"], { ...options, env: { ...options.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } }),
     });
-    assert.equal(result.success, true, JSON.stringify(result));
+    assert.equal(result.success, true, `${JSON.stringify(result)}\n${output}`);
     assert.match(output, /WebKit|webkit/);
     assert.ok([result.preparation.browserRevision, ...Object.values(result.preparation.revisionOverrides)].some(revision => output.includes(String(revision))), output);
     assert.match(output, /https:\/\//);
