@@ -221,7 +221,8 @@ The GUI version of Mesh-Talk provides a desktop application with a graphical int
    make dev
    ```
 
-3. Build the GUI version for your platform:
+3. Build the GUI version for your platform. For macOS without Developer ID
+   credentials, use the [local package command](#local-macos-source-package) instead:
    ```bash
    make tauri-build
    ```
@@ -233,9 +234,9 @@ No edition flag is required. See
 
 For development with hot reload, use `make tauri-dev` after setup and keep its
 terminal open. It starts the frontend server and desktop process; install the
-package produced by `make tauri-build` when you want an application in your OS's
-normal application location. Setup fetches Rust dependencies without compiling
-the desktop before its frontend resources exist.
+package produced by the applicable build command when you want an application
+in your OS's normal application location. Setup fetches Rust dependencies without
+compiling the desktop before its frontend resources exist.
 
 ### Build Options
 
@@ -295,6 +296,23 @@ entitlements require the corresponding signing authorization; structural
 signature verification alone does not establish that macOS will launch a
 package. Verify the final installed bundle and its packaged copy on the target
 machine. Keep the previous application recoverable until that launch succeeds.
+
+#### Local macOS source package
+
+After `make dev`, run this from the repository root when installing locally
+without Developer ID credentials:
+
+```bash
+python3 scripts/build-retention.py run --archive bundle -- node frontend/node_modules/@tauri-apps/cli/tauri.js build \
+  --config '{"bundle":{"macOS":{"signingIdentity":"-","entitlements":null,"hardenedRuntime":false}}}'
+```
+
+This explicitly selects an ad-hoc development package without restricted
+entitlements or the hardened runtime. The override applies to this command;
+`make tauri-build` retains the distribution configuration. The resulting app and
+DMG are under `target/release/bundle/`. Install and verify them using the steps
+above. This local package is not Developer ID signed or notarized; use the
+verified release workflow for distribution.
 
 #### Code Signing (for distribution)
 

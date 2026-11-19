@@ -125,11 +125,12 @@ hooks. The Tauri CLI comes from those local dependencies; no global `cargo-tauri
 installation is needed. `make tauri-dev` runs the development app with hot reload
 and keeps its terminal open; it does not install the app.
 
-To install a source build, run `make tauri-build` instead of `make tauri-dev` and
-open the package under `target/release/bundle/`. On macOS, open the generated DMG
-and drag the app to Applications; use the EXE/MSI on Windows or DEB/RPM/AppImage on
-Linux. The first build can take several minutes. The UI-free Rust core also runs as a
-headless node, with a separate keystore for each instance:
+To install a source build on macOS without Developer ID credentials, use the
+[local macOS package command](specifications/deployment_guide.md#local-macos-source-package),
+then open the generated DMG and drag the app to Applications. On Windows or Linux,
+run `make tauri-build` instead of `make tauri-dev` and install the EXE/MSI or
+DEB/RPM/AppImage under `target/release/bundle/`. The first build can take several
+minutes. The UI-free Rust core also runs as a headless node, with a separate keystore for each instance:
 
 ```bash
 cargo run -p mesh-talk-core --bin mesh-talk-node -- \
