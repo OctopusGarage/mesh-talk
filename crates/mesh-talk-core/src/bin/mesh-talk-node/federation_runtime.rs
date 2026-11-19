@@ -661,7 +661,9 @@ mod tests {
         ));
         // Keep the real first TCP/Noise attempt active while discovery publishes
         // a second endpoint for the same exact relay identity.
-        let held = tokio::time::timeout(Duration::from_secs(2), first.accept())
+        // Cold inventory preparation runs before the first connection. Give
+        // setup its own budget; overlap and failover retain their deadlines below.
+        let held = tokio::time::timeout(Duration::from_secs(30), first.accept())
             .await
             .unwrap()
             .unwrap();
