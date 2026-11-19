@@ -602,6 +602,10 @@ mod tests {
             .await
             .is_err()
         );
+        // IPC success promises a queued query, not a reply from an arbitrary
+        // service. Own its endpoint and observe the actual wire command.
+        let witness = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_port = witness.local_addr().unwrap().port();
         let probe_app = app.handle().clone();
         let observer = host.observer;
         host.handle
@@ -611,13 +615,63 @@ mod tests {
                     probe_app.state::<AppState>(),
                     probe_app.state::<NodeState>(),
                     " 127.0.0.1 ".into(),
-                    Some(47474),
+                    Some(target_port),
                 )
                 .await
             })
             .await
             .unwrap()
+            .expect("manual IPC must send to its owned loopback witness");
+        let mut packet = [0u8; 65];
+        let (length, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            witness.recv_from(&mut packet),
+        )
+        .await
+        .expect("owned IPC query must reach its requested endpoint")
+        .unwrap();
+        assert_eq!(length, 64);
+        assert!(mesh_talk_core::discovery::query::decode_query(&packet[..length]).is_some());
+
+        // A valid input still preserves the specific Core disclosure denial.
+        // An unrelated socket timeout must not satisfy this error control.
+        let private_state = managed.clone();
+        host.handle
+            .spawn(async move {
+                private_state
+                    .0
+                    .read()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .set_invisible(true)
+                    .await
+            })
+            .await
+            .unwrap()
             .unwrap();
+        let probe_app = app.handle().clone();
+        let denied = host
+            .handle
+            .spawn(async move {
+                probe_peer_endpoint(
+                    probe_app.state::<AppState>(),
+                    probe_app.state::<NodeState>(),
+                    "127.0.0.1".into(),
+                    Some(target_port),
+                )
+                .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(denied, Err(CommandError::Io(ref message)) if message.contains("routed discovery is disabled")),
+            "manual IPC must preserve the specific disclosure denial: {denied:?}"
+        );
+        assert!(
+            matches!(witness.try_recv_from(&mut packet), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        drop(witness);
         // Each host guard stops and joins its runtime on success and unwind.
         drop(remote_host);
         drop(host);

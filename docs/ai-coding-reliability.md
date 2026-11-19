@@ -198,7 +198,12 @@ full-host participants and the synchronous history observer. Desktop diagnostics
 keep caller-thread inventory observations on the observer while each actual
 participant and its network commands retain their own two-worker reactor.
 Keep real probes, original deadlines and actual shutdown/join evidence; this
-qualifies execution ownership without identifying every historical OS send stall. The single-participant
+qualifies execution ownership without identifying every historical OS send stall. Manual-probe IPC
+controls own their UDP destination and decode the actual query at the requested
+port; an `Ok` send to an unrelated service cannot witness that boundary. Keep
+Core signed-response checks separate, preserve the send/peer deadlines and bound
+the additional wire witness. Disclosure denial must match its specific Core
+error rather than accepting an unrelated timeout. The single-participant
 connection-limit/retirement fixture likewise uses the production two-worker host;
 retain its seven-slot saturation, original admission/retirement bounds and actual
 socket closure checks, alongside the held-worker positive and single-thread

@@ -281,7 +281,7 @@
         ]
       },
       "escalation": [
-        "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment. Real cache error controls must introduce a new certified proof after the storage fault, preserve unchanged-proof no-write success and verify exact recovered identity. Diagnostics fixtures retain independent participant reactors and caller-thread inventory assertions, original probe deadlines and actual stop/join cleanup."
+        "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment. Real cache error controls must introduce a new certified proof after the storage fault, preserve unchanged-proof no-write success and verify exact recovered identity. Diagnostics fixtures retain independent participant reactors and caller-thread inventory assertions, original probe deadlines and actual stop/join cleanup. The IPC send control owns its nondefault UDP endpoint and decodes the actual query with an additional three-second wire witness, while preserving the original send and peer bounds; disclosure denial must match the specific Core disabled error, never an arbitrary socket timeout."
       ],
       "consumers": ["frontend-discovery-origin"]
     },
