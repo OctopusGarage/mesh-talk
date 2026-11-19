@@ -12,11 +12,16 @@ const DM_CONV_DOMAIN: &[u8] = b"mesh-talk-dm-conversation-v1";
 /// of who is "a" and who is "b". A self-DM (`a == b`) yields a well-defined,
 /// unique id (it hashes the key twice); it never collides with a two-party pair.
 pub fn dm_conversation_id(a: &PublicIdentity, b: &PublicIdentity) -> ConversationId {
-    let (lo, hi) = if a.ed25519_pub <= b.ed25519_pub {
-        (a.ed25519_pub, b.ed25519_pub)
-    } else {
-        (b.ed25519_pub, a.ed25519_pub)
-    };
+    dm_conversation_id_from_ed25519(&a.ed25519_pub, &b.ed25519_pub)
+}
+
+/// Recovery retains authenticated signing authors without inventing exchange
+/// keys. Conversation derivation has always depended only on signing keys.
+pub(in crate::node) fn dm_conversation_id_from_ed25519(
+    a: &[u8; 32],
+    b: &[u8; 32],
+) -> ConversationId {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     let mut hasher = Sha256::new();
     hasher.update(DM_CONV_DOMAIN);
     hasher.update(lo);

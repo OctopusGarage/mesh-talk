@@ -3,6 +3,171 @@ import { test } from "node:test";
 import { Writable } from "node:stream";
 import { runInNewContext } from "node:vm";
 import { writeChildCommand } from "./native-core-scenarios.mjs";
+function linuxKeyFixture() {
+  const host = {}, listeners = new Map(), body = {};
+  const document = {
+    addEventListener(type, fn, capture) { assert.equal(capture, true); assert.ok(!listeners.has(type)); listeners.set(type, fn); },
+    removeEventListener(type, fn, capture) { assert.equal(capture, true); assert.equal(listeners.get(type), fn); listeners.delete(type); },
+  };
+  const c = {
+    current: () => true,
+    execute: async (script, args) => Function("window", "document", "args", `return (function(){${script}}).apply(null,args);`)(host, document, args),
+    until: async (label, probe, timeout) => {
+      assert.equal(timeout, 10000);
+      const result = await probe();
+      if (!result) throw new Error(`Timed out: ${label}`);
+      return result;
+    },
+  };
+  function edge(type, options = {}) {
+    listeners.get(type)?.({ type, target: body, key: "Enter", repeat: false, isTrusted: true, ...options });
+  }
+  return { c, host, listeners, edge };
+}
+
+test("Linux native input requires one trusted press and release across a focus handoff", async () => {
+  const { sendNativeLinuxKey } = await import("./native-core-scenarios.mjs");
+  for (const [name, edges, expected] of [
+    ["focused control removed, release on BODY", [["keydown", { target: {} }], ["keyup"]], null],
+    ["unrelated key and untrusted input", [["keydown", { key: "x" }], ["keydown", { isTrusted: false }], ["keydown"], ["keyup"]], null],
+    ["missing release", [["keydown"]], /Timed out/],
+    ["repeat", [["keydown"], ["keydown", { repeat: true }], ["keyup"]], /invalid/],
+    ["duplicate press", [["keydown"], ["keydown"], ["keyup"]], /invalid/],
+    ["duplicate release", [["keydown"], ["keyup"], ["keyup"]], /invalid/],
+    ["release without a press", [["keyup"]], /invalid/],
+  ]) {
+    const { c, host, listeners, edge } = linuxKeyFixture();
+    const dispatch = sendNativeLinuxKey({ ...c, input: async () => { for (const args of edges) edge(...args); } }, 42, "Enter");
+    if (expected) await assert.rejects(dispatch, expected, name);
+    else await dispatch;
+    assert.equal(listeners.size, 0, name);
+    assert.equal(host.__nativeLinuxKey, undefined, name);
+  }
+});
+
+test("a failed or replaced Linux key observer releases only its own listeners", async () => {
+  const { sendNativeLinuxKey } = await import("./native-core-scenarios.mjs");
+  const { c, listeners, edge } = linuxKeyFixture();
+  let emitted = false;
+  await assert.rejects(sendNativeLinuxKey({ ...c, current: () => false, input: () => { emitted = true; } }, 42, "Enter"), /live application owner/);
+  assert.equal(emitted, false);
+  assert.equal(listeners.size, 0);
+  await assert.rejects(sendNativeLinuxKey({ ...c, input: () => { throw new Error("X11 input failed"); } }, 42, "Enter"), /X11 input failed/);
+  assert.equal(listeners.size, 0);
+
+  const firstStarted = Promise.withResolvers(), secondStarted = Promise.withResolvers();
+  const firstRelease = Promise.withResolvers(), secondRelease = Promise.withResolvers();
+  const first = sendNativeLinuxKey({ ...c, input: () => { firstStarted.resolve(); return firstRelease.promise; } }, 42, "Enter");
+  await firstStarted.promise;
+  const second = sendNativeLinuxKey({ ...c, input: () => { secondStarted.resolve(); return secondRelease.promise; } }, 42, "Enter");
+  await secondStarted.promise;
+  firstRelease.resolve();
+  await assert.rejects(first, /replaced/);
+  assert.equal(listeners.size, 2);
+  edge("keydown"); edge("keyup");
+  secondRelease.resolve();
+  await second;
+  assert.equal(listeners.size, 0);
+});
+
+test("Linux X11 input selects the unique managed main window despite visible tooltips", { skip: process.platform === "win32" }, async () => {
+  const { sendNativeLinuxKey } = await import("./native-core-scenarios.mjs");
+  const { mkdtemp, mkdir, writeFile, readFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const dir = await mkdtemp(join(tmpdir(), "mesh-fixture-x11-"));
+  try {
+    const numericCwd = join(dir, "numeric-cwd");
+    await mkdir(numericCwd);
+    await writeFile(join(numericCwd, "17"), "");
+    const lines = [
+      "#!/bin/sh", 'case "$1" in',
+      'search) [ "$*" = "search --onlyvisible --pid $OWNED_PID --limit 33" ] || exit 1; printf "%s\\n" "$VISIBLE_WINDOWS";;',
+      'windowfocus|windowactivate) echo "Unexpected focus mutation" >&2; exit 1;;',
+      'getwindowpid) case "$2" in 17) echo "$CLIENT_PID";; 29) echo "$OWNED_PID";; *) echo "$FOREIGN_PID";; esac;;',
+      'getwindowfocus) echo "$FOCUSED_WINDOW";;',
+      'getactivewindow) echo "$ACTIVE_WINDOW";;',
+      'key) printf "key\\n" >> "$KEY_MARKER"; echo "$*";;',
+      '*) exit 1;;', 'esac',
+    ];
+    await writeFile(join(dir, "xdotool"), lines.join("\n") + "\n", { mode: 0o755 });
+    // xprop advances format-32 data by native long size, not wire CARD32 size.
+    // The actual LP64 probe returned only 9 IDs for -len 68 and all 17 for 136.
+    await writeFile(join(dir, "xprop"), String.raw`#!/bin/sh
+[ "$#" -eq 9 ] || exit 1
+[ "$1" = -root ] && [ "$2" = -len ] && [ "$3" -gt 0 ] && [ "$3" -le 256 ] && [ "$4" = -notype ] && [ "$5" = -f ] && [ "$6" = _NET_CLIENT_LIST ] && [ "$7" = 32c ] && [ "$9" = _NET_CLIENT_LIST ] || exit 1
+printf '%s\n' "$MANAGED_LINE" | awk -v bytes="$3" '
+  { eq=index($0,"="); if (!eq) { print; next }
+    printf "%s", substr($0,1,eq); count=split(substr($0,eq+1),ids,","); cap=int((bytes+7)/8);
+    for (i=1;i<=count && i<=cap;i++) { if(i>1)printf ","; printf "%s",ids[i] }
+    printf "\n"
+  }'
+`, { mode: 0o755 });
+    const owner = process.pid;
+    const cases = [
+      ["tooltip first", "29\n17", "17", "17", "17", owner, true],
+      ["main first", "17\n29", "17", "17", "17", owner, true],
+      ["foreign managed client", "29\n17", "19, 17", "17", "17", owner, true],
+      ["main last in full managed budget", "29\n17", [...Array.from({ length: 15 }, (_, i) => i + 1000), 17].join(", "), "17", "17", owner, true],
+      ["conflicting owner beyond short read", "29\n17", [17, ...Array.from({ length: 15 }, (_, i) => i + 1000), 29].join(", "), "17", "17", owner, false],
+      ["foreign keyboard focus", "29\n17", "17", "19", "17", owner, false],
+      ["foreign active client", "29\n17", "17", "17", "19", owner, false],
+      ["wrong process", "29\n17", "17", "17", "17", owner + 1, false],
+      ["unmanaged tooltip only", "29", "17", "29", "17", owner, false],
+      ["ambiguous managed windows", "29\n17", "17, 29", "17", "17", owner, false],
+      ["missing managed clients", "29\n17", "", "17", "17", owner, false],
+      ["malformed managed clients", "29\n17", "17, not-a-window", "17", "17", owner, false],
+      ["managed wildcard is not a filename", "17", "*", "17", "17", owner, false],
+      ["visible wildcard is not a filename", "*", "17", "17", "17", owner, false],
+      ["malformed visible window", "17\nnot-a-window", "17", "17", "17", owner, false],
+      ["missing property", "17", "[missing]", "17", "17", owner, false],
+      ["duplicate managed clients", "29\n17", "17, 17", "17", "17", owner, false],
+      ["duplicate visible IDs", "17\n17", "17", "17", "17", owner, false],
+      ["too many managed clients", "29\n17", Array.from({ length: 17 }, (_, i) => i + 17).join(", "), "17", "17", owner, false],
+      ["too many visible windows", Array.from({ length: 33 }, (_, i) => i + 17).join("\n"), "17", "17", "17", owner, false],
+      ["non-window ID", "29\n17", "0", "17", "17", owner, false],
+      ["out-of-range window ID", "29\n17", "4294967296", "17", "17", owner, false],
+    ];
+    for (const [name, visible, managed, focus, active, pid, admitted] of cases) {
+      const marker = join(dir, `key-${cases.findIndex(c => c[0] === name)}`);
+      const { c, edge } = linuxKeyFixture();
+      const dispatch = sendNativeLinuxKey({ ...c, input: (bin, args) => {
+        const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, VISIBLE_WINDOWS: visible, MANAGED_LINE: managed === "[missing]" ? "_NET_CLIENT_LIST: no such atom" : `_NET_CLIENT_LIST=${managed}`, FOCUSED_WINDOW: focus, ACTIVE_WINDOW: active, CLIENT_PID: String(pid), OWNED_PID: String(owner), FOREIGN_PID: String(owner + 1), KEY_MARKER: marker };
+        const output = execFileSync(bin, args, { encoding: "utf8", stdio: "pipe", env, cwd: numericCwd });
+        assert.equal(output.trim(), "key --clearmodifiers Return");
+        edge("keydown"); edge("keyup");
+      } }, owner, "Enter");
+      if (admitted) {
+        await dispatch;
+        assert.equal(await readFile(marker, "utf8"), "key\n", name);
+      } else {
+        await assert.rejects(dispatch, /X11/, name);
+        await assert.rejects(readFile(marker), { code: "ENOENT" }, `${name} must not send any key`);
+      }
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("AppKit accepts every native control key emitted by the fixture", async () => {
+  const { nativeControlKeyName } = await import("./native-core-scenarios.mjs");
+  const { readFile } = await import("node:fs/promises");
+  const appKit = await readFile(new URL("../../src-tauri/examples/native-contact-eval.rs", import.meta.url), "utf8");
+  const dispatch = appKit.match(/let \(code, characters\) = match key \{([\s\S]*?)\n\s*\};/);
+  assert.ok(dispatch, "locate the native AppKit key match");
+  const accepted = new Set([...dispatch[1].matchAll(/^\s*"([^"]+)"\s*=>/gm)].map(match => match[1]));
+  // WebDriver encodes control keys in the Unicode private-use range.
+  const emitted = new Set();
+  for (let code = 0xe000; code <= 0xf8ff; code++) {
+    const name = nativeControlKeyName(String.fromCharCode(code));
+    if (name) emitted.add(name);
+  }
+  assert.ok(emitted.has("PageDown"), "historical receipt navigation emits PageDown");
+  for (const name of emitted) assert.ok(accepted.has(name), `AppKit must accept emitted key ${name}`);
+});
+
 test("Windows native helper only emits bounded owned-PID control keys with ABI-sized SendInput", async () => {
   const { nativeWindowsKeyboardScript } = await import("./native-core-scenarios.mjs");
   for (const [key, vk] of [["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33], ["\uE00F", 34]]) {
@@ -587,4 +752,110 @@ test("attachment failure snapshot uses read-only IPC and excludes message bodies
   assert.doesNotMatch(JSON.stringify(result), /secret|private/);
   const pending = await attachmentFailureContext({ ...c, peer: { output: "file sent to recipient\n" } }, { senderDevice: "sender", fileName: "attachment.txt", outputOffset: 23 });
   assert.equal(pending.send.accepted, false, "stale CLI output cannot qualify this send");
+});
+
+
+test("privacy cancellation waits for returned trigger focus before reopening", async () => {
+  const { settledPrivacyConfirmationDismissal } = await import("./native-core-scenarios.mjs");
+  let phase = 0;
+  const c = {
+    execute: async (script) => Function("document", "getComputedStyle", "innerWidth", "innerHeight", script)({
+      querySelector: () => phase === 0 ? {} : null,
+      querySelectorAll: () => {
+        const outer = { state: "open", getBoundingClientRect: () => ({ left: 0, top: 0, right: 1040, bottom: 720, width: 1040, height: 720 }) };
+        const closing = { ...outer, state: "closed" };
+        const unrelated = { state: "closed", getBoundingClientRect: () => ({ left: 20, top: 20, right: 120, bottom: 80, width: 100, height: 60 }) };
+        return [outer, unrelated, ...(phase === 2 ? [closing] : [])].filter(e => e.state === "closed");
+      },
+      activeElement: { getAttribute: () => phase === 1 ? "elsewhere" : "invisible-switch" },
+    }, () => ({ position: "fixed", display: "block", visibility: "visible" }), 1040, 720),
+    until: async (_label, poll) => {
+      assert.equal(await poll(), false, "mounted confirmation is pending");
+      phase = 1;
+      assert.equal(await poll(), false, "removed content is not yet returned focus");
+      phase = 2;
+      assert.equal(await poll(), false, "returned focus cannot outlive an unretired closing modal overlay");
+      phase = 3;
+      assert.equal(await poll(), true, "retired confirmation backdrop does not wait for the open settings backdrop or unrelated closed controls");
+    },
+  };
+  assert.deepEqual(await settledPrivacyConfirmationDismissal(c), { confirmationDismissed: true, triggerFocusRestored: true, closingSurfacesRetired: true });
+  await assert.rejects(settledPrivacyConfirmationDismissal({ execute: async () => false, until: async (_label, poll) => { assert.equal(await poll(), false); throw new Error("trigger focus never returned"); } }), /trigger focus never returned/);
+});
+
+
+test("privacy dialog diagnostics are bounded, content-free and retire their exact owner", async () => {
+  const { startPrivacyDialogTrace } = await import("./native-core-scenarios.mjs");
+  const handlers = new Map(), observers = [], host = {};
+  let state = "open", focus = "invisible-cancel", clock = 0;
+  const document = {
+    body: {},
+    querySelector: () => state === "absent" ? null : { closest: () => ({ getAttribute: () => state }) },
+    get activeElement() { return { getAttribute: () => focus }; },
+    addEventListener: (type, handler) => { assert.ok(!handlers.has(type)); handlers.set(type, handler); },
+    removeEventListener: (type, handler) => { assert.equal(handlers.get(type), handler); handlers.delete(type); },
+  };
+  class Observer {
+    constructor(callback) { this.callback = callback; this.disconnected = 0; observers.push(this); }
+    observe(body) { assert.equal(body, document.body); }
+    disconnect() { this.disconnected++; }
+  }
+  const c = { execute: async script => Function("window", "document", "MutationObserver", "performance", script)(host, document, Observer, { now: () => clock++ }) };
+  const first = await startPrivacyDialogTrace(c);
+  const finish = await startPrivacyDialogTrace(c);
+  assert.equal(observers[0].disconnected, 1, "replacement retires the previous observer");
+  assert.deepEqual(await first(), [], "stale cleanup cannot stop a replacement trace");
+  assert.equal(handlers.size, 6);
+  const target = { getAttribute: () => "invisible-cancel" };
+  handlers.get("keydown")({ target, key: "PRIVATE-KEY-TEXT" });
+  handlers.get("keydown")({ target: { getAttribute: () => "login-password" }, key: "Enter" });
+  assert.equal(host.__nativePrivacyDialogTrace.events.length, 2, "unrelated input is not observed");
+  assert.equal(host.__nativePrivacyDialogTrace.events.at(-1).key, null);
+  assert.ok(!JSON.stringify(host.__nativePrivacyDialogTrace.events).includes("PRIVATE-KEY-TEXT"));
+  handlers.get("keydown")({ target, key: "Enter" });
+  assert.equal(host.__nativePrivacyDialogTrace.events.at(-1).key, "Enter");
+  handlers.get("keyup")({ target: document.body, key: "Enter" });
+  assert.deepEqual(
+    [host.__nativePrivacyDialogTrace.events.at(-1).kind, host.__nativePrivacyDialogTrace.events.at(-1).target, host.__nativePrivacyDialogTrace.events.at(-1).key],
+    ["keyup", null, "Enter"],
+    "a trusted control can disappear before release reaches BODY",
+  );
+  handlers.get("pointerdown")({ target: { getAttribute: () => "PRIVATE-UNRELATED-ID" } });
+  assert.equal(host.__nativePrivacyDialogTrace.events.at(-1).target, null);
+  assert.ok(!JSON.stringify(host.__nativePrivacyDialogTrace.events).includes("PRIVATE-UNRELATED-ID"));
+  for (let i = 0; i < 100; i++) handlers.get("click")({ target });
+  state = "absent"; focus = "invisible-switch";
+  observers[1].callback();
+  const trace = await finish();
+  assert.equal(trace.length, 48);
+  assert.deepEqual(trace.at(-1), { at: clock - 1, kind: "state", target: null, key: null, state: "absent", focus });
+  assert.ok(trace.every((event, i) => i === 0 || event.at > trace[i - 1].at));
+  assert.ok(!JSON.stringify(trace).includes("PRIVATE-KEY-TEXT"));
+  assert.equal(handlers.size, 0);
+  assert.equal(observers[1].disconnected, 1);
+  assert.equal(host.__nativePrivacyDialogTrace, undefined);
+  assert.deepEqual(await finish(), []);
+});
+
+
+test("successful privacy confirmation retires its closing backdrop before settling settings", async () => {
+  const { settledPrivacyMode } = await import("./native-core-scenarios.mjs");
+  let backdrop = true, settled = false;
+  const document = {
+    querySelector: () => null,
+    querySelectorAll: () => backdrop ? [{ getBoundingClientRect: () => ({ left: 0, top: 0, right: 1040, bottom: 720, width: 1040, height: 720 }) }] : [],
+    activeElement: { getAttribute: () => "invisible-switch" },
+  };
+  const c = {
+    execute: async script => Function("document", "getComputedStyle", "innerWidth", "innerHeight", script)(document, () => ({ position: "fixed", display: "block", visibility: "visible" }), 1040, 720),
+    until: async (_label, poll) => {
+      assert.equal(await poll(), false, "successful commit has not retired its closing backdrop");
+      assert.equal(settled, false);
+      backdrop = false;
+      assert.equal(await poll(), true);
+    },
+    settledDialog: async id => { assert.equal(backdrop, false); assert.equal(id, "settings-dialog"); settled = true; },
+  };
+  assert.deepEqual(await settledPrivacyMode(c), { confirmationDismissed: true, dialogSettled: true });
+  assert.equal(settled, true);
 });

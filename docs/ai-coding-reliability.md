@@ -435,6 +435,23 @@ and [runtime controls](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs
 retain real held connections, pending retries, storage recovery and a fixed repair
 that continuous irrelevant observations cannot postpone.
 
+Distinct direct receipt and message-history scopes need independent polling
+inside their existing delivery owner; shared opaque-mailbox pulls remain serial. Serial receipt-first ordering merely
+reverses a dependency: a held receipt query must not prevent a fresh original
+from arriving. An early empty control round can precede creation of the new
+receipt; preserve bounded post-original recovery before parking exact custody
+as quiet. Preserve the immediate best-effort flush's payload-custody-before-control
+ordering; that caller must not start a control exchange after its payload fails.
+Retained automatic recovery independently polls receipt-eligible originals,
+including manifest cards whose bytes still await recipient consent. Card receipt,
+download consent and complete-file custody remain distinct evidence.
+Keep both recovery scopes under the same cancellation/deadline owner, without
+retaining store guards or increasing TCP capacity. The real inbound-only
+[receipt-scope regressions](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+require a genuine pre-existing authenticated receipt through held ordinary
+history, fresh plaintext through held control history without false Delivered,
+and first-send confirmation after a deliberately early empty control round.
+
 Do not encode failed, unchanged and completed work as one empty-result boolean
 when their retry policies differ. A qualified unchanged result needs fresh exact
 source and authority evidence after all awaited stages; a denied or incomplete
@@ -1482,6 +1499,17 @@ state survives, stale cleanup cannot delete a newer write, and partial outcomes
 are reported honestly. See [development conventions](../specifications/development_conventions.md)
 and the feature-specific owners in [module ownership](module-boundaries.md).
 
+For policies that depend on whether something has **ever** happened, current
+cardinality is insufficient. Clearing or pruning history must not convert a
+previously established conversation into a never-used contact. The transcript
+conversation index owns the sticky historical fact; automatic contact expiry in
+`src-tauri/src/contact_policy/expiry.rs` uses its existence rather than message
+counts or decrypted previews. `ever_history_metadata_survives_clear_for_sent_received_and_files`
+qualifies the sent, received and file-card boundaries. Completed expiry remains
+settled across wall-clock rollback and restart; `expiry_remains_consumed_after_clock_rollback_and_restart`
+qualifies its durable marker independently of the original deadline. A failed index or clock
+read must preserve presentation rather than authorizing expiry.
+
 ## R09: Bound input and resource use
 
 **Failure pattern:** peer/UI-controlled data expands into unbounded allocation,
@@ -1860,6 +1888,32 @@ use `Debug` to log whole tuples or containers containing identifiers. The
 retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
+
+Native key injection needs an observed matching press and release before another
+key-dependent action. A helper exit or rendered frame does not establish release;
+focus may move to `BODY` when the activated control unmounts. Validate the owned
+application and its focused client before using global input on an isolated test
+display. Visible PID matches include unmanaged tooltip windows; select the unique
+visible, PID-owned client from the bounded window-manager client list, and require
+its active and normalized focus IDs to agree. Missing, malformed, over-budget or
+ambiguous ownership must reject input rather than fall back to enumeration order. Verify the normalized client without assigning raw focus to that
+client: GTK may own keyboard focus through its input-only child. A foreground
+check must not overwrite that widget focus, and foreign focus must reject input.
+Keep both edges on the same input path: an explicit X11 target can change
+transport when raw widget focus moves, while an inherited window stack can restore
+that explicit target implicitly. Reject repeated presses, missing releases and
+stale dispatch owners instead of retrying the key through a paging poll. The
+[native input controls](../scripts/diagnostics/native-core-scenarios.test.mjs)
+retain actual shell invocation, foreign-focus rejection, document-level release
+and observer retirement; hosted native evaluation supplies the real WebView
+acceptance. Every emitted named key must also be accepted by its platform owner.
+
+A dismissed modal may still own its closing focus scope. Before reopening a
+confirmation or moving to another modal, wait for its trigger to regain focus as
+well as for the old content and rendered closing modal surfaces to leave the DOM. A closing overlay
+can outlive both content and returned focus. The [native privacy dismissal controls](../scripts/diagnostics/native-core-scenarios.test.mjs)
+exercise mounted, focus-pending, closing-overlay and fully retired phases; a generic
+click retry must not replace this lifecycle acknowledgement.
 
 External publication metadata must follow the owning contract even when an API
 accepts a mutation. Derive Stable titles from the validated version tag and check

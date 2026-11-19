@@ -768,7 +768,12 @@ uninstrumented remaining-workspace consumers plus native Host coverage.
 The Linux consumers restore no Rust cache, install no frontend dependencies and
 compile no Cargo targets. They install the producer's exact Rust version,
 matching LLVM tools, pinned prebuilt Nextest/llvm-cov and required Tauri runtime
-packages. `scripts/ci/linux-workspace.sh` independently captures a successful
+packages. Both producer and consumer dependency installers explicitly request every
+package sealed by the Linux runtime identity, including `libc6`. Preinstalled
+runner-image copies can remain older when only development or runtime dependencies
+are requested. Keep exact package equality as an admission gate. The installer
+contract in `linux-workspace-cli.test.mjs` compares both roles with the validated
+runtime identity; a subsequent repository-version change still rejects execution. Linux producer, consumer and portable-health APT setup retain strict metadata failure and signed repository verification while requesting three retries per failed download with [APT’s Acquire::Retries option](https://manpages.debian.org/unstable/apt/apt.conf.5.en.html). This bounds recovery from transient package-source throttling without retrying product tests; exhausted downloads still fail setup under the existing job deadline. APT command fixtures recognize strict-update options by argument token rather than fixed position. The CI verification selector retains the release-workflow source/index-failure control so added transport options cannot silently disable its injected failure. `scripts/ci/linux-workspace.sh` independently captures a successful
 `cargo llvm-cov show-env --sh` before evaluation; failed environment discovery
 cannot admit execution. Fixture shell phases use a dedicated literal interpreter
 launch; ordinary Node/Cargo argv stays on a separate boundary. Keep derived paths
@@ -893,6 +898,14 @@ Classify fixture gates from the current decision owner's state, not a trace flag
 that also describes another phase. Do not sample a later observer projection to
 decide whether to capture a one-shot event; observe that evidence before releasing
 the captured task and retain its exact operation and child identity.
+
+When dispatch races a publication marker, qualify the actual signed source rows,
+request identity and validated page completion; dispatch time alone cannot prove
+that a request observed stale data. Retain stale-source and already-installed
+negative controls. For concurrent recovery scopes, a total accepted-socket count
+cannot by itself identify a restarted exchange. Observe the authenticated scope,
+its active lifetime and exact durable confirmation through the real protocol
+owner, and distinguish fixture teardown from production cancellation.
 
 Separate expensive fixture preparation from the operation's measured window when
 preparation is outside the requirement. Continue using the real signing,

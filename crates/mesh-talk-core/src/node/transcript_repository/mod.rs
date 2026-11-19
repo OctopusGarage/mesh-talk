@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{path::Path, sync::Arc};
 
 mod metadata;
+pub(in crate::node) use metadata::ever_history_conversations;
 mod pages;
 #[cfg(test)]
 pub(crate) fn take_header_reads_for_test() -> usize {

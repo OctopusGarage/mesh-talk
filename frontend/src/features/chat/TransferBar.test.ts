@@ -14,6 +14,19 @@ const render = (waitingDirection?: "prepare" | "send") =>
   renderToStaticMarkup(
     createElement(TransferBar, { transferKey: "file", waitingDirection }),
   );
+
+it("keeps the idle file size in the compact status line without claiming transfer progress", () => {
+  const html = renderToStaticMarkup(
+    createElement(TransferBar, {
+      transferKey: "file",
+      variant: "compact",
+      idleLabel: "12 KB",
+    }),
+  );
+  expect(html).toContain("12 KB");
+  expect(html).not.toContain('role="progressbar"');
+  expect(html).not.toContain("%");
+});
 const transfer = (done: number, total: number): Transfer => ({
   fileConv: "file",
   direction: "send",

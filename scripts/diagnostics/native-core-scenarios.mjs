@@ -1,6 +1,7 @@
 // Runtime assertions against the owned native webview, real CLI, and read-only
 // production observations. This module does not replace any application IPC.
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -71,6 +72,119 @@ export function nativeMessageContents(nonce) {
   return [`你好 🌍 café ${nonce}`, `first ${nonce}
 second line
 第三行`, `long-${nonce}-` + "mesh消息🙂 ".repeat(300) + `end-${nonce}`];
+}
+
+const nativeControlKeys = new Map([
+  ["\uE004", "Tab"], ["\uE007", "Enter"], ["\uE00C", "Escape"],
+  ["\uE00E", "PageUp"], ["\uE00F", "PageDown"],
+]);
+
+export function nativeControlKeyName(value) {
+  return nativeControlKeys.get(value);
+}
+
+// The Linux fixture runs on its own X11 display. Verify the normalized client
+// window immediately before a fresh xdotool invocation with an empty window stack.
+// Intersect visible PID matches with the managed clients: GTK tooltips share the
+// PID but are not the main window. Preserve GTK's raw child focus.
+const linuxKeyScript = `
+pid=$1
+symbol=$2
+set -f
+validate_x11_ids() {
+  ids_seen=' '
+  ids_count=0
+  for id in $1; do
+    case "$id" in ''|0*|*[!0-9]*|???????????*) return 1;; esac
+    [ "$id" -le 4294967295 ] || return 1
+    case "$ids_seen" in *" $id "*) return 1;; esac
+    ids_seen="$ids_seen$id "
+    ids_count=$((ids_count + 1))
+    [ "$ids_count" -le "$2" ] || return 1
+  done
+}
+windows=$(xdotool search --onlyvisible --pid "$pid" --limit 33)
+if ! validate_x11_ids "$windows" 32; then
+  echo 'Malformed or over-budget X11 visible window list' >&2; exit 1
+fi
+# Format-32 values occupy native longs in xprop; 136 bytes observes 17 on LP64.
+property=$(xprop -root -len 136 -notype -f _NET_CLIENT_LIST 32c '=$0+\\n' _NET_CLIENT_LIST)
+case "$property" in _NET_CLIENT_LIST=*) ;; *) echo 'Missing X11 managed client list' >&2; exit 1;; esac
+managed=$(printf '%s\\n' "$property" | cut -d= -f2- | tr ',' ' ')
+if ! validate_x11_ids "$managed" 16; then
+  echo 'Malformed or over-budget X11 managed client list' >&2; exit 1
+fi
+window=''
+for candidate in $managed; do
+  visible=false
+  for shown in $windows; do
+    if [ "$shown" = "$candidate" ]; then visible=true; fi
+  done
+  if [ "$visible" = true ] && [ "$(xdotool getwindowpid "$candidate" 2>/dev/null)" = "$pid" ]; then
+    if [ -n "$window" ]; then echo 'Ambiguous owned X11 managed windows' >&2; exit 1; fi
+    window=$candidate
+  fi
+done
+if [ -z "$window" ]; then echo 'Missing owned X11 managed main window' >&2; exit 1; fi
+if ! kill -0 "$pid" 2>/dev/null; then echo 'Owned X11 process is not live' >&2; exit 1; fi
+if [ "$(xdotool getwindowpid "$window")" != "$pid" ]; then
+  echo 'Owned X11 main window PID changed' >&2; exit 1
+fi
+if [ "$(xdotool getactivewindow)" != "$window" ]; then
+  echo 'Owned X11 main window is not active' >&2; exit 1
+fi
+if [ "$(xdotool getwindowfocus)" != "$window" ]; then
+  echo 'Owned X11 main window lacks keyboard focus' >&2; exit 1
+fi
+exec xdotool key --clearmodifiers "$symbol"`;
+
+// Executed in the owned webview. Key release may land on BODY when keydown
+// activates a control that unmounts. Observe this one key without retaining DOM.
+function watchLinuxKey(owner, expectedKey) {
+  window.__nativeLinuxKey?.stop();
+  let phase = "pending";
+  const observe = event => {
+    if (!event.isTrusted || event.key !== expectedKey || phase === "invalid") return;
+    if (event.type === "keydown" && !event.repeat && phase === "pending") phase = "pressed";
+    else if (event.type === "keyup" && phase === "pressed") phase = "released";
+    else phase = "invalid";
+  };
+  document.addEventListener("keydown", observe, true);
+  document.addEventListener("keyup", observe, true);
+  window.__nativeLinuxKey = {
+    owner,
+    get phase() { return phase; },
+    stop() {
+      document.removeEventListener("keydown", observe, true);
+      document.removeEventListener("keyup", observe, true);
+    },
+  };
+}
+
+export async function sendNativeLinuxKey({ execute, until, input, current }, pid, key) {
+  const symbol = new Map([["Enter", "Return"], ["Escape", "Escape"], ["Tab", "Tab"], ["PageUp", "Prior"], ["PageDown", "Next"]]).get(key);
+  assert.ok(Number.isSafeInteger(pid) && pid > 0 && symbol, "supported owned Linux control key");
+  const owner = randomBytes(8).toString("hex");
+  let failure;
+  try {
+    await execute(`return (${watchLinuxKey}).apply(null,arguments);`, [owner, key]);
+    assert.ok(current(), "native key requires its live application owner");
+    await input("sh", ["-ec", linuxKeyScript, "native-key", String(pid), symbol]);
+    const result = await until(`native ${key} press and release`, () => execute(
+      "const w=window.__nativeLinuxKey;if(w?.owner!==arguments[0])return 'replaced';return w.phase==='pending'||w.phase==='pressed'?false:w.phase;",
+      [owner],
+    ), 10000);
+    assert.equal(result, "released", `native ${key} requires exactly one press and release: ${result}`);
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await execute("const w=window.__nativeLinuxKey;if(w?.owner===arguments[0]){w.stop();delete window.__nativeLinuxKey;}", [owner]);
+    } catch (error) {
+      if (!failure) throw error;
+    }
+  }
 }
 
 // CI-only OS input, never DOM keyboard events. INPUT's union includes MOUSEINPUT
@@ -408,8 +522,31 @@ export async function settledIncomingAttachment(c, fileConv, fileName, backendRe
   });
 }
 
+/** Bounded fixture-only metadata; never capture text, values or arbitrary keys. */
+export async function startPrivacyDialogTrace(c) {
+  const owner = randomBytes(8).toString("hex");
+  await c.execute(`
+window.__nativePrivacyDialogTrace?.stop();
+const ids=new Set(['invisible-switch','invisible-cancel','invisible-confirm']);
+const events=[],listeners=[],state=()=>{const e=document.querySelector('[data-testid=invisible-confirm]');const focus=document.activeElement?.getAttribute('data-testid');return {state:e?.closest('[role=dialog]')?.getAttribute('data-state')??'absent',focus:ids.has(focus)?focus:null};};
+let previous=JSON.stringify(state()),stopped=false;
+const record=(kind,target=null,key=null)=>{events.push({at:performance.now(),kind,target,key,...state()});if(events.length>48)events.shift();};
+for(const type of ['click','pointerdown','keydown','keyup','focusin','focusout']){const handler=e=>{const id=e.target?.getAttribute?.('data-testid');const key=['Enter','Escape','Tab'].includes(e.key)?e.key:null;if(ids.has(id)||(type==='keyup'&&key)||(type==='pointerdown'&&state().state!=='absent'))record(type,ids.has(id)?id:null,key);};document.addEventListener(type,handler,true);listeners.push([type,handler]);}
+const observer=new MutationObserver(()=>{const next=JSON.stringify(state());if(next!==previous){previous=next;record('state');}});
+observer.observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['data-state']});
+window.__nativePrivacyDialogTrace={owner:"${owner}",events,stop(){if(stopped)return;stopped=true;observer.disconnect();for(const [type,handler] of listeners)document.removeEventListener(type,handler,true);}};
+record('started');return true;`);
+  return () => c.execute(`const trace=window.__nativePrivacyDialogTrace;if(trace?.owner!=="${owner}")return [];trace.stop();delete window.__nativePrivacyDialogTrace;return trace.events;`);
+}
+
+/** Retire both closing modal surfaces and their focus scope before reopening. */
+export async function settledPrivacyConfirmationDismissal(c) {
+  await c.until("invisible confirmation retires its modal and restores its trigger", () => c.execute("const closing=Array.from(document.querySelectorAll('[data-state=closed]')).some(e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.position==='fixed'&&s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&r.left<=0&&r.top<=0&&r.right>=innerWidth&&r.bottom>=innerHeight;});return !closing&&!document.querySelector('[data-testid=invisible-confirm]')&&document.activeElement?.getAttribute('data-testid')==='invisible-switch';"));
+  return { confirmationDismissed: true, triggerFocusRestored: true, closingSurfacesRetired: true };
+}
+
 export async function settledPrivacyMode(c) {
-  await c.until("invisible confirmation fully dismissed", () => c.execute("return !document.querySelector('[data-testid=invisible-confirm]');"));
+  await settledPrivacyConfirmationDismissal(c);
   await c.settledDialog("settings-dialog");
   return { confirmationDismissed: true, dialogSettled: true };
 }

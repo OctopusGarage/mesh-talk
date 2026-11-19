@@ -822,6 +822,10 @@
           {
             "name": "Personal-state enumeration selects authenticated control-index conversations without hydrating unrelated group inventory; deleted groups and reopened accounts retain exact current state.",
             "reference": "docs/network-design-reference.md#personal-conversation-removal"
+          },
+          {
+            "name": "Never-used discovered accounts expire after one nonrenewing local 24-hour clock; durable sent, received or file history remains protected after clear. Expiry changes presentation only and fails open on clock or history-query errors.",
+            "reference": "docs/privacy-controls.md#discovered-contacts-without-chat-history"
           }
         ]
       },

@@ -746,11 +746,22 @@
       "paths": [
         "frontend/src/store/outgoingIntent.ts",
         "frontend/src/store/outgoingIntent.test.ts",
-        "frontend/e2e/file-send-progress.spec.ts"
+        "frontend/src/store/outgoingMediaPreviews.ts",
+        "frontend/src/store/outgoingMediaPreviews.test.ts",
+        "frontend/e2e/file-send-progress.spec.ts",
+        "frontend/src/lib/imageDimensions.ts",
+        "frontend/src/lib/imageDimensions.test.ts",
+        "frontend/src/lib/pack.ts"
       ],
-      "frontend": ["src/store/outgoingIntent.test.ts"],
+      "frontend": [
+        "src/store/outgoingIntent.test.ts",
+        "src/store/outgoingMediaPreviews.test.ts",
+        "src/lib/imageDimensions.test.ts",
+        "src/lib/pack.test.ts"
+      ],
       "escalation": [
-        "File approval/progress changes require e2e/file-send-progress.spec.ts, including file-offer receipt before approval and byte completion."
+        "File approval/progress changes require e2e/file-send-progress.spec.ts, including file-offer receipt before approval and byte completion.",
+        "Run e2e/stickers.spec.ts for delayed admission with exact selected artwork, canonical decode continuity, narrow layout and reduced motion. Local previews never establish file availability or custody."
       ],
       "consumers": ["frontend-chat"],
       "capability": {
@@ -776,6 +787,10 @@
           {
             "name": "Channel durable IDs settle acceptance independently of fanout and custody",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Outgoing static previews inspect bounded PNG/JPEG headers before creating a decoder; oversized or unknown geometry retains preparation without changing the send.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
           }
         ]
       }
@@ -817,6 +832,10 @@
         "summary": "Bound identity startup waits and recover automatically after transient identity failures while retaining owner and runtime authority.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
+          {
+            "name": "A discovery contact deadline and the first accepted direct text or file recheck native contact visibility without reading conversation bodies. An older account read cannot remove a newly chatted contact. Backfill from the same eligible account or unmapped device shares a bounded two-second trailing recheck and cannot prevent an in-flight result from publishing.",
+            "reference": "docs/privacy-controls.md#network-privacy-and-contact-lists"
+          },
           {
             "name": "The thirty-second identity boot window includes native read waits; failure retains bounded background recovery without crossing owner/run lifetimes",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"

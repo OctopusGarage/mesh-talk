@@ -344,21 +344,18 @@ impl Node {
         )
     }
 
-    // Candidate eligibility is shared; canonical projection and the legacy fast
-    // scan retain their separate coverage/cost contracts.
-    fn search_conversations(&self) -> Result<Vec<SearchConversation>, NodeError> {
-        let mut conversations = Vec::new();
-        let peers = self
-            .roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .peers();
+    /// Shared people-facing device/account attribution. A current relay role
+    /// masks an older human proof for the same device; offline verified human
+    /// bindings remain eligible without treating the binding itself as history.
+    pub(in crate::node) fn human_dm_peer_bindings(
+        &self,
+        peers: &[crate::discovery::roster::PeerRecord],
+    ) -> Vec<(PublicIdentity, Option<String>, String)> {
         // Keep the current roster authoritative for each device. Signed proof
         // history lets legacy device-pair DMs remain searchable after expiry,
         // but must not revive an old human role for a live relay device.
-        let live_devices: std::collections::HashSet<String> =
+        let mut seen_devices: std::collections::HashSet<String> =
             peers.iter().map(|peer| peer.public.user_id()).collect();
-        let mut seen_devices = live_devices.clone();
         let mut dm_peers: Vec<_> = peers
             .iter()
             .filter(|peer| !peer.post_office)
@@ -375,6 +372,21 @@ impl Node {
                 .insert(proof.user_id.clone())
                 .then(|| (proof.public(), proof.account_id(), proof.name))
         }));
+        dm_peers
+    }
+
+    // Candidate eligibility is shared; canonical projection and the legacy fast
+    // scan retain their separate coverage/cost contracts.
+    fn search_conversations(&self) -> Result<Vec<SearchConversation>, NodeError> {
+        let mut conversations = Vec::new();
+        let peers = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .peers();
+        let live_devices: std::collections::HashSet<String> =
+            peers.iter().map(|peer| peer.public.user_id()).collect();
+        let dm_peers = self.human_dm_peer_bindings(&peers);
         for (public, account_id, name) in dm_peers {
             let conv = dm_conversation_id(&self.identity.public(), &public);
             conversations.push(SearchConversation {

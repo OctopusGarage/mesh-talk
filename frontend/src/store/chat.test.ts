@@ -18,7 +18,7 @@ vi.mock("@/lib/events", () => ({
 import { useChat, convKey, reactionFromMe } from "./chat";
 import { emptyReception } from "./reception";
 import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
-import type { AccountGroupOperationStatus } from "@/lib/types";
+import type { AccountGroupOperationStatus, PeerInfo } from "@/lib/types";
 import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
@@ -454,6 +454,474 @@ it("keeps repeated roster pages out of document and full group refreshes", async
     unsubscribe();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  }
+});
+
+const contactRow = { account_id: "friend", names: ["Friend"], device_count: 1 };
+function mockContactRoster(list: () => unknown, extraPeers: PeerInfo[] = []) {
+  const device = {
+    user_id: "device",
+    account_id: "friend",
+    name: "Friend",
+    post_office: false,
+    addr: "127.0.0.1:1",
+  };
+  const identity = {
+    owner: "host",
+    device_id: "me",
+    account_id: "myacct",
+    supports_push_state: true,
+  };
+  invoke.mockImplementation(async (cmd: string) => {
+    if (cmd === "owner_node_identity") return identity;
+    if (cmd === "list_peers") return [device, ...extraPeers];
+    if (cmd === "owner_roster_observation")
+      return { identity, peers: [device, ...extraPeers], people: {} };
+    if (cmd === "list_accounts") return list();
+    if (cmd === "owner_enqueue_text") return "first-text";
+    if (cmd === "owner_enqueue_file")
+      return { id: "first-file", fileConv: "file" };
+    return [];
+  });
+  return identity;
+}
+
+it("rechecks the earliest contact deadline without a heartbeat and keeps a concurrently chatted contact", async () => {
+  vi.useFakeTimers();
+  const second = { account_id: "other", names: [], device_count: 1 };
+  const now = Date.now();
+  const list = vi.fn(() =>
+    Date.now() >= now + 900
+      ? [contactRow]
+      : [
+          Date.now() >= now + 400
+            ? contactRow
+            : { ...contactRow, contact_expires_at_ms: now + 400 },
+          { ...second, contact_expires_at_ms: now + 900 },
+        ],
+  );
+  mockContactRoster(list);
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const baseline = list.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(399);
+    expect(list).toHaveBeenCalledTimes(baseline);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(list).toHaveBeenCalledTimes(baseline + 1);
+    expect(useChat.getState().accounts[0]).toEqual(contactRow);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(useChat.getState().accounts).toEqual([contactRow]);
+    expect(list).toHaveBeenCalledTimes(baseline + 2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(list).toHaveBeenCalledTimes(baseline + 2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("rearms a contact deadline after a clock rollback and rechecks on foreground activation", async () => {
+  vi.useFakeTimers();
+  const host = new EventTarget();
+  vi.stubGlobal("window", host);
+  const now = Date.now();
+  const expiring = { ...contactRow, contact_expires_at_ms: now + 100 };
+  const list = vi.fn(() => (Date.now() < now + 100 ? [expiring] : []));
+  mockContactRoster(list);
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    list.mockClear();
+    vi.setSystemTime(now - 1000);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(list).not.toHaveBeenCalled();
+    expect(useChat.getState().accounts).toEqual([expiring]);
+    vi.setSystemTime(now + 200);
+    host.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(useChat.getState().accounts).toEqual([]);
+  } finally {
+    stop();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  }
+});
+
+it.each(["onDm", "onFile", "onIntegrationMessageAccepted", "send", "sendFile"])(
+  "restores an absent contact on its first committed %s without waiting for discovery",
+  async (source) => {
+    vi.useFakeTimers();
+    let committed = false;
+    const list = vi.fn(() => (committed ? [contactRow] : []));
+    const identity = mockContactRoster(list);
+    const stop = useChat.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const baseline = list.mock.calls.length;
+      committed = true;
+      const outbound = source === "send" || source === "sendFile";
+      const submit = async () => {
+        if (outbound) {
+          useChat.setState({
+            active: { kind: "account", id: "friend", name: "Friend" },
+          });
+          if (source === "send") await useChat.getState().send("hello", null);
+          else await useChat.getState().sendFile("/tmp/file", false);
+        } else {
+          captured.current![source]({
+            ...identity,
+            destination: { kind: "account", id: "friend" },
+            from: "device",
+            from_account: "friend",
+            from_name: "Friend",
+            message_id: "committed",
+            event_id: "file",
+            file_conv: "file-conv",
+            text: "hey",
+          });
+        }
+      };
+      await submit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().accounts).toEqual([contactRow]);
+      await submit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(list).toHaveBeenCalledTimes(baseline + 1);
+      if (!outbound)
+        expect(
+          invoke.mock.calls.some(([cmd]) => cmd === "owner_account_history"),
+        ).toBe(false);
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  },
+);
+
+it.each([
+  ["file", false],
+  ["file", true],
+  ["dm", false],
+] as const)(
+  "coalesces the first %s from two undiscovered devices, receipt-only %s",
+  async (kind, receiptOnly) => {
+    vi.useFakeTimers();
+    const list = vi.fn<() => unknown>().mockReturnValue([]);
+    const extraPeers: PeerInfo[] = [];
+    const identity = mockContactRoster(list, extraPeers);
+    const stop = useChat.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      invoke.mockClear();
+      list.mockClear();
+      let finishFirst!: (rows: unknown[]) => void;
+      let finishSecond!: (rows: unknown[]) => void;
+      list
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            finishFirst = resolve;
+          }),
+        )
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            finishSecond = resolve;
+          }),
+        );
+      const offer = (sender: string, receiptOnly: boolean) =>
+        captured.current![kind === "file" ? "onFile" : "onDm"]({
+          from: sender,
+          conv: "dm-" + sender,
+          is_channel: false,
+          event_id: "event-" + sender,
+          file_conv: "file-" + sender,
+          name: "photo.png",
+          size: 32,
+          mime: "image/png",
+          media: true,
+          reception_only: receiptOnly,
+        });
+      offer("undiscovered-device-a", false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(list).toHaveBeenCalledTimes(1);
+      offer("undiscovered-device-b", receiptOnly);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(list).toHaveBeenCalledTimes(1);
+      finishFirst([contactRow]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(list).toHaveBeenCalledTimes(2);
+      expect(useChat.getState().accounts).toEqual([]);
+      const secondContact = {
+        account_id: "second-account",
+        names: ["Second"],
+        device_count: 0,
+      };
+      finishSecond([contactRow, secondContact]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().accounts).toEqual([contactRow, secondContact]);
+      expect(
+        invoke.mock.calls.filter(([cmd]) => cmd === "list_peers"),
+      ).toHaveLength(1);
+      for (const [device, account] of [
+        ["undiscovered-device-a", "friend"],
+        ["undiscovered-device-b", "second-account"],
+      ])
+        extraPeers.push({
+          user_id: device,
+          account_id: account,
+          name: account,
+          addr: "127.0.0.1:1",
+          post_office: false,
+        });
+      list.mockReturnValue([contactRow, secondContact]);
+      captured.current!.onStateChanged({ ...identity, kind: "roster" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().unread["account:friend"]).toBe(1);
+      expect(useChat.getState().unread["account:second-account"] ?? 0).toBe(
+        receiptOnly ? 0 : 1,
+      );
+      expect(useChat.getState().pendingUnknownUnread).toEqual({});
+      expect(invoke.mock.calls.map(([cmd]) => cmd)).not.toContain(
+        "owner_account_history",
+      );
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  },
+);
+
+function offerFromUndiscoveredDevice(device: string, sequence: number) {
+  captured.current!.onFile({
+    from: device,
+    conv: "dm",
+    is_channel: false,
+    event_id: `offer-${sequence}`,
+    file_conv: `file-${sequence}`,
+    name: "photo.png",
+    size: 32,
+    mime: "image/png",
+    media: true,
+  });
+}
+
+it("bounds settled contact reads for repeated backfill from one undiscovered device", async () => {
+  vi.useFakeTimers();
+  const list = vi.fn<() => unknown>().mockReturnValue([]);
+  mockContactRoster(list);
+  const stop = useChat.getState().start();
+  try {
+    // Complete the initial recovery installed before native push support is known.
+    await vi.advanceTimersByTimeAsync(2_000);
+    list.mockClear();
+    for (let i = 0; i < 10; i++) {
+      offerFromUndiscoveredDevice("unmapped", i);
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(list).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(list).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(list).toHaveBeenCalledTimes(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("retires unknown sender hints on identity replacement while a stale stop preserves a new run", async () => {
+  vi.useFakeTimers();
+  const list = vi.fn<() => unknown>().mockReturnValue([]);
+  mockContactRoster(list);
+  const oldStop = useChat.getState().start();
+  let stop = oldStop;
+  try {
+    // Complete the initial recovery installed before native push support is known.
+    await vi.advanceTimersByTimeAsync(2_000);
+    offerFromUndiscoveredDevice("same-device", 1);
+    await vi.advanceTimersByTimeAsync(0);
+    offerFromUndiscoveredDevice("same-device", 2);
+    useChat.setState((state) => ({ identityEpoch: state.identityEpoch + 1 }));
+    await vi.advanceTimersByTimeAsync(2000);
+    stop = useChat.getState().start();
+    await vi.advanceTimersByTimeAsync(0);
+    list.mockClear();
+    offerFromUndiscoveredDevice("same-device", 3);
+    await vi.advanceTimersByTimeAsync(0);
+    offerFromUndiscoveredDevice("same-device", 4);
+    oldStop();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(list).toHaveBeenCalledTimes(2);
+    offerFromUndiscoveredDevice("same-device", 5);
+    useChat.getState().resetForLock();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(list).toHaveBeenCalledTimes(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it.each(["unmapped device", "known expiring account"])(
+  "publishes a held contact read during continuous receipts from a %s before its trailing recheck",
+  async (source) => {
+    vi.useFakeTimers();
+    const known = source === "known expiring account";
+    const initial = known
+      ? [{ ...contactRow, contact_expires_at_ms: Date.now() + 60_000 }]
+      : [];
+    const list = vi.fn<() => unknown>().mockReturnValue(initial);
+    mockContactRoster(list);
+    const stop = useChat.getState().start();
+    try {
+      // Complete the initial recovery installed before native push support is known.
+      await vi.advanceTimersByTimeAsync(2_000);
+      let first!: (rows: unknown[]) => void;
+      let last!: (rows: unknown[]) => void;
+      list
+        .mockClear()
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            first = resolve;
+          }),
+        )
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            last = resolve;
+          }),
+        );
+      expect(useChat.getState().accounts).toEqual(initial);
+      const receive = (i: number) => {
+        if (known)
+          captured.current!.onDm({
+            from: "device",
+            from_account: contactRow.account_id,
+            message_id: `durable-${i}`,
+            text: "hello",
+          });
+        else offerFromUndiscoveredDevice("unmapped", i);
+      };
+      for (let i = 0; i < 6; i++) {
+        receive(i);
+        await vi.advanceTimersByTimeAsync(400);
+      }
+      expect(list).toHaveBeenCalledTimes(1);
+      first([contactRow]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(useChat.getState().accounts).toEqual([contactRow]);
+      expect(list).toHaveBeenCalledTimes(2);
+      const second = { ...contactRow, names: ["Latest"] };
+      last([second]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().accounts).toEqual([second]);
+      if (known) {
+        receive(7);
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(list).toHaveBeenCalledTimes(2);
+      }
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  },
+);
+
+it("rejects an older empty account list after a first DM with identical discovery", async () => {
+  vi.useFakeTimers();
+  let resolveOld!: (rows: unknown[]) => void;
+  const list = vi.fn<() => unknown>().mockReturnValue([]);
+  const identity = mockContactRoster(list);
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+    );
+    const stale = useChat.getState().refreshRoster();
+    await vi.advanceTimersByTimeAsync(0);
+    list.mockReturnValue([contactRow]);
+    captured.current!.onDm({
+      from: "device",
+      from_account: "friend",
+      message_id: "first",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().accounts).toEqual([contactRow]);
+    resolveOld([]);
+    await stale;
+    captured.current!.onStateChanged({ ...identity, kind: "roster" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().accounts).toEqual([contactRow]);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("keeps a successful due contact read when a concurrent full roster fails", async () => {
+  vi.useFakeTimers();
+  const expiring = { ...contactRow, contact_expires_at_ms: Date.now() + 100 };
+  const list = vi.fn<() => unknown>().mockReturnValue([expiring]);
+  mockContactRoster(list);
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    let finish!: (rows: unknown[]) => void;
+    list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    list.mockRejectedValueOnce(new Error("roster temporarily unavailable"));
+    await useChat.getState().refreshRoster();
+    finish([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().accounts).toEqual([]);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("parks a failed contact deadline until recovery and ignores a stopped owner's delayed list", async () => {
+  vi.useFakeTimers();
+  const expiring = { ...contactRow, contact_expires_at_ms: Date.now() + 100 };
+  const list = vi.fn<() => unknown>().mockReturnValue([expiring]);
+  const identity = mockContactRoster(list);
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    list.mockClear().mockRejectedValueOnce(new Error("disk unavailable"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(useChat.getState().accounts).toEqual([expiring]);
+    captured.current!.onStateChanged({ ...identity, kind: "roster" });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(list).toHaveBeenCalledTimes(1);
+    let finish!: (rows: unknown[]) => void;
+    list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    captured.current!.onDm({
+      from: "device",
+      from_account: "friend",
+      message_id: "first",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    useChat.setState({ accounts: [] });
+    finish([contactRow]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().accounts).toEqual([]);
+  } finally {
+    stop();
+    vi.useRealTimers();
   }
 });
 
@@ -3051,6 +3519,13 @@ describe("incoming events", () => {
     const newStop = useChat.getState().start();
     await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
     const run = useChat.getState().runEpoch;
+    const previews = await import("./outgoingMediaPreviews");
+    previews.retainOutgoingMediaPreview(
+      "new-run",
+      new Blob(["image"], { type: "image/png" }),
+      () => true,
+    );
+    expect(previews.getOutgoingMediaPreview("new-run")).toBeDefined();
     oldEvents.onFile({
       from: "stranger",
       is_channel: false,
@@ -3064,7 +3539,9 @@ describe("incoming events", () => {
     expect(useChat.getState().incomingFiles).toEqual([]);
     expect(useChat.getState().runEpoch).toBe(run);
     expect(useChat.getState().ready).toBe(true);
+    expect(previews.getOutgoingMediaPreview("new-run")).toBeDefined();
     newStop();
+    expect(previews.getOutgoingMediaPreview("new-run")).toBeUndefined();
   });
 
   const peer = {
@@ -3741,6 +4218,7 @@ describe("externally accepted messages", () => {
       await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
       useChat.setState({
         active: { kind: "account", id: "target", name: "Target" },
+        accounts: [{ account_id: "other", device_count: 1, names: ["Other"] }],
       });
       invoke.mockClear();
       const accepted = {
@@ -5751,6 +6229,8 @@ it("revokes an old staged identity when a full reply races a newer pending start
 it("sends installed sticker bytes as media and retries that snapshot after pack removal", async () => {
   const { usePacks } = await import("./packs");
   const { decodeStickerMedia } = await import("@/lib/stickerMedia");
+  const previews = await import("./outgoingMediaPreviews");
+  const create = vi.spyOn(URL, "createObjectURL");
   const fullPacks: import("@/lib/pack").CustomizationPack[] = [
     {
       kind: "sticker",
@@ -5791,6 +6271,13 @@ it("sends installed sticker bytes as media and retries that snapshot after pack 
   ).toMatchObject({ bytes: [1, 2, 3], ext: "png" });
   const failed = useChat.getState().messages["account:target"][0];
   expect(failed.failed).toBe(true);
+  const exactBlob = create.mock.calls[create.mock.calls.length - 1][0] as Blob;
+  expect(Array.from(new Uint8Array(await exactBlob.arrayBuffer()))).toEqual([
+    1, 2, 3,
+  ]);
+  expect(previews.getOutgoingMediaPreview(failed.clientId)).toBeDefined();
+  create.mockRestore();
+  previews.resetOutgoingMediaPreviews();
   expect(decodeStickerMedia(failed.file!)).toEqual({
     id: "pack:cats:wave",
     fallback: "👋",

@@ -93,6 +93,13 @@ reproduction; never describe a passing correctness test as performance acceptanc
    Preserve invalidation domains through batching and acknowledgement; a roster
    heartbeat must not reload unrelated settings or history. Empty pages do not
    imply a global change. Presentation metadata does not renew user activity.
+   Repeated reception from an unmapped device is a scheduling hint, not proof
+   that a new contact became eligible. Bound same-device rechecks with one
+   trailing deadline while keeping first distinct devices prompt. A continuous
+   same-source burst must not invalidate every in-flight read; publish an
+   admitted snapshot and retain its bounded follow-up. The contact controls in
+   `frontend/src/store/chat.test.ts` and `rosterRefresh.test.ts` cover settled
+   bursts, sustained input and retirement.
    Keep semantic scope through auxiliary listeners too: document and sync-status
    changes must not query every group, and status-only changes must not reload
    document inventories. Mixed changes retain every affected domain; unknown

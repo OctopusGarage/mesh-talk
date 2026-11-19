@@ -40,6 +40,12 @@ pub(super) const QUIET_REPAIR_INTERVAL: std::time::Duration =
 
 const CONTROL_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeliveryAttemptContext {
+    ImmediateFlush,
+    RetainedRecovery,
+}
+
 /// Transport completion is separate from accepted data and from retryable failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::node) enum Reconciliation {
@@ -2217,11 +2223,16 @@ impl Node {
         let Some(message) = message else {
             return;
         };
-        let transfer = async {
-            for destination in message.destinations {
-                Box::pin(self.retry_one_destination(&destination)).await;
-            }
-        };
+        let transfer =
+            async {
+                for destination in message.destinations {
+                    Box::pin(self.retry_one_destination(
+                        &destination,
+                        DeliveryAttemptContext::ImmediateFlush,
+                    ))
+                    .await;
+                }
+            };
         let _ = tokio::time::timeout(super::route_timing::MAX_CONTROL_DEADLINE, transfer).await;
     }
 
@@ -2914,7 +2925,11 @@ impl Node {
                             .expect("delivery lock not poisoned")
                             .contains_destination(id, destination.event.id);
                         let (progress, reason) = if live {
-                            node.retry_one_destination_with_reason(&destination).await
+                            node.retry_one_destination_with_reason(
+                                &destination,
+                                DeliveryAttemptContext::RetainedRecovery,
+                            )
+                            .await
                         } else {
                             (false, None)
                         };
@@ -2972,7 +2987,12 @@ impl Node {
                     active.insert(key.clone(), routes);
                     let owner = key.clone();
                     let task = controls.spawn(work.track(async move {
-                        let progress = node.retry_one_destination(&receipt.destination).await;
+                        let progress = node
+                            .retry_one_destination(
+                                &receipt.destination,
+                                DeliveryAttemptContext::RetainedRecovery,
+                            )
+                            .await;
                         let failed = progress
                             && node
                                 .delivery
@@ -3061,11 +3081,16 @@ impl Node {
         tokio::time::timeout(super::route_timing::MAX_CONTROL_DEADLINE, async {
             let (direct, relay) = tokio::join!(
                 async {
-                    let messages = Box::pin(self.pull_delivery_scope(peer, dm, false)).await;
-                    let receipts = Box::pin(self.pull_delivery_scope(peer, conv, false)).await;
+                    let (messages, receipts) = tokio::join!(
+                        Box::pin(self.pull_delivery_scope(peer, dm, false)),
+                        Box::pin(self.pull_delivery_scope(peer, conv, false)),
+                    );
                     messages.combine(receipts)
                 },
                 async {
+                    // Each relay call drains the same pairwise mailbox; conv
+                    // only selects its subsequent local projection. Preserve
+                    // serial relay drains instead of duplicating them in flight.
                     let messages = Box::pin(self.pull_delivery_scope(peer, dm, true)).await;
                     let receipts = Box::pin(self.pull_delivery_scope(peer, conv, true)).await;
                     messages.combine(receipts)
@@ -3191,13 +3216,20 @@ impl Node {
         completed
     }
 
-    async fn retry_one_destination(self: &Arc<Self>, destination: &DeliveryDestination) -> bool {
-        self.retry_one_destination_with_reason(destination).await.0
+    async fn retry_one_destination(
+        self: &Arc<Self>,
+        destination: &DeliveryDestination,
+        context: DeliveryAttemptContext,
+    ) -> bool {
+        self.retry_one_destination_with_reason(destination, context)
+            .await
+            .0
     }
 
     async fn retry_one_destination_with_reason(
         self: &Arc<Self>,
         destination: &DeliveryDestination,
+        context: DeliveryAttemptContext,
     ) -> (bool, Option<DeliveryRecoveryReason>) {
         if !self.delivery_destination_allowed(destination) {
             return (false, None);
@@ -3233,6 +3265,11 @@ impl Node {
         } else {
             None
         };
+        // Immediate best-effort flush preserves payload-before-control ordering.
+        // Retained recovery can already have a genuine receipt at the recipient,
+        // including for a manifest whose bytes still await download consent.
+        let independent_receipts =
+            destination.receipt_eligible && context == DeliveryAttemptContext::RetainedRecovery;
         let started = std::time::Instant::now();
         let budget = super::route_timing::MAX_CONTROL_DEADLINE;
         let direct = async {
@@ -3241,24 +3278,61 @@ impl Node {
             if let Some(peer) = direct_peer {
                 let outcome = self
                     .adaptive_control_timeout(&peer.public, async {
-                        let held = self
-                            .transfer_delivery_destination(
-                                &peer,
-                                destination,
-                                destination.event.conversation_id,
-                            )
-                            .await;
-                        self.emit_new_messages(destination.event.conversation_id);
-                        if held {
+                        let messages = async {
+                            let held = self
+                                .transfer_delivery_destination(
+                                    &peer,
+                                    destination,
+                                    destination.event.conversation_id,
+                                )
+                                .await;
+                            self.emit_new_messages(destination.event.conversation_id);
+                            held
+                        };
+                        let receipts = || async {
                             let control = super::delivery_receipt::delivery_conversation_id(
                                 &self.identity.public(),
                                 &peer.public,
                             );
-                            self.transfer_delivery_destination(&peer, destination, control)
-                                .await;
+                            Box::pin(self.transfer_delivery_destination(
+                                &peer,
+                                destination,
+                                control,
+                            ))
+                            .await;
                             self.emit_new_messages(control);
+                        };
+                        if independent_receipts {
+                            // Existing receipt evidence must not wait behind
+                            // ordinary history, and new messages must not wait
+                            // behind receipt history. Both scopes remain owned
+                            // by this one deadline/cancellation boundary and
+                            // the shared TCP capacity. Only receipt validation
+                            // may retire this exact destination as delivered.
+                            let held = tokio::join!(Box::pin(messages), receipts()).0;
+                            if held
+                                && self
+                                    .delivery
+                                    .lock()
+                                    .expect("delivery lock not poisoned")
+                                    .contains_work_event(destination.event.id)
+                            {
+                                // The early independent control round can finish
+                                // empty before this first send creates a receipt.
+                                // Preserve the existing post-send control pull
+                                // inside this same bounded owner.
+                                receipts().await;
+                            }
+                            held
+                        } else {
+                            // Immediate flushes, own copies and receipt transfers
+                            // keep their payload-before-control exchange contract.
+                            let held = messages.await;
+                            if held {
+                                receipts().await;
+                            }
+                            held
                         }
-                        held
                     })
                     .await;
                 timed_out = outcome.is_none();
@@ -4902,7 +4976,10 @@ mod diagnostic_tests {
         let task = controls.spawn(async move {
             let _attempt = attempt;
             sending
-                .retry_one_destination_with_reason(&destination)
+                .retry_one_destination_with_reason(
+                    &destination,
+                    super::DeliveryAttemptContext::RetainedRecovery,
+                )
                 .await
                 .0
         });
