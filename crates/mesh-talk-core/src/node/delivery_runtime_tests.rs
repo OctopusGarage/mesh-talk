@@ -5850,12 +5850,17 @@ fn node_with_files(
 
 #[tokio::test]
 async fn automatic_receipt_roundtrip_with_both_original_peers_stopped_in_turn() {
-    automatic_offline_roundtrip(false, false).await;
+    automatic_offline_roundtrip(false, false, false).await;
 }
 
 #[tokio::test]
 async fn automatic_receipt_reuses_exact_ack_after_relay_eviction() {
-    automatic_offline_roundtrip(true, true).await;
+    automatic_offline_roundtrip(true, true, false).await;
+}
+
+#[tokio::test]
+async fn receipt_relay_custody_retires_queue_while_old_recipient_route_stalls() {
+    automatic_offline_roundtrip(false, false, true).await;
 }
 
 #[tokio::test]
@@ -6258,7 +6263,11 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
     }
 }
 
-async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
+async fn automatic_offline_roundtrip(
+    evict: bool,
+    bridge_enabled: bool,
+    stall_original_route: bool,
+) {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
@@ -6272,7 +6281,17 @@ async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
     let baccount = bob_account.secret_bytes();
     let target = bob_account.account_id();
     let own = aa.account_id();
-    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Retain the existing listening socket across Alice's shutdown, including
+    // on Windows; no immediate close/rebind or TIME_WAIT timing is required.
+    let stalled_listener = if stall_original_route {
+        let listener = al.into_std().unwrap();
+        let retained = TcpListener::from_std(listener.try_clone().unwrap()).unwrap();
+        al = TcpListener::from_std(listener).unwrap();
+        Some(retained)
+    } else {
+        None
+    };
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
     let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
@@ -6334,6 +6353,35 @@ async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
     at.abort();
     let _ = at.await;
     drop(a); // Alice stays stopped for ALL Bob recovery.
+    // A former endpoint can keep accepting TCP without authenticating. Receipt
+    // relay custody must retire its queue without waiting for this route.
+    let stalled_route = stalled_listener.map(|listener| tokio::spawn(async move {
+        use futures_util::{StreamExt, stream::FuturesUnordered};
+        use tokio::io::AsyncReadExt;
+        let mut streams = FuturesUnordered::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.unwrap();
+                    assert!(streams.len() < super::session_pool::MAX_TCP_CONNECTIONS);
+                    streams.push(async move {
+                        let mut bytes = [0u8; 4096];
+                        let mut received = 0;
+                        loop {
+                            match stream.read(&mut bytes).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(count) => {
+                                    received += count;
+                                    assert!(received < bytes.len(), "unauthenticated fixture input remains bounded");
+                                }
+                            }
+                        }
+                    });
+                }
+                Some(()) = streams.next(), if !streams.is_empty() => {}
+            }
+        }
+    }));
     let bl = TcpListener::bind(("127.0.0.1", bp.tcp_port)).await.unwrap();
     let (b, mut brx) = node(
         bd.path(),
@@ -6353,13 +6401,45 @@ async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
         .unwrap();
     assert_eq!(received.text, b"strict automatic offline");
     assert_eq!(b.account_history(&own, 10).unwrap().len(), 1);
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let receipt_custody = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !b.delivery.lock().unwrap().retry_receipts(1).is_empty() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    if let Some(task) = stalled_route {
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+    let receipt_relay_held = if stall_original_route {
+        let control =
+            super::delivery_receipt::delivery_conversation_id(&b.identity.public(), &ap.public());
+        let ack = b.log.lock().unwrap().events(&control).unwrap()[0].clone();
+        let receipt_mailbox =
+            crate::postoffice::opaque::RelayMailbox::new(&b.identity, &ap.public(), &pp.public())
+                .unwrap();
+        relay
+            .lock()
+            .unwrap()
+            .has(&receipt_mailbox.wrap(&ack).unwrap().id)
+    } else {
+        true
+    };
+    if receipt_custody.is_err() || !receipt_relay_held {
+        if let Some(task) = bt.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = pt.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+    assert!(
+        receipt_relay_held,
+        "receipt queue retirement requires actual durable relay custody of its signed receipt"
+    );
+    receipt_custody.expect("real receipt relay custody must retire the receipt queue without waiting for the stalled old recipient route");
     assert!(brx.try_recv().is_err());
     let control =
         super::delivery_receipt::delivery_conversation_id(&b.identity.public(), &ap.public());
@@ -11478,6 +11558,7 @@ async fn delayed_route_delivery_with_budget(
     let logical = Arc::new(Mutex::new(None));
     let teardown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let trace_start = Instant::now();
+    let exchange_epoch = Arc::new(std::sync::OnceLock::<tokio::time::Instant>::new());
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
@@ -11524,6 +11605,7 @@ async fn delayed_route_delivery_with_budget(
         let logical = logical.clone();
         let teardown = teardown.clone();
         let fixture_sessions = fixture_sessions.clone();
+        let exchange_epoch = exchange_epoch.clone();
         tasks.spawn(async move {
             let mut next_connection = 0;
             loop {
@@ -11541,6 +11623,7 @@ async fn delayed_route_delivery_with_budget(
                     let sender = sender.clone();
                     let logical = logical.clone();
                     let teardown = teardown.clone();
+                    let exchange_epoch = exchange_epoch.clone();
                     connections.spawn(async move {
                         if let Ok(mut channel) = recipient.privacy_accept(stream).await {
                             record(
@@ -11611,6 +11694,18 @@ async fn delayed_route_delivery_with_budget(
                                     );
                                 }
                             }));
+                            // Hold the actual authenticated owner beyond the former
+                            // fixed control deadline, independently of setup time or
+                            // incidental TCP/frame scheduling. Keep both bounded
+                            // scopes owned; their normal production dispatch creates
+                            // the original and its genuine authenticated receipt.
+                            tokio::time::sleep_until(
+                                *exchange_epoch
+                                    .get()
+                                    .expect("enqueue epoch precedes delivery")
+                                    + Duration::from_secs(18),
+                            )
+                            .await;
                             // Keep production protocol dispatch, admission and completion.
                             recipient.serve_connection(channel).await;
                         }
@@ -11669,6 +11764,7 @@ async fn delayed_route_delivery_with_budget(
         }
     });
     let start = Instant::now();
+    exchange_epoch.set(tokio::time::Instant::now()).unwrap();
     let id = tokio::time::timeout(
         Duration::from_millis(500),
         a.enqueue_to_account(&b.account_id(), b"hotspot handoff", None),
@@ -11731,6 +11827,10 @@ async fn delayed_route_delivery_with_budget(
     }
     let (received, confirmed) = result.expect("automatic delivery and authenticated receipt must progress over the slow valid route without waiting for the stale route");
     if recipient_inbound_only {
+        assert!(
+            received >= Duration::from_secs(18),
+            "the authenticated original itself must remain held beyond the former deadline"
+        );
         assert!(
             confirmed > Duration::from_secs(15),
             "fixture must exercise an exchange beyond the former fixed deadline"

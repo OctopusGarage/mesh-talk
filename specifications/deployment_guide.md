@@ -273,11 +273,28 @@ checksums and verification artifacts:
 
 - Xcode Command Line Tools
 
-#### Installation
+#### Installing and verifying the macOS app
 
 1. Download the `.dmg` file or use the `.app` bundle
 2. Drag the Mesh-Talk application to your Applications folder
 3. Launch from Applications or Spotlight search
+
+Keep one installed application in `/Applications` and retain the same destination
+during updates, for example `/Applications/Mesh-Talk.app`.
+Keep build outputs and backup archives separate from that installation. After
+replacing the app, verify its bundle identity, icon and the actual launcher entry;
+opening an executable directly does not validate Launchpad or Dock shortcuts.
+An obsolete launcher record can show a question mark even when the current app
+exists. Qualify the stale record against its resolved file and bundle identity
+before removing it, preserve other application records and layout, and verify
+the remaining entry actually opens the installed app. Do not reset the whole
+launcher database to repair one stale entry.
+
+Local ad-hoc signing is separate from Developer ID distribution. Restricted
+entitlements require the corresponding signing authorization; structural
+signature verification alone does not establish that macOS will launch a
+package. Verify the final installed bundle and its packaged copy on the target
+machine. Keep the previous application recoverable until that launch succeeds.
 
 #### Code Signing (for distribution)
 

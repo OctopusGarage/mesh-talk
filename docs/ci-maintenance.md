@@ -1003,8 +1003,26 @@ rejection; an empty change rejected for another reason is not a valid negative
 control. Keep these cases on every platform instead of skipping them.
 
 Browser commands use the existing process owner with a deadline inside the total
-job budget, reserving time for joined cleanup and evidence upload. Keep streamed
-logs and append-only active/completed-case progress when final reports cannot be
+job budget, reserving time for joined cleanup and evidence upload.
+
+WebKit preparation uses the same UI command owner with the smaller of five minutes
+and the remaining absolute job budget, retaining the original twenty-minute job
+and eighteen-minute work envelope. Invoke the installed pinned Playwright CLI
+rather than resolving another installer. Record package/browser revisions and
+revision overrides, stream `pw:install` phase diagnostics, and retain the first
+8 MiB of output plus a separate structured preparation receipt under
+`ui-runner-evidence/browser-preparation/`; exceeding the log limit fails and
+retires owned work. Preserve these diagnostics even when no browser test starts.
+The installer already rotates its trusted revision-specific CDN URLs through five
+attempts; a socket inactivity timeout does not bound lock acquisition, a flowing
+transfer, extraction or filesystem cleanup. Do not add an outer retry or infer
+which internal phase stalled from an unavailable job log. The
+`ui-runner.test.mjs` controls qualify actual cancellation, timeout, bounded output,
+uncertain cleanup and the pinned installer's dry-run provenance. They do not prove
+historical cause or hosted browser availability; measure preparation and the
+complete partition on the actual runner.
+
+Keep streamed logs and append-only active/completed-case progress when final reports cannot be
 written. Timeout or uncertain cleanup remains a failure. Preserve verified closure of owned work as a diagnostic separately from the
 actual child outcome: Windows
 intentionally terminates even an empty job to close descendant admission.

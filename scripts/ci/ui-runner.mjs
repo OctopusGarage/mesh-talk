@@ -4,6 +4,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Writable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { execute as executeOwned } from "../validation/stage.mjs";
 
@@ -14,12 +15,14 @@ export async function runUi(args, {
   execute = executeOwned,
   command = [process.execPath, resolve("node_modules/@playwright/test/cli.js"), "test", ...args],
   onOutput = chunk => process.stdout.write(chunk),
+  preparation = null,
+  cwd = process.cwd(),
 } = {}) {
   if (!Number.isSafeInteger(deadline) || deadline <= Date.now()) throw Error("UI job deadline is missing or exhausted");
   await mkdir(directory, { recursive: true });
   const invocation = randomUUID();
   const started = Date.now();
-  await writeFile(join(directory, "owner.json"), JSON.stringify({ state: "running", invocation, started, deadline, success: false }, null, 2));
+  await writeFile(join(directory, "owner.json"), JSON.stringify({ state: "running", invocation, started, deadline, preparation, success: false }, null, 2));
   const controller = new AbortController();
   let timedOut = false;
   const abort = () => controller.abort();
@@ -27,10 +30,16 @@ export async function runUi(args, {
   process.on("SIGINT", abort);
   const timer = setTimeout(() => { timedOut = true; abort(); }, Math.max(1, deadline - Date.now()));
   const shard = args.find(arg => arg.startsWith("--shard="))?.slice(8) ?? null;
-  const env = { ...process.env, MESH_UI_INVOCATION_ID: invocation, MESH_UI_EVIDENCE_DIR: directory, MESH_UI_SHARD: shard ?? "" };
+  const env = { ...process.env, ...(preparation ? { DEBUG: [process.env.DEBUG, "pw:install"].filter(Boolean).join(",") } : {}), MESH_UI_INVOCATION_ID: invocation, MESH_UI_EVIDENCE_DIR: directory, MESH_UI_SHARD: shard ?? "" };
+  let outputBytes = 0;
+  const forwardOutput = preparation ? chunk => {
+    const captured = chunk.subarray(0, Math.max(0, preparation.logLimitBytes - outputBytes));
+    outputBytes += captured.length;
+    if (captured.length) onOutput(captured);
+  } : onOutput;
   let outcome;
   try {
-    if (process.env.MESH_UI_BALANCED_PARTITION === "1") {
+    if (!preparation && process.env.MESH_UI_BALANCED_PARTITION === "1") {
       assert.ok(shard, "Balanced execution requires a shard identity");
       const base = [process.execPath, resolve("node_modules/@playwright/test/cli.js"), "test"];
       const listing = join(directory, "listing.json");
@@ -51,8 +60,9 @@ export async function runUi(args, {
       await writeFile(join(directory, "partition.json"), JSON.stringify({ sourceSha: env.EVAL_SOURCE_SHA, shard, cases: selected }));
       command = [...base, ...args.filter(arg => !arg.startsWith("--shard=")), `--test-list=${listPath}`];
     }
-    outcome = await execute(command, { cwd: process.cwd(), env,
-      terminationSignal: "SIGINT", logPath: join(directory, "execution.log"), signal: controller.signal, onOutput });
+    outcome = await execute(command, { cwd, env,
+      ...(preparation ? { createLogStream: filename => boundedPreparationLog(filename) } : {}),
+      terminationSignal: "SIGINT", logPath: join(directory, "execution.log"), signal: controller.signal, onOutput: forwardOutput });
   } catch (error) {
     outcome = { code: 1, error: error.message };
   } finally {
@@ -61,7 +71,7 @@ export async function runUi(args, {
     process.off("SIGINT", abort);
   }
   const sourceSha = process.env.EVAL_SOURCE_SHA ?? null;
-  if (process.platform !== "win32" && (controller.signal.aborted || outcome.code !== 0 || outcome.error || outcome.signal || outcome.forcedRetirement)) {
+  if (!preparation && process.platform !== "win32" && (controller.signal.aborted || outcome.code !== 0 || outcome.error || outcome.signal || outcome.forcedRetirement)) {
     let proof;
     try { proof = JSON.parse(await readFile(join(directory, `${invocation}-teardown.json`), "utf8")); } catch {}
     if (proof?.invocation !== invocation || proof.sourceSha !== sourceSha || proof.shard !== shard || proof.errors !== 0) {
@@ -70,10 +80,46 @@ export async function runUi(args, {
     }
   }
   const result = { ...outcome, invocation, state: "finished", started, deadline, elapsedMs: Date.now() - started, timedOut,
-    sourceSha, shard,
+    sourceSha, shard, preparation,
     success: outcome.code === 0 && !controller.signal.aborted && !outcome.error && !outcome.cleanupUnverified };
   await writeFile(join(directory, "owner.json"), JSON.stringify(result, null, 2));
   return result;
+}
+
+// Installation has no independently grouped web server: the existing process
+// owner verifies its installer/download descendants, including bounded draining.
+function boundedPreparationLog(filename) {
+  const limit = 8 * 1024 * 1024;
+  let bytes = 0;
+  writeFileSync(filename, "");
+  return new Writable({ write(chunk, _encoding, done) {
+    const remaining = limit - bytes;
+    const captured = chunk.subarray(0, remaining);
+    try { appendFileSync(filename, captured); } catch (error) { done(error); return; }
+    bytes += captured.length;
+    done(chunk.length > remaining ? Error("Browser preparation log exceeded 8 MiB") : null);
+  } });
+}
+
+export async function prepareBrowser(browser, {
+  deadline = Number(process.env.MESH_UI_DEADLINE_MS),
+  frontend = process.cwd(),
+  directory = resolve(process.env.MESH_UI_EVIDENCE_DIR ?? "ui-runner-evidence", "browser-preparation"),
+  ...options
+} = {}) {
+  assert.equal(browser, "webkit", "Unsupported preparation browser");
+  assert.ok(Number.isSafeInteger(deadline) && deadline > Date.now(), "UI job deadline is missing or exhausted");
+  const packageRoot = resolve(frontend, "node_modules/playwright-core");
+  const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+  const browsers = JSON.parse(await readFile(join(packageRoot, "browsers.json"), "utf8"));
+  const descriptor = browsers.browsers.find(value => value.name === browser);
+  assert.ok(descriptor?.revision, "Pinned browser revision is missing");
+  return runUi([], { ...options, directory, cwd: frontend,
+    deadline: Math.min(deadline, Date.now() + 5 * 60000),
+    command: [process.execPath, resolve(frontend, "node_modules/@playwright/test/cli.js"), "install", "--with-deps", browser],
+    preparation: { browser, playwrightVersion: manifest.version, browserRevision: descriptor.revision,
+      revisionOverrides: descriptor.revisionOverrides ?? {}, logLimitBytes: 8 * 1024 * 1024, maximumMs: 5 * 60000 },
+  });
 }
 
 /** Append-only bounded progress survives a killed runner without a finalized report. */
@@ -107,7 +153,10 @@ export default class UiProgressReporter {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const result = await runUi(process.argv.slice(2));
+    const args = process.argv.slice(2);
+    const result = args.length === 1 && args[0].startsWith("--install-browser=")
+      ? await prepareBrowser(args[0].slice("--install-browser=".length))
+      : await runUi(args);
     console.log(JSON.stringify(result));
     process.exitCode = result.success ? 0 : 1;
   } catch (error) { console.error(error.message); process.exitCode = 1; }

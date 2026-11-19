@@ -1388,8 +1388,34 @@ impl Node {
         expected: &PublicIdentity,
         priority: super::session_pool::AuthenticationPriority,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
-        self.privacy_dial_budgeted(addr, expected, priority, false, false)
-            .await
+        self.privacy_dial_budgeted(
+            addr,
+            expected,
+            priority,
+            false,
+            false,
+            super::session_pool::AuthenticationAdmission::Backpressure,
+        )
+        .await
+    }
+
+    /// Explicit caller policy, independent of queue priority. RouteProgress is
+    /// selected by bounded delivery exchanges; general callers keep backpressure.
+    pub(in crate::node) async fn privacy_dial_with_admission(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+        admission: super::session_pool::AuthenticationAdmission,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_dial_budgeted(
+            addr,
+            expected,
+            super::session_pool::AuthenticationPriority::Ordinary,
+            false,
+            false,
+            admission,
+        )
+        .await
     }
 
     /// Explicit call/pairing actions bypass only speculative-route admission;
@@ -1405,6 +1431,7 @@ impl Node {
             super::session_pool::AuthenticationPriority::Ordinary,
             true,
             false,
+            super::session_pool::AuthenticationAdmission::Backpressure,
         )
         .await
     }
@@ -1422,6 +1449,7 @@ impl Node {
             super::session_pool::AuthenticationPriority::Ordinary,
             false,
             true,
+            super::session_pool::AuthenticationAdmission::Backpressure,
         )
         .await
     }
@@ -1433,13 +1461,14 @@ impl Node {
         priority: super::session_pool::AuthenticationPriority,
         interactive: bool,
         watch: bool,
+        admission: super::session_pool::AuthenticationAdmission,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         // One caller owns every route attempt and the disclosure lease. Keep
         // that lease across Noise identity disclosure, but never accumulate a
         // fresh full deadline for each capacity wait or candidate wave.
         tokio::time::timeout(
             super::route_timing::MAX_AUTHENTICATION_DEADLINE,
-            self.privacy_dial_inner(addr, expected, priority, interactive, watch),
+            self.privacy_dial_inner(addr, expected, priority, interactive, watch, admission),
         )
         .await
         .map_err(|_| TransportError::Noise("dial deadline exceeded".into()))?
@@ -1452,6 +1481,7 @@ impl Node {
         priority: super::session_pool::AuthenticationPriority,
         interactive: bool,
         watch: bool,
+        admission: super::session_pool::AuthenticationAdmission,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
@@ -1500,13 +1530,18 @@ impl Node {
                         "dial_authentication_admission_wait".into()
                     });
                     let authentication_key = self.peer_endpoint_key(candidate, expected);
-                    let _authentication = match priority {
-                        super::session_pool::AuthenticationPriority::Ordinary => {
+                    let _authentication = match (admission, priority) {
+                        (super::session_pool::AuthenticationAdmission::RouteProgress, _) => {
+                            self.sessions.authentication_admission_with_policy(
+                                authentication_key.clone(), priority, admission,
+                            ).await?
+                        }
+                        (_, super::session_pool::AuthenticationPriority::Ordinary) => {
                             self.sessions
                                 .authentication_admission(authentication_key.clone())
                                 .await?
                         }
-                        super::session_pool::AuthenticationPriority::Control => {
+                        (_, super::session_pool::AuthenticationPriority::Control) => {
                             self.sessions
                                 .authentication_admission_priority(authentication_key.clone(), priority)
                                 .await?

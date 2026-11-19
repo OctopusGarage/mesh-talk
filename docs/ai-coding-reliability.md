@@ -435,15 +435,17 @@ and [runtime controls](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs
 retain real held connections, pending retries, storage recovery and a fixed repair
 that continuous irrelevant observations cannot postpone.
 
-A serialized admission deadline must cover the work performed by its active
-owner. Reusing a shorter TCP-capacity timeout for an authentication gate can
-repeatedly discard a healthy route just before a valid slow handshake releases
-it. Derive that wait from the route's bounded authentication and TCP-admission
-budgets, retain the caller's outer deadline, and consume no TCP permit while
-queued. The [session pool regression](../crates/mesh-talk-core/src/node/session_pool.rs)
-`authentication_waiter_survives_valid_slow_owner_without_consuming_tcp` holds the
-original owner beyond the generic capacity wait and checks handoff; the same
-module retains bounded saturation, cancellation and priority-fairness controls.
+Select serialized admission budgets with the caller's error and deadline contract.
+Bounded delivery can explicitly wait through one valid slow authentication owner,
+but short account negotiation must first receive local backpressure and retain
+its verified progress. A global longer wait can instead let the outer deadline
+misclassify local contention as a peer failure. Keep admission policy separate
+from queue priority, retain outer deadlines and consume no TCP permit while
+queued. The [session pool regressions](../crates/mesh-talk-core/src/node/session_pool.rs)
+exercise both default local backpressure and explicit route-progress handoff;
+account document/history controls require retained digests, pending demand and
+recovery without a false sync error. The same module retains bounded saturation,
+cancellation and priority-fairness controls.
 
 Distinct direct receipt and message-history scopes need independent polling
 inside their existing delivery owner; shared opaque-mailbox pulls remain serial. Serial receipt-first ordering merely
@@ -455,6 +457,13 @@ ordering; that caller must not start a control exchange after its payload fails.
 Retained automatic recovery independently polls receipt-eligible originals,
 including manifest cards whose bytes still await recipient consent. Card receipt,
 download consent and complete-file custody remain distinct evidence.
+Distinguish the actual signed-receipt publication owner from original delivery.
+Completed custody of that immutable control can retire its publication queue
+without waiting for a stalled direct alternative; original custody still cannot
+establish recipient delivery. Select this behavior through the receipt worker's
+explicit context, preserve its normal completed-exchange checks, and retain the
+queue when both alternatives fail. The receipt recovery regressions require
+exact opaque relay storage, stalled-route recovery and no-holder retention.
 Keep both recovery scopes under the same cancellation/deadline owner, without
 retaining store guards or increasing TCP capacity. The real inbound-only
 [receipt-scope regressions](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
@@ -2650,6 +2659,24 @@ ignored build assets or ambient global tools. Dependency setup must not compile
 a consumer before its generated inputs exist. The [source build owner](../specifications/deployment_guide.md#gui-version-deployment)
 and `standards-wiring.test.mjs` cover dependency preparation and local CLI dispatch;
 real development launch and package generation remain separate acceptance evidence.
+
+For native installation, verify the final user-facing launcher entry, bundle
+identity and icon after replacement; a directly launched binary can hide stale
+shortcuts or duplicate legacy identities. Structural signature validity also
+does not establish entitlement authorization at process launch. The
+[macOS installation owner](../specifications/deployment_guide.md#installing-and-verifying-the-macos-app) requires
+recoverable replacement, actual installed launch and package comparison. Repair
+only qualified stale records while preserving unrelated launcher data and layout;
+keep real target-machine evidence separate from build or mocked IPC results.
+
+Dependency preparation needs its own deadline inside the job envelope and
+retained phase diagnostics before any test starts. A library's per-socket timeout
+or internal retries do not bound lock waits, flowing transfers, extraction and
+retirement. The [UI command owner](../scripts/ci/ui-runner.mjs) records pinned
+installer/browser provenance and separate bounded setup logs; its real child
+controls in `ui-runner.test.mjs` require cancellation/timeout retirement and reject
+uncertain cleanup. Missing historical logs cannot identify the stalled phase;
+a successful dry run proves argument/provenance handling, not hosted availability.
 
 Record the tested source, command, environment, count and outcome. Reassess
 consumers after merging new callers or changing a shared helper. Execute the

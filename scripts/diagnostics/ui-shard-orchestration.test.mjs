@@ -252,6 +252,9 @@ test("the stable required WebKit check admits only both successful partitions", 
   assert.match(producer, /runs-on: macos-26-intel/);
   assert.match(producer, /shard: \[1, 2\]/);
   assert.match(producer, /timeout-minutes: 20/);
+  assert.match(producer, /node \.\.\/scripts\/ci\/ui-runner\.mjs --install-browser=webkit/);
+  assert.doesNotMatch(producer, /npx playwright install/);
+  assert.match(producer, /frontend\/ui-runner-evidence\//);
   assert.match(producer, /ui-runner.mjs.*--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/2/);
   assert.match(collector, /name: Portable UI \(macos-26-intel, webkit\)/);
   assert.match(collector, /needs: \[portable-shards, scope\]/);

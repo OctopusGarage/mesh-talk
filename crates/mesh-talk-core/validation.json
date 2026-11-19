@@ -592,6 +592,8 @@
             "immediate_delivery_retires_stalled_exchanges_within_one_network_budget",
             "immediate_delivery_budget_covers_the_entire_account_fanout",
             "automatic_receipt_recovery_is_independent_of_stalled_dm_history",
+            "receipt_relay_custody_retires_queue_while_old_recipient_route_stalls",
+            "receipt_recovery_without_direct_or_relay_custody_keeps_durable_queue",
             "automatic_manifest_receipt_recovery_is_independent_of_stalled_dm_history",
             "consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnects",
             "automatic_dm_send_progresses_while_receipt_history_is_stalled",
@@ -712,7 +714,11 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Per-route authentication admission covers one adaptive handshake plus outbound TCP admission while retaining caller deadlines, queue fairness and cancellation; queued callers consume no TCP permits and never evict an active owner.",
+            "name": "Only the actual signed-receipt publication owner may finish its queue after a completed alternative establishes exact custody and cancel its unfinished alternative; original message custody remains Awaiting, and absent direct/relay custody retains the receipt.",
+            "reference": "docs/network-design-reference.md#state-and-concurrency-contract"
+          },
+          {
+            "name": "Default authentication admission reports bounded local backpressure before account negotiation deadlines; explicit delivery RouteProgress admission covers one adaptive handshake plus outbound TCP admission while retaining caller deadlines, queue fairness and cancellation; queued callers consume no TCP permits and never evict an active owner.",
             "reference": "docs/network-design-reference.md"
           },
           {

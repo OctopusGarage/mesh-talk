@@ -272,7 +272,8 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - run: npx playwright install --with-deps webkit
+      - name: Prepare pinned WebKit within its setup budget
+        run: node ../scripts/ci/ui-runner.mjs --install-browser=webkit
       - name: Run real React portable workflows (mocked IPC boundary)
         run: node ../scripts/ci/ui-runner.mjs --config=playwright.portable.config.ts --workers=1 --retries=0 --shard=${{ matrix.shard }}/2 --reporter=list,json,../scripts/ci/ui-runner.mjs
       - name: Seal source-pinned partition evidence
@@ -292,6 +293,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: webkit-diagnostics-${{ matrix.shard }}-${{ github.run_attempt }}
+          # Includes browser-preparation receipts/logs when no test starts.
           path: |
             frontend/eval-results/webkit/raw/
             frontend/ui-runner-evidence/

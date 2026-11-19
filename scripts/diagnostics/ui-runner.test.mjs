@@ -160,3 +160,86 @@ test("balanced discovery fails closed and preserves original shard identity with
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("browser preparation retains the pinned installer and a separate bounded receipt", async () => {
+  const { prepareBrowser } = await import("../ci/ui-runner.mjs");
+  assert.equal(typeof prepareBrowser, "function");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-browser-prepare-"));
+  const { fileURLToPath } = await import("node:url");
+  const frontend = fileURLToPath(new URL("../../frontend/", import.meta.url));
+  try {
+    let invoked = 0;
+    const result = await prepareBrowser("webkit", { directory, frontend, deadline: Date.now() + 600000, execute: async (command, options) => {
+      invoked++;
+      assert.equal(command[0], process.execPath);
+      assert.equal(command[1], join(frontend, "node_modules/@playwright/test/cli.js"));
+      assert.deepEqual(command.slice(2), ["install", "--with-deps", "webkit"]);
+      assert.match(options.env.DEBUG, /pw:install/);
+      return { code: 0 };
+    } });
+    assert.equal(result.success, true);
+    assert.equal(invoked, 1, "installer already owns transport retries");
+    assert.equal(result.deadline - result.started <= 300000, true);
+    assert.equal(result.preparation.browser, "webkit");
+    assert.ok(result.preparation.playwrightVersion && result.preparation.browserRevision);
+    assert.deepEqual(JSON.parse(await readFile(join(directory, "owner.json"))), result);
+    await assert.rejects(prepareBrowser("unknown", { directory, frontend }), /browser/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("real preparation timeout and cancellation retire admitted child work and preserve diagnostics", { timeout: 20000 }, async () => {
+  const { prepareBrowser } = await import("../ci/ui-runner.mjs");
+  const { execute } = await import("../validation/stage.mjs");
+  const { fileURLToPath } = await import("node:url");
+  const frontend = fileURLToPath(new URL("../../frontend/", import.meta.url));
+  for (const mode of ["timeout", "cancel"]) {
+    const directory = await mkdtemp(join(tmpdir(), "mesh-browser-retire-"));
+    try {
+      const result = await prepareBrowser("webkit", { directory, frontend, deadline: Date.now() + (mode === "timeout" ? 800 : 10000),
+        onOutput(chunk) { if (mode === "cancel" && String(chunk).includes("PREPARATION_READY")) process.emit("SIGTERM"); },
+        execute: (_command, options) => execute([process.execPath, "-e", "console.error('first installer diagnostic');console.log('PREPARATION_READY');setInterval(()=>{},1000)"], options),
+      });
+      assert.equal(result.success, false);
+      assert.equal(result.timedOut, mode === "timeout");
+      assert.ok(!result.cleanupUnverified, JSON.stringify(result));
+      assert.match(await readFile(join(directory, "execution.log"), "utf8"), /first installer diagnostic/);
+      assert.equal(JSON.parse(await readFile(join(directory, "owner.json"))).success, false);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("preparation output has a hard retained byte limit and uncertainty cannot certify success", { timeout: 15000 }, async () => {
+  const { prepareBrowser } = await import("../ci/ui-runner.mjs");
+  const { execute } = await import("../validation/stage.mjs");
+  const { fileURLToPath } = await import("node:url");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-browser-output-"));
+  const frontend = fileURLToPath(new URL("../../frontend/", import.meta.url));
+  try {
+    const result = await prepareBrowser("webkit", { directory, frontend, deadline: Date.now() + 12000, onOutput() {},
+      execute: (_command, options) => execute([process.execPath, "-e", "process.stdout.write(Buffer.alloc(9*1024*1024,120));setInterval(()=>{},1000)"], options),
+    });
+    assert.equal(result.success, false);
+    assert.match(result.error, /exceeded 8 MiB/);
+    assert.equal((await readFile(join(directory, "execution.log"))).length, 8 * 1024 * 1024);
+    const uncertain = await prepareBrowser("webkit", { directory, frontend, deadline: Date.now() + 10000, execute: async () => ({ code: 0, cleanupUnverified: true }) });
+    assert.equal(uncertain.success, false);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("pinned installer dry run preserves WebKit revision provenance without downloads", { timeout: 15000 }, async () => {
+  const { prepareBrowser } = await import("../ci/ui-runner.mjs");
+  const { execute } = await import("../validation/stage.mjs");
+  const { fileURLToPath } = await import("node:url");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-browser-provenance-"));
+  const frontend = fileURLToPath(new URL("../../frontend/", import.meta.url));
+  let output = "";
+  try {
+    const result = await prepareBrowser("webkit", { directory, frontend, deadline: Date.now() + 12000, onOutput(chunk) { output += chunk; },
+      execute: (command, options) => execute([...command, "--dry-run"], options),
+    });
+    assert.equal(result.success, true, JSON.stringify(result));
+    assert.match(output, /WebKit|webkit/);
+    assert.ok([result.preparation.browserRevision, ...Object.values(result.preparation.revisionOverrides)].some(revision => output.includes(String(revision))), output);
+    assert.match(output, /https:\/\//);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

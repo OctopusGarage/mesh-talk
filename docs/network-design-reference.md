@@ -549,6 +549,18 @@ Retained automatic recovery independently polls all receipt-eligible originals,
 including genuine manifest cards with unavailable bytes and pending consent.
 Own-account copies and receipt transfers do not add a parallel receipt query.
 
+The actual signed-receipt publication worker explicitly selects ReceiptRecovery.
+A completed direct or relay alternative with qualified custody may retire that
+exact receipt publication queue and cancel its unfinished alternative. Original
+message and own-copy recovery retain their existing alternative completion and
+recipient-confirmation rules; receipt publication custody never establishes
+Delivered. Both receipt alternatives failing leaves the same signed receipt
+pending. Cancellation releases owned admission/socket futures; normal transport
+retirement retains actual cleanup ownership. A stalled old recipient route must
+not delay already qualified receipt relay custody. The receipt recovery tests
+retain exact wrapped-ack storage, no-holder failure, original Awaiting on custody,
+and eventual authenticated receipt recovery after both original peers stop.
+
 One eligible retained destination can own two direct scope exchanges, plus its existing
 relay alternative (at most two simultaneous offices from a four-candidate batch).
 The one verified-peer reconciliation owner polls two distinct direct scopes
@@ -3539,13 +3551,16 @@ timeout, caller retirement and route races. Priority changes neither identity
 validation nor connection capacity, and confers no account or group authority.
 
 The gate registry retains at most 256 live keys, prunes only expired weak entries
-and never evicts an active owner into a duplicate gate. Gate acquisition waits
-for at most the exact route's adaptive authentication deadline plus the two-second outbound TCP capacity wait. This bounds waiting
-for one live owner through both stages without prematurely discarding a valid
-slow route. Generic TCP capacity admission retains its two-second wait; the
-actual handshake retains its adaptive route deadline. The caller's enclosing
-control deadline can retire the waiter earlier. Dropping a waiter, race loser or
-caller releases its owned state.
+and never evicts an active owner into a duplicate gate. Ordinary callers retain
+two-second local-backpressure admission, so account negotiation can observe local
+contention before its own deadline and preserve verified progress. Bounded
+delivery exchanges explicitly select RouteProgress admission: at most the exact
+route's adaptive authentication deadline plus the two-second outbound TCP
+capacity wait, while their enclosing dial/control deadlines remain authoritative.
+This policy is separate from priority and does not apply to unrelated account,
+background or interactive consumers. Generic TCP capacity admission retains its
+two-second wait; the actual handshake retains its adaptive route deadline.
+Dropping a waiter, race loser or caller releases its owned state.
 Network/session clearing cannot discard an active gate; old work must retire or
 cancel before another request for that same key begins. These hints authorize
 neither peer identity nor recipient delivery. Repeated unreachable probes must
