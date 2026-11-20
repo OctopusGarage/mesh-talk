@@ -1,0 +1,55 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7VCYCBHS9422T3P85FW3D14",
+  "strategy": "manual-commit",
+  "branch": "fix/chat-media-presentation",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/module-boundaries.md",
+    "frontend/DESIGN.md",
+    "frontend/e2e/file-send-progress.spec.ts",
+    "frontend/e2e/media-message-presentation.spec.ts",
+    "frontend/e2e/stickers.spec.ts",
+    "frontend/src/features/chat/MediaPreview.test.ts",
+    "frontend/src/features/chat/MediaPreview.tsx",
+    "frontend/src/features/chat/MediaSticker.test.ts",
+    "frontend/src/features/chat/MediaSticker.tsx",
+    "frontend/src/features/chat/MessageBubble.media.test.ts",
+    "frontend/src/features/chat/MessageBubble.tsx",
+    "frontend/src/features/chat/TransferBar.tsx",
+    "frontend/validation.json",
+    "scripts/evals/browser-report.mjs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 513563,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 67259008,
+    "output_tokens": 173028,
+    "api_call_count": 412,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 7212,
+    "layers": {
+      "betterleaks": 4,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 7212,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
