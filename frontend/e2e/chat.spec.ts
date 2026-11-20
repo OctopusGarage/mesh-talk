@@ -377,7 +377,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("screenshot-editor")).toBeVisible();
     await expect(page.getByTestId("screenshot-send")).toBeDisabled();
     await expect(
-      page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+      page.getByRole("article", { name: /\[Photo\]/ }),
     ).toHaveCount(0);
     await page
       .getByTestId("screenshot-canvas")
@@ -400,7 +400,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("composer-send").click();
     await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
     await expect(
-      page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+      page.getByRole("article", { name: /\[Photo\]/ }),
     ).toBeVisible();
     const crop = await page.evaluate(() => {
       const bytes = (window as unknown as { __lastWrittenFileBytes?: number[] })

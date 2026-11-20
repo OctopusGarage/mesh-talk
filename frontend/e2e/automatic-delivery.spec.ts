@@ -887,7 +887,7 @@ test("group image record discloses member and post-office copies separately from
     };
   });
   await page.getByTestId("conversation-row-chan_team_dddd4444").click();
-  const bubble = page.getByRole("article", { name: /record-photo/ });
+  const bubble = page.getByRole("article", { name: /\[Photo\]/ });
   const member = bubble.getByRole("button", {
     name: "Last confirmed: 1 member copy",
   });

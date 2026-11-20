@@ -44,7 +44,7 @@ test("Enter sends a staged screenshot after capture loses input focus", async ({
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("composer-pending-image")).toHaveCount(0);
     await expect(
-      page.getByRole("article", { name: /screenshot-\d+\.png/ }).last(),
+      page.getByRole("article", { name: /\[Photo\]/ }).last(),
     ).toBeVisible();
   }
 });
@@ -58,7 +58,7 @@ test("screenshot selection annotation and explicit send produce cropped PNG", as
   await expect(page.getByTestId("screenshot-canvas")).toBeVisible();
   await expect(page.getByTestId("screenshot-send")).toBeDisabled();
   await expect(
-    page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+    page.getByRole("article", { name: /\[Photo\]/ }),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "Select a new area" }).click();
   await selectRegion(page);
@@ -79,7 +79,7 @@ test("screenshot selection annotation and explicit send produce cropped PNG", as
     /screenshot-\d+\.png/,
   );
   await expect(
-    page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+    page.getByRole("article", { name: /\[Photo\]/ }),
   ).toHaveCount(0);
   // Chromium permits automated clipboard reads. WebKit still exercises the
   // real gesture-triggered write above, without automated read permission.
@@ -94,7 +94,7 @@ test("screenshot selection annotation and explicit send produce cropped PNG", as
   await page.getByTestId("composer-send").click();
   await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
   await expect(
-    page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+    page.getByRole("article", { name: /\[Photo\]/ }),
   ).toBeVisible();
   const saved = await page.evaluate(() => {
     const bytes = (window as unknown as { __lastWrittenFileBytes?: number[] })
@@ -154,7 +154,7 @@ test("hidden screenshot capture cancels without sending", async ({ page }) => {
   await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
   await expect(page.getByTestId("composer-pending-files")).toHaveCount(0);
   await expect(
-    page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+    page.getByRole("article", { name: /\[Photo\]/ }),
   ).toHaveCount(0);
 });
 
@@ -170,7 +170,7 @@ test("sender previews a screenshot when media IPC returns fallback byte arrays",
     /screenshot-\d+\.png/,
   );
   await expect(
-    page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+    page.getByRole("article", { name: /\[Photo\]/ }),
   ).toHaveCount(0);
   await page.getByTestId("composer-send").click();
 
@@ -212,11 +212,11 @@ test("rectangle arrow text and undo remain usable before send", async ({
     /screenshot-\d+\.png/,
   );
   await expect(
-    page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+    page.getByRole("article", { name: /\[Photo\]/ }),
   ).toHaveCount(0);
   await page.getByTestId("composer-send").click();
   await expect(
-    page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+    page.getByRole("article", { name: /\[Photo\]/ }),
   ).toBeVisible();
 });
 
@@ -241,7 +241,7 @@ test("unavailable capture is disabled and failed send preserves staged screensho
     /screenshot-\d+\.png/,
   );
   await expect(
-    page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+    page.getByRole("article", { name: /\[Photo\]/ }),
   ).toHaveCount(0);
   await page.getByTestId("composer-send").click();
   await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
@@ -250,7 +250,7 @@ test("unavailable capture is disabled and failed send preserves staged screensho
   );
   await expect(page.getByTestId("composer").getByRole("alert")).toBeVisible();
   await expect(
-    page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+    page.getByRole("article", { name: /\[Photo\]/ }),
   ).toHaveCount(0);
 });
 
@@ -410,7 +410,7 @@ for (const [width, height] of [
     await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
     await expect(page.getByTestId("composer-pending-image")).toBeVisible();
     await expect(
-      page.getByRole("article", { name: /screenshot-\d+\.png/ }),
+      page.getByRole("article", { name: /\[Photo\]/ }),
     ).toHaveCount(0);
     await page.getByTestId("composer-send").click();
     // Sending reads the staged File asynchronously before writing it through IPC.
