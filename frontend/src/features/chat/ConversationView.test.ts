@@ -328,44 +328,50 @@ it.each(["left", "dissolved", "unknown"] as const)(
   },
 );
 
-it("shows a reference-only member's pending message control in its conversation", () => {
-  chatState.active = { kind: "channel", id: "group", name: "Group" };
-  chatState.channels = [
-    {
-      channel_id: "group",
-      name: "Group",
-      owner: "sibling",
-      member_count: 2,
-      shared_reference: true,
-      account_access: {
-        account_id: "local-account",
-        role: "member",
-        execution: { kind: "waiting_for_device" },
+it.each(["file", "reaction", "recall"] as const)(
+  "keeps pending %s operation controls out of the conversation",
+  (kind) => {
+    chatState.active = { kind: "channel", id: "group", name: "Group" };
+    chatState.channels = [
+      {
+        channel_id: "group",
+        name: "Group",
+        owner: "sibling",
+        member_count: 2,
+        shared_reference: true,
+        account_access: {
+          account_id: "local-account",
+          role: "member",
+          execution: { kind: "waiting_for_device" },
+        },
       },
-    },
-  ];
-  chatState.groupOperations = {
-    original: {
-      id: "original",
-      account_id: "local-account",
-      group: "group",
-      kind: "recall",
-      stage: "observed",
-      observation: 1,
-      status: {
+    ];
+    chatState.groupOperations = {
+      original: {
         id: "original",
         account_id: "local-account",
         group: "group",
-        kind: "recall",
-        phase: { kind: "waiting_for_executor" },
-        executions: [],
-        committed_events: [],
-        primary_event: null,
+        kind,
+        stage: "observed",
+        observation: 1,
+        status: {
+          id: "original",
+          account_id: "local-account",
+          group: "group",
+          kind,
+          phase: { kind: "waiting_for_executor" },
+          executions: [],
+          committed_events: [],
+          primary_event: null,
+        },
       },
-    },
-  };
-  const html = renderToStaticMarkup(createElement(ConversationView));
-  expect(html).toContain("Recall message");
-  expect(html).toContain("Waiting for one of your linked devices");
-  expect(html).not.toContain("The account action completed");
-});
+    };
+    const html = renderToStaticMarkup(createElement(ConversationView));
+    expect(html).not.toContain("Recall message");
+    expect(html).not.toContain("Waiting for one of your linked devices");
+    expect(html).not.toContain("Request cancellation");
+    expect(html).not.toContain("Technical details");
+    expect(chatState.groupOperations.original.id).toBe("original");
+    expect(html).not.toContain("The account action completed");
+  },
+);
