@@ -43,14 +43,27 @@ motion. Decoded images preserve their original proportions, and file availabilit
 preview failures, consent and delayed message arrival keep their separate meanings.
 
 Outgoing images and stickers keep the exact locally captured artwork while the
-canonical file source decodes. Stickers reserve a 128px stage; photos retain the
+canonical file source decodes. Stickers reserve a stable 24px stage inside the ordinary text-message bubble;
+legacy, selected, waiting fallback and decoded artwork use the same size. Photos retain the
 selected image proportions. Replacing identical artwork happens without replaying
 a loading phase. Preview URLs are presentation only: at most eight images, three
 MiB each and twelve MiB total, reclaimed after thirty seconds or earlier on
 canonical decode and owner retirement. Protected and read-only views never use
-them. Files put transfer status in their secondary line; photos use a restrained
-status capsule over the image. Percentages and remaining time come only from
-measured transfer observations, and byte completion remains confirmation pending.
+them. File cards put transfer status in their secondary line. Expression and photo
+messages keep sending, waiting and receipt state in the existing message footer;
+no floating capsule, percentage or file-transfer label obscures their content.
+Unknown outgoing photo geometry uses a compact 192px-wide provisional frame with
+a static image glyph and an accessible preparation label. Once decoded, photos
+retain their actual proportions within the existing 320px bounds. Incoming
+photo download/consent/unavailable controls retain their separate meanings.
+Percentages and remaining time on real file cards come only from measured
+transfer observations, and byte completion remains confirmation pending.
+
+This follows the user's compact-expression preference: Telegram distinguishes
+[small inline custom emoji from standalone stickers](https://telegram.org/faq#stickers-emoji-and-reactions).
+The [Signal status model](https://support.signal.org/hc/en-us/articles/360007320751-How-do-I-know-if-my-message-was-delivered-or-read)
+reinforces keeping sending and delivery distinct; Mesh Talk retains its own
+account/file-offer receipt authority rather than copying cloud-service states.
 
 Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
 

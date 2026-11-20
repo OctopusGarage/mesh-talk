@@ -5,7 +5,6 @@ import { useMotionOK } from "@/lib/motion";
 import { useTranslation } from "react-i18next";
 import { useFileStatus } from "@/store/fileAvailability";
 import { useFileObjectUrl } from "./mediaFile";
-import { ReceiveProgress } from "./ReceiveProgress";
 import { stickerSummary } from "@/lib/stickerMedia";
 
 /** Artwork belongs to the received manifest, independently of installed packs. */
@@ -16,7 +15,6 @@ export function MediaSticker({
   label,
   readOnly = false,
   localPreview,
-  externalStatus = false,
 }: {
   fileConv: string;
   mime: string;
@@ -24,7 +22,6 @@ export function MediaSticker({
   label?: string;
   readOnly?: boolean;
   localPreview?: OutgoingMediaPreview;
-  externalStatus?: boolean;
 }) {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
@@ -62,8 +59,8 @@ export function MediaSticker({
   const durable = !!url && failedUrl !== url;
   const decoded = durable && decodedUrl === url;
   return (
-    <div className="w-32 max-w-full space-y-2 text-center">
-      <div className="relative h-32 w-32 max-w-full">
+    <div className="flex max-w-full items-center gap-1.5">
+      <div className="relative h-6 w-6 shrink-0">
         {preview && !decoded ? (
           <img
             data-testid="outgoing-media-preview"
@@ -76,7 +73,7 @@ export function MediaSticker({
             alt={description}
             title={label}
             draggable={false}
-            className="absolute inset-0 h-32 w-32 max-w-full select-none object-contain"
+            className="absolute inset-0 h-6 w-6 select-none object-contain"
           />
         ) : !preview ? (
           <span
@@ -88,7 +85,7 @@ export function MediaSticker({
             }}
             role="img"
             aria-label={description}
-            className="inline-flex h-32 w-32 max-w-full items-center justify-center text-6xl"
+            className="inline-flex h-6 w-6 items-center justify-center text-xl leading-none"
           >
             {fallback}
           </span>
@@ -115,7 +112,7 @@ export function MediaSticker({
             onError={(event) => {
               if (currentImage(event.currentTarget)) setFailedUrl(url);
             }}
-            className="absolute inset-0 h-32 w-32 max-w-full select-none object-contain"
+            className="absolute inset-0 h-6 w-6 select-none object-contain"
             style={{
               opacity: decoded ? 1 : 0,
             }}
@@ -143,13 +140,24 @@ export function MediaSticker({
             </button>
           )}
         </div>
-      ) : decoded || preview || externalStatus ? null : status?.ready ? (
-        <p role="status" className="text-xs text-muted-foreground">
+      ) : !decoded &&
+        (status?.unavailable ||
+          status?.consent === "pending" ||
+          status?.consent === "declined") ? (
+        <span role="status" className="text-xs text-muted-foreground">
+          {t(
+            status.unavailable
+              ? "files.unavailable"
+              : status.consent === "pending"
+                ? "files.approvalRequired"
+                : "files.declined",
+          )}
+        </span>
+      ) : !decoded && !preview ? (
+        <span role="status" className="sr-only">
           {t("common.loading")}
-        </p>
-      ) : (
-        <ReceiveProgress status={status} />
-      )}
+        </span>
+      ) : null}
     </div>
   );
 }

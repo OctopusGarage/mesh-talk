@@ -19,6 +19,7 @@ import {
   Maximize,
   Copy,
   Share2,
+  Image as ImageIcon,
   ImageOff,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -68,7 +69,7 @@ export function MediaPreview({
   readOnly = false,
   localPreview,
   preparing = false,
-  externalStatus = false,
+  outgoing = false,
   failed = false,
 }: {
   fileConv: string;
@@ -82,8 +83,8 @@ export function MediaPreview({
   readOnly?: boolean;
   localPreview?: OutgoingMediaPreview;
   preparing?: boolean;
-  /** The parent presents outgoing transfer state beside or over this stage. */
-  externalStatus?: boolean;
+  /** Outgoing state belongs to the message footer, never an artwork overlay. */
+  outgoing?: boolean;
   failed?: boolean;
 }) {
   const { t } = useTranslation();
@@ -157,7 +158,7 @@ export function MediaPreview({
       ? decoded
       : imageGeometry.get(url)
     : undefined;
-  const frameClass = `relative w-80 max-w-full overflow-hidden rounded-lg ${video ? "aspect-video bg-muted/40" : "aspect-[4/3] bg-card text-card-foreground ring-1 ring-inset ring-border"}`;
+  const frameClass = `relative ${outgoing && !video ? "w-48" : "w-80"} max-w-full overflow-hidden rounded-lg ${video ? "aspect-video bg-muted/40" : "aspect-[4/3] bg-card text-card-foreground ring-1 ring-inset ring-border"}`;
   const imageFrameClass =
     "relative block max-w-full overflow-hidden rounded-lg";
   // A provisional 4:3 frame becomes the actual aspect ratio on the first decode.
@@ -557,6 +558,29 @@ export function MediaPreview({
         className="absolute inset-0 h-full w-full select-none object-contain"
       />
     ) : null;
+  const outgoingPlaceholder = (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-3 text-muted-foreground">
+      {failed || status?.unavailable ? (
+        <ImageOff className="h-6 w-6" aria-hidden="true" />
+      ) : video ? (
+        <Play className="h-6 w-6" aria-hidden="true" />
+      ) : (
+        <ImageIcon className="h-6 w-6" aria-hidden="true" />
+      )}
+      <span
+        role="status"
+        className={failed || status?.unavailable ? "text-xs" : "sr-only"}
+      >
+        {t(
+          failed
+            ? "message.fail.unknown"
+            : status?.unavailable
+              ? "files.unavailable"
+              : "transfer.imagePreparing",
+        )}
+      </span>
+    </div>
+  );
   // A video we can't preview inline (too large, or an undecodable codec like HEVC). Over-cap
   // media is normally handled by FileBubble's file card; this also covers a decode failure.
   if (video && (!withinCap || videoFailed)) {
@@ -608,6 +632,12 @@ export function MediaPreview({
         {selectedArtwork}
       </div>
     );
+  if (outgoing && (!available || !url))
+    return (
+      <div data-media-placeholder="" className={frameClass}>
+        {outgoingPlaceholder}
+      </div>
+    );
   if (!video && (!available || !url))
     return (
       <div
@@ -620,7 +650,7 @@ export function MediaPreview({
             aria-label={t("message.fail.unknown")}
           />
         ) : (
-          !externalStatus && (
+          !outgoing && (
             <ReceiveProgress
               status={status}
               presentation="image"
@@ -638,7 +668,7 @@ export function MediaPreview({
         title={displayName}
       >
         <span className="block truncate">{displayName}</span>
-        {!externalStatus && !failed && <ReceiveProgress status={status} />}
+        {!outgoing && !failed && <ReceiveProgress status={status} />}
       </div>
     );
   if (!url)
@@ -782,14 +812,17 @@ export function MediaPreview({
       }}
     >
       {selectedArtwork ||
-        (!geometry && !externalStatus && (
-          <ReceiveProgress
-            status={status}
-            presentation="image"
-            size={size}
-            preparing
-          />
-        ))}
+        (!geometry &&
+          (outgoing ? (
+            outgoingPlaceholder
+          ) : (
+            <ReceiveProgress
+              status={status}
+              presentation="image"
+              size={size}
+              preparing
+            />
+          )))}
     </div>
   );
 

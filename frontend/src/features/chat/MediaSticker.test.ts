@@ -5,7 +5,13 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const state = vi.hoisted(() => ({
   current: true,
   url: null as string | null,
-  status: undefined as { ready: boolean; unavailable?: boolean } | undefined,
+  status: undefined as
+    | {
+        ready: boolean;
+        unavailable?: boolean;
+        consent?: "pending" | "accepted" | "declined";
+      }
+    | undefined,
 }));
 vi.mock("react-i18next", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react-i18next")>()),
@@ -97,13 +103,14 @@ it("never displays a selected preview after its owner retires", async () => {
 it("shows the fallback while waiting and the received image with accessible alt when ready", async () => {
   await render();
   expect(host.textContent).toContain("👋");
-  expect(host.textContent).toContain("transfer.waiting");
+  expect(host.textContent).toContain("common.loading");
+  expect(host.querySelector('[role="progressbar"]')).toBeNull();
   state.status = { ready: true };
   state.url = "blob:received";
   await render();
   expect(host.querySelector("img")?.getAttribute("src")).toBe("blob:received");
   expect(host.querySelector("img")?.getAttribute("alt")).toBe("[Sticker]");
-  expect(host.querySelector("img")?.className).toContain("h-32 w-32");
+  expect(host.querySelector("img")?.className).toContain("h-6 w-6");
 });
 it("keeps a semantic accessible name while media is missing and after it arrives", async () => {
   await render(false, "静下心");
@@ -233,16 +240,30 @@ it("retires an old decoder error when the current source actually displays", asy
   expect(host.textContent).not.toContain("common.retry");
 });
 
-it("leaves outgoing phase labels to the parent when no optional preview exists", async () => {
+it("keeps a pending sticker readable without file transfer controls", async () => {
   await act(async () =>
     root.render(
       createElement(MediaSticker, {
         fileConv: "",
         mime: "image/png",
         fallback: "👋",
-        externalStatus: true,
       }),
     ),
   );
   expect(host.textContent).not.toContain("transfer.waiting");
 });
+
+it.each([
+  ["pending", "files.approvalRequired"],
+  ["declined", "files.declined"],
+] as const)(
+  "keeps sticker consent %s distinct from loading",
+  async (consent, label) => {
+    state.status = { ready: false, consent };
+    await render();
+    expect(host.textContent).toContain("👋");
+    expect(host.textContent).toContain(label);
+    expect(host.querySelector('[role="progressbar"]')).toBeNull();
+    expect(host.querySelector("img")).toBeNull();
+  },
+);

@@ -2372,6 +2372,18 @@ latency beyond the accelerated bound to verify that isolation. Require timeout
 failure plus later-case execution with joined descendants; never disable the
 watchdog or use retries to qualify a failure.
 
+Transport reuse must not force file-card presentation onto conversation media.
+Expression and photo sending keep content unobscured and status in the message
+footer; local previews and completed byte counts never establish recipient
+receipt. Removing a visible progress widget must not retire authoritative
+approval, byte or custody observation after an early file-offer receipt. The
+[media rendering controls](../frontend/src/features/chat/MessageBubble.media.test.ts)
+and [actual photo/file journeys](../frontend/e2e/file-send-progress.spec.ts)
+qualify both unobscured media and continued measured file progress. Keep compact
+expression preview/fallback/decode geometry consistent and preserve incoming
+consent, unavailable, retry and protected/read-only access through the existing
+[inline-media owner](module-boundaries.md#inline-media-presentation).
+
 Independent message kinds should have independent browser scenarios. The
 [automatic delivery fixture](../frontend/e2e/automatic-delivery.spec.ts) checks
 text, sticker and file-card Awaiting/explicit projection separately; keep the
