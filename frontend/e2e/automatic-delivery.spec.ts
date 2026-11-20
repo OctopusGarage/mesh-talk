@@ -955,10 +955,11 @@ test("typed channel File stays pending until canonical metadata commits and orig
       "The result is unconfirmed. Check this operation before retrying.",
       { exact: true },
     ),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Check status", exact: true }),
-  ).toBeVisible();
+  ).toHaveCount(0);
+  await expect(bubble.getByRole("status", { name: /sending/i })).toBeVisible();
   await page.evaluate(() =>
     (
       window as unknown as { __mockReleaseDeferred(): void }
