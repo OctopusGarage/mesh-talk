@@ -750,6 +750,24 @@ it("uses a compact, quiet outgoing placeholder while the message footer owns sen
   expect(host.querySelector('[role="progressbar"]')).toBeNull();
 });
 
+it("keeps admitted outgoing photos quiet until a preview becomes available", async () => {
+  state.status = { ...state.status, ready: false, done: 0, total: 8 };
+  const props = {
+    fileConv: "ordinary-image",
+    name: "photo.png",
+    size: 100,
+    outgoing: true,
+  };
+  await act(async () => root.render(createElement(MediaPreview, props)));
+  expect(host.querySelector("[data-media-placeholder]")).not.toBeNull();
+  expect(host.querySelector('[role="progressbar"]')).toBeNull();
+  expect(host.querySelector('[role="status"]')?.className).toContain("sr-only");
+  state.status = { ...state.status, ready: true, done: 8 };
+  await act(async () => root.render(createElement(MediaPreview, props)));
+  expect(host.querySelector("[data-media-placeholder]")).toBeNull();
+  expect(host.querySelector('[data-testid="file-image"]')).not.toBeNull();
+});
+
 it("does not label a locally preparing video as waiting for incoming bytes", async () => {
   state.status = { ...state.status, ready: false, done: 0, total: 0 };
   await act(async () =>
