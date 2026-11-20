@@ -131,6 +131,10 @@ Receiving, loading and unsupported states use a responsive provisional frame
 photo geometry uses a compact 192px-wide frame with a static glyph and accessible
 preparation label. Outgoing photo and sticker transport state belongs to the
 ordinary message footer, never a floating file-progress capsule over artwork.
+Conversation rows own attachment sending feedback; `PendingGroupControls` hides
+file, reaction and recall tickets in `ConversationView` while explicit management dialogs
+retain status/cancellation controls. Pending message footers use an accessible
+clock instead of visible sending prose; this does not change operation lifetime.
 Resource-backed expressions retain a stable 24px stage in the text-message
 bubble across selected previews, version-skew fallbacks and canonical decode.
 This presentation choice does not change transport, consent, offer receipts,

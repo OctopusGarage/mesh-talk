@@ -119,3 +119,8 @@ Message entrances observe the live system motion preference directly: enabling r
 Pending composer images reserve a 160 × 80 frame before their local URL or decoded pixels are ready, keeping keyboard paste immediate and avoiding decode-driven layout shifts. Video poster caches retain original source dimensions atomically with the bounded JPEG, so the player starts with the same aspect ratio and natural-size ceiling before metadata arrives. Both sending and receiving progress use the same 100ms linear transform interpolation. Short desktop authentication uses the existing two-column layout through 740px of height so native credential guidance does not push the primary action below the first viewport.
 
 Video players and their native controls stay outside shared-element projection. Video lightboxes retain the background opacity transition and mount the player at its final geometry; image lightboxes retain their shared-element transition. Do not delay autoplay or retain idle video decoders to hide startup work. Native performance evidence must separate foreground interface frame intervals from video presentation and decoding metrics; hidden-window samples cannot establish playback smoothness.
+
+Routine sending uses a small clock beside the timestamp, with an accessible
+sending label. Conversation-level account-operation panels must not duplicate
+attachment sending or expose technical ticket controls during ordinary messaging;
+explicit management dialogs retain those controls. Failures remain actionable.

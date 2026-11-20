@@ -982,7 +982,7 @@ export function ConversationView() {
 
       {isChannel && (
         <div className="mx-auto max-h-56 w-full max-w-[820px] overflow-y-auto px-5">
-          <PendingGroupControls group={active.id} />
+          <PendingGroupControls group={active.id} hideMessageOperations />
         </div>
       )}
       <TransferBar transferKey={active.id} />

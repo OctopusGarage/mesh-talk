@@ -166,6 +166,14 @@ it.each(["reaction", "recall"] as const)(
     );
     expect(html).toContain("Request cancellation");
     expect(html).not.toContain("completed");
+    expect(
+      renderToStaticMarkup(
+        createElement(PendingGroupControls, {
+          group: "group",
+          hideMessageOperations: true,
+        }),
+      ),
+    ).toBe("");
   },
 );
 
@@ -198,6 +206,14 @@ it.each([undefined, "accepted", "cancelled", "committed", "rejected"] as const)(
     const html = renderToStaticMarkup(
       createElement(PendingGroupControls, { group: "group" }),
     );
+    expect(
+      renderToStaticMarkup(
+        createElement(PendingGroupControls, {
+          group: "group",
+          hideMessageOperations: true,
+        }),
+      ),
+    ).toBe("");
     if (!phase || phase === "accepted") {
       expect(html).toContain("Attachments");
       expect(html).toContain("Request cancellation");
