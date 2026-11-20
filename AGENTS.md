@@ -1,5 +1,46 @@
 # Repository Guidelines
 
+## Roadmap and task execution
+
+- Read the [development roadmap](docs/development-roadmap.md) before selecting
+  planned work. It owns the thirty-source consolidation, foundation scope,
+  priorities, task dependencies, phase acceptance, current claims and deferred
+  features; this file owns the execution rules. Existing guides retain authority
+  over product/security/resource contracts.
+- The planning change must merge through the existing PR/review/current-head
+  checks before product execution. Start the execution cycle from that accepted
+  `main` revision, beginning with F01, then select tasks with accepted relevant
+  inputs. A planning merge or an existing test file is not implementation or
+  acceptance evidence. Do not bypass gates or resume an unmerged planning
+  snapshot as though it were the accepted baseline.
+- Deliver the finite current-IM foundations and their integrated acceptance
+  before post-foundation features. Forum, PWA, marketplace, external SDK and other
+  roadmap-only directions require a recorded activation decision; do not build
+  their speculative infrastructure during foundation work. Verified urgent
+  security, data-loss or hard-freeze findings override ordinary order.
+- Before a claim, recheck the live tracker, existing branches/PRs and ownership.
+  Register one task owner, source/parent SHA, outcome, exact owned paths, accepted
+  inputs, shared-interface/integration owner, evidence and next action. Reuse
+  existing work without silently reassigning it. Keep one authoritative live
+  claim record and update state/evidence before releasing the claim.
+- Admit parallel mutations only with stable accepted inputs/interfaces,
+  independent path and policy ownership, a clear integration order and available
+  review/validation capacity. Do not start work expected to need reimplementation
+  when an upstream change merges. Separate files do not prove independence;
+  serialize uncertain shared contracts or limit preparation to read-only work.
+  Stop and reassess dependents when their accepted interface changes.
+- For coordinated parallel tasks, declare an integration branch, create children
+  from its accepted tip/parent, and merge reviewed, validated compatible results
+  back in dependency order before integrated acceptance and the main PR gates.
+  Preserve the [worktree lifecycle](#worktree-lifecycle); never sweep unrelated
+  changes or bypass preservation/cleanup rules.
+- Treat module extraction as a bounded change with a real existing consumer,
+  explicit policy/lifecycle/errors and recovery evidence. Measure selected
+  performance paths before and after; deliver regression protection and maintained
+  decisions with each slice. Retain working boundaries when no justified change
+  is needed. Unknown facts become bounded investigations, not assumed defects,
+  numerical targets, migrations or commitments to future features.
+
 ## Reliability before implementation
 
 - For background work, synchronization, storage, caching or UI-state changes, read
