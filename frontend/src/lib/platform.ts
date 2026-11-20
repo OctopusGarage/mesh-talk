@@ -1,4 +1,4 @@
-// Lightweight, dependency-free platform detection for chrome adjustments.
+// Lightweight, dependency-free platform detection for chrome and font adjustments.
 //
 // The custom title bar (tauri.conf `titleBarStyle: "Overlay"`) is macOS-only: the native
 // traffic-lights float over the top-left of our content, so the sidebar header needs a
@@ -37,9 +37,17 @@ export function needsCustomWindowControls(): boolean {
   return isTauri() && !looksLikeMac();
 }
 
-/** Set `data-os` on <html> so CSS can key chrome adjustments off the platform. */
+/** Select native chrome and Windows flag fonts before the first render. */
 export function applyPlatformClass(): void {
   if (typeof document === "undefined") return;
+  // Country flags are missing from Windows' native emoji font, including in
+  // Chromium browser previews. Keep this separate from native window chrome.
+  if (
+    typeof navigator !== "undefined" &&
+    /Windows NT/i.test(navigator.userAgent)
+  ) {
+    document.documentElement.setAttribute("data-windows-emoji", "true");
+  }
   if (isMacOverlay()) {
     document.documentElement.setAttribute("data-os", "macos");
   } else if (needsCustomWindowControls()) {

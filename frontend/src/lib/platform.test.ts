@@ -50,3 +50,21 @@ it.each([
   vi.stubGlobal("navigator", { userAgent: agent });
   expect(isLinuxDesktop()).toBe(expected);
 });
+
+// Windows font selection also applies to browser previews; native chrome stays separate.
+it.each([
+  ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)", true],
+  ["Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)", false],
+  ["Mozilla/5.0 (X11; Linux x86_64)", false],
+])("selects country flag fallback for %s", (agent, windows) => {
+  const setAttribute = vi.fn();
+  vi.stubGlobal("window", {});
+  vi.stubGlobal("navigator", { userAgent: agent });
+  vi.stubGlobal("document", { documentElement: { setAttribute } });
+  applyPlatformClass();
+  if (windows) {
+    expect(setAttribute).toHaveBeenCalledWith("data-windows-emoji", "true");
+  } else {
+    expect(setAttribute).not.toHaveBeenCalledWith("data-windows-emoji", "true");
+  }
+});

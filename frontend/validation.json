@@ -2,6 +2,36 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-windows-country-flags",
+      "paths": [
+        "frontend/src/features/chat/AboutDialog.tsx",
+        "frontend/src/features/chat/AboutDialog.test.ts",
+        "frontend/src/lib/platform.ts",
+        "frontend/src/lib/platform.test.ts",
+        "frontend/tailwind.config.js",
+        "frontend/src/assets/fonts/",
+        "frontend/e2e/country-flags.spec.ts",
+        "frontend/src/index.css"
+      ],
+      "frontend": [
+        "src/lib/platform.test.ts",
+        "src/features/chat/AboutDialog.test.ts"
+      ],
+      "capability": {
+        "summary": "Supply local country-flag glyphs only on Windows while retaining original Unicode text.",
+        "guide": "docs/module-boundaries.md#windows-country-flag-presentation",
+        "invariants": [
+          {
+            "name": "Windows selects a bundled limited-coverage font before system RI letter glyphs; other platforms retain native fonts. No remote asset request or message conversion.",
+            "reference": "docs/ai-coding-reliability.md#r10-evidence-that-exercises-the-failure"
+          }
+        ]
+      },
+      "escalation": [
+        "Real Windows 10 WebView2 must verify flag colors, copy/paste, deletion, reply/search/reaction surfaces and zoom. Browser shaping assertions on another host are not native acceptance."
+      ]
+    },
+    {
       "id": "frontend-message-reception-source",
       "paths": [
         "frontend/src/lib/types.ts",
@@ -2712,6 +2742,18 @@
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-windows-country-flags-acceptance",
+      "paths": [
+        "frontend/src/lib/platform.ts",
+        "frontend/src/lib/platform.test.ts",
+        "frontend/tailwind.config.js",
+        "frontend/src/assets/fonts/",
+        "frontend/e2e/country-flags.spec.ts",
+        "frontend/src/index.css"
+      ],
+      "browser": ["e2e/country-flags.spec.ts"]
+    },
     {
       "id": "frontend-memory-guardrail-acceptance",
       "paths": [
