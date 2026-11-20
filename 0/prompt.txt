@@ -1,0 +1,67 @@
+这个最后为啥是个草稿，哪里有问题？？https://github.com/OctopusGarage/mesh-talk/releases/tag/untagged-1a0ebbb64f851f2f5d04
+
+---
+
+能不能优化掉，那里不合理还是设计问题，还是不稳定吗，仔细客观全面分析清楚吧，不要老是这样吧，相当于留个烂摊子就不管了！！能不能专业优雅可靠一点
+
+---
+
+make sure merge to origin/main and then make sure all origin/main CI passed, and finaly verify
+
+---
+
+为啥按readme的方法，本地执行不行，哪里有问题？？：“git clone https://github.com/OctopusGarage/mesh-talk.git
+cd mesh-talk
+make dev
+make tauri-dev
+” 想在本地安装
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"你自己执行吧","question":"请贴出执行失败的命令和完整报错（从第一条 error 开始），并说明是在 macOS、Windows 还是 Linux；这样能核对你遇到的具体故障。","questionItemId":"[\"request_user_input_async\",\"call_78bab022d98742d1a4e909c7def32a85\",0]"}]
+</send_user_message_question_reply>
+
+---
+
+本地
+
+---
+
+现在按这个可以正常运行没告警和报错对吧：“git clone https://github.com/OctopusGarage/mesh-talk.git
+cd mesh-talk
+make dev
+make tauri-dev
+”
+
+---
+
+你给我新安装的app打不开，而且图标也不对去
+
+---
+
+图标有问题好
+
+---
+
+有问号
+
+---
+
+[Image #1]
+
+---
+
+现在application有两个mesh talk
+
+---
+
+究竟那个才是对的啊，不要搞乱了啊，修正掉啊
+
+---
+
+全部改动放在同一个PR并合并
+
+---
+
+$mattpocock-skills:handoff
