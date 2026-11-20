@@ -1759,7 +1759,7 @@ async fn channel_custody_converges_while_directory_is_held() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await.expect("actual newly published source-authenticated external custody must converge while directory is held");
-        assert!(external.channel_history(channel, 10).unwrap().iter().any(|row| row.id == event), "the external member must retain the exact fresh event");
+        assert!(external_history.iter().any(|row| row.id == event), "the external member must retain the exact fresh event");
         assert!(!sibling.channel_custody_observations(channel, event).is_empty(), "fresh external custody must arrive as an actual account-private document");
         assert!(!release.is_closed());
         assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0, "the authenticated directory handler must remain held through fresh custody convergence");

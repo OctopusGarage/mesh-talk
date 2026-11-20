@@ -37,6 +37,79 @@ fn seed_retired_preferences(
     }
 }
 
+// Listener cancellation is only an observer boundary; the fixture must also
+// retire admitted captures before consuming its storage owner.
+async fn retire_fixture_listener(node: &std::sync::Arc<Node>, task: tokio::task::JoinHandle<()>) {
+    let prepared = node.retire_prepared_sync_views();
+    node.clear_delivery_observations();
+    task.abort();
+    let listener_result = task.await;
+    let prepared_result = match prepared {
+        Some(retirement) => Some(retirement.await),
+        None => None,
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), node.runtime_work.drain())
+        .await
+        .expect("fixture retirement must drain actual admitted work before profile reuse");
+    if let Some(result) = prepared_result {
+        result.expect("fixture prepared views must finish retirement");
+    }
+    if let Err(error) = listener_result {
+        assert!(error.is_cancelled(), "fixture listener panicked: {error}");
+    }
+}
+
+#[tokio::test]
+async fn loopback_fixture_retirement_waits_until_admitted_node_releases_profile() {
+    use std::{sync::Arc, task::Poll, time::Duration};
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&peer, &Account::generate(), "peer", 9);
+    let (node, _, _) = test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let retained = Arc::clone(&node);
+    let (release, held) = tokio::sync::oneshot::channel();
+    let work = tokio::spawn(node.runtime_work.admit().unwrap().track(async move {
+        let _ = held.await;
+        drop(retained);
+    }));
+    // A joined top-level observer cannot stand in for the captured storage
+    // owner. Finish it first so the first retirement poll reaches that seam.
+    let (finished, done) = tokio::sync::oneshot::channel();
+    let observer = tokio::spawn(async move {
+        let _ = finished.send(());
+    });
+    done.await.unwrap();
+    assert!(observer.is_finished());
+    let mut retirement = Box::pin(async move {
+        retire_fixture_listener(&node, observer).await;
+        drop(node);
+    });
+    let waiting = matches!(futures_util::poll!(&mut retirement), Poll::Pending);
+    let still_locked =
+        crate::storage::profile::ProfileStorageLease::acquire(directory.path()).is_err();
+    release.send(()).unwrap();
+    work.await.unwrap();
+    if waiting {
+        tokio::time::timeout(Duration::from_secs(5), retirement)
+            .await
+            .expect("fixture retirement must finish after actual captured work is released");
+    }
+    assert!(
+        still_locked,
+        "admitted work must retain the actual profile lease"
+    );
+    assert!(
+        waiting,
+        "listener retirement returned while admitted Node work still retained the profile"
+    );
+    assert!(crate::storage::profile::ProfileStorageLease::acquire(directory.path()).is_ok());
+}
+
 #[tokio::test]
 async fn retired_language_preferences_do_not_block_account_or_integration_sends() {
     let dir = tempfile::tempdir().unwrap();
@@ -106,10 +179,10 @@ async fn retired_hidden_decisions_do_not_hide_loopback_history_search_or_recover
         .await
         .unwrap()
         .unwrap();
-    at.abort();
-    bt.abort();
-    let _ = at.await;
-    let _ = bt.await;
+    tokio::join!(
+        retire_fixture_listener(&a, at),
+        retire_fixture_listener(&b, bt)
+    );
     assert_eq!(message.text, text.as_bytes());
     assert_eq!(
         b.account_history(&a.account_id(), 10).unwrap()[0].text,
@@ -117,7 +190,8 @@ async fn retired_hidden_decisions_do_not_hide_loopback_history_search_or_recover
     );
     assert!(!b.search("项目").unwrap().is_empty());
     assert!(!b.export_account_backfill().unwrap().is_empty());
-    drop(b);
+    b.close_profile()
+        .expect("retired fixture must release every Node and storage owner before reopen");
     let (reopened, _, _) = test_support::node_with_files(
         bd.path(),
         DeviceIdentity::from_secret_bytes(bob_secret.0, bob_secret.1),

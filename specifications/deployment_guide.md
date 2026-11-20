@@ -24,9 +24,17 @@ Before deploying Mesh-Talk, ensure you have the following tools installed:
 
 ### Node.js and npm
 
-- Node.js 22 or newer (the version used by CI)
+- Node.js 22.12 or newer
 - npm (comes with Node.js)
 - Installation: https://nodejs.org/
+
+### Source build helpers
+
+- Python 3.11 or newer (`python3`), used by the managed build/cache owner.
+- GNU Make for the commands below. On Windows, use Git Bash with Make and
+  `python3` available on `PATH`, alongside the MSVC toolchain.
+- The Tauri CLI is installed locally by `make dev`; a global `cargo-tauri`
+  installation is not required.
 
 ### Platform-Specific Dependencies
 
@@ -207,24 +215,28 @@ The GUI version of Mesh-Talk provides a desktop application with a graphical int
    cd mesh-talk
    ```
 
-2. Install frontend dependencies:
+2. Prepare locked Rust and frontend dependencies from the repository root:
 
    ```bash
-   cd frontend
-   npm install
-   cd ..
+   make dev
    ```
 
-3. Build the GUI version for your platform:
+3. Build the GUI version for your platform. For macOS without Developer ID
+   credentials, use the [local package command](#local-macos-source-package) instead:
    ```bash
-   cd src-tauri
-   cargo tauri build
+   make tauri-build
    ```
 
 Desktop builds start without optional avatar, theme, or sticker packs and animated
 Noto sticker files. Packs can be installed later from the marketplace or local ZIPs.
 No edition flag is required. See
 [`docs/CUSTOMIZATION_PACKS.md`](../docs/CUSTOMIZATION_PACKS.md).
+
+For development with hot reload, use `make tauri-dev` after setup and keep its
+terminal open. It starts the frontend server and desktop process; install the
+package produced by the applicable build command when you want an application
+in your OS's normal application location. Setup fetches Rust dependencies without
+compiling the desktop before its frontend resources exist.
 
 ### Build Options
 
@@ -233,19 +245,19 @@ You can customize the build with the following options:
 - Build for a specific platform:
 
   ```bash
-  cargo tauri build --target x86_64-apple-darwin    # macOS
-  cargo tauri build --target x86_64-pc-windows-msvc # Windows
-  cargo tauri build --target x86_64-unknown-linux-gnu # Linux
+  node frontend/node_modules/@tauri-apps/cli/tauri.js build --target x86_64-apple-darwin    # macOS
+  node frontend/node_modules/@tauri-apps/cli/tauri.js build --target x86_64-pc-windows-msvc # Windows
+  node frontend/node_modules/@tauri-apps/cli/tauri.js build --target x86_64-unknown-linux-gnu # Linux
   ```
 
 - Create a debug build:
   ```bash
-  cargo tauri build --debug
+  node frontend/node_modules/@tauri-apps/cli/tauri.js build --debug
   ```
 
 ### Installation Packages
 
-After building from `src-tauri/`, installation packages are under the workspace
+Run these commands from the repository root. Installation packages are under the workspace
 `target/release/bundle/` (or `target/<triple>/release/bundle/` for an explicit
 target). The release workflow packages each target into a ZIP with
 checksums and verification artifacts:
@@ -262,11 +274,45 @@ checksums and verification artifacts:
 
 - Xcode Command Line Tools
 
-#### Installation
+#### Installing and verifying the macOS app
 
 1. Download the `.dmg` file or use the `.app` bundle
 2. Drag the Mesh-Talk application to your Applications folder
 3. Launch from Applications or Spotlight search
+
+Keep one installed application in `/Applications` and retain the same destination
+during updates, for example `/Applications/Mesh-Talk.app`.
+Keep build outputs and backup archives separate from that installation. After
+replacing the app, verify its bundle identity, icon and the actual launcher entry;
+opening an executable directly does not validate Launchpad or Dock shortcuts.
+An obsolete launcher record can show a question mark even when the current app
+exists. Qualify the stale record against its resolved file and bundle identity
+before removing it, preserve other application records and layout, and verify
+the remaining entry actually opens the installed app. Do not reset the whole
+launcher database to repair one stale entry.
+
+Local ad-hoc signing is separate from Developer ID distribution. Restricted
+entitlements require the corresponding signing authorization; structural
+signature verification alone does not establish that macOS will launch a
+package. Verify the final installed bundle and its packaged copy on the target
+machine. Keep the previous application recoverable until that launch succeeds.
+
+#### Local macOS source package
+
+After `make dev`, run this from the repository root when installing locally
+without Developer ID credentials:
+
+```bash
+python3 scripts/build-retention.py run -- node frontend/node_modules/@tauri-apps/cli/tauri.js build \
+  --config '{"bundle":{"macOS":{"signingIdentity":"-","entitlements":null,"hardenedRuntime":false}}}'
+```
+
+This explicitly selects an ad-hoc development package without restricted
+entitlements or the hardened runtime. The override applies to this command;
+`make tauri-build` retains the distribution configuration. The resulting app and
+DMG are under `target/release/bundle/`. Install and verify them using the steps
+above. This local package is not Developer ID signed or notarized; use the
+verified release workflow for distribution.
 
 #### Code Signing (for distribution)
 

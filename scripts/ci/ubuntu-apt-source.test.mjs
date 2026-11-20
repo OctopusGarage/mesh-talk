@@ -394,6 +394,8 @@ test("host matching ignores Azure text in credentials, paths, queries and lookal
   for (const uri of [
     "https://azure.archive.ubuntu.com.example/ubuntu",
     "https://notazure.archive.ubuntu.com/ubuntu",
+    "https://us-east-2.ec2.archive.ubuntu.com.example/ubuntu",
+    "https://us-east-2.ec2.archive.ubuntu.com@mirror.example/ubuntu",
     "https://azure.archive.ubuntu.com@mirror.example/ubuntu",
     "https://mirror.example/azure.archive.ubuntu.com",
     "https://mirror.example/ubuntu?host=azure.archive.ubuntu.com",
@@ -426,6 +428,7 @@ test("invalid URI tokens reject in source fields and mirror lists", () => {
 test("all exact Ubuntu archive origins use the independent signed normal or ports mirror", () => {
   for (const [host, path] of [
     ["azure.archive.ubuntu.com", "ubuntu"],
+    ["us-east-2.ec2.archive.ubuntu.com", "ubuntu"],
     ["archive.ubuntu.com", "ubuntu"],
     ["security.ubuntu.com", "ubuntu"],
     ["ports.ubuntu.com", "ubuntu-ports"],
@@ -456,6 +459,7 @@ test("all exact Ubuntu archive origins use the independent signed normal or port
 test("every malformed known Ubuntu origin rejects before any source is replaced", async (t) => {
   for (const [host, path] of [
     ["azure.archive.ubuntu.com", "ubuntu"],
+    ["us-east-2.ec2.archive.ubuntu.com", "ubuntu"],
     ["archive.ubuntu.com", "ubuntu"],
     ["security.ubuntu.com", "ubuntu"],
     ["ports.ubuntu.com", "ubuntu-ports"],
@@ -489,3 +493,39 @@ test("every malformed known Ubuntu origin rejects before any source is replaced"
     }
   }
 });
+
+test(
+  "the observed EC2 source and referenced mirror list preserve signing, priority and idempotence",
+  posixOnly,
+  async (t) => {
+    const root = await fixture(t);
+    const source = join(root, "etc/apt/sources.list.d/ubuntu.sources");
+    const mirror = join(root, "etc/apt/apt-mirrors.txt");
+    const before =
+      "Types: deb\nURIs: http://us-east-2.ec2.archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates noble-backports\nComponents: main universe\nSigned-By: /keys/ubuntu.gpg\n\nTypes: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble-security\nSigned-By: /keys/ubuntu.gpg\n";
+    const rows =
+      "http://us-east-2.ec2.archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://mirror.example/ubuntu/\tpriority:2\n";
+    await writeFile(source, before, { mode: 0o640 });
+    await writeFile(mirror, rows, { mode: 0o600 });
+    assert.equal(
+      await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+      2,
+    );
+    const origin = "http://us-east-2.ec2.archive.ubuntu.com/ubuntu/";
+    const destination = "https://mirrors.ocf.berkeley.edu/ubuntu/";
+    assert.equal(
+      await readFile(source, "utf8"),
+      before.replace(origin, destination),
+    );
+    assert.equal(
+      await readFile(mirror, "utf8"),
+      rows.replace(origin, destination),
+    );
+    assert.equal((await stat(source)).mode & 0o777, 0o640);
+    assert.equal((await stat(mirror)).mode & 0o777, 0o600);
+    assert.equal(
+      await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+      0,
+    );
+  },
+);

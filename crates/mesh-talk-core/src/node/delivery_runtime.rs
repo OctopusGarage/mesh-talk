@@ -44,6 +44,7 @@ const CONTROL_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_
 enum DeliveryAttemptContext {
     ImmediateFlush,
     RetainedRecovery,
+    ReceiptRecovery,
 }
 
 /// Transport completion is separate from accepted data and from retryable failure.
@@ -2277,14 +2278,30 @@ impl Node {
         destination: &DeliveryDestination,
         conversation: ConversationId,
     ) -> bool {
+        self.transfer_delivery_destination_with_admission(
+            peer,
+            destination,
+            conversation,
+            super::session_pool::AuthenticationAdmission::Backpressure,
+        )
+        .await
+    }
+
+    async fn transfer_delivery_destination_with_admission(
+        self: &Arc<Self>,
+        peer: &crate::discovery::PeerRecord,
+        destination: &DeliveryDestination,
+        conversation: ConversationId,
+        admission: super::session_pool::AuthenticationAdmission,
+    ) -> bool {
         for fresh in [false, true] {
             let started = std::time::Instant::now();
             let dial = if fresh {
-                self.privacy_dial(peer.addr, &destination.device)
+                self.privacy_dial_with_admission(peer.addr, &destination.device, admission)
                     .await
                     .map(|channel| (channel, false))
             } else {
-                self.privacy_sync_dial_with_reuse(peer.addr, &destination.device)
+                self.privacy_sync_dial_with_admission(peer.addr, &destination.device, admission)
                     .await
             };
             let Ok((mut channel, reused)) = dial else {
@@ -2376,11 +2393,16 @@ impl Node {
                         for fresh in [false, true] {
                             let started = std::time::Instant::now();
                             let dial = if fresh {
-                                self.privacy_dial(po.addr, &po.public)
-                                    .await
-                                    .map(|channel| (channel, false))
+                                self.privacy_dial_with_admission(
+                                    po.addr,
+                                    &po.public,
+                                    super::session_pool::AuthenticationAdmission::RouteProgress,
+                                )
+                                .await
+                                .map(|channel| (channel, false))
                             } else {
-                                self.privacy_sync_dial_with_reuse(po.addr, &po.public).await
+                                self.privacy_delivery_sync_dial_with_reuse(po.addr, &po.public)
+                                    .await
                             };
                             let Ok((mut channel, reused)) = dial else {
                                 return false;
@@ -2990,7 +3012,7 @@ impl Node {
                         let progress = node
                             .retry_one_destination(
                                 &receipt.destination,
-                                DeliveryAttemptContext::RetainedRecovery,
+                                DeliveryAttemptContext::ReceiptRecovery,
                             )
                             .await;
                         let failed = progress
@@ -3153,7 +3175,10 @@ impl Node {
             }
             let result = self
                 .adaptive_control_timeout(&peer.public, async {
-                    let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &peer.public).await
+                    let Ok(mut channel) = self
+                        .privacy_delivery_sync_dial_with_reuse(peer.addr, &peer.public)
+                        .await
+                        .map(|(channel, _)| channel)
                     else {
                         return Err(SessionError::UnexpectedMessage);
                     };
@@ -3280,10 +3305,11 @@ impl Node {
                     .adaptive_control_timeout(&peer.public, async {
                         let messages = async {
                             let held = self
-                                .transfer_delivery_destination(
+                                .transfer_delivery_destination_with_admission(
                                     &peer,
                                     destination,
                                     destination.event.conversation_id,
+                                    super::session_pool::AuthenticationAdmission::RouteProgress,
                                 )
                                 .await;
                             self.emit_new_messages(destination.event.conversation_id);
@@ -3294,10 +3320,11 @@ impl Node {
                                 &self.identity.public(),
                                 &peer.public,
                             );
-                            Box::pin(self.transfer_delivery_destination(
+                            Box::pin(self.transfer_delivery_destination_with_admission(
                                 &peer,
                                 destination,
                                 control,
+                                super::session_pool::AuthenticationAdmission::RouteProgress,
                             ))
                             .await;
                             self.emit_new_messages(control);
@@ -3348,8 +3375,11 @@ impl Node {
             (outcome.unwrap_or(false), started.elapsed(), timed_out)
         };
         tokio::pin!(direct, relay);
-        // Both alternatives share the same bounded wall-clock window. Custody
-        // cannot cancel recipient progress; exact recipient confirmation can.
+        // Both alternatives share the same bounded wall-clock window. Original
+        // custody cannot cancel recipient progress; exact confirmation can.
+        // The receipt worker already owns an immutable signed recipient proof:
+        // qualified custody can retire its publication queue without waiting
+        // for a stalled alternative. This grants no original delivery status.
         let retired = async {
             loop {
                 let changed = self.delivery_status_notify.notified();
@@ -3374,8 +3404,18 @@ impl Node {
         while direct_result.is_none() || relay_result.is_none() {
             tokio::select! {
                 _ = &mut retired => break,
-                result = &mut direct, if direct_result.is_none() => direct_result = Some(result),
-                result = &mut relay, if relay_result.is_none() => relay_result = Some(result),
+                result = &mut direct, if direct_result.is_none() => {
+                    direct_result = Some(result);
+                    if context == DeliveryAttemptContext::ReceiptRecovery && result.0 {
+                        break;
+                    }
+                }
+                result = &mut relay, if relay_result.is_none() => {
+                    relay_result = Some(result);
+                    if context == DeliveryAttemptContext::ReceiptRecovery && result.0 {
+                        break;
+                    }
+                }
             }
         }
         // Dropping an unfinished alternative releases its socket and peer lane.
@@ -4549,6 +4589,95 @@ fn delivery_log_error(error: NodeError) -> LogError {
 
 #[cfg(test)]
 mod diagnostic_tests {
+    #[tokio::test]
+    async fn receipt_recovery_without_direct_or_relay_custody_keeps_durable_queue() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source_dir = tempfile::tempdir().unwrap();
+        let receiver_dir = tempfile::tempdir().unwrap();
+        let source_identity = DeviceIdentity::generate();
+        let receiver_identity = DeviceIdentity::generate();
+        let source_account = Account::generate();
+        let receiver_account = Account::generate();
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = closed.local_addr().unwrap();
+        let source_proof =
+            Announce::new_with_account(&source_identity, &source_account, "source", address.port());
+        let receiver_proof = Announce::new_with_account(
+            &receiver_identity,
+            &receiver_account,
+            "receiver",
+            address.port(),
+        );
+        let (source, _, _) = node_with_files(
+            source_dir.path(),
+            source_identity,
+            source_account,
+            &receiver_proof,
+        );
+        let (receiver, mut messages, _) = node_with_files(
+            receiver_dir.path(),
+            receiver_identity,
+            receiver_account,
+            &source_proof,
+        );
+        let id = source
+            .enqueue_to_account(&receiver.account_id(), b"receipt custody negative", None)
+            .await
+            .unwrap();
+        let original = source
+            .delivery
+            .lock()
+            .unwrap()
+            .message(id)
+            .unwrap()
+            .destinations[0]
+            .event
+            .clone();
+        receiver
+            .log
+            .lock()
+            .unwrap()
+            .append_durable(original.clone())
+            .unwrap();
+        receiver.emit_new_messages(original.conversation_id);
+        assert!(messages.try_recv().is_ok());
+        let receipt = receiver.delivery.lock().unwrap().retry_receipts(1)[0].clone();
+        let relay = Announce::new_post_office(
+            &DeviceIdentity::generate(),
+            "unavailable relay",
+            address.port(),
+        );
+        receiver
+            .roster
+            .lock()
+            .unwrap()
+            .update(&relay, address.ip(), &receiver.user_id());
+        drop(closed);
+        let held = receiver
+            .retry_one_destination(
+                &receipt.destination,
+                super::DeliveryAttemptContext::ReceiptRecovery,
+            )
+            .await;
+        assert!(
+            !held,
+            "no completed authenticated holder can qualify receipt retirement"
+        );
+        assert_eq!(
+            receiver.delivery.lock().unwrap().retry_receipts(1)[0]
+                .destination
+                .event
+                .id,
+            receipt.destination.event.id
+        );
+        assert_eq!(
+            source.delivery_status(id),
+            Some(super::super::DeliveryStatus::Awaiting)
+        );
+    }
+
     #[test]
     fn quiet_pull_deadline_and_changed_admission_do_not_requeue_as_progress() {
         use super::Reconciliation::{Advanced, Deferred, Quiet};

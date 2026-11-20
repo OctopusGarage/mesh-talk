@@ -153,3 +153,14 @@ test("downloaded collectors preserve attempt, OS partitions and diagnostic produ
     await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "broken"), { runAttempt: "2", linuxResult: "success", desktopResult: "skipped", windowsResult: "skipped" }, { merge: async () => { throw Error("corrupt blob"); }, log() {} }));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("balanced partitions preserve exact complete CLI identities and reject malformed discovery", async () => {
+  const { balancedCasePartition, fullCaseInventory } = await import("../evals/chromium-evidence.mjs");
+  const fixture = { suites: [{ specs: Array.from({ length: 24 }, (_, i) => ({ id: `case-${i}`, file: "sample.spec.ts", title: `journey ${i}`, tests: [{ projectName: "chromium" }] })) }] };
+  const complete = fullCaseInventory(fixture);
+  const union = Array.from({ length: 8 }, (_, i) => balancedCasePartition(fixture, `${i + 1}/8`)).flat();
+  assert.deepEqual(union.map(value => value.id).sort(), complete.map(value => value.id).sort());
+  assert.equal(new Set(union.map(value => value.line)).size, 24);
+  for (const report of [{ errors: [{}] }, { suites: [] }, { suites: [{ specs: [fixture.suites[0].specs[0], fixture.suites[0].specs[0]] }] }, { suites: [{ specs: [{ id: "a", file: "sample", title: "ambiguous › title", tests: [{ projectName: "chromium" }] }] }] }]) assert.throws(() => fullCaseInventory(report));
+  for (const shard of ["0/8", "9/8", "1/0", "1/25"]) assert.throws(() => balancedCasePartition(fixture, shard));
+});

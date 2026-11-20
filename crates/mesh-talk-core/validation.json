@@ -172,7 +172,7 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Ordinary Text/Sticker, Policy/Dissolve, owner Rename and file-result provenance fixtures use the existing thirty-second functional convergence owner for each submitted turn; matching file retries have a separate invocation bound. Required private/public predicates and persistence-fault repair remain inside the same turn, while dedicated held-traffic, transfer and request/result latency bounds are unchanged. Queued-source private receipts retain their eight-second latency assertion; after receipt and release, all signed rows, public receipt and actual pair retirement remain required under the shared thirty-second functional convergence watchdog without changing other performance or production deadlines. Two live queued controls retain terminal-prefix reuse and dispatch under held maintenance, using the production operation-before-legacy partial-page boundary with a signed higher-key projection and two new legacy rows. Preserve strict lower-result-key ordering, exact checkpoint replay and real signed receipts; separate real-Noise controls retain the 64-row page ceiling and complete replay. Natural A liveness qualifies publication start; publication-triggered cancellation may occur before the publisher returns. Dedicated observer and retirement controls retain rejection of stale child identities without extra queued-operation variants.",
+            "name": "Ordinary Text/Sticker, Policy/Dissolve, owner Rename and file-result provenance fixtures use the existing thirty-second functional convergence owner for each submitted turn; matching file retries have a separate invocation bound. Required private/public predicates and persistence-fault repair remain inside the same turn, while dedicated held-traffic, transfer and request/result latency bounds are unchanged. Queued-source private receipts retain their eight-second latency assertion; after receipt and release, all signed rows, public receipt and actual pair retirement remain required under the shared thirty-second functional convergence watchdog without changing other performance or production deadlines. Two live queued controls retain terminal-prefix reuse and dispatch under held maintenance, using the production operation-before-legacy partial-page boundary with a signed higher-key projection and two new legacy rows. Preserve strict lower-result-key ordering, exact checkpoint replay and real signed receipts; separate real-Noise controls retain the 64-row page ceiling and complete replay. Natural A liveness qualifies publication start; publication-triggered cancellation may occur before the publisher returns. Dedicated observer and retirement controls retain rejection of stale child identities without extra queued-operation variants. The maintenance-held control forces a real protected request before publication observation is registered and verifies its exact task/nonce supplies the validated partial page. Current source rows, requester absence and client validation qualify its snapshot; dispatch timestamps are diagnostic only. The owned server gate releases on cancellation, and both original operation and recovery budgets remain unchanged.",
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
@@ -474,6 +474,7 @@
     {
       "id": "core-startup-identity",
       "paths": [
+        "crates/mesh-talk-core/src/node/unrestricted_messages_tests.rs",
         "crates/mesh-talk-core/src/node/participant_runtime.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/runtime_startup.rs",
@@ -492,6 +493,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "node::unrestricted_messages_tests::",
             "node::participant_runtime_tests::routed_inventory_",
             "shared_local_repair_actual_owners",
             "startup_identity_precedes_blocked_durable_store_and_matches_runtime",
@@ -592,6 +594,8 @@
             "immediate_delivery_retires_stalled_exchanges_within_one_network_budget",
             "immediate_delivery_budget_covers_the_entire_account_fanout",
             "automatic_receipt_recovery_is_independent_of_stalled_dm_history",
+            "receipt_relay_custody_retires_queue_while_old_recipient_route_stalls",
+            "receipt_recovery_without_direct_or_relay_custody_keeps_durable_queue",
             "automatic_manifest_receipt_recovery_is_independent_of_stalled_dm_history",
             "consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnects",
             "automatic_dm_send_progresses_while_receipt_history_is_stalled",
@@ -710,6 +714,14 @@
           {
             "name": "Repeated positive custody does not accelerate an awaiting destination; delivery retry progress requires durable queue advancement and failed destination/receipt retirement remains deferred. A newly accepted durable intent bypasses older retry hints, while idempotent acceptance of a pending intent does not manufacture a new demand generation. Generic projection/poll completion notifications never create new intent demand.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Only the actual signed-receipt publication owner may finish its queue after a completed alternative establishes exact custody and cancel its unfinished alternative; original message custody remains Awaiting, and absent direct/relay custody retains the receipt.",
+            "reference": "docs/network-design-reference.md#state-and-concurrency-contract"
+          },
+          {
+            "name": "Default authentication admission reports bounded local backpressure before account negotiation deadlines; explicit delivery RouteProgress admission covers one adaptive handshake plus outbound TCP admission while retaining caller deadlines, queue fairness and cancellation; queued callers consume no TCP permits and never evict an active owner.",
+            "reference": "docs/network-design-reference.md"
           },
           {
             "name": "A failed unchanged historical endpoint waits five minutes across background callers; cancellation and local pressure do not learn remote failure. Exact identity/endpoint, privacy/network generations, fresh discovery and successful authentication retain prompt recovery.",

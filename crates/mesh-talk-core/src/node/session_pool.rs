@@ -122,6 +122,15 @@ impl AuthenticationWaiter {
     }
 }
 
+/// Admission purpose is independent of queue priority. Short negotiations need
+/// local backpressure before their own deadline; delivery can wait through a
+/// valid slow route under its enclosing exchange deadline.
+#[derive(Clone, Copy)]
+pub(in crate::node) enum AuthenticationAdmission {
+    Backpressure,
+    RouteProgress,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::node) enum AuthenticationPriority {
     Ordinary,
@@ -454,6 +463,26 @@ impl SessionPool {
         key: PeerEndpointKey,
         priority: AuthenticationPriority,
     ) -> Result<AuthenticationLease, TransportError> {
+        self.authentication_admission_with_policy(
+            key,
+            priority,
+            AuthenticationAdmission::Backpressure,
+        )
+        .await
+    }
+
+    pub(in crate::node) async fn authentication_admission_with_policy(
+        &self,
+        key: PeerEndpointKey,
+        priority: AuthenticationPriority,
+        admission: AuthenticationAdmission,
+    ) -> Result<AuthenticationLease, TransportError> {
+        let admission_wait = match admission {
+            AuthenticationAdmission::Backpressure => CAPACITY_WAIT,
+            AuthenticationAdmission::RouteProgress => {
+                CAPACITY_WAIT + self.authentication_timeout(&key.identity, key.address)
+            }
+        };
         let gate = {
             let mut gates = self.authentication_gates.lock().unwrap();
             gates.retain(|(_, gate)| gate.strong_count() > 0);
@@ -488,7 +517,7 @@ impl SessionPool {
             ticket,
             queued: true,
         };
-        tokio::time::timeout(CAPACITY_WAIT, waiter.wait())
+        tokio::time::timeout(admission_wait, waiter.wait())
             .await
             .map_err(|_| TransportError::Noise("peer authentication capacity busy".into()))
     }
@@ -1042,15 +1071,39 @@ impl Node {
         addr: SocketAddr,
         expected: &PublicIdentity,
     ) -> Result<(SecureChannel<TcpStream>, bool), TransportError> {
+        self.privacy_sync_dial_with_admission(addr, expected, AuthenticationAdmission::Backpressure)
+            .await
+    }
+
+    pub(in crate::node) async fn privacy_delivery_sync_dial_with_reuse(
+        &self,
+        addr: SocketAddr,
+        expected: &PublicIdentity,
+    ) -> Result<(SecureChannel<TcpStream>, bool), TransportError> {
+        self.privacy_sync_dial_with_admission(
+            addr,
+            expected,
+            AuthenticationAdmission::RouteProgress,
+        )
+        .await
+    }
+
+    pub(in crate::node) async fn privacy_sync_dial_with_admission(
+        &self,
+        addr: SocketAddr,
+        expected: &PublicIdentity,
+        admission: AuthenticationAdmission,
+    ) -> Result<(SecureChannel<TcpStream>, bool), TransportError> {
         if let Some(channel) = self
             .checkout_reusable_channel(SessionProtocol::Sync, addr, expected)
             .await?
         {
             return Ok((channel, true));
         }
-        self.privacy_dial(addr, expected)
-            .await
-            .map(|channel| (channel, false))
+        let channel = self
+            .privacy_dial_with_admission(addr, expected, admission)
+            .await?;
+        Ok((channel, false))
     }
 
     pub(in crate::node) fn peer_endpoint_key(
@@ -1869,6 +1922,57 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn ordinary_authentication_contention_reports_local_backpressure_before_negotiation() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let owner = pool.authentication_admission(key.clone()).await.unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(pool.authentication_admission(key.clone()).await.is_err());
+        assert_eq!(
+            started.elapsed(),
+            CAPACITY_WAIT,
+            "ordinary callers must receive local backpressure before their account negotiation deadline"
+        );
+        assert_eq!(pool.outbound.available_permits(), MAX_DIRECTION_CONNECTIONS);
+        drop(owner);
+        assert!(pool.authentication_admission(key).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_waiter_survives_valid_slow_owner_without_consuming_tcp() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let owner = pool.authentication_admission(key.clone()).await.unwrap();
+        let waiter = pool.authentication_admission_with_policy(
+            key.clone(),
+            AuthenticationPriority::Ordinary,
+            AuthenticationAdmission::RouteProgress,
+        );
+        tokio::pin!(waiter);
+        tokio::select! {
+            result = &mut waiter => panic!("valid owner must retain queued competitor: {}", result.is_ok()),
+            _ = tokio::time::sleep(Duration::from_millis(2100)) => {}
+        }
+        assert!(
+            pool.authentication_gates.lock().unwrap()[0]
+                .1
+                .upgrade()
+                .unwrap()
+                .state
+                .lock()
+                .unwrap()
+                .active
+        );
+        assert_eq!(pool.outbound.available_permits(), MAX_DIRECTION_CONNECTIONS);
+        drop(owner);
+        let successor = waiter
+            .await
+            .expect("valid slow authentication must hand off admission");
+        drop(successor);
+        assert!(pool.authentication_admission(key).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn authentication_gates_scope_both_identity_keys_endpoint_and_generation() {
         let pool = SessionPool::default();
         let key = authentication_key(1);
@@ -1886,9 +1990,21 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let started = tokio::time::Instant::now();
         assert!(
-            pool.authentication_admission(key.clone()).await.is_err(),
+            pool.authentication_admission_with_policy(
+                key.clone(),
+                AuthenticationPriority::Ordinary,
+                AuthenticationAdmission::RouteProgress,
+            )
+            .await
+            .is_err(),
             "a duplicate waits for bounded admission without another owner"
+        );
+        assert_eq!(
+            started.elapsed(),
+            CAPACITY_WAIT + pool.authentication_timeout(&key.identity, key.address),
+            "a stalled owner cannot retain a waiter beyond one bounded admission/authentication budget"
         );
         assert_eq!(pool.outbound.available_permits(), MAX_DIRECTION_CONNECTIONS);
         drop(owner);

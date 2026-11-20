@@ -97,6 +97,7 @@ jobs:
         id: ui
         run: node ../scripts/ci/ui-runner.mjs --workers=1 --retries=0 --shard=${{ matrix.shard }}/${{ inputs.shard_total }} --reporter=list,blob,json,../scripts/ci/ui-runner.mjs
         env:
+          MESH_UI_BALANCED_PARTITION: ${{ runner.os == 'macOS' && '1' || '0' }}
           PLAYWRIGHT_JSON_OUTPUT_NAME: full-results.json
           EVAL_SOURCE_SHA: ${{ github.sha }}
           MESH_TALK_E2E_COVERAGE: ${{ runner.os == 'Linux' && '1' || '0' }}

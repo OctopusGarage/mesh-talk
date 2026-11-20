@@ -567,29 +567,57 @@ mod peer_query_tests {
 
     #[tokio::test]
     async fn list_peers_preserves_cache_failure_and_recovers() {
+        use mesh_talk_core::{
+            discovery::{Announce, announce::encode},
+            identity::{account::Account, device::DeviceIdentity},
+        };
         let root = tempfile::tempdir().unwrap();
-        let source_root = tempfile::tempdir().unwrap();
-        let source = start(source_root.path(), "source").await;
         let target = start(root.path(), "target").await;
+        let target_port = target.discovery_port();
         let state = NodeState::default();
         *state.0.write().await = Some(target);
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let warm_identity = DeviceIdentity::generate();
+        let warm_account = Account::generate();
+        let warm = Announce::new_with_account(&warm_identity, &warm_account, "warm", 9);
+        sender
+            .send_to(&encode(&warm), ("127.0.0.1", target_port))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if list_peers(app.state())
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|peer| peer.user_id == warm_identity.user_id())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
         let cache = root.path().join("accounts/target/peer-proofs");
         let bytes = std::fs::read(&cache).unwrap();
         std::fs::remove_file(&cache).unwrap();
         std::fs::create_dir(&cache).unwrap();
-        {
-            let guard = state.0.read().await;
-            guard
-                .as_ref()
-                .unwrap()
-                .probe_endpoint(([127, 0, 0, 1], source.discovery_port()).into())
-                .await
-                .unwrap();
-        }
+        // An unchanged cached proof owns no disk write. Only a new certified
+        // identity after this fault can qualify persistence-error propagation.
+        assert!(list_peers(app.state()).await.is_ok());
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&identity, &account, "fresh", 9);
+        sender
+            .send_to(&encode(&proof), ("127.0.0.1", target_port))
+            .await
+            .unwrap();
         let failed = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let result = list_peers(app.state()).await;
@@ -605,14 +633,17 @@ mod peer_query_tests {
         std::fs::write(&cache, bytes).unwrap();
         let recovered = list_peers(app.state()).await;
         state.0.write().await.take().unwrap().stop().await;
-        source.stop().await;
         assert!(
             matches!(failed, Ok(Err(CommandError::Io(_)))),
-            "a failed certified snapshot must remain an IO error"
+            "a new certified proof must preserve its persistence IO failure"
         );
         assert!(
-            !recovered.unwrap().is_empty(),
-            "restored storage must expose peers again"
+            recovered
+                .unwrap()
+                .iter()
+                .any(|peer| peer.user_id == identity.user_id()
+                    && peer.account_id.as_deref() == Some(account.account_id().as_str())),
+            "restored storage must expose the exact newly certified identity"
         );
     }
 

@@ -48,6 +48,7 @@ test("one reusable shard implementation retains platform-sized runners and all e
   assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 3);
   assert.ok(!root().includes("name: Run UI E2E"));
   assert.match(reusable, /node \.\.\/scripts\/ci\/ui-runner\.mjs --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ inputs.shard_total \}\} --reporter=list,blob,json,\.\.\/scripts\/ci\/ui-runner\.mjs/);
+  assert.ok(reusable.includes("MESH_UI_BALANCED_PARTITION: ${{ runner.os == 'macOS' && '1' || '0' }}"));
   assert.match(reusable, /MESH_TALK_E2E_COVERAGE: \$\{\{ runner.os == 'Linux' && '1' \|\| '0' \}\}/);
   for (const prefix of ["playwright-ui", "chromium-portable"]) assert.ok(reusable.includes(`name: ${prefix}-`));
   assert.match(reusable, /SOURCE_SHA: \$\{\{ github.sha \}\}/);
@@ -251,6 +252,9 @@ test("the stable required WebKit check admits only both successful partitions", 
   assert.match(producer, /runs-on: macos-26-intel/);
   assert.match(producer, /shard: \[1, 2\]/);
   assert.match(producer, /timeout-minutes: 20/);
+  assert.match(producer, /node \.\.\/scripts\/ci\/ui-runner\.mjs --install-browser=webkit/);
+  assert.doesNotMatch(producer, /npx playwright install/);
+  assert.match(producer, /frontend\/ui-runner-evidence\//);
   assert.match(producer, /ui-runner.mjs.*--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/2/);
   assert.match(collector, /name: Portable UI \(macos-26-intel, webkit\)/);
   assert.match(collector, /needs: \[portable-shards, scope\]/);

@@ -194,7 +194,16 @@ is exercised by the real maintenance-hold Noise regression in
 alongside stalled-handshake retirement and the single-worker negative control.
 Custom protocol and failed-initial-custody recovery fixtures must retain that
 same independent host and retirement owner, including separate reactors for both
-full-host participants and the synchronous history observer. The single-participant
+full-host participants and the synchronous history observer. Desktop diagnostics likewise
+keep caller-thread inventory observations on the observer while each actual
+participant and its network commands retain their own two-worker reactor.
+Keep real probes, original deadlines and actual shutdown/join evidence; this
+qualifies execution ownership without identifying every historical OS send stall. Manual-probe IPC
+controls own their UDP destination and decode the actual query at the requested
+port; an `Ok` send to an unrelated service cannot witness that boundary. Keep
+Core signed-response checks separate, preserve the send/peer deadlines and bound
+the additional wire witness. Disclosure denial must match its specific Core
+error rather than accepting an unrelated timeout. The single-participant
 connection-limit/retirement fixture likewise uses the production two-worker host;
 retain its seven-slot saturation, original admission/retirement bounds and actual
 socket closure checks, alongside the held-worker positive and single-thread
@@ -280,6 +289,12 @@ exclusive-open failures fatal rather than retrying around a live owner. The
 [cached-route restart fixture](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
 awaits both original runtimes before asserting that an offline cached route is
 not fresh presence; retirement's held-writer controls retain lease exclusion.
+Direct Node fixtures must also close work admission, join their accept owners,
+drain actual admitted children/blocking captures, and consume `close_profile`
+before reopening storage. Aborting and joining only the accept-loop parent does
+not certify that its children released the profile. The
+[retired-metadata recovery fixture](../crates/mesh-talk-core/src/node/unrestricted_messages_tests.rs)
+retains durable history/search/backup assertions across that exact boundary.
 
 A UI read watchdog retires observation, not the native operation. Coalesce a
 same-owner/query refresh against the original promise until settlement, retaining
@@ -435,6 +450,18 @@ and [runtime controls](../crates/mesh-talk-core/src/node/runtime_routed_tests.rs
 retain real held connections, pending retries, storage recovery and a fixed repair
 that continuous irrelevant observations cannot postpone.
 
+Select serialized admission budgets with the caller's error and deadline contract.
+Bounded delivery can explicitly wait through one valid slow authentication owner,
+but short account negotiation must first receive local backpressure and retain
+its verified progress. A global longer wait can instead let the outer deadline
+misclassify local contention as a peer failure. Keep admission policy separate
+from queue priority, retain outer deadlines and consume no TCP permit while
+queued. The [session pool regressions](../crates/mesh-talk-core/src/node/session_pool.rs)
+exercise both default local backpressure and explicit route-progress handoff;
+account document/history controls require retained digests, pending demand and
+recovery without a false sync error. The same module retains bounded saturation,
+cancellation and priority-fairness controls.
+
 Distinct direct receipt and message-history scopes need independent polling
 inside their existing delivery owner; shared opaque-mailbox pulls remain serial. Serial receipt-first ordering merely
 reverses a dependency: a held receipt query must not prevent a fresh original
@@ -445,6 +472,13 @@ ordering; that caller must not start a control exchange after its payload fails.
 Retained automatic recovery independently polls receipt-eligible originals,
 including manifest cards whose bytes still await recipient consent. Card receipt,
 download consent and complete-file custody remain distinct evidence.
+Distinguish the actual signed-receipt publication owner from original delivery.
+Completed custody of that immutable control can retire its publication queue
+without waiting for a stalled direct alternative; original custody still cannot
+establish recipient delivery. Select this behavior through the receipt worker's
+explicit context, preserve its normal completed-exchange checks, and retain the
+queue when both alternatives fail. The receipt recovery regressions require
+exact opaque relay storage, stalled-route recovery and no-holder retention.
 Keep both recovery scopes under the same cancellation/deadline owner, without
 retaining store guards or increasing TCP capacity. The real inbound-only
 [receipt-scope regressions](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
@@ -1971,8 +2005,11 @@ cached indexes. Release preparation must reuse the
 [hosted Ubuntu source owner](../scripts/ci/ubuntu-apt-source.mjs), reject any index
 refresh error before installing dependencies, and preserve repository signing and
 architecture. Any download-mirror change belongs in that owner, with exact origin
-validation and separate normal/ports paths; it must not replace Ubuntu's signing
-authority or disable freshness checks. The [release workflow regression](../scripts/diagnostics/release-workflow.test.mjs)
+validation and separate normal/ports paths. Include each exact hosted origin
+observed in installation evidence (including regional EC2 sources), and exercise
+direct sources and referenced mirror lists with lookalike-host negative controls;
+a successful no-op preparation does not prove a source was covered. It must not
+replace Ubuntu's signing authority or disable freshness checks. The [release workflow regression](../scripts/diagnostics/release-workflow.test.mjs)
 executes its shell boundaries with preparation/index failures and proves that
 installation does not follow. Fixture success does not establish runner DNS or
 signed hosted release acceptance.
@@ -1997,6 +2034,14 @@ natural read, so preparation does not wait on transport admission while that
 exact read must remain live. Keep all production hosts, page/terminal assertions
 and deadlines;
 a queued-frame observation is neither a committed Wake nor permission to skip work.
+Request dispatch time does not identify the source snapshot it will read. A protected
+request can already be in flight when a later corpus is published, then serve that exact
+corpus. The queued-control fixture qualifies the live nonce/task, current source rows and
+requester absence at the server boundary, then requires the client's validated partial
+continuation. Its forced in-flight request regression retains all operation/receipt and
+recovery assertions. Do not reject it solely because dispatch preceded publication
+bookkeeping, or accept send attempts as received/validated bytes. Copy diagnostic mutex
+values before panicking so the first failure does not poison observation state.
 
 Scope fixture transformations and assertions to the owning configuration table,
 not globally unique text. Test the same valid value in an unrelated profile and
@@ -2289,7 +2334,13 @@ proof of completion. Preserve bounded owner-phase diagnostics through recovery
 without extending the measured deadline or warming away the required cold work.
 
 A progressing serial test partition can exhaust its job watchdog without a hung
-case. The Windows archive owner uses eight native serial execution partitions,
+case. Equal case counts do not imply equal cost when a runner groups cases by
+worker options before sharding. The [Chromium inventory owner](../scripts/evals/chromium-evidence.mjs)
+and UI runner spread macOS cases before those groups form, validate the real CLI's
+selected identities, and preserve source/shard metadata. Prove the complete
+once-only union and keep failure/cancellation evidence; listing success alone
+does not qualify hosted execution or merged reports.
+The Windows archive owner uses eight native serial execution partitions,
 with direct required checks and the existing sealed once-only inventory contract.
 Exercise actual pinned archive consumers and omission/duplication/failed-execution
 controls. Preserve watchdogs, product assertions and full coverage. The existing
@@ -2422,7 +2473,12 @@ qualify separate setup and admitted repair cancellation: setup cannot consume th
 progress budget, and that budget must still cancel actual owned work.
 
 A storage fault fixture must fail the currently selected persistence owner and
-observe that failure before asserting recovery. A hook on a neighboring journal
+observe that failure before asserting recovery. An unchanged cached proof is a
+valid no-write result, so a disk fault must precede a genuinely new certified
+identity or changed commit. The real UDP/cache fixture in
+[desktop peer queries](../src-tauri/src/chat_commands/account.rs) warms the old
+proof, preserves its no-write result, then injects a new signed proof and verifies
+its exact identity after storage recovery. A hook on a neighboring journal
 cannot certify the actual commit failed merely because both use the same logger.
 
 A bounded positive observer may keep waiting on the owning API's explicit pending
@@ -2620,6 +2676,40 @@ from Keychain on success and failure. Their controls cover stale local passwords
 retired writes and locking during provider replacement; native acceptance additionally
 requires two packaged builds with different code identities. Verify actual prompts,
 not merely the absence of an explicit authentication call.
+
+Validate documented bootstrap commands from a clean source checkout, without
+ignored build assets or ambient global tools. Dependency setup must not compile
+a consumer before its generated inputs exist. The [source build owner](../specifications/deployment_guide.md#gui-version-deployment)
+and `standards-wiring.test.mjs` cover dependency preparation and local CLI dispatch;
+real development launch and package generation remain separate acceptance evidence.
+
+For native installation, verify the final user-facing launcher entry, bundle
+identity and icon after replacement; a directly launched binary can hide stale
+shortcuts or duplicate legacy identities. Structural signature validity also
+does not establish entitlement authorization at process launch. The
+[macOS installation owner](../specifications/deployment_guide.md#installing-and-verifying-the-macos-app) requires
+recoverable replacement, actual installed launch and package comparison. Repair
+only qualified stale records while preserving unrelated launcher data and layout;
+keep real target-machine evidence separate from build or mocked IPC results.
+
+Dependency preparation needs its own deadline inside the job envelope and
+retained phase diagnostics before any test starts. A library's per-socket timeout
+or internal retries do not bound lock waits, flowing transfers, extraction and
+retirement. The [UI command owner](../scripts/ci/ui-runner.mjs) records pinned
+installer/browser provenance and separate bounded setup logs; its real child
+controls in `ui-runner.test.mjs` require cancellation/timeout retirement and reject
+uncertain cleanup. Standalone process fixtures must clear an inherited outer
+process-group ownership marker in their own child environment. Nested execution
+intentionally retains its lease until that outer owner retires; a fixture that
+keeps the outer test runner alive cannot also await its retirement. Exercise the
+fixture CLI through the real outer stage, as Health does, without changing the
+parent environment or weakening production nested ownership.
+Keep browser-catalog provenance fixtures independent of installed system packages:
+on Linux the pinned installer's `--with-deps --dry-run` audits package availability
+and can fail before an otherwise valid catalog check. Retain `--with-deps` in
+actual installation and its command-contract test.
+Missing historical logs cannot identify the stalled phase;
+a successful dry run proves argument/provenance handling, not hosted availability.
 
 Record the tested source, command, environment, count and outcome. Reassess
 consumers after merging new callers or changing a shared helper. Execute the

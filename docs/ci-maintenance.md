@@ -21,6 +21,12 @@ in ignored `tmp/` or PR/CI artifacts; durable decisions belong in the owning gui
 For producer/consumer artifact handoffs, pass the successful upload's immutable
 artifact ID instead of rediscovering it by name. Keep source, run, attempt and
 content-digest validation at the consumer; an artifact ID alone is not acceptance.
+Release evidence recording and upload retain their verified-draft prerequisite but run
+after final publication failure or cancellation. Keep failure summaries actionable and
+source-bound. Nonpublishing branch runs retain workflow-artifact evidence without requiring
+a draft. Retained evidence from a failed run is diagnostic; the verified-build owner
+still requires successful exact-source jobs/run before authorizing reuse. The existing
+release-gates and release-reuse regressions own these producer/consumer boundaries.
 
 ## Make the cost of a change explicit
 
@@ -590,6 +596,22 @@ counts: tracing modes can produce distinct worker groups and uneven tails.
 Shuffle may reorder work only after shard allocation; verify its actual effect
 before treating it as rebalancing. Preserve required trace evidence and evaluate
 the complete DAG under the global runner quota.
+macOS Chromium retains eight serial runners and four admission slots, but allocates
+its complete public CLI inventory by sorted project/file/full-title round robin
+before Playwright groups worker-scoped trace options. Equal contiguous case counts
+can concentrate expensive trace-enabled journeys in one partition while seven
+others finish much earlier. The existing UI runner discovers the full listing,
+writes a supported `--test-list`, then independently lists that selection and
+requires exact case IDs and titles before execution. Discovery shares the original
+absolute job deadline and fails closed on errors, empty/malformed or duplicate
+identities, or a changed selection. Remove native `--shard` after preselection to
+avoid filtering twice; preserve its original identity in progress and teardown
+receipts and retain all eight current-attempt artifact collectors. Linux and
+Windows retain their existing native allocation. Keep the union/listing regression
+in `chromium-evidence.test.mjs`, the owner failure controls in `ui-runner.test.mjs`,
+and measure hosted setup, listing, execution and evidence overhead before claiming
+an improvement. Listing conservation establishes selection, not browser acceptance.
+
 For a wall-time target, calculate both the dependency critical path and the
 aggregate runner work divided by the constrained pool's available slots.
 Scheduling alone cannot beat that capacity bound; added shard setup consumes
@@ -981,8 +1003,26 @@ rejection; an empty change rejected for another reason is not a valid negative
 control. Keep these cases on every platform instead of skipping them.
 
 Browser commands use the existing process owner with a deadline inside the total
-job budget, reserving time for joined cleanup and evidence upload. Keep streamed
-logs and append-only active/completed-case progress when final reports cannot be
+job budget, reserving time for joined cleanup and evidence upload.
+
+WebKit preparation uses the same UI command owner with the smaller of five minutes
+and the remaining absolute job budget, retaining the original twenty-minute job
+and eighteen-minute work envelope. Invoke the installed pinned Playwright CLI
+rather than resolving another installer. Record package/browser revisions and
+revision overrides, stream `pw:install` phase diagnostics, and retain the first
+8 MiB of output plus a separate structured preparation receipt under
+`ui-runner-evidence/browser-preparation/`; exceeding the log limit fails and
+retires owned work. Preserve these diagnostics even when no browser test starts.
+The installer already rotates its trusted revision-specific CDN URLs through five
+attempts; a socket inactivity timeout does not bound lock acquisition, a flowing
+transfer, extraction or filesystem cleanup. Do not add an outer retry or infer
+which internal phase stalled from an unavailable job log. The
+`ui-runner.test.mjs` controls qualify actual cancellation, timeout, bounded output,
+uncertain cleanup and the pinned installer's dry-run provenance. They do not prove
+historical cause or hosted browser availability; measure preparation and the
+complete partition on the actual runner.
+
+Keep streamed logs and append-only active/completed-case progress when final reports cannot be
 written. Timeout or uncertain cleanup remains a failure. Preserve verified closure of owned work as a diagnostic separately from the
 actual child outcome: Windows
 intentionally terminates even an empty job to close descendant admission.

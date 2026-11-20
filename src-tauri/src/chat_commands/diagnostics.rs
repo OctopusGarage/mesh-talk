@@ -161,10 +161,146 @@ mod tests {
     use super::*;
     use tauri::Manager;
 
+    // Keep the observer current-thread: inventory assertions below distinguish
+    // caller reads from maintenance reads. Actual hosts own a separate reactor.
+    struct DiagnosticsHost {
+        handle: tokio::runtime::Handle,
+        observer: std::thread::ThreadId,
+        shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl DiagnosticsHost {
+        fn new(state: NodeState) -> Self {
+            let (ready, started) = std::sync::mpsc::sync_channel(1);
+            let (shutdown, stopped) = tokio::sync::oneshot::channel();
+            let thread = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                ready.send(runtime.handle().clone()).unwrap();
+                runtime.block_on(async move {
+                    let _ = stopped.await;
+                    let node = state.0.write().await.take();
+                    if let Some(node) = node {
+                        node.stop().await;
+                    }
+                });
+                // Runtime destruction also joins its blocking workers, on the
+                // owning thread rather than inside the observer's async task.
+            });
+            Self {
+                handle: started.recv().unwrap(),
+                observer: std::thread::current().id(),
+                shutdown: Some(shutdown),
+                thread: Some(thread),
+            }
+        }
+
+        async fn start(
+            &self,
+            state: NodeState,
+            root: &std::path::Path,
+            owner: &str,
+            name: &str,
+            port: u16,
+        ) -> (String, String, u16) {
+            let root = root.to_owned();
+            let owner = owner.to_owned();
+            let name = name.to_owned();
+            let observer = self.observer;
+            self.handle
+                .spawn(async move {
+                    assert_ne!(std::thread::current().id(), observer);
+                    let runtime = mesh_talk_core::node::NodeRuntime::start(
+                        &root,
+                        &owner,
+                        &name,
+                        "test-password",
+                        port,
+                        |_| {},
+                        |_| {},
+                        |_| {},
+                        |_| {},
+                        |_| {},
+                    )
+                    .await
+                    .unwrap();
+                    let identity = (
+                        runtime.user_id().to_owned(),
+                        runtime.account_id().to_owned(),
+                        runtime.discovery_port(),
+                    );
+                    *state.0.write().await = Some(runtime);
+                    identity
+                })
+                .await
+                .unwrap()
+        }
+    }
+
+    impl Drop for DiagnosticsHost {
+        fn drop(&mut self) {
+            let _ = self.shutdown.take().unwrap().send(());
+            let result = self.thread.take().unwrap().join();
+            if !std::thread::panicking() {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_host_unwind_joins_runtime_and_releases_profile_for_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let managed = NodeState::empty();
+        let host = DiagnosticsHost::new(managed.clone());
+        let (user_id, account_id, _) = host
+            .start(
+                managed.clone(),
+                root.path(),
+                "diagnostics-unwind",
+                "Diagnostics Unwind",
+                0,
+            )
+            .await;
+        assert!(managed.0.read().await.is_some());
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _host = host;
+            // Resume an existing unwind so the expected failure does not invoke
+            // the process-wide panic hook or change its concurrent observers.
+            std::panic::resume_unwind(Box::new("controlled diagnostics observer failure"));
+        }));
+        assert!(failure.is_err());
+        assert!(
+            managed.0.read().await.is_none(),
+            "unwind cleanup must join runtime retirement before returning"
+        );
+
+        let restarted = DiagnosticsHost::new(managed.clone());
+        let (restarted_user, restarted_account, _) = restarted
+            .start(
+                managed.clone(),
+                root.path(),
+                "diagnostics-unwind",
+                "Diagnostics Unwind",
+                0,
+            )
+            .await;
+        assert_eq!(restarted_user, user_id);
+        assert_eq!(restarted_account, account_id);
+        drop(restarted);
+        assert!(managed.0.read().await.is_none());
+    }
+
     #[tokio::test]
     async fn diagnostics_expose_a_live_runtime_and_reject_invalid_manual_targets() {
         let root = tempfile::tempdir().unwrap();
         let managed = NodeState::empty();
+        let remote_state = NodeState::empty();
+        let host = DiagnosticsHost::new(managed.clone());
+        let remote_host = DiagnosticsHost::new(remote_state.clone());
         let app_state = AppState::new(crate::services::auth_service::AuthService::new(
             std::sync::Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
                 mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
@@ -193,22 +329,15 @@ mod tests {
         assert!(diag_get_peers(state.clone()).await.is_err());
         assert!(diag_network_info(state.clone()).await.is_err());
 
-        let runtime = mesh_talk_core::node::NodeRuntime::start(
-            root.path(),
-            "diagnostics-test",
-            "Diagnostics Test",
-            "test-password",
-            0,
-            |_| {},
-            |_| {},
-            |_| {},
-            |_| {},
-            |_| {},
-        )
-        .await
-        .unwrap();
-        let own_user_id = runtime.user_id().to_owned();
-        *managed.0.write().await = Some(runtime);
+        let (own_user_id, _, _) = host
+            .start(
+                managed.clone(),
+                root.path(),
+                "diagnostics-test",
+                "Diagnostics Test",
+                0,
+            )
+            .await;
 
         assert!(diag_get_peers(state.clone()).await.unwrap().is_empty());
         let info = diag_network_info(state.clone()).await.unwrap();
@@ -227,38 +356,42 @@ mod tests {
             .unwrap()[&info.account_id]["online"],
             true
         );
-        rescan_peers(app.state::<AppState>(), state.clone())
-            .await
-            .unwrap();
 
-        let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let remote_port = reserved.local_addr().unwrap().port();
-        drop(reserved);
-        let remote = mesh_talk_core::node::NodeRuntime::start(
-            root.path(),
-            "remote-diagnostics-test",
-            "Remote Diagnostics",
-            "test-password",
-            remote_port,
-            |_| {},
-            |_| {},
-            |_| {},
-            |_| {},
-            |_| {},
-        )
-        .await
-        .unwrap();
-        let remote_id = remote.user_id().to_owned();
-        let remote_account = remote.account_id().to_owned();
-        assert_eq!(remote.discovery_port(), remote_port);
-        managed
-            .0
-            .write()
+        let (remote_id, remote_account, remote_port) = remote_host
+            .start(
+                remote_state.clone(),
+                root.path(),
+                "remote-diagnostics-test",
+                "Remote Diagnostics",
+                0,
+            )
+            .await;
+        assert_eq!(
+            remote_state
+                .0
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .discovery_port(),
+            remote_port
+        );
+        let probe_state = managed.clone();
+        let observer = host.observer;
+        host.handle
+            .spawn(async move {
+                assert_ne!(std::thread::current().id(), observer);
+                probe_state
+                    .0
+                    .read()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .probe_endpoint(std::net::SocketAddr::from(([127, 0, 0, 1], remote_port)))
+                    .await
+            })
             .await
-            .as_ref()
             .unwrap()
-            .probe_endpoint(std::net::SocketAddr::from(([127, 0, 0, 1], remote_port)))
-            .await
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
@@ -290,6 +423,60 @@ mod tests {
             .unwrap()[&remote_account]["online"],
             true
         );
+
+        // Qualify explicit probes before triggering ambient scans or unrelated
+        // channel publication; their original send and peer budgets remain unchanged.
+        for host in ["", "example.com/path", "host name", "127.0.0.1:47474"] {
+            assert!(
+                probe_peer_endpoint(app.state::<AppState>(), state.clone(), host.into(), None)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            probe_peer_endpoint(
+                app.state::<AppState>(),
+                state.clone(),
+                "127.0.0.1".into(),
+                Some(0)
+            )
+            .await
+            .is_err()
+        );
+        // IPC success promises a queued query, not a reply from an arbitrary
+        // service. Own its endpoint and observe the actual wire command.
+        let witness = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_port = witness.local_addr().unwrap().port();
+        let probe_app = app.handle().clone();
+        let observer = host.observer;
+        host.handle
+            .spawn(async move {
+                assert_ne!(std::thread::current().id(), observer);
+                probe_peer_endpoint(
+                    probe_app.state::<AppState>(),
+                    probe_app.state::<NodeState>(),
+                    " 127.0.0.1 ".into(),
+                    Some(target_port),
+                )
+                .await
+            })
+            .await
+            .unwrap()
+            .expect("manual IPC must send to its owned loopback witness");
+        let mut packet = [0u8; 65];
+        let (length, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            witness.recv_from(&mut packet),
+        )
+        .await
+        .expect("owned IPC query must reach its requested endpoint")
+        .unwrap();
+        assert_eq!(length, 64);
+        assert!(mesh_talk_core::discovery::query::decode_query(&packet[..length]).is_some());
+
+        rescan_peers(app.state::<AppState>(), state.clone())
+            .await
+            .unwrap();
 
         let node = managed.0.write().await.as_ref().unwrap().handle();
         let public = managed
@@ -449,32 +636,47 @@ mod tests {
             "profile changes invalidate the group projection hint"
         );
 
-        for host in ["", "example.com/path", "host name", "127.0.0.1:47474"] {
-            assert!(
-                probe_peer_endpoint(app.state::<AppState>(), state.clone(), host.into(), None)
+        // A valid input still preserves the specific Core disclosure denial.
+        // An unrelated socket timeout must not satisfy this error control.
+        let private_state = managed.clone();
+        host.handle
+            .spawn(async move {
+                private_state
+                    .0
+                    .read()
                     .await
-                    .is_err()
-            );
-        }
-        assert!(
-            probe_peer_endpoint(
-                app.state::<AppState>(),
-                state.clone(),
-                "127.0.0.1".into(),
-                Some(0)
-            )
+                    .as_ref()
+                    .unwrap()
+                    .set_invisible(true)
+                    .await
+            })
             .await
-            .is_err()
+            .unwrap()
+            .unwrap();
+        let probe_app = app.handle().clone();
+        let denied = host
+            .handle
+            .spawn(async move {
+                probe_peer_endpoint(
+                    probe_app.state::<AppState>(),
+                    probe_app.state::<NodeState>(),
+                    "127.0.0.1".into(),
+                    Some(target_port),
+                )
+                .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(denied, Err(CommandError::Io(ref message)) if message.contains("routed discovery is disabled")),
+            "manual IPC must preserve the specific disclosure denial: {denied:?}"
         );
-        probe_peer_endpoint(
-            app.state::<AppState>(),
-            state,
-            " 127.0.0.1 ".into(),
-            Some(47474),
-        )
-        .await
-        .unwrap();
-        managed.0.write().await.take().unwrap().stop().await;
-        remote.stop().await;
+        assert!(
+            matches!(witness.try_recv_from(&mut packet), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        drop(witness);
+        // Each host guard stops and joins its runtime on success and unwind.
+        drop(remote_host);
+        drop(host);
     }
 }
