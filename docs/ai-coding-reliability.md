@@ -35,6 +35,13 @@ the regression as the new rule.
    exclusions and unresolved evidence. Update this guide when the defect exposes
    a reusable failure pattern; follow the maintenance procedure below.
 
+Accessible message summaries are consumer contracts. When photo, expression or
+file naming changes, update browser selectors and the owning `prScenarios`
+selection together; retain payload, privacy and receipt assertions instead of
+restoring implementation-specific names for tests. The inline-media owner uses
+`screenshot-portable.spec.ts` and `automatic-delivery.spec.ts` to cover screenshot
+sending and group custody alongside the presentation scenarios.
+
 Keep the risk explanation proportional to the change. A documentation edit does
 not require a new concurrency test. A changed async callback does require a
 lifetime review even when the diff is one line. Put task-specific reasoning and

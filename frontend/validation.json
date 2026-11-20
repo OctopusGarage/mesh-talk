@@ -3362,7 +3362,10 @@
         "frontend/src/features/chat/ReceiveProgress.test.ts",
         "frontend/e2e/image-receiving.spec.ts",
         "frontend/e2e/video-player-layout.spec.ts",
-        "frontend/e2e/fixtures/video-metadata.json"
+        "frontend/e2e/fixtures/video-metadata.json",
+        "frontend/e2e/media-message-presentation.spec.ts",
+        "frontend/e2e/screenshot-portable.spec.ts",
+        "frontend/e2e/automatic-delivery.spec.ts"
       ],
       "browser": [
         "e2e/media-scroll.spec.ts",
@@ -3373,7 +3376,10 @@
         "e2e/ui-visual-regression.spec.ts",
         "e2e/image-receiving.spec.ts",
         "e2e/file-receive-controls.spec.ts",
-        "e2e/video-player-layout.spec.ts"
+        "e2e/video-player-layout.spec.ts",
+        "e2e/media-message-presentation.spec.ts",
+        "e2e/screenshot-portable.spec.ts",
+        "e2e/automatic-delivery.spec.ts"
       ],
       "native": ["host"]
     },
