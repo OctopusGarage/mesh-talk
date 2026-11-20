@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7W6QZSBMCW6WWXNHS6GXMK5",
+  "session_id": "01a1f7b7-ecae-7361-a65c-ae3e1d3bc6a2",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-20T10:06:31.181805Z",
+  "branch": "ao/f01-inventory/foundation-integration",
+  "checkpoints_count": 1,
+  "save_step_count": 4,
+  "files_touched": [
+    "docs/development-roadmap.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "441ec51453c0",
+  "checkpoint_transcript_start": 2238,
+  "transcript_lines_at_start": 2238,
+  "compact_transcript_start": 311,
+  "redaction": {
+    "replacements": 6,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 6,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 9
+  }
+}
