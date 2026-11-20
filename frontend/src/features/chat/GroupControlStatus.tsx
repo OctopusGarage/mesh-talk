@@ -100,9 +100,12 @@ export function GroupControlStatus({
 export function PendingGroupControls({
   group,
   excludeId,
+  hideMessageOperations = false,
 }: {
   group: string;
   excludeId?: string;
+  /** Message interactions own routine feedback; management dialogs retain explicit controls. */
+  hideMessageOperations?: boolean;
 }) {
   const { t } = useTranslation();
   const account = useChat((state) => state.myAccountId);
@@ -128,6 +131,8 @@ export function PendingGroupControls({
   const controls = Object.values(tickets ?? {})
     .filter(
       (ticket) =>
+        (!hideMessageOperations ||
+          !["file", "reaction", "recall"].includes(ticket.kind)) &&
         ticket.id !== excludeId &&
         ticket.account_id === account &&
         ticket.group === group &&

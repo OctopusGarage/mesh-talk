@@ -2,6 +2,7 @@ import { DeliveryDetails } from "./DeliveryDetails";
 import { useAuth } from "@/store/auth";
 import {
   Check,
+  Clock,
   Copy,
   Inbox,
   Timer,
@@ -156,8 +157,10 @@ export function DeliveryFooter({
       {showTime && (
         <span data-testid="message-time">{formatTime(message.wallClock)}</span>
       )}
-      {message.pending && (!message.file || message.protection) && (
-        <span>{` · ${t("message.sending")}`}</span>
+      {message.pending && (
+        <span role="status" aria-label={t("message.sending")}>
+          <Clock className="h-3 w-3" aria-hidden="true" />
+        </span>
       )}
       {showSource && (
         <MessageStatus

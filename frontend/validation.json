@@ -1815,7 +1815,8 @@
         "frontend/src/features/chat/favorites/FavoritesDialog.tsx",
         "frontend/src/features/chat/favorites/FavoriteMessageText.tsx",
         "frontend/src/lib/attachmentSave.ts",
-        "frontend/src/lib/attachmentSave.test.ts"
+        "frontend/src/lib/attachmentSave.test.ts",
+        "frontend/src/features/chat/MessageBubble.media.test.ts"
       ],
       "frontend": [
         "src/lib/stickerMedia.test.ts",
@@ -1837,7 +1838,8 @@
         "src/features/chat/DeliveryDetails.test.ts",
         "src/features/chat/ConversationHistoryDialog.test.ts",
         "src/features/chat/favorites/FavoriteEditor.test.ts",
-        "src/lib/attachmentSave.test.ts"
+        "src/lib/attachmentSave.test.ts",
+        "src/features/chat/MessageBubble.media.test.ts"
       ],
       "capability": {
         "summary": "Send selected sticker artwork as bounded ordinary media while preserving legacy sticker identities and account-owned file retry.",
@@ -2132,7 +2134,7 @@
         "src/features/chat/MembersDialog.test.ts"
       ],
       "capability": {
-        "summary": "Remove personal chats and optional history across linked devices without changing other accounts’ membership or copies.",
+        "summary": "Remove personal chats and optional history across linked devices without changing other accounts\u2019 membership or copies.",
         "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
         "invariants": [
           {
@@ -2279,7 +2281,9 @@
         "frontend/src/features/chat/ComposerImagePreview.tsx",
         "frontend/e2e/composer-preview-layout.spec.ts",
         "frontend/e2e/video-player-layout.spec.ts",
-        "frontend/e2e/fixtures/video-metadata.json"
+        "frontend/e2e/fixtures/video-metadata.json",
+        "frontend/src/features/chat/MessageBubble.media.test.ts",
+        "frontend/e2e/media-message-presentation.spec.ts"
       ],
       "frontend": [
         "src/features/chat/MediaPreview.test.ts",
@@ -2289,7 +2293,8 @@
         "src/features/chat/mediaFilePoster.test.ts",
         "src/features/chat/useConversationViewport.test.ts",
         "src/features/chat/protectedImage.test.ts",
-        "src/features/chat/ReceiveProgress.test.ts"
+        "src/features/chat/ReceiveProgress.test.ts",
+        "src/features/chat/MessageBubble.media.test.ts"
       ],
       "capability": {
         "summary": "Fit decoded images to their original proportions within bounded thumbnails, reuse known geometry on virtualized remounts within bounded session ownership, and support bounded full-size image zoom and pan.",
@@ -2315,7 +2320,8 @@
       },
       "escalation": [
         "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior. Geometry polls must retain unavailable measurements as pending, capture positive baselines and reuse coherent visible image/frame samples. A transient unavailable measurement must recover and permanent absence must fail without weakening exact geometry, cache reuse or assertion budgets.",
-        "Verify pending image frame dimensions before/after decoding and video source dimensions before/after player metadata, including cached remount, portrait and oversized sources. Confirm actual WKWebView geometry and frame timing separately. Video players and native controls must remain outside shared-element transforms from the first frame; keep opacity feedback, autoplay, Escape, focus restoration and rapid reopening. Separate fresh-process startup from repeat opens, record visibility and media presentation counters, and exclude hidden-window samples from performance comparisons."
+        "Verify pending image frame dimensions before/after decoding and video source dimensions before/after player metadata, including cached remount, portrait and oversized sources. Confirm actual WKWebView geometry and frame timing separately. Video players and native controls must remain outside shared-element transforms from the first frame; keep opacity feedback, autoplay, Escape, focus restoration and rapid reopening. Separate fresh-process startup from repeat opens, record visibility and media presentation counters, and exclude hidden-window samples from performance comparisons.",
+        "Run e2e/stickers.spec.ts and e2e/file-send-progress.spec.ts for original 128px unframed sticker stages, unobscured photo preparation and continued byte-status refresh after an early offer receipt. Keep real file progress, incoming-media controls and native preview ownership intact."
       ]
     },
     {
@@ -3356,7 +3362,10 @@
         "frontend/src/features/chat/ReceiveProgress.test.ts",
         "frontend/e2e/image-receiving.spec.ts",
         "frontend/e2e/video-player-layout.spec.ts",
-        "frontend/e2e/fixtures/video-metadata.json"
+        "frontend/e2e/fixtures/video-metadata.json",
+        "frontend/e2e/media-message-presentation.spec.ts",
+        "frontend/e2e/screenshot-portable.spec.ts",
+        "frontend/e2e/automatic-delivery.spec.ts"
       ],
       "browser": [
         "e2e/media-scroll.spec.ts",
@@ -3367,7 +3376,10 @@
         "e2e/ui-visual-regression.spec.ts",
         "e2e/image-receiving.spec.ts",
         "e2e/file-receive-controls.spec.ts",
-        "e2e/video-player-layout.spec.ts"
+        "e2e/video-player-layout.spec.ts",
+        "e2e/media-message-presentation.spec.ts",
+        "e2e/screenshot-portable.spec.ts",
+        "e2e/automatic-delivery.spec.ts"
       ],
       "native": ["host"]
     },

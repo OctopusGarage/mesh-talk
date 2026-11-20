@@ -5,7 +5,6 @@ import { useMotionOK } from "@/lib/motion";
 import { useTranslation } from "react-i18next";
 import { useFileStatus } from "@/store/fileAvailability";
 import { useFileObjectUrl } from "./mediaFile";
-import { ReceiveProgress } from "./ReceiveProgress";
 import { stickerSummary } from "@/lib/stickerMedia";
 
 /** Artwork belongs to the received manifest, independently of installed packs. */
@@ -16,7 +15,6 @@ export function MediaSticker({
   label,
   readOnly = false,
   localPreview,
-  externalStatus = false,
 }: {
   fileConv: string;
   mime: string;
@@ -24,7 +22,6 @@ export function MediaSticker({
   label?: string;
   readOnly?: boolean;
   localPreview?: OutgoingMediaPreview;
-  externalStatus?: boolean;
 }) {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
@@ -143,13 +140,24 @@ export function MediaSticker({
             </button>
           )}
         </div>
-      ) : decoded || preview || externalStatus ? null : status?.ready ? (
-        <p role="status" className="text-xs text-muted-foreground">
+      ) : !decoded &&
+        (status?.unavailable ||
+          status?.consent === "pending" ||
+          status?.consent === "declined") ? (
+        <span role="status" className="text-xs text-muted-foreground">
+          {t(
+            status.unavailable
+              ? "files.unavailable"
+              : status.consent === "pending"
+                ? "files.approvalRequired"
+                : "files.declined",
+          )}
+        </span>
+      ) : !decoded && !preview ? (
+        <span role="status" className="sr-only">
           {t("common.loading")}
-        </p>
-      ) : (
-        <ReceiveProgress status={status} />
-      )}
+        </span>
+      ) : null}
     </div>
   );
 }

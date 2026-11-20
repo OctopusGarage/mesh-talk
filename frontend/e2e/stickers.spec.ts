@@ -57,7 +57,7 @@ test("open the sticker panel and send an animated sticker", async ({
 
   // Send the "face with tears of joy" sticker from the removable pack.
   await page.getByTestId("sticker-option-pack:google-noto:1f602").click();
-  // Panel closes and the sticker lands as its own bubble-less message.
+  // Panel closes and the sticker lands as its own full-size artwork message.
   await expect(panel).toBeHidden();
   await expect(page.getByTestId("message-sticker").last()).toBeVisible();
 });
@@ -128,8 +128,14 @@ test("an installed cat sticker collection can send artwork", async ({
     .toBeGreaterThan(0);
   await expect(bubble.getByTestId("message-sticker-fallback")).toHaveCount(0);
   await expect(bubble.getByText(/Loading|Waiting for file/)).toHaveCount(0);
+  await expect(bubble.getByRole("progressbar")).toHaveCount(0);
+  await expect(bubble.locator("[data-context-menu]")).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
   const before = await preview.boundingBox();
   expect(before?.height).toBeCloseTo(128, 2);
+  await expect(bubble.locator(".bg-bubble-own")).toHaveCount(0);
   await page.screenshot({
     path: test.info().outputPath("sticker-pending-desktop.png"),
   });
@@ -446,9 +452,9 @@ for (const theme of ["light", "dark"] as const) {
           const bounds = await sticker.boundingBox();
           return (
             bounds !== null &&
-            bounds.width > 0 &&
+            bounds.width >= 120 &&
             bounds.width <= 128 &&
-            bounds.height > 0 &&
+            bounds.height >= 120 &&
             bounds.height <= 128
           );
         })

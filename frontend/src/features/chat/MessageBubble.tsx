@@ -65,7 +65,7 @@ import {
   markUnavailableFileError,
 } from "@/store/fileAvailability";
 import { stickerSummary } from "@/lib/stickerMedia";
-import { messageSticker } from "@/lib/messagePresentation";
+import { messageSticker, messageSummary } from "@/lib/messagePresentation";
 import { MediaSticker } from "./MediaSticker";
 import { ReplyPreview } from "./ReplyPreview";
 import { MediaPreview } from "./MediaPreview";
@@ -73,7 +73,6 @@ import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
 import { ReceiveProgress } from "./ReceiveProgress";
 import { TransferBar } from "./TransferBar";
-import { useTransfers } from "@/store/transfers";
 import {
   useOutgoingMediaPreview,
   type OutgoingMediaPreview,
@@ -125,12 +124,6 @@ function FileBubble({
     mine && !readOnly && !metadataPending && !isChannel && !isPersonal
       ? messageId || undefined
       : undefined;
-  // Subscribe only to visibility, leaving byte ticks inside TransferBar.
-  const hasUploadStatus = useTransfers((state) => {
-    if (!uploadKey) return false;
-    const transfer = state.transfers[uploadKey];
-    return !transfer?.delivered && (!!transfer || !!sendKey);
-  });
 
   const saveAs = async () => {
     const lease = captureChatOwnership();
@@ -193,24 +186,8 @@ function FileBubble({
           localPreview={localPreview}
           preparing={!!metadataPending && mine && !failed}
           failed={mine && failed}
-          externalStatus={
-            mine &&
-            !readOnly &&
-            !failed &&
-            (!!metadataPending || hasUploadStatus)
-          }
+          outgoing={mine && !readOnly}
         />
-        {mine && !failed && (metadataPending || uploadKey) && (
-          <div className="pointer-events-none absolute inset-x-3 top-3">
-            <TransferBar
-              variant="media"
-              transferKey={metadataPending ? sendKey : uploadKey}
-              waitingDirection={
-                metadataPending ? "prepare" : sendKey ? "send" : undefined
-              }
-            />
-          </div>
-        )}
       </div>
     );
   }
@@ -449,8 +426,8 @@ export function MessageBubble({
     mine && !readOnly && !m.protection ? m.clientId : undefined,
   );
   const isFile = !!m.file;
-  // Sticker messages render bubble-less (Telegram-style): just the animation. Fall back to
-  // the big emoji char when this build doesn't bundle that sticker (version skew).
+  // Resource-backed expressions use the same compact message frame as text.
+  // Keep the selected artwork and its version-skew fallback at the same size.
   const presentation = messageSticker(m, installedPacks);
   const mediaSticker = presentation?.media ? presentation : null;
   const stickerDescription = presentation
@@ -488,9 +465,11 @@ export function MessageBubble({
     ? displayedText
     : isSticker
       ? stickerDescription
-      : isFile
-        ? t("files.sentFile", { name: m.file!.name })
-        : displayedText;
+      : m.file?.media
+        ? messageSummary(m, t, installedPacks)
+        : isFile
+          ? t("files.sentFile", { name: m.file!.name })
+          : displayedText;
   const ariaLabel = `${speaker}: ${body} · ${formatTime(m.wallClock)}${
     status ? ` · ${status}` : ""
   }`;
@@ -668,8 +647,7 @@ export function MessageBubble({
                 data-context-menu=""
                 className={cn(
                   "min-w-0 text-[14px] leading-[1.55]",
-                  // Stickers float; actual inline media removes its text-bubble shell.
-                  // File cards and consent prompts retain the ordinary bubble.
+                  // Stickers retain their original unframed artwork stage.
                   isSticker
                     ? ""
                     : cn(
@@ -690,40 +668,15 @@ export function MessageBubble({
                     mime={m.file?.mime}
                   />
                 ) : mediaSticker ? (
-                  <div className="relative w-32">
-                    <MediaSticker
-                      key={m.clientId || m.file!.fileConv}
-                      fileConv={m.file!.fileConv}
-                      mime={m.file!.mime}
-                      fallback={mediaSticker.fallback}
-                      label={presentation?.label}
-                      readOnly={readOnly}
-                      localPreview={localPreview}
-                      externalStatus={
-                        mine && !readOnly && !!(m.pending || m.failed)
-                      }
-                    />
-                    {mine &&
-                      !readOnly &&
-                      !m.failed &&
-                      (m.pending || (!isChannel && !isPersonal)) && (
-                        <div className="pointer-events-none absolute inset-x-0 top-20">
-                          <TransferBar
-                            variant="media"
-                            transferKey={
-                              m.metadataPending ? m.clientId : m.id || undefined
-                            }
-                            waitingDirection={
-                              m.pending
-                                ? m.metadataPending
-                                  ? "prepare"
-                                  : "send"
-                                : undefined
-                            }
-                          />
-                        </div>
-                      )}
-                  </div>
+                  <MediaSticker
+                    key={m.clientId || m.file!.fileConv}
+                    fileConv={m.file!.fileConv}
+                    mime={m.file!.mime}
+                    fallback={mediaSticker.fallback}
+                    label={presentation?.label}
+                    readOnly={readOnly}
+                    localPreview={localPreview}
+                  />
                 ) : isSticker ? (
                   sticker ? (
                     <img
@@ -732,16 +685,15 @@ export function MessageBubble({
                       title={presentation?.label}
                       data-testid="message-sticker"
                       draggable={false}
-                      className="h-32 w-32 max-w-full select-none object-contain"
+                      className="block h-32 w-32 max-w-full select-none object-contain"
                     />
                   ) : (
-                    // Version skew: peer sent a sticker this build doesn't bundle → show
-                    // the fallback emoji char big.
+                    // Version skew preserves the full-size sticker stage.
                     <span
                       data-testid="message-sticker-fallback"
                       role="img"
                       aria-label={stickerDescription}
-                      className="text-6xl"
+                      className="inline-flex h-32 w-32 max-w-full items-center justify-center text-6xl"
                     >
                       {displayedText}
                     </span>

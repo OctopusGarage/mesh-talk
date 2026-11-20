@@ -35,6 +35,13 @@ the regression as the new rule.
    exclusions and unresolved evidence. Update this guide when the defect exposes
    a reusable failure pattern; follow the maintenance procedure below.
 
+Accessible message summaries are consumer contracts. When photo, expression or
+file naming changes, update browser selectors and the owning `prScenarios`
+selection together; retain payload, privacy and receipt assertions instead of
+restoring implementation-specific names for tests. The inline-media owner uses
+`screenshot-portable.spec.ts` and `automatic-delivery.spec.ts` to cover screenshot
+sending and group custody alongside the presentation scenarios.
+
 Keep the risk explanation proportional to the change. A documentation edit does
 not require a new concurrency test. A changed async callback does require a
 lifetime review even when the diff is one line. Put task-specific reasoning and
@@ -2371,6 +2378,18 @@ deliberately parked case. Later cases keep the normal source allowance; inject
 latency beyond the accelerated bound to verify that isolation. Require timeout
 failure plus later-case execution with joined descendants; never disable the
 watchdog or use retries to qualify a failure.
+
+Transport reuse must not force file-card presentation onto conversation media.
+Expression and photo sending keep content unobscured and status in the message
+footer; local previews and completed byte counts never establish recipient
+receipt. Removing a visible progress widget must not retire authoritative
+approval, byte or custody observation after an early file-offer receipt. The
+[media rendering controls](../frontend/src/features/chat/MessageBubble.media.test.ts)
+and [actual photo/file journeys](../frontend/e2e/file-send-progress.spec.ts)
+qualify both unobscured media and continued measured file progress. Keep compact
+expression preview/fallback/decode geometry consistent and preserve incoming
+consent, unavailable, retry and protected/read-only access through the existing
+[inline-media owner](module-boundaries.md#inline-media-presentation).
 
 Independent message kinds should have independent browser scenarios. The
 [automatic delivery fixture](../frontend/e2e/automatic-delivery.spec.ts) checks

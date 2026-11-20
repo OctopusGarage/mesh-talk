@@ -12,7 +12,7 @@ for (const attachment of [
   { kind: "file", path: "/tmp/large.bin", button: "composer-attach" },
   { kind: "image", path: "/tmp/photo.png", button: "composer-image" },
 ])
-  test(`${attachment.kind} sender keeps confirmed upload percent and ETA visible until recipient custody`, async ({
+  test(`${attachment.kind} sender preserves measured upload state until recipient custody`, async ({
     page,
   }, testInfo) => {
     await enterChat(page);
@@ -24,6 +24,8 @@ for (const attachment of [
           done: number;
           delivered: boolean;
           consent: "pending" | "accepted";
+          observed: number[];
+          confirmed: boolean;
         };
         __TAURI_INTERNALS__: {
           invoke: (
@@ -38,6 +40,8 @@ for (const attachment of [
         done: 0,
         delivered: false,
         consent: path.endsWith(".bin") ? "pending" : "accepted",
+        observed: [],
+        confirmed: false,
       };
       win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         if (cmd === "plugin:dialog|open") return path;
@@ -45,21 +49,25 @@ for (const attachment of [
         if (cmd === "owner_enqueue_file")
           win.__upload.id = (result as { id: string }).id;
         if (cmd === "owner_delivery_statuses")
-          return (result as Array<{ id: string; status: string }>).map((row) =>
-            row.id === win.__upload.id
-              ? {
-                  ...row,
-                  // The offer arrives before approval or file bytes. Its
-                  // receipt must not retire the file's progress refresh.
-                  status: "delivered",
-                  file_progress: {
-                    done: win.__upload.done,
-                    total: 8,
-                    delivered: win.__upload.delivered,
-                    consent: win.__upload.consent,
-                  },
-                }
-              : row,
+          return (result as Array<{ id: string; status: string }>).map(
+            (row) => {
+              if (row.id !== win.__upload.id) return row;
+              const upload = win.__upload;
+              if (!upload.observed.includes(upload.done))
+                upload.observed.push(upload.done);
+              upload.confirmed = upload.delivered;
+              return {
+                ...row,
+                // Receipt of a card must not stop byte/custody observation.
+                status: "delivered",
+                file_progress: {
+                  done: upload.done,
+                  total: 8,
+                  delivered: upload.delivered,
+                  consent: upload.consent,
+                },
+              };
+            },
           );
         return result;
       };
@@ -80,23 +88,54 @@ for (const attachment of [
         ).__upload.consent = "accepted";
       });
     }
-    await expect(
-      bubble.getByRole("progressbar", {
-        name: /Waiting for file transfer to start/,
-      }),
-    ).toHaveAttribute("aria-valuenow", "0");
+    if (attachment.kind === "file") {
+      await expect(
+        bubble.getByRole("progressbar", {
+          name: /Waiting for file transfer to start/,
+        }),
+      ).toHaveAttribute("aria-valuenow", "0");
+    } else {
+      await expect(bubble.getByRole("progressbar")).toHaveCount(0);
+      await expect(bubble.getByTestId("file-image")).toBeVisible();
+      await expect(bubble.getByText(/Waiting for file/)).toHaveCount(0);
+    }
     await page.evaluate(
       () =>
         ((window as unknown as { __upload: { done: number } }).__upload.done =
           2),
     );
-    await expect(bubble.getByText("25%", { exact: true })).toBeVisible();
+    if (attachment.kind === "file")
+      await expect(bubble.getByText("25%", { exact: true })).toBeVisible();
+    else
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            (
+              window as unknown as { __upload: { observed: number[] } }
+            ).__upload.observed.includes(2),
+          ),
+        )
+        .toBe(true);
     await page.evaluate(
       () =>
         ((window as unknown as { __upload: { done: number } }).__upload.done =
           4),
     );
-    await expect(bubble.getByText(/left/)).toBeVisible();
+    if (attachment.kind === "file")
+      await expect(bubble.getByText(/left/)).toBeVisible();
+    else {
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            (
+              window as unknown as { __upload: { observed: number[] } }
+            ).__upload.observed.includes(4),
+          ),
+        )
+        .toBe(true);
+      await expect(bubble.getByRole("progressbar")).toHaveCount(0);
+      await expect(bubble.getByText(/%|left/)).toHaveCount(0);
+    }
     const halfProgressImage = testInfo.outputPath("upload-half.png");
     await page.screenshot({ path: halfProgressImage });
     await testInfo.attach("upload-at-half", {
@@ -109,15 +148,37 @@ for (const attachment of [
       ).__upload;
       state.done = 8;
     });
-    await expect(
-      bubble.getByRole("progressbar", { name: /Confirming receipt/ }),
-    ).toHaveAttribute("aria-valuenow", "100");
-    await expect(bubble.getByText("100%", { exact: true })).toBeVisible();
+    if (attachment.kind === "file") {
+      await expect(
+        bubble.getByRole("progressbar", { name: /Confirming receipt/ }),
+      ).toHaveAttribute("aria-valuenow", "100");
+      await expect(bubble.getByText("100%", { exact: true })).toBeVisible();
+    } else {
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            (
+              window as unknown as { __upload: { observed: number[] } }
+            ).__upload.observed.includes(8),
+          ),
+        )
+        .toBe(true);
+      await expect(bubble.getByRole("progressbar")).toHaveCount(0);
+    }
     await page.evaluate(() => {
       const state = (window as unknown as { __upload: { delivered: boolean } })
         .__upload;
       state.delivered = true;
     });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __upload: { confirmed: boolean } }).__upload
+              .confirmed,
+        ),
+      )
+      .toBe(true);
     await expect(bubble.getByRole("progressbar")).toHaveCount(0);
   });
 

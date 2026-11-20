@@ -366,5 +366,7 @@ it("lets a pending file's transfer surface own its sending label", async () => {
   });
   expect(html).toContain("Preparing");
   expect(html).not.toContain("> · sending");
-  expect(render({ ...base, id: null, pending: true })).toContain("> · sending");
+  const pendingText = render({ ...base, id: null, pending: true });
+  expect(pendingText).not.toContain("> · sending");
+  expect(pendingText).toContain('role="status" aria-label="sending…"');
 });

@@ -730,7 +730,7 @@ it("retains exact selected artwork when the canonical preview read fails", async
   expect(host.querySelector('[data-testid="file-image"]')).not.toBeNull();
   expect(host.textContent).not.toContain("files.unavailable");
 });
-it("lets the outgoing transfer surface own preparation without a duplicate inner status", async () => {
+it("uses a compact, quiet outgoing placeholder while the message footer owns sending", async () => {
   state.status = { ...state.status, ready: false };
   await act(async () =>
     root.render(
@@ -739,12 +739,33 @@ it("lets the outgoing transfer surface own preparation without a duplicate inner
         name: "photo.png",
         size: 4_000_000,
         preparing: true,
-        externalStatus: true,
+        outgoing: true,
       }),
     ),
   );
-  expect(host.textContent).not.toContain("transfer.imagePreparing");
+  expect(host.querySelector('[role="status"]')?.className).toContain("sr-only");
+  expect(host.querySelector("[data-media-placeholder]")?.className).toContain(
+    "w-48",
+  );
   expect(host.querySelector('[role="progressbar"]')).toBeNull();
+});
+
+it("keeps admitted outgoing photos quiet until a preview becomes available", async () => {
+  state.status = { ...state.status, ready: false, done: 0, total: 8 };
+  const props = {
+    fileConv: "ordinary-image",
+    name: "photo.png",
+    size: 100,
+    outgoing: true,
+  };
+  await act(async () => root.render(createElement(MediaPreview, props)));
+  expect(host.querySelector("[data-media-placeholder]")).not.toBeNull();
+  expect(host.querySelector('[role="progressbar"]')).toBeNull();
+  expect(host.querySelector('[role="status"]')?.className).toContain("sr-only");
+  state.status = { ...state.status, ready: true, done: 8 };
+  await act(async () => root.render(createElement(MediaPreview, props)));
+  expect(host.querySelector("[data-media-placeholder]")).toBeNull();
+  expect(host.querySelector('[data-testid="file-image"]')).not.toBeNull();
 });
 
 it("does not label a locally preparing video as waiting for incoming bytes", async () => {
@@ -756,7 +777,7 @@ it("does not label a locally preparing video as waiting for incoming bytes", asy
         name: "clip.mp4",
         size: 100,
         preparing: true,
-        externalStatus: true,
+        outgoing: true,
       }),
     ),
   );

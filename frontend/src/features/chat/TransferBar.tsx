@@ -15,7 +15,7 @@ export function TransferBar({
 }: {
   transferKey: string | undefined;
   waitingDirection?: "prepare" | "send";
-  variant?: "default" | "compact" | "media";
+  variant?: "default" | "compact";
   idleLabel?: string;
 }) {
   const { t } = useTranslation();
@@ -66,7 +66,7 @@ export function TransferBar({
         {idleLabel}
       </span>
     );
-  const compact = variant !== "default";
+  const compact = variant === "compact";
   return (
     <AnimatePresence initial={false}>
       {active && (
@@ -76,23 +76,10 @@ export function TransferBar({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
-          className={
-            variant === "media"
-              ? "rounded-full border border-white/20 bg-background/90 px-3 py-2 text-foreground shadow-sm backdrop-blur-md"
-              : compact
-                ? "min-w-0 py-0.5"
-                : "px-3 py-1.5"
-          }
+          className={compact ? "min-w-0 py-0.5" : "px-3 py-1.5"}
         >
           <div className="mb-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px]">
-            <span
-              title={verb}
-              className={
-                variant === "media"
-                  ? "min-w-0 flex-1 truncate text-muted-foreground"
-                  : "text-muted-foreground"
-              }
-            >
+            <span title={verb} className="text-muted-foreground">
               {verb}
             </span>
             {compact && eta && (

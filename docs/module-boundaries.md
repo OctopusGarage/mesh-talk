@@ -89,7 +89,7 @@ Paths below are relative to the repository root. `core/` abbreviates
 | Auth/runtime ownership                         | `src-tauri/src/state.rs`, `chat_commands/state.rs`, `runtime_bootstrap.rs`, `runtime_admission.rs`, `linked_account.rs`, `owner_commands.rs`, `owner_commands/search.rs`          | Reuse session leases and runtime installation checks; commands adapt inputs and errors. Frontend work uses `ui/store/ownership.ts`.                                                                                                                                                                 |
 | Message UI transitions                         | `ui/store/chat.ts`, `outgoingIntent.ts`, `conversationState.ts`, `chatRuntimeEffects.ts`                                                                                          | Intents own acceptance, conversation state owns cache transitions, effects bridge feature stores. Do not settle messages independently in components.                                                                                                                                               |
 | Settings/privacy                               | `src-tauri/src/settings.rs`, `privacy_commands.rs`, `ui/store/settings.ts`, `privacy.ts`                                                                                          | `ui/lib/privacySettings.ts` owns presentation defaults/projection; `settingsDialogSession.ts` owns load/save generations. Network admission remains in core.                                                                                                                                        |
-| Contact presentation | `src-tauri/src/contact_policy.rs`, `src-tauri/src/contact_policy/expiry.rs`, `ui/store/contactPolicy.ts`, `ui/store/rosterRefresh.ts`, `ui/lib/contactVisibility.ts` | Hiding and [never-chatted expiry](privacy-controls.md#discovered-contacts-without-chat-history) filter presentation, not communication. Expiry uses persistent first observation and attributable sticky history; preserve routing, shared groups, delivery and explicit personal controls. |
+| Contact presentation                           | `src-tauri/src/contact_policy.rs`, `src-tauri/src/contact_policy/expiry.rs`, `ui/store/contactPolicy.ts`, `ui/store/rosterRefresh.ts`, `ui/lib/contactVisibility.ts`              | Hiding and [never-chatted expiry](privacy-controls.md#discovered-contacts-without-chat-history) filter presentation, not communication. Expiry uses persistent first observation and attributable sticky history; preserve routing, shared groups, delivery and explicit personal controls.         |
 | Personal conversation removal                  | `core/node/account_documents/personal.rs`, `core/node/lifecycle.rs`, `src-tauri/src/contact_policy/deletion.rs`, `owner_commands/group_operations.rs`                             | Core owns durable account-scoped intent, deletion floors and retryable local cleanup. Host adapts exact-runtime commands; UI offers history choices and clears projections only after actual cleanup. Personal removal never dissolves a group or recalls other accounts' copies.                   |
 | Backup/recovery                                | `core/recovery/`, `core/node/recovery.rs`, `src-tauri/src/recovery.rs`                                                                                                            | Core validates archive/snapshot; host owns staging/publication and runtime barriers; UI presents inspection and confirmation.                                                                                                                                                                       |
 | Appearance/avatars/packs                       | `ui/store/avatars.ts`, `packs.ts`, `ui/lib/theme.ts`, `pack.ts`, `ui/components/identity/`                                                                                        | Reuse identity rendering and pack validation. Do not create feature-specific avatar stores or variant parsers.                                                                                                                                                                                      |
@@ -127,7 +127,19 @@ can retry on readiness changes or foreground activation. Protected reveal remain
 separate. Derived images are not persisted as plaintext or substituted for saved
 originals.
 Receiving, loading and unsupported states use a responsive provisional frame
-(up to 320 pixels wide, 4:3 for images and 16:9 for video). On image decode,
+(up to 320 pixels wide, 4:3 for images and 16:9 for video). Unknown outgoing
+photo geometry uses a compact 192px-wide frame with a static glyph and accessible
+preparation label. Outgoing photo and sticker transport state belongs to the
+ordinary message footer, never a floating file-progress capsule over artwork.
+Conversation rows own attachment sending feedback; `PendingGroupControls` hides
+file, reaction and recall tickets in `ConversationView` while explicit management dialogs
+retain status/cancellation controls. Pending message footers use an accessible
+clock instead of visible sending prose; this does not change operation lifetime.
+Resource-backed stickers retain their original stable 128px unframed artwork
+stage across selected previews, version-skew fallbacks and canonical decode.
+Ordinary Unicode emoji remain text; sending feedback must not resize sticker art.
+This presentation choice does not change transport, consent, offer receipts,
+byte completion, retry authority or read-only/protected access. On image decode,
 the frame adopts the original aspect ratio within 320 by 320 pixels without
 upscaling or cropping. Images have no padded text bubble; quoted thumbnails
 fit their original ratio within 64 by 48 pixels. The lightbox retains full-size
