@@ -59,8 +59,8 @@ export function MediaSticker({
   const durable = !!url && failedUrl !== url;
   const decoded = durable && decodedUrl === url;
   return (
-    <div className="flex max-w-full items-center gap-1.5">
-      <div className="relative h-6 w-6 shrink-0">
+    <div className="w-32 max-w-full space-y-2 text-center">
+      <div className="relative h-32 w-32 max-w-full">
         {preview && !decoded ? (
           <img
             data-testid="outgoing-media-preview"
@@ -73,7 +73,7 @@ export function MediaSticker({
             alt={description}
             title={label}
             draggable={false}
-            className="absolute inset-0 h-6 w-6 select-none object-contain"
+            className="absolute inset-0 h-32 w-32 max-w-full select-none object-contain"
           />
         ) : !preview ? (
           <span
@@ -85,7 +85,7 @@ export function MediaSticker({
             }}
             role="img"
             aria-label={description}
-            className="inline-flex h-6 w-6 items-center justify-center text-xl leading-none"
+            className="inline-flex h-32 w-32 max-w-full items-center justify-center text-6xl"
           >
             {fallback}
           </span>
@@ -112,7 +112,7 @@ export function MediaSticker({
             onError={(event) => {
               if (currentImage(event.currentTarget)) setFailedUrl(url);
             }}
-            className="absolute inset-0 h-6 w-6 select-none object-contain"
+            className="absolute inset-0 h-32 w-32 max-w-full select-none object-contain"
             style={{
               opacity: decoded ? 1 : 0,
             }}

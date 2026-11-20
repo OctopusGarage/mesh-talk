@@ -110,7 +110,7 @@ it("shows the fallback while waiting and the received image with accessible alt 
   await render();
   expect(host.querySelector("img")?.getAttribute("src")).toBe("blob:received");
   expect(host.querySelector("img")?.getAttribute("alt")).toBe("[Sticker]");
-  expect(host.querySelector("img")?.className).toContain("h-6 w-6");
+  expect(host.querySelector("img")?.className).toContain("h-32 w-32");
 });
 it("keeps a semantic accessible name while media is missing and after it arrives", async () => {
   await render(false, "静下心");

@@ -647,11 +647,15 @@ export function MessageBubble({
                 data-context-menu=""
                 className={cn(
                   "min-w-0 text-[14px] leading-[1.55]",
-                  // Only photos/videos remove the text shell; expressions keep it.
-                  "rounded-xl px-3.5 py-2.5 [&:has([data-inline-media])]:border-0 [&:has([data-inline-media])]:bg-transparent [&:has([data-inline-media])]:p-0",
-                  mine
-                    ? "rounded-br-sm bg-bubble-own text-[hsl(var(--bubble-own-foreground))]"
-                    : "rounded-bl-sm border border-border bg-muted text-foreground",
+                  // Stickers retain their original unframed artwork stage.
+                  isSticker
+                    ? ""
+                    : cn(
+                        "rounded-xl px-3.5 py-2.5 [&:has([data-inline-media])]:border-0 [&:has([data-inline-media])]:bg-transparent [&:has([data-inline-media])]:p-0",
+                        mine
+                          ? "rounded-br-sm bg-bubble-own text-[hsl(var(--bubble-own-foreground))]"
+                          : "rounded-bl-sm border border-border bg-muted text-foreground",
+                      ),
                   mentioned && "ring-1 ring-inset ring-signal/65",
                   m.pending && !m.file && "opacity-75",
                 )}
@@ -681,15 +685,15 @@ export function MessageBubble({
                       title={presentation?.label}
                       data-testid="message-sticker"
                       draggable={false}
-                      className="block h-6 w-6 max-w-full select-none object-contain"
+                      className="block h-32 w-32 max-w-full select-none object-contain"
                     />
                   ) : (
-                    // Version skew retains a compact, readable expression.
+                    // Version skew preserves the full-size sticker stage.
                     <span
                       data-testid="message-sticker-fallback"
                       role="img"
                       aria-label={stickerDescription}
-                      className="inline-flex h-6 w-6 items-center justify-center text-xl leading-none"
+                      className="inline-flex h-32 w-32 max-w-full items-center justify-center text-6xl"
                     >
                       {displayedText}
                     </span>

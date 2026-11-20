@@ -96,17 +96,17 @@ it.each([0, 4, 8])(
   },
 );
 it.each([true, false])(
-  "gives media and legacy stickers ordinary compact message geometry (fromMe=%s)",
+  "preserves full-size sticker artwork without a text bubble (fromMe=%s)",
   (fromMe) => {
     for (const m of [
       { file: sticker },
       { sticker: "legacy:missing", text: "👋" },
     ]) {
       const html = render({ ...m, fromMe });
-      expect(html).toContain(fromMe ? "bg-bubble-own" : "bg-muted");
-      expect(html).toContain("h-6 w-6");
-      expect(html).not.toContain("h-32");
-      expect(html).not.toContain("text-6xl");
+      expect(html).not.toContain("bg-bubble-own");
+      expect(html).not.toContain("rounded-xl px-3.5 py-2.5");
+      expect(html).toContain("h-32 w-32");
+      expect(html).not.toContain('role="progressbar"');
     }
   },
 );
@@ -133,4 +133,11 @@ it("announces a photo as image content rather than a file card", () => {
   const html = render({ file: photo });
   expect(html).toContain("[Photo]");
   expect(html).not.toContain("Sent a file");
+});
+
+it("keeps ordinary Unicode emoji in the text bubble without sticker geometry", () => {
+  const html = render({ text: "👍", fromMe: true });
+  expect(html).toContain("👍");
+  expect(html).toContain("bg-bubble-own");
+  expect(html).not.toContain("h-32 w-32");
 });

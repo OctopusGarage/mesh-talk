@@ -135,8 +135,9 @@ Conversation rows own attachment sending feedback; `PendingGroupControls` hides
 file, reaction and recall tickets in `ConversationView` while explicit management dialogs
 retain status/cancellation controls. Pending message footers use an accessible
 clock instead of visible sending prose; this does not change operation lifetime.
-Resource-backed expressions retain a stable 24px stage in the text-message
-bubble across selected previews, version-skew fallbacks and canonical decode.
+Resource-backed stickers retain their original stable 128px unframed artwork
+stage across selected previews, version-skew fallbacks and canonical decode.
+Ordinary Unicode emoji remain text; sending feedback must not resize sticker art.
 This presentation choice does not change transport, consent, offer receipts,
 byte completion, retry authority or read-only/protected access. On image decode,
 the frame adopts the original aspect ratio within 320 by 320 pixels without

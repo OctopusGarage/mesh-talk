@@ -43,7 +43,7 @@ motion. Decoded images preserve their original proportions, and file availabilit
 preview failures, consent and delayed message arrival keep their separate meanings.
 
 Outgoing images and stickers keep the exact locally captured artwork while the
-canonical file source decodes. Stickers reserve a stable 24px stage inside the ordinary text-message bubble;
+canonical file source decodes. Stickers retain their original 128px artwork stage without a text-message bubble;
 legacy, selected, waiting fallback and decoded artwork use the same size. Photos retain the
 selected image proportions. Replacing identical artwork happens without replaying
 a loading phase. Preview URLs are presentation only: at most eight images, three
@@ -59,7 +59,7 @@ photo download/consent/unavailable controls retain their separate meanings.
 Percentages and remaining time on real file cards come only from measured
 transfer observations, and byte completion remains confirmation pending.
 
-This follows the user's compact-expression preference: Telegram distinguishes
+Ordinary Unicode emoji remain text; stickers remain distinct artwork. Telegram distinguishes
 [small inline custom emoji from standalone stickers](https://telegram.org/faq#stickers-emoji-and-reactions).
 The [Signal status model](https://support.signal.org/hc/en-us/articles/360007320751-How-do-I-know-if-my-message-was-delivered-or-read)
 reinforces keeping sending and delivery distinct; Mesh Talk retains its own
