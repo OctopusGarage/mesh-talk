@@ -1927,6 +1927,9 @@ scalar counts before logging, including failure-only test output. Do not
 use `Debug` to log whole tuples or containers containing identifiers. The
 [runtime restart control](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
 retains delivery evidence without logging its private observation tuples.
+The [queued-source hold control](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)
+likewise projects wake observations to a receiving count at its hold-failure boundary;
+retain the exact setup task and wake tokens for assertions, outside panic output.
 
 ## R10: Evidence that exercises the failure
 

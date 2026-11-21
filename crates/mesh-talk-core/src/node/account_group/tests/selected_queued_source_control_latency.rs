@@ -2207,9 +2207,10 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             .take(16)
             .cloned()
             .collect::<Vec<_>>();
-        let receiving = queued_a_wake_observed.lock().unwrap().receiving.clone();
+        // Keep private wake tokens and the setup result out of failure output.
+        let receiving_count = queued_a_wake_observed.lock().unwrap().receiving.len();
         panic!(
-            "the exact natural A hold must remain live at canonical B publication; task={first_task:?} ledger_active={first_active}; receiving={receiving:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}"
+            "the exact natural A hold must remain live at canonical B publication; ledger_active={first_active}; receiving_count={receiving_count}; pages={observed:?}; setup={setup:?}; phases={phases:?}"
         );
     }
     let mut held_b_request = None;
