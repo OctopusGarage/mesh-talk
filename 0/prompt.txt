@@ -1,0 +1,26 @@
+Roadmap的任务究竟在做什么，现在第一个任务究竟在干嘛，怎么做那么久没完成，有啥需要我决策和讨论的吗，analysis; analysis; analysis; analysis; analysis; analysis; analysis; analysis; analysis; analysis;
+
+---
+
+那你能做的能不能一次性自己全部做完，不要老是停下来，analysis; analysis; analysis; analysis; analysis; analysis;
+
+---
+
+So why not continue to finish now
+
+---
+
+This thread's goal is already set. Do not call create_goal. Start working on it now: finish all you can do until you have something need me to confirm and stop
+
+---
+
+Please unlock this Mac and leave its desktop session active. Is it ready for me to rerun native acceptance?
+Keep native acceptance pending for now
+
+---
+
+Why you need to unlock ，can you skip this ，I am outside
+
+---
+
+Resume the goal
