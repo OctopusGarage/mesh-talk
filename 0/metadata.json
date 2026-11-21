@@ -1,0 +1,44 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7YEYG9TDAVEDWN6VEJDQ03Z",
+  "session_id": "01a1fcd7-b5c6-7351-8363-fc2c90243c98",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-21T07:08:21.949713Z",
+  "branch": "docs/f01-fresh-inventory-20261121",
+  "checkpoints_count": 2,
+  "save_step_count": 1,
+  "files_touched": [
+    "docs/development-roadmap.md",
+    "docs/module-boundaries.md",
+    "specifications/TODO.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6-astra",
+  "turn_id": "65e8cd973bd5",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 107652,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 2396160,
+    "output_tokens": 8627,
+    "api_call_count": 32,
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 2,
+    "layers": {
+      "betterleaks": 2,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 0,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 2
+  }
+}
