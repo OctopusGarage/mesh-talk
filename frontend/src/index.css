@@ -1,6 +1,29 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
+/*! Twemoji country flag artwork: Twitter and contributors, CC-BY-4.0.
+ * https://creativecommons.org/licenses/by/4.0/
+ * Font: Mozilla twemoji-colr, subset by TalkJS (country-flag-emoji-polyfill 0.1.8).
+ * https://github.com/talkjs/country-flag-emoji-polyfill
+ * Vendored unchanged; source and license: src/assets/fonts/LICENSE.md.
+ */
+@font-face {
+  font-family: "Mesh Talk Country Flags";
+  src: url("./assets/fonts/TwemojiCountryFlags.woff2") format("woff2");
+  font-display: swap;
+  unicode-range:
+    U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E,
+    U+E0073-E0074, U+E0077, U+E007F;
+}
+
+/* The family is only selected on Windows. Other platforms never request it.
+ * Prepend it to every shared stack: system fonts already contain RI letter
+ * glyphs, so a conventional fallback at the end cannot supply flag ligatures.
+ */
+html[data-windows-emoji="true"] {
+  --font-country-flags: "Mesh Talk Country Flags";
+}
+
 /*
   "Ink & Signal" design tokens.
   Dark is the hero (sustained ink surfaces); light is a calm cool-paper.

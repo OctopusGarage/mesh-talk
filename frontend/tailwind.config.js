@@ -52,6 +52,7 @@ export default {
       },
       fontFamily: {
         display: [
+          "var(--font-country-flags, 'Space Grotesk Variable')",
           "'Space Grotesk Variable'",
           "-apple-system",
           "BlinkMacSystemFont",
@@ -60,13 +61,20 @@ export default {
           "sans-serif",
         ],
         sans: [
+          "var(--font-country-flags, -apple-system)",
           "-apple-system",
           "BlinkMacSystemFont",
           "'Segoe UI Variable'",
           "system-ui",
           "sans-serif",
         ],
-        mono: ["'SFMono-Regular'", "Consolas", "ui-monospace", "monospace"],
+        mono: [
+          "var(--font-country-flags, 'SFMono-Regular')",
+          "'SFMono-Regular'",
+          "Consolas",
+          "ui-monospace",
+          "monospace",
+        ],
       },
       boxShadow: {
         // Desktop surfaces lift only when they float above the conversation.

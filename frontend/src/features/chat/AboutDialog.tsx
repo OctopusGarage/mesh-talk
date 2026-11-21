@@ -99,6 +99,19 @@ export function AboutDialog({
 
           <UpdatePanel />
 
+          <p className="text-xs text-muted-foreground">
+            Twemoji © Twitter and contributors ·{" "}
+            <button
+              type="button"
+              className="underline underline-offset-2 hover:text-foreground"
+              onClick={() =>
+                open_("https://creativecommons.org/licenses/by/4.0/")
+              }
+            >
+              CC BY 4.0
+            </button>
+          </p>
+
           <div className="grid gap-2">
             <Button
               variant="secondary"

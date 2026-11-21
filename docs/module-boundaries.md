@@ -1582,3 +1582,26 @@ OS hostnames; admitted sync IPC releases them only for the expected current acco
 presence semantics. Hostnames reuse encrypted account-document persistence and the
 existing certified sibling transport; public discovery and profiles never carry
 them. See [private account synchronization](network-design-reference.md#g-linking-and-ongoing-account-synchronization).
+
+## Windows country flag presentation
+
+`frontend/src/lib/platform.ts` selects the Windows-only country-flag family before
+React renders. `frontend/src/index.css` owns its local WOFF2 face and restricted
+Unicode coverage; `frontend/tailwind.config.js` prepends it to sans, display and
+mono stacks. Native title-bar selection stays independent. macOS and Linux keep
+their existing stacks and do not request the font.
+
+The bundled font's provenance and licenses live in `frontend/src/assets/fonts/`;
+the About dialog exposes artwork attribution and its CC BY 4.0 license link.
+Messages, storage, transport, clipboard and composer values retain original Unicode;
+there is no emoji-to-image conversion. Font failure falls back to readable system
+text via `font-display: swap`. New emoji outside the pinned font remain dependent
+on platform coverage; this is not a full cross-platform emoji implementation.
+
+Font work is demand-driven by matching visible glyphs: one 77 KiB-class local asset,
+no business-data writes, scans, timers or observers, and no per-message retained
+state. Browsers own decoded font lifetime. Platform selection tests and the
+country-flags browser scenario protect selection, local loading, ligature shaping
+and unchanged composer/message text. Real Windows 10 WebView2 acceptance must also
+check colors, selection/copy, deletion, reply/search/reaction surfaces and zoom;
+other-host Chromium and DOM assertions do not establish native visual acceptance.
