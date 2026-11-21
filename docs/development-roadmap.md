@@ -77,8 +77,8 @@ package is not a mandate to replace its implementation.
 ## Foundation work packages and dependencies
 
 F identifiers name the foundation program. They do not convert previous task
-states. All tasks begin **unclaimed and unstarted** until the execution cycle
-begins from the merged planning baseline. A dependency requires an accepted
+states. The claim table below records the current inventory and retained local-input
+states; those supersede the planning baseline's initial unclaimed state. A dependency requires an accepted
 relevant output, not the completion of an unrelated whole document or subsystem.
 For construction packages, select one bounded real-consumer slice per delivery
 branch; a broad package is not permission for an all-app rewrite.
@@ -367,16 +367,38 @@ execution. Read the current main, roadmap, live tracker and relevant existing
 branches/PRs before claiming work. Do not infer a free task from this initial table
 or overwrite another session's claim. A branch name is not a lock.
 
-| Task           | Current claim/state    | Readiness and next action                                                                                                                    |
-| -------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| F01            | Unclaimed; not started | First eligible task after planning merge; produce the bounded inventory and downstream handoff below.                                        |
-| F02/F03/F04    | Unclaimed; not started | Wait for accepted relevant F01 owners/scenarios, then open independent evidence/contract lanes.                                              |
-| F05            | Unclaimed; not started | Wait for relevant F01/F04 outputs and F02/F03 safety/baseline evidence; select one justified interface/consumer slice.                       |
-| F06/F07/F08    | Unclaimed; not started | Wait for their accepted evidence/contracts/interface slices; serialize shared policy mutations.                                              |
-| F09            | Unclaimed; not started | Attach protection/documentation work to each foundation slice after relevant F02/F03/F04 inputs; do not postpone it until construction ends. |
-| F10            | Unclaimed; not started | Wait for the agreed mandatory F01–F09 scope and assess the integrated candidate.                                                             |
-| M01–M04        | Unclaimed; not started | Wait for F10 and each task's decisions; use independent interface ownership.                                                                 |
-| Future roadmap | Deferred; no claims    | Record the activation decision and create a bounded task before any implementation.                                                          |
+| Task           | Current claim/state                                            | Readiness and next action                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F01            | Static inventory delivered; publication tracked by its task PR | Original inventory owner `mesh-talk-10`, frozen local input `ec3ba473c815e00189ba9f404d1ab02fd638675a`; publication integrator Codex on `codex/f01-inventory-publication`, source/parent `5fe57c380b4b047ced19337b1233013d6d0ffcd7`. Only this roadmap, `docs/module-boundaries.md` and `specifications/TODO.md`; see [inventory](module-boundaries.md#current-im-foundation-inventory). Accept this bounded static input when its task PR merges; no runtime/product acceptance implied. |
+| F02            | Existing local inputs; broader qualification needs evidence    | Last recorded bounded MCP-oracle lane owner `mesh-talk-34`; preserved integration source below. Reconcile accepted assertions, timing/failure records and pending review before any new claim; no oracle source or execution result is imported here.                                                                                                                                                                                                                                     |
+| F03            | Existing local preparation; measurements need evidence         | Last recorded bounded preparation owner `mesh-talk-28`; reconcile retained source/build/workload readiness before reserving measurement resources. No measurements are supplied by F01.                                                                                                                                                                                                                                                                                                   |
+| F04            | Existing local inputs; broader contracts need evidence         | Last recorded bounded runtime-oracle owner `mesh-talk-32`; reconcile retained authority/lifecycle evidence and affected contracts before a new claim. No runtime/test code is imported here.                                                                                                                                                                                                                                                                                              |
+| F05            | Unclaimed; not started                                         | Wait for relevant F04 contracts and F02/F03 safety/baseline evidence; use F01 owners/consumers to select one justified seam.                                                                                                                                                                                                                                                                                                                                                              |
+| F06/F07/F08    | Unclaimed; not started                                         | Wait for accepted relevant evidence/contracts/interface slices; serialize shared policy mutations.                                                                                                                                                                                                                                                                                                                                                                                        |
+| F09            | Unclaimed; not started                                         | Accompany each selected foundation delivery; F01's static assertion routes do not close regression acceptance.                                                                                                                                                                                                                                                                                                                                                                            |
+| F10            | Unclaimed; not started                                         | Needs accepted mandatory F01–F09 scope and integrated current-source/platform evidence.                                                                                                                                                                                                                                                                                                                                                                                                   |
+| M01–M04        | Unclaimed; not started                                         | Wait for F10 and each task's decisions; preserve independent interface ownership.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Future roadmap | Deferred; no claims                                            | Record activation and create a bounded task before implementation.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+
+F01 publication retains the original inventory authorship and locally reported
+static review, with a fresh check of the cited current-main owners, modern group
+send route and representative assertion bodies. Its 19 primary boundary entries,
+eight scenario routes and U1–U7 are navigation and bounded handoff evidence, not
+passing tests, exhaustive audits or performance measurements. Exact validation,
+review, publication and merge state belong to the task PR; source inspection
+remains pinned to the base above. No glossary, product interface, test, workflow,
+validation selector, budget or required-check policy changes in this delivery.
+
+Existing downstream local work is preserved at
+`ao/f01-inventory/mcp-live-grant-oracle-integration`, inspected tip
+`1dddd563a1f3f2ed5f287cde82aeeb8d2089ab73`, with recorded integration owner
+`mesh-talk-10`. These are local sources, not published GitHub acceptance or a new
+claim by this session. The original F01 source states its inventory claim is
+closed for local delivery; this separate publication does not reassign the
+subsequent integration or its F02/F03/F04 bounded lanes. Recheck the actual live
+owner/tracker before selecting downstream work; do not reset these lanes to
+unclaimed merely because their results have not reached main. Their historical
+reports, test-only changes and later qualification claims are outside this PR.
 
 Record each live claim in this table or one linked issue/PR tracker designated by
 the integration owner; do not maintain conflicting live trackers. Required fields:
@@ -417,9 +439,10 @@ reason; unrelated worktrees remain user-owned.
 
 ## First execution handoff
 
-After this planning change merges, start F01 from that main revision. F01 is an
-inspection/documentation task; it does not authorize product edits. Its output
-must be sufficient to dispatch F02/F03/F04 without repeating the inventory:
+The [F01 inventory](module-boundaries.md#current-im-foundation-inventory) now
+provides the source-bound input for F02/F03/F04. It is inspection/documentation,
+not product qualification. Preserve the following scope when refreshing it for a
+changed product boundary; do not repeat the full inventory at every task:
 
 1. Map account/device/session, conversation/membership, delivery/read/custody and
    local/account deletion meanings to their current owning guides and actual
@@ -442,3 +465,10 @@ F02/F03 then collect measurements, and F04 resolves the selected current-IM
 contracts. Choose construction changes from that evidence. Do not restart the
 global prioritization exercise or activate parked features because a task reveals
 an appealing technology option.
+
+The next bounded selection after this inventory change merges is to reconcile the
+retained F02/F03/F04 local inputs with this accepted main inventory and their
+actual live owners. Then select a nonoverlapping evidence/contract slice with
+explicit source, paths, decision owner and acceptance. Do not duplicate an oracle
+or measurement proposal already owned locally, import the complete unmerged stack
+without review, or skip the missing runtime/performance/native evidence.

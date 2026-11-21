@@ -7,17 +7,17 @@ work.
 
 ## Current capability areas
 
-| Area                       | Implemented behavior                                                                                                                             | Reference / boundary                                                                                                                                                                    |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Direct conversations       | Signed discovery, identity-pinned Noise/TCP, encrypted account-addressed DMs, replies, reactions, mentions, search and retained history.         | [Architecture](../docs/ARCHITECTURE.md); discovery and TCP reachability remain separate.                                                                                                |
-| Groups                     | Signed membership controls, sender-key encryption, bounded fanout and authorized member recovery with per-member sharing.                        | [Group flows and scenarios](../docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery); a removed/nonmember device cannot acquire authority from discovery. |
-| Relay networking           | Equal trusted post offices, shared public enrollment, opaque custody/federation, direct-first attempts, soft preference and alternatives.        | [Network baseline](../docs/network-design-reference.md); an alternate needs a surviving onward route.                                                                                   |
-| Network controls           | Per-device master/send/receive/directory preferences, physical-LAN-only discovery and direct LAN/Tailscale relay selection.                      | [Privacy controls](../docs/privacy-controls.md); visibility does not grant conversation authority or create a firewall.                                                                 |
-| Files and folders          | Encrypted chunks, exact-offer consent, durable decisions, restart recovery, integrity checks and recipient completion.                           | [File flow](../docs/network-design-reference.md#e-files-folders-consent-and-completion); card arrival is not byte completion.                                                           |
-| Linked devices             | Code-authorized enrollment, certified sibling synchronization and device-local category preferences.                                             | [Pairing and replay](../docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization); full replay needs its own live authenticated route.                            |
-| Calls                      | Optional device-addressed live Noise signaling and separate WebRTC media.                                                                        | No post-office signaling fallback or TURN service; native WebView and physical capture acceptance remain separate.                                                                      |
+| Area                       | Implemented behavior                                                                                                                                  | Reference / boundary                                                                                                                                                                    |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Direct conversations       | Signed discovery, identity-pinned Noise/TCP, encrypted account-addressed DMs, replies, reactions, mentions, search and retained history.              | [Architecture](../docs/ARCHITECTURE.md); discovery and TCP reachability remain separate.                                                                                                |
+| Groups                     | Signed membership controls, sender-key encryption, bounded fanout and authorized member recovery with per-member sharing.                             | [Group flows and scenarios](../docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery); a removed/nonmember device cannot acquire authority from discovery. |
+| Relay networking           | Equal trusted post offices, shared public enrollment, opaque custody/federation, direct-first attempts, soft preference and alternatives.             | [Network baseline](../docs/network-design-reference.md); an alternate needs a surviving onward route.                                                                                   |
+| Network controls           | Per-device master/send/receive/directory preferences, physical-LAN-only discovery and direct LAN/Tailscale relay selection.                           | [Privacy controls](../docs/privacy-controls.md); visibility does not grant conversation authority or create a firewall.                                                                 |
+| Files and folders          | Encrypted chunks, exact-offer consent, durable decisions, restart recovery, integrity checks and recipient completion.                                | [File flow](../docs/network-design-reference.md#e-files-folders-consent-and-completion); card arrival is not byte completion.                                                           |
+| Linked devices             | Code-authorized enrollment, certified sibling synchronization and device-local category preferences.                                                  | [Pairing and replay](../docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization); full replay needs its own live authenticated route.                            |
+| Calls                      | Optional device-addressed live Noise signaling and separate WebRTC media.                                                                             | No post-office signaling fallback or TURN service; native WebView and physical capture acceptance remain separate.                                                                      |
 | Desktop presentation       | Shared person/relay classification, account/device profile details, themes, avatars, stickers, virtualized navigation and optional pack installation. | [Visual system](../frontend/DESIGN.md) · [Customization packs](../docs/CUSTOMIZATION_PACKS.md).                                                                                         |
-| Local privacy and recovery | Privacy presets, lock controls, hidden contacts, local retention, recall and encrypted manual backup/restore.                                    | [Privacy](../docs/privacy-controls.md) · [Backup/recovery](../docs/backup-recovery.md); restore creates a new device and cannot revoke an old one.                                      |
+| Local privacy and recovery | Privacy presets, lock controls, hidden contacts, local retention, recall and encrypted manual backup/restore.                                         | [Privacy](../docs/privacy-controls.md) · [Backup/recovery](../docs/backup-recovery.md); restore creates a new device and cannot revoke an old one.                                      |
 
 ## Deliberate design boundaries
 
@@ -40,6 +40,24 @@ work.
   [GLib compatibility workflow](../.github/workflows/glib-0.20-watch.yml) tracks the
   GTK/Tauri dependency gate. Consult the lockfile and security configuration before
   changing versions; do not treat this note as a vulnerability waiver.
+
+## Foundation qualification status
+
+The [current-IM foundation inventory](../docs/module-boundaries.md#current-im-foundation-inventory)
+binds the capability areas above to source owners, actual callers, store categories,
+representative assertion bodies and remaining unknowns at source
+`5fe57c380b4b047ced19337b1233013d6d0ffcd7`. Its implemented/partial/scoped-missing/unknown
+labels describe static inspection scope, not new passing tests or accepted runtime
+measurements. The [roadmap](../docs/development-roadmap.md#task-claims-branches-and-integration)
+remains the sole foundation claim tracker and acceptance order.
+
+Current indexed participant storage, direct-account desktop enqueue and group
+account-operation submission paths must be distinguished from retained standalone
+log/device-send compatibility callers and explicit physical-channel enqueue adapters. Experimental Bluetooth and historical mobile-PWA work are not production
+foundation acceptance. The bounded F01 inventory supplies static owner/caller/assertion input only;
+retained local F02/F03/F04 evidence must be reconciled through their recorded
+owners before new assignments. Verification coverage, runtime measurements and
+contract qualification remain incomplete before construction. F01 does not certify F10 or authorize later features.
 
 ## Evidence and future decisions
 
