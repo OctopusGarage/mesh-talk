@@ -342,6 +342,9 @@ text, parameters and message content. IPC diagnostics count registered dispatch
 attempts by bounded command name, without arguments or results; they do not prove
 command completion or CPU attribution. Keep their collector and output disabled
 by default, and emit after releasing observation guards without adding a timer.
+Record startup timings at their actual milestone. The desktop log records
+`desktop_host_ready_ms` once when Tauri signals readiness after setup. Measure
+first usable UI, authentication and account hydration separately.
 Heap snapshots/retaining paths distinguish
 leaks from stable bloat and allocation churn. Forced working-set trims, periodic
 GC, cache deletion or moving pressure to disk do not prove a fix.

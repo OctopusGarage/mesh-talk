@@ -1035,9 +1035,13 @@
         }
       ],
       "capability": {
-        "summary": "Expose bounded opt-in diagnostic metadata while preserving normal logging and IPC authority.",
+        "summary": "Record desktop host readiness and expose bounded opt-in IPC metadata while preserving logging and IPC authority.",
         "guide": "docs/performance-requirements.md#evidence-and-maintenance",
         "invariants": [
+          {
+            "name": "Desktop host readiness logs one elapsed time at Tauri Ready after setup, before shutdown. The native acceptance harness observes the metric while the desktop is running.",
+            "reference": "docs/performance-requirements.md#evidence-and-maintenance"
+          },
           {
             "name": "IPC work summaries are disabled by default, record only bounded registered command names after handled dispatch, exclude lock rejection and unhandled inputs, and emit outside nonblocking observation guards without a background timer. Counts do not establish completion, success or CPU attribution; arguments, results and private state never enter the observer.",
             "reference": "docs/performance-requirements.md#evidence-and-maintenance"

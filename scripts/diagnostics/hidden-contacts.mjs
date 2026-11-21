@@ -232,6 +232,15 @@ async function passed(name, observations, captures = []) {
   console.log(`PASS ${name}`);
 }
 async function startApp() {
+  const startupLog = join(fixture, "app", "logs", "mesh-talk.log");
+  const startupMetricCount = async () => {
+    const log = await readFile(startupLog, "utf8").catch(error => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    return (log.match(/\bdesktop_host_ready_ms=\d+\b/gu) ?? []).length;
+  };
+  const previousStartupMetrics = await startupMetricCount();
   const port = await freePort();
   endpoint = `http://127.0.0.1:${port}`;
   app = launch(appBinary, [join(fixture, "app"), String(port), String(discoveryPort)]);
@@ -239,6 +248,10 @@ async function startApp() {
     if (!owned.has(app)) throw new Error(`app exited: ${app.output}`);
     return (await request("GET", "/status"))?.ready;
   });
+  await until("one host initialization metric while desktop is running", async () => {
+    assert.ok(owned.has(app), "desktop exited before emitting readiness metric");
+    return await startupMetricCount() === previousStartupMetrics + 1;
+  }, 5000);
   const value = await request("POST", "/session", { capabilities: { alwaysMatch: {} } });
   session = value.sessionId;
   assert.ok(session, "native session created");

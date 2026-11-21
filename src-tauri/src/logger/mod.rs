@@ -13,6 +13,7 @@ use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
 /// Maximum number of days to retain log files
 const MAX_LOG_RETENTION_DAYS: u64 = 7;
 pub(crate) const GRAPHICS_LOG_TARGET: &str = "mesh_talk::graphics_configuration";
+pub(crate) const STARTUP_LOG_TARGET: &str = "mesh_talk::desktop_startup";
 
 // Opt-in metadata only. No background task or timer is created by this observer.
 const IPC_WORK_TARGET: &str = "mesh_talk::ipc_work";
@@ -164,6 +165,7 @@ pub fn init_logging(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::er
         .targets(targets)
         .level(configured_log_level(cfg!(debug_assertions)))
         .level_for(GRAPHICS_LOG_TARGET, LogLevelFilter::Info)
+        .level_for(STARTUP_LOG_TARGET, LogLevelFilter::Info)
         .level_for(
             IPC_WORK_TARGET,
             if ipc_work_enabled() {

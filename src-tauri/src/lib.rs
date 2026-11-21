@@ -127,7 +127,7 @@ pub fn run_tauri_configured(
             .set(root)
             .expect("runtime configured only once");
     }
-    let _timer = perf_monitor!("application_startup");
+    let mut desktop_start = Some(std::time::Instant::now());
     log::info!("Starting Mesh-Talk desktop runtime");
 
     // Data directory + file manager (~/.mesh-talk), shared by the auth keystore.
@@ -587,7 +587,16 @@ pub fn run_tauri_configured(
             log::error!("Error while running tauri application: {e}");
             std::process::exit(1);
         })
-        .run(|app, event| {
+        .run(move |app, event| {
+            if matches!(event, tauri::RunEvent::Ready)
+                && let Some(started) = desktop_start.take()
+            {
+                log::info!(
+                    target: crate::logger::STARTUP_LOG_TARGET,
+                    "desktop_host_ready_ms={}",
+                    started.elapsed().as_millis()
+                );
+            }
             #[cfg(target_os = "macos")]
             if matches!(event, tauri::RunEvent::Reopen { .. })
                 && let Err(error) = crate::window_visibility::restore_main(app)
