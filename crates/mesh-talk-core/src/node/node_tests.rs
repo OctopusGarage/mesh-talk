@@ -11280,6 +11280,77 @@ fn account_history_deduplicates_direct_and_linked_copies_by_message_id() {
 }
 
 #[test]
+fn first_account_history_open_batches_candidate_writes() {
+    use crate::identity::account::Account;
+    use crate::node::conversation::account_conversation_id;
+    use crate::node::dm_envelope::DmEnvelope;
+
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let own_id = account.account_id();
+    let peer = Account::generate().account_id();
+    let conversation = account_conversation_id(&own_id, &peer);
+    let (dm, _dm_rx) = mpsc::unbounded_channel();
+    let (channel, _channel_rx) = mpsc::unbounded_channel();
+    let (file, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open_with_account(
+        DeviceIdentity::generate(),
+        account,
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    let mut expected = Vec::new();
+    for index in 1..=32u8 {
+        let text = format!("stored message {index}").into_bytes();
+        let envelope = DmEnvelope::new(
+            peer.clone(),
+            own_id.clone(),
+            [index; 32],
+            MessageBody::new(text.clone(), None).encode(),
+        )
+        .encode();
+        node.received
+            .lock()
+            .unwrap()
+            .record(
+                conversation,
+                peer.clone(),
+                u64::from(index),
+                &envelope,
+                EventId::new([index + 64; 32]),
+            )
+            .unwrap();
+        expected.push(text);
+    }
+
+    let database = node.storage.database();
+    let read = || {
+        node.account_history(&peer, 200)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect::<Vec<_>>()
+    };
+    let before = database.successful_write_commits();
+    assert_eq!(read(), expected);
+    let after = database.successful_write_commits();
+    assert!(
+        (1..=10).contains(&(after - before)),
+        "one bounded history page should not commit each row separately, observed {} write commits",
+        after - before
+    );
+    assert_eq!(read(), expected);
+    assert_eq!(database.successful_write_commits(), after);
+}
+
+#[test]
 fn linked_history_clear_and_retention_survive_restart_without_resurrection() {
     use crate::identity::account::Account;
     use crate::node::conversation::account_conversation_id;

@@ -463,6 +463,7 @@ impl Node {
                     if page.rows.is_empty() {
                         break;
                     }
+                    let mut candidates = Vec::new();
                     for header in page.rows {
                         after = Some(header.ordinal);
                         if kind == FILES && !file_eligible(header.ordinal)? {
@@ -549,17 +550,13 @@ impl Node {
                                 break;
                             }
                         } else {
-                            repository.history_add(
-                                &conversation,
-                                generation.job,
-                                candidate,
-                                header.deadline,
-                            )?;
+                            candidates.push((candidate, header.deadline));
                         }
                     }
                     if rebuild {
                         break;
                     }
+                    repository.history_add_page(&conversation, generation.job, &candidates)?;
                 }
                 if rebuild {
                     break;

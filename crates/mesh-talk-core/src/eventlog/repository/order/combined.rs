@@ -124,13 +124,87 @@ impl EventRepository {
         row: HistorySelector,
         deadline: Option<u64>,
     ) -> Result<(), LogError> {
-        self.database.transaction(|c|{
-            let scope:Option<i64>=c.query_row("SELECT s.lifecycle FROM retained_events e JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE e.domain=?1 AND e.id=?2 AND e.conversation=?3",params![self.domain.0.as_slice(),row.id.as_bytes().as_slice(),conv.as_bytes().as_slice()],|r|r.get(0)).optional()?;
-            if scope.is_some_and(|state|state!=0){return Ok(());}
-            let exists:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM history_order_jobs WHERE domain=?1 AND conversation=?2 AND job=?3 AND ready=0)",params![self.domain.0.as_slice(),conv.as_bytes().as_slice(),job.as_slice()],|r|r.get(0))?;
-            if !exists{return Err(LogError::StaleCursor);}
-            c.execute("INSERT INTO history_order_candidates VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(job,id) DO UPDATE SET clock=excluded.clock,source_kind=excluded.source_kind,ordinal=excluded.ordinal,priority=excluded.priority,sequence=excluded.sequence,charged_bytes=excluded.charged_bytes,archive=excluded.archive WHERE (excluded.priority,excluded.clock,excluded.sequence,excluded.ordinal)<(priority,clock,sequence,ordinal)",params![job.as_slice(),row.id.as_bytes().as_slice(),row.clock.to_be_bytes().as_slice(),row.source_kind,row.ordinal,row.priority,row.sequence.to_be_bytes().as_slice(),integer(row.charged_bytes)?,i64::from(scope.is_none())])?;
-            if let Some(deadline)=deadline {c.execute("UPDATE history_order_jobs SET next_deadline=?2 WHERE job=?1 AND (next_deadline IS NULL OR next_deadline>?2)",params![job.as_slice(),deadline.to_be_bytes().as_slice()])?;}
+        self.history_add_page(conv, job, &[(row, deadline)])
+    }
+
+    /// Commit one bounded page of metadata to an unfinished generation.
+    pub(crate) fn history_add_page(
+        &self,
+        conv: &ConversationId,
+        job: [u8; 16],
+        rows: &[(HistorySelector, Option<u64>)],
+    ) -> Result<(), LogError> {
+        if rows.len() > 128 {
+            return Err(LogError::InvalidPageBudget);
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        self.database.transaction(|connection| {
+            let mut scope = connection.prepare_cached(
+                "SELECT s.lifecycle FROM retained_events e
+                 JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation
+                 WHERE e.domain=?1 AND e.id=?2 AND e.conversation=?3",
+            )?;
+            let mut unfinished = connection.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM history_order_jobs
+                 WHERE domain=?1 AND conversation=?2 AND job=?3 AND ready=0)",
+            )?;
+            let mut insert = connection.prepare_cached(
+                "INSERT INTO history_order_candidates VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                 ON CONFLICT(job,id) DO UPDATE SET clock=excluded.clock,
+                    source_kind=excluded.source_kind,ordinal=excluded.ordinal,
+                    priority=excluded.priority,sequence=excluded.sequence,
+                    charged_bytes=excluded.charged_bytes,archive=excluded.archive
+                 WHERE (excluded.priority,excluded.clock,excluded.sequence,excluded.ordinal)
+                    <(priority,clock,sequence,ordinal)",
+            )?;
+            let mut update_deadline = connection.prepare_cached(
+                "UPDATE history_order_jobs SET next_deadline=?2
+                 WHERE job=?1 AND (next_deadline IS NULL OR next_deadline>?2)",
+            )?;
+            for &(row, deadline) in rows {
+                let lifecycle: Option<i64> = scope
+                    .query_row(
+                        params![
+                            self.domain.0.as_slice(),
+                            row.id.as_bytes().as_slice(),
+                            conv.as_bytes().as_slice()
+                        ],
+                        |result| result.get(0),
+                    )
+                    .optional()?;
+                if lifecycle.is_some_and(|state| state != 0) {
+                    continue;
+                }
+                let exists: bool = unfinished.query_row(
+                    params![
+                        self.domain.0.as_slice(),
+                        conv.as_bytes().as_slice(),
+                        job.as_slice()
+                    ],
+                    |result| result.get(0),
+                )?;
+                if !exists {
+                    return Err(LogError::StaleCursor);
+                }
+                insert.execute(params![
+                    job.as_slice(),
+                    row.id.as_bytes().as_slice(),
+                    row.clock.to_be_bytes().as_slice(),
+                    row.source_kind,
+                    row.ordinal,
+                    row.priority,
+                    row.sequence.to_be_bytes().as_slice(),
+                    integer(row.charged_bytes)?,
+                    i64::from(lifecycle.is_none())
+                ])?;
+                if let Some(deadline) = deadline {
+                    update_deadline
+                        .execute(params![job.as_slice(), deadline.to_be_bytes().as_slice()])?;
+                }
+            }
             Ok(())
         })
     }

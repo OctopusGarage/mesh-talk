@@ -1591,6 +1591,12 @@ requested message or leave a synchronous query spinning without progress.
 Authoritative signed events and plaintext sidecars remain untouched by this
 derived-index failure boundary.
 
+Full history generation commits candidate metadata in the same bounded pages
+used for header discovery, up to 128 candidates per transaction. Each page
+preserves lifecycle checks and candidate precedence. Rank publication retains
+its existing readiness gate, so an interrupted construction can be rebuilt
+without exposing partial history. Reopening unchanged history reuses ready ranks.
+
 Event repository schema v2 admits the signed `ChannelMetadata` event added by
 channel protocol v5. The only v1 schema change relaxes the event-kind constraint
 from 18 to 19. Upgrade validates the exact owned v1 tables and indexes, then

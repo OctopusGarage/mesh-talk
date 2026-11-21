@@ -3111,6 +3111,7 @@
             "selected_history_and_archive_wait_for_admitted_recall_before_body_reads",
             "retained_channel_without_checkpoint_cannot_publish_saved_plaintext",
             "indexed_runtime_recent_history_",
+            "first_account_history_open_batches_candidate_writes",
             "node::filebook::indexed::tests::",
             "node::attachment_consent::",
             "direct_file_approval_shares_signed_revision_with_relay_delivery",
@@ -3138,6 +3139,10 @@
         "summary": "Serve production participant history, recall, archive, and exact deletion state from profile-owned indexed stores with bounded metadata discovery and selected-body reads.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
+          {
+            "name": "Full history generation commits candidate metadata in bounded header pages while preserving lifecycle checks and refusing unfinished rank ranges. Reopening unchanged history reuses the ready ranks without another write commit.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
           {
             "name": "Ever-history selection reads at most 128 indexed account or verified legacy device-pair keys without plaintext and retains sent, received and file-card existence after clear, prune and restart. Legacy attribution shares search human-binding and live-relay precedence, uses at most 129 deduplicated signing keys from current identity, up to 64 authenticated recovery origins and up to 64 certified own devices, and supplies optional contact-specific offline candidates only with positive indexed history. Generic known-account enumeration keeps its prior cost and failure behavior; binding alone is never history and storage errors remain errors rather than false absence.",
             "reference": "docs/privacy-controls.md#discovered-contacts-without-chat-history"
