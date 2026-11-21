@@ -43,6 +43,12 @@ work.
 
 ## Evidence and future decisions
 
+The [current-IM foundation inventory](../docs/module-boundaries.md#current-im-foundation-inventory)
+routes the roadmap scenarios to existing owners, stores and verification inputs.
+It is a static inspection map, not foundation or platform acceptance;
+[the roadmap](../docs/development-roadmap.md#task-claims-branches-and-integration)
+owns active claims and downstream readiness.
+
 The [implementation/evidence tracker](../docs/network-design-reference.md#implementation-and-evidence-tracker)
 records named logical and physical checks. Three independent physical LANs, a
 separate ordinary client host on the mini's LAN, native macOS WebView media and

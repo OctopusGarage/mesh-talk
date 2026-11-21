@@ -11,6 +11,83 @@ The [canonical glossary](../CONTEXT.md) defines domain concepts;
 The layers and owners below are implementation responsibilities, not declarations
 that every module or crate is a separate DDD bounded context.
 
+## Current-IM foundation inventory
+
+This bounded F01 map routes the eight [foundation scenarios](development-roadmap.md#required-scenario-inventory)
+to existing owners. It supplements the detailed feature map below; it does not
+replace the glossary or certify runtime behavior. **Implemented** means a current
+source path was inspected; **partial** means only a narrower boundary is covered;
+**unknown** means evidence must still be collected. No new missing product
+capability or confirmed defect was established by this inspection. Future SDK,
+forum, PWA and replacement UI work remain deferred by the roadmap.
+
+### Concepts, authority and existing consumers
+
+Paths use `core/` for `crates/mesh-talk-core/src/` and `ui/` for
+`frontend/src/`. Domain definitions remain in [CONTEXT.md](../CONTEXT.md).
+
+| Boundary | Existing producer and consumer | Invariant and inspection status |
+| --- | --- | --- |
+| Local user, account and device | Desktop `runtime_bootstrap.rs::spawn_node_runtime` consumes a `SessionLease` and starts core `NodeRuntime`; `identity/` and `node/account_devices.rs` own cryptographic identity. | Implemented: the host data-directory account identifier is explicitly distinct from the cryptographic account. Names and addresses cannot establish device authority. |
+| Desktop session, participant, transport and ratchet | `src-tauri/src/runtime_admission.rs` fences host operations; `core/node/participant_runtime.rs` owns producers; `core/node/session_pool.rs` and `core/ratchet/` own different protocol lifetimes. `ui/store/ownership.ts` fences presentation completions. | Implemented seams; UI cancellation explicitly does not abort an admitted native operation. Complete native retirement remains unknown. |
+| Conversation, member and pending operation | `ui/store/outgoingIntent.ts` calls `submitAccountGroupText` through `ui/lib/api/chat.ts`; `src-tauri/src/owner_commands/group_operations.rs` captures runtime admission and calls core `submit_account_group_text_if`. `core/node/account_group/` owns operation/access state; `channel_account_authority.rs` owns signed membership. | Keep pending operations distinct from effective public events and announcements distinct from membership grants. The [account ownership contract](#account-and-device-ownership) remains authoritative; full transition qualification is F04 work. |
+| Acceptance, custody, delivery and read | Current `ui/store/outgoingIntent.ts` calls typed enqueue adapters for personal messages and account-group operation adapters for groups; `core/node/outgoing_message.rs` supplies retry-safe integration acceptance; `delivery_store.rs`, `delivery_runtime.rs`, `delivery_receipt.rs` and account read documents retain separate outcomes. | Implemented: request-ID reuse checks content digest and rechecks host authorization. Acceptance is not recipient delivery or reading. Ordinary sends and integration requests have distinct entry points. Retained `chat_commands/messaging.rs::send_dm` and `channels.rs::send_channel_message` are not the current outgoing-intent UI route. |
+| Removal, recall and cleanup | `core/node/account_documents/personal.rs` represents Delete, Reopen and Applied controls; sibling history import consumes their permission cut. `node/recall.rs` owns a different operation. | Implemented: hidden state, history clearing, deletion floor and local cleanup completion are distinct. No global deletion or safe marker reclamation claim. |
+| Disclosure and local integration access | `core/node/privacy_routes.rs` provides historical route hints; authenticated transport verifies identity. `src-tauri/src/integrations.rs` adapts the integration service; MCP is a separate transport adapter. | Route hints are not proof. Grant expiry, destination rights and exact-session authority must be checked at acceptance, not inferred from a UI state or discovery result. See [integration contracts](bot-integrations.md). |
+
+### Stores and resource ownership
+
+Retain the existing [storage architecture](ARCHITECTURE.md) and
+[performance requirements](performance-requirements.md); this map proposes no
+migration or new cache. Storage format presence is not a performance diagnosis.
+
+| Category | Current owner and real consumer | Resource/recovery boundary and next evidence |
+| --- | --- | --- |
+| Profile identity and encrypted indexed data | `core/storage/profile/`, `storage/database.rs`; event repository and transcript repository consume the profile connection. | SQLCipher owns connection/cache/WAL settings. Production and test KDF settings differ; F03 must record resolved build features before startup measurements. Per-connection cache limits are not process memory limits. |
+| Signed events and transcript projections | `core/eventlog/repository/`, `eventlog/persist.rs`, `node/transcript_repository/`; history, sync and search consume them. | Transcript headers and bodies are separate; page admission bounds rows and bytes. Legacy import code remains in `eventlog/persist/legacy.rs`; it is not evidence that every current query uses legacy storage. F03 measures metadata scans separately from decoded payloads. |
+| Durable outgoing state | `core/node/delivery_store.rs` consumes encrypted record logs for journal and outbox; delivery runtime and receipts consume transitions. | Coexists with indexed storage. F04 must qualify interrupted acceptance/reopen and sender-state recovery before any extraction or compaction. |
+| Personal controls and replay evidence | `core/node/account_documents/personal.rs`, `account_sync/`; account-history import consumes deletion floors and source cuts. | Keep replay suppression until its owning contract permits reclamation. F04 qualifies restart/restore and genuinely new content separately. |
+| File cards, bytes and completion | `core/node/files.rs`, `file_consent.rs`, `file_completion.rs`, `group_file_delivery.rs`; desktop `chat_commands/files.rs` and attachment UI consume them. | Card visibility, exact-offer consent, verified chunks and completion are separate. Replica budget is not an overall attachment quota; F03 measures temporary/output files and repeated media use. |
+| UI state and transient projections | `ui/store/chat.ts`, `ownership.ts`, conversation components; host events and typed API results are inputs. | Generation checks prevent stale publication but do not establish backend cancellation. F03 includes renderer/helper processes, repeated navigation and return to idle. |
+
+### Scenario routes and available verification
+
+Entries below identify reusable evidence inputs, **not fresh passing runs**.
+Use each crate's `validation.json`, `frontend/validation.json` and the
+[validation planner](testing-feedback-loop.md#change-aware-development-plans)
+to select actual commands for a changed boundary. A test filename alone does not
+establish its assertions, source selection or platform coverage.
+
+| Required scenario | Existing owner/caller route | Representative evidence input and remaining limit |
+| --- | --- | --- |
+| Startup/unlock with retained history | Desktop runtime bootstrap → `NodeRuntime` → profile storage and participant preparation. | `core-startup-identity` and `core-indexed-current-profiles` capability contracts; participant preparation tests. F03 still needs production cold/warm time-to-usable UI, retained-data scale and interrupted initialization evidence. |
+| Visible/hidden idle | Participant event/deadline waits → file/recovery producers; chat store → conversation viewport. | Inspected `participant_runtime_tests.rs` scheduling paths and `ConversationViewIdle.test.ts`: the latter changes peer-check timestamps without viewport rerenders and retains new-message behavior. Mocked rendering does not measure native CPU, wakeups or hidden-window reception. |
+| Direct/group messaging | `ui/store/outgoingIntent.ts` → typed `enqueueText` / `submitAccountGroupText` → owner-scoped desktop adapters → core durable acceptance / account-group operations → delivery. | `delivery_store_tests.rs`, `delivery_runtime_tests.rs`, `delivery_receipt_tests.rs` and `core-account-group-operations` are existing selectors to audit in F02. Full assertion coverage, recipient scales and return-to-idle timings remain unqualified here. |
+| Linked-device/group catch-up | Certified sibling `account_sync/` and group custody/session paths consume separate authority. | `account_sync/selection_tests.rs`, `personal_replay_tests.rs` and `core-shared-channel-custody`. F04 must qualify duplicate/reordered/interrupted pages and revoked membership; loopback evidence cannot certify physical topology. |
+| History/search/navigation | Host owner-scoped search → `core/node/search.rs` / transcript repository → UI results. | Inspected `recent_search_reports_recent_window_and_does_not_find_older_match`: excludes a match outside the 2,000-entry window. Search metadata scans and bounded payload decoding are distinct costs. `core-search-references` owns selectors; F03 measures repeated navigation/cache growth. |
+| Attachments/media | Attachment intake → desktop files adapter → consent/chunks/completion → UI media. | `core-file`, `core-file-consent-tests`, `core-file-message-identity`, `core-group-file-relay`; existing source coverage is partial evidence only. F02 audits cancellation, corrupt/incomplete source and retry assertions; F03 needs native decode and cleanup measurements. |
+| Delete/restart/restore | Personal controls → cleanup acknowledgements → sibling history admission; backup/restore is a separate host route. | Inspected `buffered_archive_page_cannot_acquire_permission_from_a_later_cleanup_ack`: old buffered content stays absent, unrelated content imports, a fresh authorized request can add new content. This does not qualify full backup restoration or all marker lifetimes. |
+| Lock/logout/sleep/owner replacement | Desktop session admission → participant stop; frontend generation fences publication. | Inspected `stop_waits_for_owned_blocking_work_after_host_cancellation`: stop waits for a held worker, joins after release and rejects later work. Native sleep/resume, all host producers and exact-session integration retirement still require composition evidence. |
+
+### Downstream handoffs and finite unknowns
+
+The integration owner accepts these inputs through the roadmap's review gates.
+Until then they are a proposed static map. F05–F08 do not gain construction
+permission from an inventory or from the existence of a test.
+
+| Handoff / decision owner | Falsifiable next action | Admission/stop condition |
+| --- | --- | --- |
+| F02 — validation owner | For the eight rows, resolve capability selectors, inspect actual assertions and collect one source-bound focused attempt with setup/compile/execution/retry timings. Audit existing `scripts/validation/{affected,checks,feedback,latency}.mjs` and CI ownership before adding tooling. | Produce an assertion-gap and check-allocation proposal; preserve required checks. Broader REQ-003/030 method classification stays explicitly outstanding. No full-suite run is needed for this static map. |
+| F03 — runtime/performance owner | Establish production build/features, OS/architecture, process family and fixture identity; measure startup, five-minute settled visible/hidden idle, one messaging/catch-up workload and return to idle using existing budgets. | No inference from fast-test KDF or synthetic test timing to shipped performance. If provenance or quiet measurement conditions are unavailable, record the exact missing input and stop performance conclusions. |
+| F04 — core authority and desktop lifecycle owners | Trace the selected send/delete operation through host admission, durable commit, replay/restart and owner replacement; qualify public membership, private removal and announcement authority separately. | Resolve the needed contract with failure/recovery evidence. Product-policy ambiguity goes to the product owner; inspection uncertainty is not a confirmed defect. |
+| F05/F06 — module and scheduling owners | Reuse participant preparation/launch/stop, runtime admission and meaningful event/deadline waits unless an accepted baseline demonstrates a concrete gap. | No universal scheduler or file-count-driven extraction. Require a real consumer and accepted F02/F03/F04 inputs. |
+| F07/F08 — communication and storage owners | Use separate personal/group replay authority and separate indexed/log/file resource categories when ranking a measured slice. | No storage replacement, deletion-floor reclamation or protocol change without compatibility/recovery evidence. |
+| F09/F10 — validation and integration owners | Bind each admitted slice to its existing contract/selector, then assemble the eight scenario results with source/platform limitations. | Static documentation does not satisfy integrated acceptance; future features remain deferred. |
+
+No current code/contract contradiction was confirmed in this bounded inspection.
+The unresolved items above are evidence gaps, not claims that the entire
+implementation is correct or that each named test covers its whole subsystem.
+
 ## 1. Dependency direction
 
 | Layer                                       | Owns                                                                                          | Depends on                                              | Must delegate                                                        |
