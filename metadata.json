@@ -3,11 +3,16 @@
   "checkpoint_id": "01M7YVXWR90EGR3XSYGP0QH1SY",
   "strategy": "manual-commit",
   "branch": "docs/f01-fresh-inventory-20261121",
-  "checkpoints_count": 9,
+  "checkpoints_count": 11,
   "files_touched": [
+    "docs/ai-coding-reliability.md",
     "docs/development-roadmap.md",
     "scripts/build-retention.py",
     "scripts/diagnostics/capability-contracts.test.mjs",
+    "scripts/diagnostics/validation-latency.test.mjs",
+    "scripts/diagnostics/validation-stage.test.mjs",
+    "scripts/test_build_retention.py",
+    "scripts/validation/latency.mjs",
     "scripts/validation/stage.mjs",
     "src-tauri/src/chat_commands/files.rs",
     "src-tauri/validation.json"
@@ -19,14 +24,21 @@
       "compact_transcript": "/0/transcript.jsonl",
       "content_hash": "/0/content_hash.txt",
       "prompt": "/0/prompt.txt"
+    },
+    {
+      "metadata": "/1/metadata.json",
+      "transcript": "/1/full.jsonl",
+      "compact_transcript": "/1/transcript.jsonl",
+      "content_hash": "/1/content_hash.txt",
+      "prompt": "/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 271067,
+    "input_tokens": 368828,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 31039616,
-    "output_tokens": 83735,
-    "api_call_count": 255,
+    "cache_read_tokens": 36309504,
+    "output_tokens": 90197,
+    "api_call_count": 358,
     "subagent_tokens_complete": true
   },
   "redaction": {
