@@ -10,6 +10,7 @@ The [performance guide](performance-requirements.md) owns resource budgets.
 | Work | Existing entry point or reference | When to use it |
 | --- | --- | --- |
 | Refresh visible data from a scoped event | [useSerialPoll](../frontend/src/features/chat/useSerialPoll.ts) | A renderer view needs an initial read, event-driven refresh, a foreground catch-up and a visible fallback. The hook serializes actual reads, retains one pending invalidation and stops its timer while hidden. Select a supported invalidation scope and provide the feature's snapshot read. |
+| Recheck an external setting on activation | [startRecoveryRefresh](../frontend/src/lib/recoveryRefresh.ts) | A renderer owner needs a coalesced foreground check. Set the interval to null for activation-only recovery, as used for native notification permission. |
 | Enforce a UI read deadline | [readWithDeadline](../frontend/src/lib/readDeadline.ts) | The WebView needs to stop waiting for a read. Its shared admission limit stays occupied until the real native operation settles. Mutations and native cancellation have separate owners. |
 | Retire expiring UI state | [Chat expiry](../frontend/src/store/chatExpiry.ts) and [contact expiry](../frontend/src/store/rosterRefresh.ts) | Data already supplies an expiry timestamp. Update the existing feature state so its owner can rearm the nearest deadline. The Host remains authoritative for business expiry. |
 | Observe Host work after a runtime is installed | [NodeRuntime host-task registration](../crates/mesh-talk-core/src/node/runtime.rs) | The task belongs to an authenticated runtime. Register it with the runtime so retirement closes admission and joins owned work. Use graceful registration for adapters that need asynchronous cleanup. |
@@ -60,7 +61,9 @@ A registration should declare:
 
 For example, a settings panel that reads sync status should register with the
 existing serial refresh hook and select the relevant invalidation. The feature
-provides its scoped query and current-owner result handler. The hook owns event
+provides its scoped query and current-owner result handler. Device linking
+subscribes to same-owner sync status and retains its five-second visible fallback
+for time-derived availability changes. The hook owns event
 delivery, one in-flight read, foreground refresh, hidden behavior and cleanup.
 A delivery retry instead registers with the Core delivery owner so it retains
 durable work identity and the existing policy for eligible destinations.

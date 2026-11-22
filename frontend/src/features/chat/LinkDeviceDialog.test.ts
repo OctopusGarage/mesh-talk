@@ -15,6 +15,10 @@ import { publishAppearanceBeforeLink } from "@/lib/linkedAppearance";
 import { publishContactsBeforeLink } from "@/lib/linkedContacts";
 import { publishDraftsBeforeLink, useDrafts } from "@/store/drafts";
 import { useAuth } from "@/store/auth";
+import {
+  notifySyncInvalidation,
+  setPushStateSupport,
+} from "@/lib/syncInvalidation";
 import { useChat } from "@/store/chat";
 import { LinkDeviceDialog } from "./LinkDeviceDialog";
 
@@ -113,6 +117,8 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
+  setPushStateSupport(null);
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -1086,4 +1092,42 @@ it("keeps successful linking visible across runtime replacement and clears it on
   expect(
     document.querySelector('[data-testid="pairing-success-notice"]'),
   ).toBeNull();
+});
+
+it("refreshes device sync on its owner signal and retains the visible fallback", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  setPushStateSupport("owner-a");
+  await render();
+  await open();
+  expect(chat.getDeviceSyncStatus).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    notifySyncInvalidation({
+      owner: "owner-b",
+      kind: "state",
+      scope: "sync_status",
+    });
+    notifySyncInvalidation({
+      owner: "owner-a",
+      kind: "state",
+      scope: "documents",
+    });
+  });
+  expect(chat.getDeviceSyncStatus).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    notifySyncInvalidation({
+      owner: "owner-a",
+      kind: "state",
+      scope: "sync_status",
+    });
+    notifySyncInvalidation({
+      owner: "owner-a",
+      kind: "state",
+      scope: "sync_status",
+    });
+  });
+  expect(chat.getDeviceSyncStatus).toHaveBeenCalledTimes(3);
+  expect(chat.getAccountLoginSyncStatus).toHaveBeenCalledTimes(1);
+  await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  expect(chat.getDeviceSyncStatus).toHaveBeenCalledTimes(4);
 });

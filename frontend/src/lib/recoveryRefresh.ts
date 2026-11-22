@@ -9,7 +9,7 @@ export function startRecoveryRefresh(
     intervalMs = () => RECOVERY_REFRESH_MS,
   }: {
     background?: boolean;
-    intervalMs?: () => number;
+    intervalMs?: (() => number) | null;
   } = {},
 ): () => void {
   let active = true;
@@ -20,7 +20,7 @@ export function startRecoveryRefresh(
   const arm = () => {
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
-    if (!active || (!background && !visible())) return;
+    if (!active || intervalMs === null || (!background && !visible())) return;
     timer = setTimeout(
       () => {
         timer = undefined;

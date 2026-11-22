@@ -1308,7 +1308,7 @@
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           },
           {
-            "name": "Visible serial readers use event invalidations with a five-minute push-backed recovery deadline, retaining compatibility intervals without push support. Hidden readers suspend recovery timers and refresh on activation. UI watchdog expiry retains the actual native read lease and at most one pending invalidation through physical settlement and global admission release; closing retires timers/listeners and suppresses late publication.",
+            "name": "Visible serial readers use event invalidations with a default five-minute push-backed recovery deadline. Device linking retains its five-second availability fallback, and compatibility intervals remain without push support. Hidden readers suspend recovery timers and refresh on activation. UI watchdog expiry retains the actual native read lease and at most one pending invalidation through physical settlement and global admission release; closing retires timers/listeners and suppresses late publication.",
             "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]

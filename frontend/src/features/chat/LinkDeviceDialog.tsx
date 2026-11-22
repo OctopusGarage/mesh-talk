@@ -34,6 +34,8 @@ import { useSerialPoll } from "./useSerialPoll";
 import { useChat } from "@/store/chat";
 import { useAuth } from "@/store/auth";
 
+const DEVICE_SYNC_REFRESH_MS = 5_000;
+
 const SYNC_OPTIONS = [
   { category: "history", label: "historySync" },
   { category: "attachments", label: "attachmentsSync" },
@@ -233,13 +235,17 @@ function OwnedLinkDeviceDialog({
 
   useSerialPoll(
     open,
-    5_000,
+    DEVICE_SYNC_REFRESH_MS,
     () => chat.getDeviceSyncStatus(owner),
     (statuses) => {
       setSyncStatus(statuses);
       setSyncStatusError(null);
     },
     (error) => setSyncStatusError(errorMessage(error)),
+    "state",
+    (change) => change.owner === owner && change.scope !== "documents",
+    // Availability expiry is time-derived and does not always emit a status wake.
+    DEVICE_SYNC_REFRESH_MS,
   );
 
   useSerialPoll(

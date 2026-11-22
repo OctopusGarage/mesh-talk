@@ -4,6 +4,7 @@ import {
   type SyncInvalidation,
 } from "@/lib/syncInvalidation";
 import { readWithDeadline } from "@/lib/readDeadline";
+import { RECOVERY_REFRESH_MS } from "@/lib/recoveryRefresh";
 import { useEffect, useRef } from "react";
 
 /** Event-owned refresh with one visible recovery deadline and one actual read. */
@@ -15,6 +16,7 @@ export function useSerialPoll<T>(
   onError: (error: unknown) => void,
   wakeOn?: SyncInvalidation["kind"],
   acceptsInvalidation?: (change: SyncInvalidation) => boolean,
+  pushRecoveryMs = RECOVERY_REFRESH_MS,
 ) {
   const handlers = useRef({ request, onResult, onError, acceptsInvalidation });
   useEffect(() => {
@@ -30,7 +32,7 @@ export function useSerialPoll<T>(
     const schedule = () => {
       clearTimeout(timer);
       if (!active || busy || document.hidden) return;
-      const delay = wakeOn && supportsPushState() ? 300_000 : intervalMs;
+      const delay = wakeOn && supportsPushState() ? pushRecoveryMs : intervalMs;
       timer = setTimeout(() => poll(), delay);
     };
     const poll = (invalidate = false) => {
@@ -93,5 +95,5 @@ export function useSerialPoll<T>(
       document.removeEventListener("visibilitychange", foreground);
       unlisten();
     };
-  }, [enabled, intervalMs, wakeOn]);
+  }, [enabled, intervalMs, wakeOn, pushRecoveryMs]);
 }

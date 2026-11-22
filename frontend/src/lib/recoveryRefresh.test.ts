@@ -59,3 +59,24 @@ it("retains durable reconciliation recovery while hidden", async () => {
   await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   expect(run).toHaveBeenCalledOnce();
 });
+
+it("supports foreground-only recovery with no periodic timer", async () => {
+  const run = vi.fn();
+  stop = startRecoveryRefresh(run, { intervalMs: null });
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS * 2);
+  expect(run).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+  page.visibilityState = "hidden";
+  page.dispatchEvent(new Event("visibilitychange"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(run).not.toHaveBeenCalled();
+  page.visibilityState = "visible";
+  page.dispatchEvent(new Event("visibilitychange"));
+  events.dispatchEvent(new Event("focus"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(run).toHaveBeenCalledOnce();
+  stop();
+  events.dispatchEvent(new Event("focus"));
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
+  expect(run).toHaveBeenCalledOnce();
+});

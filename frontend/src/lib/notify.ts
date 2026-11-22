@@ -4,6 +4,7 @@ import {
   type NotificationPermission,
 } from "./api/notifications";
 import { readWithDeadline } from "./readDeadline";
+import { startRecoveryRefresh } from "./recoveryRefresh";
 
 interface PermissionState {
   permission: NotificationPermission | null;
@@ -75,14 +76,7 @@ export function watchNotificationPermission() {
   const refresh = () => {
     void useNotificationPermission.getState().refresh();
   };
-  const visible = () => {
-    if (document.visibilityState === "visible") refresh();
-  };
+  const stop = startRecoveryRefresh(refresh, { intervalMs: null });
   refresh();
-  window.addEventListener("focus", refresh);
-  document.addEventListener("visibilitychange", visible);
-  return () => {
-    window.removeEventListener("focus", refresh);
-    document.removeEventListener("visibilitychange", visible);
-  };
+  return stop;
 }

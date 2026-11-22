@@ -7,7 +7,10 @@ const { check, request } = vi.hoisted(() => ({
 vi.mock("./api/notifications", () => ({
   notifications: { check, request },
 }));
-import { useNotificationPermission } from "./notify";
+import {
+  useNotificationPermission,
+  watchNotificationPermission,
+} from "./notify";
 const allowed = {
   status: "granted",
   platform: "macos",
@@ -112,4 +115,32 @@ it("does not open a delayed prompt after the originating view has closed", async
   resolve(prompt);
   await enabling;
   expect(request).not.toHaveBeenCalled();
+});
+
+it("rechecks permission once on foreground activation without polling or prompting", async () => {
+  vi.useFakeTimers();
+  const host = new EventTarget();
+  const page = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  vi.stubGlobal("window", host);
+  vi.stubGlobal("document", page);
+  check.mockResolvedValueOnce(allowed).mockResolvedValueOnce(denied);
+  const stop = watchNotificationPermission();
+  try {
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(check).toHaveBeenCalledOnce();
+    host.dispatchEvent(new Event("focus"));
+    page.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(useNotificationPermission.getState().permission).toEqual(denied);
+    stop();
+    host.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(request).not.toHaveBeenCalled();
+  } finally {
+    stop();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  }
 });
