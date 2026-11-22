@@ -660,14 +660,21 @@ export interface PendingStickerSourcesPage {
   next_cursor: string | null;
 }
 
+/** Identity returned by queries admitted to a specific desktop runtime. */
+export interface NodeIdentity {
+  owner: string;
+  device_id: string;
+  account_id: string;
+  display_name?: string;
+  history_revision?: number;
+  supports_push_state?: boolean;
+  supports_bounded_delivery?: boolean;
+  runtime_id?: string | null;
+}
+
 /** Authorized source identity accompanying a single roster observation. */
 export interface RosterObservation {
-  identity: {
-    owner: string;
-    account_id: string;
-    device_id: string;
-    runtime_id?: string | null;
-  };
+  identity: NodeIdentity;
   peers: PeerInfo[];
   people: PresenceMap;
 }

@@ -8028,7 +8028,10 @@ it.each(["held", "failed"])(
       ).toHaveLength(1);
       expect(
         invoke.mock.calls.filter(
-          ([cmd]) => cmd === "get_presence" || cmd === "list_peers",
+          ([cmd]) =>
+            cmd === "get_presence" ||
+            cmd === "list_peers" ||
+            cmd === "owner_node_identity",
         ),
       ).toHaveLength(0);
       if (mode === "failed") rejectGroup(new Error("group storage failed"));
@@ -8071,7 +8074,10 @@ it.each(["identity", "peers"])(
       expect(useChat.getState().ready).toBe(phase !== "identity");
       expect(
         invoke.mock.calls.filter(([cmd]) => cmd === "owner_roster_observation"),
-      ).toHaveLength(phase === "identity" ? 0 : 1);
+      ).toHaveLength(1);
+      expect(
+        invoke.mock.calls.filter(([cmd]) => cmd === "owner_node_identity"),
+      ).toHaveLength(1);
     } finally {
       stop();
       vi.useRealTimers();

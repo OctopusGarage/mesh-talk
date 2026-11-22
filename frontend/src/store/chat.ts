@@ -21,7 +21,7 @@ import {
   loadReceptionSnapshot,
   saveReceptionSnapshot,
 } from "@/lib/receptionSnapshot";
-import type { PersonalConversationState } from "@/lib/types";
+import type { NodeIdentity, PersonalConversationState } from "@/lib/types";
 import { useDrafts } from "./drafts";
 import { usePacks } from "./packs";
 import { stickerPackId, stickerById } from "@/lib/stickerPacks";
@@ -174,14 +174,7 @@ const BOOT_RECOVERY_INTERVAL_MS = 10_000;
 /** Both startup and full runtime identities bind persisted reception exactly once. */
 function applyVerifiedIdentity(
   set: Set,
-  identity: {
-    owner: string;
-    account_id: string;
-    device_id: string;
-    history_revision?: number;
-    supports_bounded_delivery?: boolean;
-    runtime_id?: string;
-  },
+  identity: NodeIdentity,
   ready: boolean,
 ) {
   const owner = identity.owner;
@@ -809,9 +802,29 @@ async function refreshRosterSnapshot(
   const request = get().rosterRequest + (presenceOnly ? 0 : 1);
   if (!presenceOnly) set({ rosterRequest: request });
   try {
+    // A qualified roster event already carries an exact-runtime identity with
+    // its peer snapshot. If it fails, distinguish lost runtime authority from
+    // an unavailable roster using the owning identity command.
+    let observed:
+      Awaited<ReturnType<typeof rosterPresenceApi.observeRoster>> | undefined;
+    if (presenceOnly && ticket) {
+      // Give synchronous event consumers a chance to retire this lease before
+      // requesting the shared snapshot.
+      await Promise.resolve();
+      if (!lease.current() || get().rosterRequest !== request || hasPending())
+        return;
+      try {
+        observed = (await ticket.read(lease.owner!)).value;
+      } catch {
+        if (!lease.current() || get().rosterRequest !== request || hasPending())
+          return;
+      }
+    }
     let identity;
     try {
-      identity = await readWithDeadline(() => chat.ownerIdentity(lease.owner!));
+      identity =
+        observed?.identity ??
+        (await readWithDeadline(() => chat.ownerIdentity(lease.owner!)));
     } catch {
       if (get().rosterRequest === request && !hasPending())
         set({ ready: false });
@@ -858,19 +871,9 @@ async function refreshRosterSnapshot(
     if (!publishedAccountRoster?.current()) publishedAccountRoster = null;
     // Keep full reads concurrent. Heartbeats first inspect cheap discovery facts;
     // route-only changes still publish peers without rereading account history/policy.
+    if (presenceOnly && ticket && !observed) return;
     const observedPeers = presenceOnly
-      ? ticket
-        ? await ticket.read(lease.owner!).then(({ value }) => {
-            if (
-              value.identity.owner !== lease.owner ||
-              value.identity.account_id !== identity.account_id ||
-              value.identity.device_id !== identity.device_id ||
-              value.identity.runtime_id !== identity.runtime_id
-            )
-              throw new Error("Roster source identity changed");
-            return value.peers;
-          })
-        : await readWithDeadline(() => chat.listPeers())
+      ? (observed?.peers ?? (await readWithDeadline(() => chat.listPeers())))
       : null;
     if (!lease.current() || get().rosterRequest !== request || hasPending())
       return;

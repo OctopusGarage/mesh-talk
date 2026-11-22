@@ -238,8 +238,11 @@ retirement or replacement rejects the captured result. This does not change
 discovery proof persistence, current account binding or presence expiry.
 
 An ordinary roster invalidation shares one lazy, event-owned peer/people
-observation between the chat and presence consumers. It is not reusable across
-events or runtime generations. Group revision and projection run separately;
+observation between the chat and presence consumers. The chat consumer uses the
+identity admitted with that peer snapshot. If the observation fails, a separate
+identity check distinguishes runtime loss or replacement from roster failure.
+The observation is scoped to its event and runtime generation. Group revision
+and projection run separately;
 holding or failing them must not prevent peer publication. Equal applied group
 revisions return an explicit unchanged result without another peer snapshot or
 group projection. Changed inputs and forced repair use a coherent full response.

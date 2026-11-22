@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  NodeIdentity,
   AccountGroupControlRequest,
   AccountGroupOperationStatus,
   PersonalConversationState,
@@ -234,16 +235,7 @@ export const chat = {
       device_id?: string;
     } | null>("owner_startup_identity", { owner }),
   ownerIdentity: (owner: string) =>
-    invoke<{
-      owner: string;
-      device_id: string;
-      account_id: string;
-      display_name?: string;
-      history_revision?: number;
-      supports_push_state?: boolean;
-      supports_bounded_delivery?: boolean;
-      runtime_id?: string;
-    }>("owner_node_identity", { owner }),
+    invoke<NodeIdentity>("owner_node_identity", { owner }),
   enqueueText: (
     owner: string,
     account: string,
