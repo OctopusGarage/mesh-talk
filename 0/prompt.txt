@@ -1,0 +1,59 @@
+请阅读 AGENTS.md 和 docs/development-roadmap.md，核对最新 main、现有实现和任务认领状态，从 T001 开始推进首批 P0 任务；先完成现状与证据梳理，更新任务状态和后续可并行清单，暂不修改产品代码。 原始整理有30个需求： /Users/kingsonwu/Downloads/requirements-intake.md ，重新看看哪些应该合并，哪些应该拆分，哪些应该放在前面先做，作为后面的依赖前置任务，或者放优先级高的地方，方便后续的其他任务，哪些应该暂时作为规划，短时间内不会开始，只是作为一种功能的规划和展望之类的，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；
+
+---
+
+只看/Users/
+  kingsonwu/Downloads/requirements-intake.md 吧，哪些不要理了，等下我讨论完，直接更新覆盖掉那些旧的信息就行了，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+只看/Users/
+  kingsonwu/Downloads/requirements-intake.md 吧，那些不要理了，等下我们讨论完，直接更新覆盖掉那些旧的信息就行了，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+yes，continue
+
+---
+
+我希望是这样的，哪些放在前面先做，比如性能，拆模块之类的，这些提前做完，后续其他任务在这个基础上做会更好，而且全部基础任务做好之后，哪些任务可以在这个基础上并行开发的，还有论坛，pwa，前端市场等之类的需求，应该放在后面功能展望和规划中，不用先立马做，等这些基础的东西做完，才这个这些基础上做，比如通道这些都拆好了，优化好性能之类的，但是可以记录到roadmap中，所以我现在希望可以详细分析给这些需求出一个全局的清晰简洁的计划，依赖安排，怎么分阶段完成之类的，然后你仔细分析清楚，这里路克出来，我们再继续讨论。analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+我希望是这样的，哪些放在前面先做，比如性能，拆模块之类的，这些提前做完，后续其他任务在这个基础上做会更好，而且全部基础任务做好之后，哪些任务可以在这个基础上并行开发的，还有论坛，pwa，前端市场等之类的需求，应该放在后面功能展望和规划中，不用先立马做，等这些基础的东西做完，才这个这些基础上做，比如通道这些都拆好了，优化好性能之类的，但是可以记录到roadmap中，所以我现在希望可以详细分析给这些需求出一个全局的清晰简洁的计划，依赖安排，怎么分阶段完成之类的，然后你仔细分析清楚，这里路克出来，我们再继续讨论。不一定要完全按我的，我只是抛砖引玉，你要仔细客观分析清楚，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+ok， continue，new workree branch to do this thing, and what we discusss 和改动都在这个分支进行就可以，如果有并行的，就从这个分支拆出去完成后在合并回来就行，continue；continue；continue；continue；continue；
+
+---
+
+so continue
+
+---
+
+记住我们的这轮的完整最终目标是先把全局的规划等都定清楚了，然后后续可以开始逐个进行，遇到有些可以并行执行的（可以不影响不想用后续合并重做的情况下才开始做），然后全局规划确定后更新AGENTS.md 和 docs/development-roadmap.md 然后合并到main，然后再重新开始按照计划来逐个完成任务
+
+---
+
+记住我们的这轮的完整最终目标是先把全局的规划等都定清楚了，然后后续可以开始逐个进行，遇到有些可以并行执行的（可以不影响不想用后续合并重做的情况下才开始做），然后全局规划确定后更新AGENTS.md 和 docs/development-roadmap.md 然后合并到main，然后再重新开始按照计划来逐个完成任务，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；
+
+---
+
+所以目标完成了吗？analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+那你继续完成吧，analyze；analyze；analyze；analyze；analyze；
+
+---
+
+最新的整理的全局计划和细节这里列出来看看，analyze；analyze；analyze；analyze；analyze；
+
+---
+
+make sure all CI passed! why 加个文档CI也会失败。。。。
+
+---
+
+开始继续进行任务吧。continue；continue；continue；continue；continue；continue；
