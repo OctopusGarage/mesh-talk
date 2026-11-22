@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 
+STARTUP_TIMEOUT_SECONDS = 90
 WARMUP_SECONDS = 5
 SAMPLE_SECONDS = 3
 SAMPLES = 5
@@ -66,6 +67,21 @@ def snapshot(process):
     return cpu, memory, int(io["write_bytes"])
 
 
+def wait_ready(process, log, timeout):
+    started = time.monotonic()
+    while True:
+        with log.open("rb") as stream:
+            output = stream.read(65536).decode(errors="replace")
+        if "listening on tcp/" in output:
+            return time.monotonic() - started
+        if (code := process.poll()) is not None:
+            error = next((line for line in output.splitlines() if line.startswith(("Error:", "error:"))), "")
+            raise RuntimeError(f"node exited before readiness (exit {code}) {error[:240]}".rstrip())
+        if time.monotonic() - started >= timeout:
+            raise RuntimeError(f"node readiness timed out after {timeout} seconds")
+        time.sleep(0.05)
+
+
 def measure(binary):
     if platform.system() != "Linux":
         raise RuntimeError("Linux process counters are required")
@@ -84,15 +100,7 @@ def measure(binary):
             stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
         ) as process:
             try:
-                deadline = time.monotonic() + 30
-                while True:
-                    with stdout.open("rb") as stream:
-                        ready = b"listening on tcp/" in stream.read(65536)
-                    if ready:
-                        break
-                    if process.poll() is not None or time.monotonic() >= deadline:
-                        raise RuntimeError("node did not reach readiness")
-                    time.sleep(0.05)
+                startup = wait_ready(process, stdout, STARTUP_TIMEOUT_SECONDS)
                 time.sleep(WARMUP_SECONDS)
                 started = time.monotonic()
                 start = snapshot(process)
@@ -105,7 +113,7 @@ def measure(binary):
                 process.communicate(b"/quit\n", timeout=5)
                 if process.returncode:
                     raise RuntimeError("node failed to shut down")
-                return {**result, "elapsed_seconds": elapsed, "samples": len(samples)}
+                return {**result, "startup_seconds": startup, "elapsed_seconds": elapsed, "samples": len(samples)}
             finally:
                 if process.poll() is None:
                     process.kill()

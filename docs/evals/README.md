@@ -236,7 +236,8 @@ publication remain separate acceptance requirements in [the update guide](../upd
 The Linux archive producer in [CI](../../.github/workflows/ci.yml) measures the
 already-built workspace node. The fixture creates a fresh temporary encrypted
 profile, uses a separate UDP discovery port, waits for the real listener, then
-allows five seconds to settle. Five samples span about 15 seconds with no test
+allows five seconds to settle. Startup has a separate 90-second limit, and
+early exit and readiness timeout have distinct errors. Five samples span about 15 seconds with no test
 traffic. No extra Cargo build, native desktop session or external peer is needed.
 
 Run on Linux after building `mesh-talk-node`:

@@ -5,8 +5,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock
 
-from resource_benchmark import evaluate, private_kib
+from resource_benchmark import evaluate, private_kib, wait_ready
 
 
 class ResourceBenchmarkTest(unittest.TestCase):
@@ -27,6 +28,18 @@ class ResourceBenchmarkTest(unittest.TestCase):
         self.assertFalse(evaluate((2, 1024, 0), [(4, 1030, 4096)], 10, 100)["breaches"])
         with self.assertRaises(ValueError):
             evaluate((3, 1024, 0), [(2, 1030, 0)], 10, 100)
+
+    def test_early_exit_and_timeout_are_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "node.log"
+            log.write_text("Error: fixture bind failed\n")
+            process = Mock()
+            process.poll.return_value = 7
+            with self.assertRaisesRegex(RuntimeError, "exit 7.*fixture bind failed"):
+                wait_ready(process, log, 0)
+            process.poll.return_value = None
+            with self.assertRaisesRegex(RuntimeError, "readiness timed out"):
+                wait_ready(process, log, 0)
 
     def test_missing_binary_publishes_error_and_fails(self):
         entrypoint = Path(__file__).with_name("resource_benchmark.py")
