@@ -7972,7 +7972,18 @@ it.each(["held", "failed"])(
   "shares one ordinary roster observation while %s group work cannot block chat",
   async (mode) => {
     vi.useFakeTimers();
-    const identity = { owner: "host", account_id: "myacct", device_id: "me" };
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    const scope = {
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      runtime_id: "installed",
+    };
+    const identity = { ...scope, supports_bounded_delivery: true };
     const peer = {
       user_id: "friend-device",
       account_id: "friend",
@@ -7984,6 +7995,28 @@ it.each(["held", "failed"])(
     let rejectGroup!: (error: Error) => void;
     invoke.mockImplementation((command: string) => {
       if (command === "owner_node_identity") return Promise.resolve(identity);
+      if (command === "owner_startup_identity")
+        return Promise.resolve({
+          ...scope,
+          startup_id: scope.runtime_id,
+          phase: "ready",
+        });
+      if (command === "owner_reception_page") {
+        const cursor = {
+          epoch: "0123456789abcdef0123456789abcdef",
+          sequence: "0",
+        };
+        return Promise.resolve({
+          scope,
+          token: "initial",
+          after: cursor,
+          next: cursor,
+          through: cursor,
+          complete: true,
+          receipts: [],
+        });
+      }
+      if (command === "owner_reception_ack") return Promise.resolve(false);
       if (command === "get_presence")
         return Promise.resolve({
           people: {},
@@ -8014,8 +8047,15 @@ it.each(["held", "failed"])(
     const stopPresence = usePresence.getState().start();
     try {
       await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState()).toMatchObject({
+        ready: true,
+        deliveryRuntime: scope.runtime_id,
+      });
       invoke.mockClear();
-      captured.current?.onStateChanged({ ...identity, kind: "roster" });
+      captured.current?.onRosterChanged({ ...scope, runtime_id: "retired" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke).not.toHaveBeenCalled();
+      captured.current?.onRosterChanged(scope);
       await vi.advanceTimersByTimeAsync(0);
       expect(useChat.getState().peers).toEqual([peer]);
       expect(
@@ -8031,7 +8071,9 @@ it.each(["held", "failed"])(
           ([cmd]) =>
             cmd === "get_presence" ||
             cmd === "list_peers" ||
-            cmd === "owner_node_identity",
+            cmd === "owner_node_identity" ||
+            cmd === "owner_reception_page" ||
+            cmd === "owner_reception_ack",
         ),
       ).toHaveLength(0);
       if (mode === "failed") rejectGroup(new Error("group storage failed"));
@@ -8044,6 +8086,7 @@ it.each(["held", "failed"])(
       stopPresence();
       stopChat();
       vi.useRealTimers();
+      vi.unstubAllGlobals();
     }
   },
 );

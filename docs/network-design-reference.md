@@ -237,6 +237,12 @@ not a successful empty roster. Publication rechecks the exact installed runtime;
 retirement or replacement rejects the captured result. This does not change
 discovery proof persistence, current account binding or presence expiry.
 
+The desktop forwards coalesced roster changes as installation-scoped hints.
+Roster-only renewals bypass the durable reception page and its ACK. A retired
+runtime or locked app cannot publish them to the active renderer. Startup and
+foreground repair read current state independently of these hints, and local
+presence still expires from its last observed deadline if a hint is lost.
+
 An ordinary roster invalidation shares one lazy, event-owned peer/people
 observation between the chat and presence consumers. The chat consumer uses the
 identity admitted with that peer snapshot. If the observation fails, a separate

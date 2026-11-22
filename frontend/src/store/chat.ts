@@ -1596,16 +1596,22 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       if (kind !== "roster") void refreshGroupOperationIntents(rawSet, get);
     };
 
+    const matchesRuntime = (scope: ReceptionScope) => {
+      const state = get();
+      return (
+        lease.current() &&
+        scope.owner === lease.owner &&
+        scope.account_id === state.myAccountId &&
+        scope.device_id === state.myId &&
+        scope.runtime_id === state.deliveryRuntime
+      );
+    };
     const unlisten = subscribeNodeEvents({
       onReceptionWake: (scope) => {
-        if (
-          lease.current() &&
-          scope.owner === lease.owner &&
-          scope.account_id === get().myAccountId &&
-          scope.device_id === get().myId &&
-          scope.runtime_id === get().deliveryRuntime
-        )
-          wakeReception();
+        if (matchesRuntime(scope)) wakeReception();
+      },
+      onRosterChanged: (scope) => {
+        if (get().ready && matchesRuntime(scope)) applyInvalidation("roster");
       },
       onStateChanged: (e) => {
         const state = get();

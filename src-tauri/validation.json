@@ -1413,7 +1413,7 @@
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
-            "name": "Runtime, local user, account and device authority fence every page and ACK; current state/progress use the same coalesced wake.",
+            "name": "Runtime, local user, account and device authority fence every page and ACK; state and progress use the coalesced reception wake. Roster-only hints bypass reception and require the exact installed renderer runtime.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

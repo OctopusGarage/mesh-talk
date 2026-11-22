@@ -239,6 +239,8 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                             runtime.account_id().to_owned(),
                             runtime.user_id().to_owned(),
                             kind,
+                            (kind == "roster" && handle.bounded_delivery())
+                                .then(|| reception_scope.clone()),
                             changes,
                         ),
                     )));
@@ -563,6 +565,7 @@ async fn forward_state_changes<R: tauri::Runtime>(
     account: String,
     device: String,
     kind: &'static str,
+    roster_scope: Option<crate::reception_host::Scope>,
     mut changes: tokio::sync::watch::Receiver<u64>,
 ) {
     while changes.changed().await.is_ok() {
@@ -575,6 +578,16 @@ async fn forward_state_changes<R: tauri::Runtime>(
         changes.borrow_and_update();
         if authority
             .current(|_| {
+                if let Some(scope) = &roster_scope {
+                    // Renewals describe current presence. The next renewal or
+                    // startup snapshot repairs a lost hint without a receipt.
+                    if !crate::app_lock::app_locked(&app)
+                        && let Err(error) = app.emit("node-roster-changed", scope)
+                    {
+                        log::warn!("Failed to emit roster invalidation: {error}");
+                    }
+                    return;
+                }
                 crate::events::emit_node_state_changed(
                     &app,
                     crate::events::NodeStateChangedEvent {
@@ -1459,6 +1472,7 @@ mod tests {
             "account".into(),
             "device".into(),
             "files",
+            None,
             receiver,
         ));
         for generation in 1..=100 {
@@ -1477,6 +1491,63 @@ mod tests {
             RuntimeAuthority::request(session, authority.lease.clone(), node).unwrap();
         changes.send_replace(101);
         tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn roster_watch_coalesces_outside_reception_and_rejects_retired_authority() {
+        let (session, node, authority) = authority();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        for name in [
+            "node-roster-changed",
+            "node-reception-wake",
+            "node-state-changed",
+        ] {
+            let events = events.clone();
+            app.listen(name, move |event| {
+                let payload = serde_json::from_str::<serde_json::Value>(event.payload()).unwrap();
+                let _ = events.send((name, payload));
+            });
+        }
+        let scope = crate::reception_host::Scope {
+            owner: authority.lease.owner().to_owned(),
+            account_id: "account".into(),
+            device_id: "device".into(),
+            runtime_id: authority.runtime_id().unwrap(),
+        };
+        let reception = crate::reception_host::ReceptionHostState::default();
+        reception.install(scope.clone());
+        app.manage(reception);
+        let expected = serde_json::to_value(&scope).unwrap();
+        let (changes, receiver) = tokio::sync::watch::channel(0);
+        let task = tokio::spawn(forward_state_changes(
+            app.handle().clone(),
+            authority.clone(),
+            scope.account_id.clone(),
+            scope.device_id.clone(),
+            "roster",
+            Some(scope),
+            receiver,
+        ));
+        for generation in 1..=100 {
+            changes.send_replace(generation);
+        }
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), received.recv())
+                .await
+                .unwrap(),
+            Some(("node-roster-changed", expected))
+        );
+        let _replacement =
+            RuntimeAuthority::request(session, authority.lease.clone(), node).unwrap();
+        changes.send_replace(101);
+        tokio::time::timeout(std::time::Duration::from_secs(3), task)
             .await
             .unwrap()
             .unwrap();

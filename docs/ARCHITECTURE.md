@@ -2031,8 +2031,10 @@ explicitly when full, and a too-small demand read leaves the first signal queued
 Call signaling remains best-effort and adds no wire acknowledgement or replay.
 Desktop startup, the node CLI and the dedicated integration host select this
 mode. The desktop publishes one scoped wake until its pending page is ACKed;
-state, channel, profile and file-progress invalidations share that gate. It
-retains only page cursor/token metadata and at most 64 current progress hints.
+state, channel, profile and file-progress invalidations share that gate. The
+gate retains only page cursor/token metadata and at most 64 current progress
+hints. Roster-only changes use a coalesced, installation-scoped observation
+event and do not reserve a durable reception page.
 Current profile values occupy at most 16 rows and 1 MiB raw per page; their walk
 restarts on a new revision or renderer replacement. Alongside receipt and call
 budgets, their conservative serialization charge remains below 64 MiB. Backend current-value payloads use the encrypted participant indexes; Node warm
