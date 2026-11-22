@@ -218,6 +218,8 @@ jobs:
       # 7️⃣ Collect artifacts
       - name: Collect build artifacts
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: bash scripts/release/package-app.sh collect
 
       - name: Collect version-bound updater artifacts

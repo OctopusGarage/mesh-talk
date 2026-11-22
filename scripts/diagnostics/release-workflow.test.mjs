@@ -17,7 +17,7 @@ test("release artifact steps delegate policy with target passed as data", () => 
     assert.ok(step, name);
     assert.ok(step.includes(`run: bash scripts/release/package-app.sh ${mode}`));
     assert.doesNotMatch(step, /run: \|/);
-    if (mode === "package") assert.match(step, /TARGET: \$\{\{ matrix\.target \}\}/);
+    if (mode !== "checksums") assert.match(step, /TARGET: \$\{\{ matrix\.target \}\}/);
   }
   assert.doesNotMatch(packageSource, /\$\{\{/);
 });

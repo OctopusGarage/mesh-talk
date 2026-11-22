@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -53,6 +53,34 @@ test("application artifact helper collects exact names and rejects invalid packa
     assert.ok(!existsSync(join(root, `release_zips/mesh-talk_${env.ARTIFACT_TAG}_windows_x86_64.zip.bundle`)));
     for (const extension of ["exe", "msi"]) rmSync(join(root, `release/Mesh Talk_${env.ARTIFACT_TAG}_x64.${extension}`));
     assert.throws(() => run("package"), "another platform's installers cannot satisfy the target");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the ARM64 collector compresses and verifies a real DMG before checksumming", { skip: process.platform !== "darwin" }, () => {
+  const helper = new URL("../release/package-app.sh", import.meta.url).pathname;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "mesh-arm64-dmg-")));
+  const env = { ...process.env, ARTIFACT_TAG: "v0.4.6", TARGET: "aarch64-apple-darwin" };
+  const dir = join(root, "target", env.TARGET, "release/bundle/dmg");
+  const source = join(dir, "mesh-talk_0.4.6_aarch64.dmg");
+  const output = join(root, "release/mesh-talk_v0.4.6_aarch64.dmg");
+  const run = (mode, target = env.TARGET) => execFileSync("bash", [helper, mode], { cwd: root, env: { ...env, TARGET: target }, stdio: "pipe" });
+  try {
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(join(root, "payload"));
+    writeFileSync(join(root, "payload", "fixture.txt"), "fixture data\n".repeat(2048));
+    execFileSync("hdiutil", ["create", "-format", "UDRO", "-fs", "HFS+", "-srcfolder", join(root, "payload"), source], { stdio: "pipe" });
+    run("collect");
+    assert.ok(statSync(output).size < statSync(source).size);
+    assert.match(execFileSync("hdiutil", ["imageinfo", output], { encoding: "utf8" }), /Format:\s+ULMO/);
+    run("checksums");
+    execFileSync("shasum", ["-a", "256", "-c", "SHA256SUMS"], { cwd: join(root, "release"), stdio: "pipe" });
+    writeFileSync(source, "invalid disk image");
+    assert.throws(() => run("collect"));
+    execFileSync("shasum", ["-a", "256", "-c", "SHA256SUMS"], { cwd: join(root, "release"), stdio: "pipe" });
+    run("collect", "x86_64-apple-darwin");
+    assert.deepEqual(readFileSync(output), readFileSync(source));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

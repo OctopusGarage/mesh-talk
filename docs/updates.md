@@ -199,6 +199,13 @@ checksum roles and fresh signed application ZIPs. The release workflow passes th
 validated tag and target to that script; the existing signing and verification
 owners still control acceptance.
 
+The macOS ARM64 collector converts the manual DMG to ULMO (LZMA) before
+checksumming and signing the ZIP. It verifies the converted image and keeps
+it only when smaller. The ARM64 installer requires Apple silicon, which
+supports this disk-image format. Intel macOS keeps the original DMG format
+for older macOS installations. The updater payload is collected separately;
+the release verifier still checks that its executable matches the manual DMG.
+
 Manual downloads carry no updater payload bytes. Their signed checksum manifests are limited
 to 64 KiB each, and their installer formats remain an exact platform-specific set. macOS DMGs and
 their outer ZIPs each have a 24 MiB limit, enforced independently before native inspection by

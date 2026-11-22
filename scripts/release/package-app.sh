@@ -2,6 +2,22 @@
 # Own manual installer collection, checksum roles and signed application ZIPs.
 set -euo pipefail
 
+collect_arm64_dmg() (
+  local source="$1" output="$2" staging original_size compressed_size
+  staging=$(mktemp -d release/.arm64-dmg.XXXXXX)
+  trap 'rm -rf -- "$staging"' EXIT
+  hdiutil convert "$source" -format ULMO -o "$staging/installer.dmg"
+  hdiutil verify "$staging/installer.dmg"
+  original_size=$(wc -c < "$source")
+  compressed_size=$(wc -c < "$staging/installer.dmg")
+  if (( compressed_size < original_size )); then
+    mv "$staging/installer.dmg" "$output"
+    echo "ARM64 DMG compressed from $original_size to $compressed_size bytes."
+  else
+    cp "$source" "$output"
+  fi
+)
+
 collect() {
   : "${ARTIFACT_TAG:?release tag required}"
   mkdir -p release
@@ -18,7 +34,12 @@ collect() {
     [ -e "$file" ] || continue
     BASENAME=$(basename "$file")
     NEWNAME=$(echo "$BASENAME" | sed -E "s/_[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?/_${TAG}/")
-    cp "$file" "release/$NEWNAME"
+    case "${TARGET:-}:$file" in
+      aarch64-apple-darwin:target/aarch64-apple-darwin/release/bundle/dmg/*.dmg)
+        collect_arm64_dmg "$file" "release/$NEWNAME"
+        ;;
+      *) cp "$file" "release/$NEWNAME" ;;
+    esac
   done
 
   ls -lh release || true
