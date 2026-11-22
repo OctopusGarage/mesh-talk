@@ -21,6 +21,7 @@ import {
   Share2,
   Image as ImageIcon,
   ImageOff,
+  ScanLine,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { OutgoingMediaPreview } from "@/store/outgoingMediaPreviews";
@@ -46,6 +47,7 @@ import { ReceiveProgress } from "./ReceiveProgress";
 import { isVideo } from "@/lib/mediaTypes";
 import { isMacOverlay } from "@/lib/platform";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
+import { ImageQrResult } from "./ImageQrResult";
 import {
   blobMime,
   useFileObjectUrl,
@@ -104,6 +106,10 @@ export function MediaPreview({
   const [explicitOriginal, setExplicitOriginal] = useState<string | null>(null);
   const boundedPreview = /\.(png|jpe?g)$/i.test(name);
   const [lightbox, setLightbox] = useState(false);
+  const [qrImage, setQrImage] = useState<string | null>(null);
+  const [originalReadFailure, setOriginalReadFailure] = useState<string | null>(
+    null,
+  );
   const [previewRetry, setPreviewRetry] = useState(0);
   const [previewFailure, setPreviewFailure] = useState<string | null>(null);
   const previewUrl = useFileObjectUrl(
@@ -121,7 +127,7 @@ export function MediaPreview({
     fileConv,
     lightbox && available && boundedPreview,
     blobMime(name, mime),
-    { reuse: true },
+    { reuse: true, onReadError: () => setOriginalReadFailure(fileConv) },
   );
   const url =
     boundedPreview && explicitOriginal === fileConv && lightbox
@@ -262,9 +268,15 @@ export function MediaPreview({
   const playerRef = useRef<HTMLVideoElement>(null);
   const closeLightbox = useCallback(() => {
     playerRef.current?.pause();
+    setQrImage(null);
     setLightbox(false);
     triggerRef.current?.focus();
   }, []);
+  const recognizeQr = () => {
+    if (!captureChatOwnership().current()) return;
+    setQrImage(fileConv);
+    setLightbox(true);
+  };
   useLayoutEffect(() => {
     if (!lightbox) return;
     closeRef.current?.focus();
@@ -940,6 +952,23 @@ export function MediaPreview({
             >
               <X className="h-4 w-4" />
             </button>
+            {qrImage === fileConv && (
+              <ImageQrResult
+                key={
+                  fullUrl ??
+                  (originalReadFailure === fileConv ? previewUrl : null)
+                }
+                url={
+                  fullUrl ??
+                  (originalReadFailure === fileConv ? previewUrl : null)
+                }
+                onClose={() => {
+                  setQrImage(null);
+                  closeRef.current?.focus();
+                }}
+                onOpenChat={closeLightbox}
+              />
+            )}
             <div
               ref={stageRef}
               className="absolute inset-x-6 bottom-24 top-16 flex items-center justify-center overflow-hidden"
@@ -1081,6 +1110,10 @@ export function MediaPreview({
                   }}
                   onClick={(event) => event.stopPropagation()}
                 >
+                  <ContextMenuItem onSelect={recognizeQr}>
+                    <ScanLine className="h-4 w-4" />
+                    {t("files.recognizeQr")}
+                  </ContextMenuItem>
                   {canCopyImage() && (
                     <ContextMenuItem
                       disabled={copying}
@@ -1152,6 +1185,7 @@ export function MediaPreview({
                     () => zoom(viewRef.current.scale * 1.25),
                     view.scale >= 8,
                   ],
+                  ["recognizeQr", ScanLine, recognizeQr, qrImage === fileConv],
                 ] as const
               ).map(([label, Icon, action, disabled]) => (
                 <button

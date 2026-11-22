@@ -126,6 +126,12 @@ original reference; failed previews never eagerly fall back to original reads an
 can retry on readiness changes or foreground activation. Protected reveal remains
 separate. Derived images are not persisted as plaintext or substituted for saved
 originals.
+The full-size image preview can recognize one QR result on explicit request.
+It samples the admitted image at up to 1,536 pixels per edge, does recognition
+in a dedicated worker, and releases the worker on completion, timeout or exit.
+The preview shows the payload before offering an external HTTP(S) link or
+opening a known Mesh Talk account conversation. A scanned account ID cannot
+create a contact or grant access. Protected image reveals do not use this path.
 Receiving, loading and unsupported states use a responsive provisional frame
 (up to 320 pixels wide, 4:3 for images and 16:9 for video). Unknown outgoing
 photo geometry uses a compact 192px-wide frame with a static glyph and accessible

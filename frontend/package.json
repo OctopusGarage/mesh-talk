@@ -42,6 +42,7 @@
     "fflate": "^0.8.3",
     "framer-motion": "^14.13.0",
     "i18next": "^27.1.1",
+    "jsqr": "1.4.0",
     "lucide-react": "^1.72.0",
     "qrcode.react": "^4.2.0",
     "react": "^19.3.1",

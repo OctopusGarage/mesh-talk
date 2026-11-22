@@ -2292,6 +2292,8 @@
       "paths": [
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/ImageQrResult.tsx",
+        "frontend/src/features/chat/imageQr.worker.ts",
         "frontend/src/features/chat/MessageBubble.tsx",
         "frontend/src/features/chat/mediaFile.tsx",
         "frontend/src/features/chat/mediaFilePoster.test.ts",
@@ -2330,6 +2332,10 @@
         "summary": "Fit decoded images to their original proportions within bounded thumbnails, reuse known geometry on virtualized remounts within bounded session ownership, and support bounded full-size image zoom and pan.",
         "guide": "docs/module-boundaries.md#inline-media-presentation",
         "invariants": [
+          {
+            "name": "QR decoding starts only on explicit ordinary image preview demand. The result precedes external navigation or opening an existing account conversation.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
           {
             "name": "Ordinary image previews support anchored bounded zoom and pan without dismissing on drag; reset/reopen restores window fit, and native text-copy policy remains enforced.",
             "reference": "docs/module-boundaries.md#inline-media-presentation"
