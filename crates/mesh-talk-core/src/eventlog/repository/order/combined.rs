@@ -160,10 +160,8 @@ impl EventRepository {
                  WHERE (excluded.priority,excluded.clock,excluded.sequence,excluded.ordinal)
                     <(priority,clock,sequence,ordinal)",
             )?;
-            let mut update_deadline = connection.prepare_cached(
-                "UPDATE history_order_jobs SET next_deadline=?2
-                 WHERE job=?1 AND (next_deadline IS NULL OR next_deadline>?2)",
-            )?;
+            let mut checked_generation = false;
+            let mut earliest_deadline = None;
             for &(row, deadline) in rows {
                 let lifecycle: Option<i64> = scope
                     .query_row(
@@ -178,16 +176,21 @@ impl EventRepository {
                 if lifecycle.is_some_and(|state| state != 0) {
                     continue;
                 }
-                let exists: bool = unfinished.query_row(
-                    params![
-                        self.domain.0.as_slice(),
-                        conv.as_bytes().as_slice(),
-                        job.as_slice()
-                    ],
-                    |result| result.get(0),
-                )?;
-                if !exists {
-                    return Err(LogError::StaleCursor);
+                // All candidates share this generation and transaction. Keep the
+                // check after filtering so an entirely ineligible page is a no-op.
+                if !checked_generation {
+                    let exists: bool = unfinished.query_row(
+                        params![
+                            self.domain.0.as_slice(),
+                            conv.as_bytes().as_slice(),
+                            job.as_slice()
+                        ],
+                        |result| result.get(0),
+                    )?;
+                    if !exists {
+                        return Err(LogError::StaleCursor);
+                    }
+                    checked_generation = true;
                 }
                 insert.execute(params![
                     job.as_slice(),
@@ -201,9 +204,18 @@ impl EventRepository {
                     i64::from(lifecycle.is_none())
                 ])?;
                 if let Some(deadline) = deadline {
-                    update_deadline
-                        .execute(params![job.as_slice(), deadline.to_be_bytes().as_slice()])?;
+                    earliest_deadline = Some(
+                        earliest_deadline.map_or(deadline, |earliest: u64| earliest.min(deadline)),
+                    );
                 }
+            }
+            if let Some(deadline) = earliest_deadline {
+                connection
+                    .prepare_cached(
+                        "UPDATE history_order_jobs SET next_deadline=?2
+                     WHERE job=?1 AND (next_deadline IS NULL OR next_deadline>?2)",
+                    )?
+                    .execute(params![job.as_slice(), deadline.to_be_bytes().as_slice()])?;
             }
             Ok(())
         })

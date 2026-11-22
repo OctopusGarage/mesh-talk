@@ -1446,13 +1446,40 @@ fn runtime_metadata_combined_history_append_failure_and_expiry_never_publish_par
     drop(repo);
     drop(db);
 
-    let repo = EventRepository::new(database(&dir), EventDomainId([2; 16])).unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([2; 16])).unwrap();
     repo.initialize_history_order().unwrap();
     let rebuilt = repo.history_generation(&conv, b"one", 0, None).unwrap();
     assert!(!rebuilt.ready);
     assert_ne!(rebuilt.job, first.job);
-    repo.history_add(&conv, rebuilt.job, row(1, 10), Some(20))
-        .unwrap();
+    db.transaction(|c| {
+        c.execute_batch(
+            "CREATE TEMP TABLE deadline_updates(value BLOB);
+             CREATE TEMP TRIGGER observe_deadline_update AFTER UPDATE OF next_deadline
+             ON history_order_jobs BEGIN INSERT INTO deadline_updates VALUES(NEW.next_deadline); END;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    repo.history_add_page(
+        &conv,
+        rebuilt.job,
+        &[
+            (row(1, 10), Some(40)),
+            (row(2, 11), Some(20)),
+            (row(3, 12), Some(30)),
+        ],
+    )
+    .unwrap();
+    db.transaction(|c| {
+        let mut updates = c.prepare("SELECT value FROM deadline_updates")?;
+        let values = updates
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(values, vec![20u64.to_be_bytes().to_vec()]);
+        Ok(())
+    })
+    .unwrap();
     while !repo.history_order_step(rebuilt.job).unwrap().ready {}
     repo.history_finish_inputs(&conv, rebuilt.job, stable_history_inputs(), [1, 0, 0], 0)
         .unwrap();
