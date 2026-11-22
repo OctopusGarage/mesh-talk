@@ -827,6 +827,14 @@ fn account_conv() -> ConversationId {
 }
 
 fn outgoing(dir: &std::path::Path, n: u8) -> DeliveryTransaction {
+    outgoing_with_deadline(dir, n, None)
+}
+
+fn outgoing_with_deadline(
+    dir: &std::path::Path,
+    n: u8,
+    deadline: Option<u64>,
+) -> DeliveryTransaction {
     let alice = DeviceIdentity::from_secret_bytes([1; 32], [2; 32]);
     let bob = DeviceIdentity::from_secret_bytes([3; 32], [4; 32]);
     let ratchet = DmRatchet::new(RatchetSessions::open(&dir.join("sessions"), "pw").unwrap());
@@ -834,7 +842,7 @@ fn outgoing(dir: &std::path::Path, n: u8) -> DeliveryTransaction {
         "a".repeat(32),
         "b".repeat(32),
         [n; 32],
-        b"private body".to_vec(),
+        crate::expiry::wrap(b"private body", deadline),
     )
     .encode();
     let (wire, prepared) = ratchet
@@ -1606,6 +1614,19 @@ fn legacy_device_transaction_preserves_optional_certified_account_binding() {
     }
 }
 
+#[test]
+fn expiry_watch_only_wakes_after_expiring_delivery_is_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    let changes = store.subscribe_expiry_changes();
+    store.begin(outgoing(dir.path(), 5)).unwrap();
+    assert!(!changes.has_changed().unwrap());
+    store
+        .begin(outgoing_with_deadline(dir.path(), 7, Some(200)))
+        .unwrap();
+    assert!(changes.has_changed().unwrap());
+}
+
 #[cfg(unix)]
 #[test]
 fn failed_durable_intent_does_not_install_or_publish_status() {
@@ -1613,9 +1634,11 @@ fn failed_durable_intent_does_not_install_or_publish_status() {
     let parent = dir.path().join("profile");
     let moved = dir.path().join("moved");
     let mut store = DeliveryStore::open(&parent, "pw").unwrap();
-    let tx = outgoing(&parent, 7);
+    let changes = store.subscribe_expiry_changes();
+    let tx = outgoing_with_deadline(&parent, 7, Some(200));
     std::fs::rename(&parent, &moved).unwrap();
     assert!(store.begin(tx).is_err());
+    assert!(!changes.has_changed().unwrap());
     assert_eq!(store.status(EventId::new([7; 32])), None);
     std::fs::rename(&moved, &parent).unwrap();
     drop(store);

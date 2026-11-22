@@ -455,6 +455,23 @@ pub(crate) struct RequestRecord {
 }
 
 impl DeliveryTransaction {
+    pub(super) fn outgoing_expiry(&self) -> Option<(&OutgoingDelivery, u64, bool)> {
+        let (message, plaintext, manifest) = match self.body() {
+            Self::Outgoing { message, sent, .. } => (message, &sent.plaintext, false),
+            Self::OutgoingManifest {
+                message, received, ..
+            } => (message, &received.plaintext, true),
+            _ => return None,
+        };
+        let envelope = super::dm_envelope::DmEnvelope::decode_ref(plaintext);
+        let deadline = crate::expiry::deadline(
+            envelope
+                .as_ref()
+                .map_or(plaintext.as_slice(), |value| value.body),
+        )?;
+        Some((message, deadline, manifest || envelope.is_some()))
+    }
+
     pub(crate) fn body(&self) -> &Self {
         match self {
             Self::Requested { transaction, .. }
@@ -616,6 +633,7 @@ pub(crate) struct DeliveryStore {
     journal_path: PathBuf,
     outbox_path: PathBuf,
     pending: Vec<DeliveryTransaction>,
+    expiry_changes: tokio::sync::watch::Sender<()>,
     requests: BTreeMap<[u8; 32], RequestRecord>,
     messages: BTreeMap<EventId, OutgoingDelivery>,
     completed: BTreeMap<EventId, CompletedDelivery>,
@@ -1018,6 +1036,7 @@ impl DeliveryStore {
             journal_path,
             outbox_path,
             pending: Vec::new(),
+            expiry_changes: tokio::sync::watch::channel(()).0,
             requests: BTreeMap::new(),
             messages: BTreeMap::new(),
             completed: BTreeMap::new(),
@@ -1348,6 +1367,7 @@ impl DeliveryStore {
         };
         self.check_capacity(destinations, bytes)?;
         let id = tx.id();
+        let has_expiry = tx.outgoing_expiry().is_some();
         self.pending.push(tx);
         // Stage the reservation only under the owner lock. On any pre-WAL
         // failure remove it again; it is never visible as accepted work.
@@ -1371,6 +1391,9 @@ impl DeliveryStore {
             self.pending.pop();
             return Err(error);
         }
+        if has_expiry {
+            self.expiry_changes.send_replace(());
+        }
         Ok(id)
     }
 
@@ -1382,6 +1405,11 @@ impl DeliveryStore {
             .filter(|r| {
                 super::node::now_millis().saturating_sub(r.accepted_at_ms) < 7 * 24 * 60 * 60 * 1000
             })
+    }
+
+    /// Journal commits are separate from the indexed profile database.
+    pub(in crate::node) fn subscribe_expiry_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.expiry_changes.subscribe()
     }
 
     pub(crate) fn pending_transactions(&self) -> &[DeliveryTransaction] {

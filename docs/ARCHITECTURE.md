@@ -128,10 +128,14 @@ returns the authenticated deadline for per-message countdowns. A single desktop
 session monotonic clock removes expired cached messages and outgoing intents and updates
 countdowns without per-message IPC. Focus and visibility changes recheck deadlines;
 the history dialog filters and clears its own expired rows.
-A one-second core maintenance task removes plaintext sidecars on both sides,
-cancels expired outgoing retry work, suppresses replay through account sync, and
-removes locally managed media. Queries enforce deadlines independently of cleanup;
-cleanup errors are logged and retried on the next maintenance pass. A monotonic
+Core expiry maintenance removes plaintext sidecars on both sides, cancels expired
+outgoing retry work, suppresses replay through account sync, and removes locally
+managed media. A successful pass with no tracked deadlines parks until an indexed
+profile commit, a separate expiring delivery or favorites journal commit, or
+sparse repair.
+Active deadlines and errors retain the one-second check so forward clock changes
+and failed erasure are serviced promptly. Queries enforce deadlines independently
+of cleanup. A monotonic
 observation timer also bounds the lifetime by the sender event's intended duration if the local
 wall clock was already wrong when the message arrived. On restart the prior monotonic
 clock anchor cannot be recovered; expiring recipient copies are erased early to

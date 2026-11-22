@@ -651,28 +651,62 @@ impl Node {
         inbound.shutdown().await;
     }
 
-    async fn run_expiry_loop(self: Arc<Self>) {
+    pub(in crate::node) async fn run_expiry_loop(self: Arc<Self>) {
+        const CLOCK_CHECK: Duration = Duration::from_secs(1);
+        const QUIET_REPAIR: Duration = Duration::from_secs(300);
+        let mut source = self.storage.database().subscribe_source_changes();
+        let mut journal = self
+            .delivery
+            .lock()
+            .expect("delivery lock not poisoned")
+            .subscribe_expiry_changes();
+        let mut favorites = self
+            .favorites
+            .lock()
+            .expect("favorites mutex")
+            .subscribe_changes();
+        let mut needs_clock_check = true;
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            let next_allowed = tokio::time::Instant::now() + CLOCK_CHECK;
+            if !needs_clock_check {
+                tokio::select! {
+                    result = source.changed() => { if result.is_err() { return; } }
+                    result = journal.changed() => { if result.is_err() { return; } }
+                    result = favorites.changed() => { if result.is_err() { return; } }
+                    _ = tokio::time::sleep(QUIET_REPAIR) => {}
+                }
+            }
+            // Bound sustained write traffic to the previous maintenance cadence.
+            // Active deadlines keep the one-second bound for forward wall-clock jumps.
+            tokio::time::sleep_until(next_allowed).await;
+            source.borrow_and_update();
+            journal.borrow_and_update();
+            favorites.borrow_and_update();
             let Some(work) = self.runtime_work.admit() else {
                 return;
             };
             let node = Arc::clone(&self);
-            match work
+            needs_clock_check = match work
                 .spawn_blocking(move || {
                     #[cfg(test)]
                     if let Some(hook) = node.expiry_cleanup_hook.lock().unwrap().take() {
                         hook();
                     }
-                    node.prune_expired_received()
+                    node.clean_expiry()
                 })
                 .await
                 .map(|value| value.into_inner())
             {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => log::warn!("message expiry cleanup failed: {error}"),
-                Err(error) => log::warn!("message expiry task failed: {error}"),
-            }
+                Ok(Ok((_, has_deadlines))) => has_deadlines,
+                Ok(Err(error)) => {
+                    log::warn!("message expiry cleanup failed: {error}");
+                    true
+                }
+                Err(error) => {
+                    log::warn!("message expiry task failed: {error}");
+                    true
+                }
+            };
         }
     }
 

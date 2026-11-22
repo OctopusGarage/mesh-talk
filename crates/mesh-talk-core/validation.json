@@ -2140,6 +2140,8 @@
             "node::delivery_runtime_tests::expired_pending_acceptance_erases_text_and_file_before_sidecar_recovery",
             "node::delivery_runtime_tests::outgoing_expiry_rejects_past_and_unbounded_deadlines",
             "node::expiry_policy::tests::",
+            "node::node::tests::expiry_worker_parks_without_deadlines_and_rechecks_after_commit",
+            "node::delivery_store::tests::expiry_watch_only_wakes_after_expiring_delivery_is_committed",
             "node::node::tests::unchanged_expiry_maintenance_does_not_rescan_future_received_deadlines",
             "node::favorites::capture_tests::unchanged_expiry_maintenance_does_not_rescan_favorite_media"
           ]
@@ -2162,7 +2164,7 @@
             "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
           },
           {
-            "name": "Unchanged expiry and favorite-media maintenance skips repeated metadata/media scans only for successfully completed matching revision/authority inputs before their earliest wall or monotonic deadline; restart, mutations and failures retain erasure and retry semantics. Completed media GC performs no inactive namespace writes; fresh schedules and failed-completion recovery retain their existing cutoff owner.",
+            "name": "Unchanged expiry and favorite-media maintenance skips repeated metadata/media scans only for successfully completed matching revision/authority inputs before their earliest wall or monotonic deadline; restart, mutations and failures retain erasure and retry semantics. Quiet expiry work parks on profile, expiring delivery and favorites journal commits with sparse repair; active clocks and failed erasure keep one-second checks. Completed media GC performs no inactive namespace writes; fresh schedules and failed-completion recovery retain their existing cutoff owner.",
             "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
           }
         ]

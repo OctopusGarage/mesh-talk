@@ -1855,6 +1855,76 @@ fn restart_erases_unexpired_recipient_copy_without_erasing_sender_copy() {
     );
 }
 
+#[tokio::test]
+async fn expiry_worker_parks_without_deadlines_and_rechecks_after_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let (entered, first) = tokio::sync::oneshot::channel();
+    *node.expiry_cleanup_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = entered.send(());
+    }));
+    let worker = tokio::spawn(Arc::clone(&node).run_expiry_loop());
+    tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .unwrap()
+        .unwrap();
+    let (entered, mut next) = tokio::sync::oneshot::channel();
+    *node.expiry_cleanup_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = entered.send(());
+    }));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1_500), &mut next)
+            .await
+            .is_err(),
+        "steady empty storage must not run cleanup once a second"
+    );
+    let now = super::now_millis();
+    let conversation = ConversationId::new([53; 32]);
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            "peer".into(),
+            now,
+            &crate::expiry::wrap(b"already due", Some(now.saturating_sub(1))),
+            EventId::new([54; 32]),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(4), next)
+        .await
+        .expect("a committed expiring row must wake parked cleanup")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while !node
+            .received
+            .lock()
+            .unwrap()
+            .entries(&conversation)
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cleanup must physically erase the due row");
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+}
+
 #[test]
 fn unchanged_expiry_maintenance_does_not_rescan_future_received_deadlines() {
     let dir = tempfile::tempdir().unwrap();

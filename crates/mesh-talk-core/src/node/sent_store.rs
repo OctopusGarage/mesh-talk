@@ -275,6 +275,10 @@ impl SentStore {
     ) -> Result<Vec<ConversationId>, LogError> {
         self.repository.conversation_page(after, limit)
     }
+    pub(in crate::node) fn has_deadlines(&self) -> Result<bool, LogError> {
+        self.repository.has_deadlines()
+    }
+
     pub(crate) fn deadline_page(
         &self,
         before: Option<u64>,

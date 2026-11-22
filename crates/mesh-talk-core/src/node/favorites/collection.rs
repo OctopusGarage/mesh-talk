@@ -475,21 +475,20 @@ impl Node {
         }
         Ok(())
     }
-    pub(in crate::node) fn prune_favorite_files(&self) -> Result<(), NodeError> {
+    pub(in crate::node) fn prune_favorite_files(&self) -> Result<bool, NodeError> {
         let mut store = self.favorites.lock().expect("favorites mutex");
+        let favorites_revision = *store.changes.borrow();
         let now = self.expiry_now();
         let media = self
             .favorite_media
             .inventory_revision()
             .map_err(|e| NodeError::File(e.to_string()))?;
-        if let Some(media) = media
-            && store.media_prune.as_ref().is_some_and(|prior| {
-                prior.favorites == store.mutation_revision
-                    && prior.media == media
-                    && prior.next_expiry.is_none_or(|deadline| now < deadline)
-            })
+        if let Some(prior) = &store.media_prune
+            && media == Some(prior.media)
+            && prior.favorites == favorites_revision
+            && prior.next_expiry.is_none_or(|deadline| now < deadline)
         {
-            return Ok(());
+            return Ok(prior.next_expiry.is_some());
         }
         // An unsuccessful pass must never certify an unchanged namespace.
         store.media_prune = None;
@@ -508,12 +507,15 @@ impl Node {
                 .filter(|deadline| *deadline > now)
                 .min();
             store.media_prune = Some(FavoriteMediaPrune {
-                favorites: store.mutation_revision,
+                favorites: favorites_revision,
                 media,
                 next_expiry,
             });
         }
-        Ok(())
+        Ok(store
+            .media_prune
+            .as_ref()
+            .is_none_or(|prior| prior.next_expiry.is_some()))
     }
     pub(in crate::node) fn missing_favorite_files(&self) -> Vec<ConversationId> {
         let store = self.favorites.lock().expect("favorites mutex");
