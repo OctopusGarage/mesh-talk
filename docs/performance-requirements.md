@@ -76,9 +76,9 @@ reproduction; never describe a passing correctness test as performance acceptanc
    user navigation and foreground activation. Schedule the next actual expiry or
    retry deadline. Empty success is not progress and must not keep a fast retry
    hot. Coalesce duplicate wakes; retain bounded dirty work while a task is busy.
-   Before adding a subscription or timer, inspect the owning event and
-   scheduling mechanisms. Reuse scoped watch signals for projections that can
-   read current state. Use the existing lifecycle owner for deadlines,
+   Before adding a subscription or timer, use the [event-driven design guide](event-driven-design.md)
+   to locate the owning event and scheduling mechanisms. Reuse scoped watch
+   signals for projections that can read current state. Use the existing lifecycle owner for deadlines,
    throttling, retries and periodic repair. Document the trigger, cancellation
    boundary, missed-signal recovery and the reason for any recurring idle work.
    Native reception alerts follow the core UI-generation watch and reserve a
