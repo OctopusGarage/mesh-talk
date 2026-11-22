@@ -172,6 +172,25 @@ jobs:
         working-directory: src-tauri
         run: cargo build --workspace --locked
 
+      - name: Measure Linux headless idle resources
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        timeout-minutes: 2
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 -B -m unittest discover -s scripts/evals -p test_resource_benchmark.py
+          python3 -B scripts/evals/resource_benchmark.py target/debug/mesh-talk-node "$RUNNER_TEMP/resource-benchmark.json"
+
+      - name: Preserve Linux resource benchmark
+        if: ${{ always() && steps.scope.outputs.full == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-idle-resources-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/resource-benchmark.json
+          retention-days: 14
+          if-no-files-found: ignore
+
       - name: Workspace doctests (Linux)
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: cargo test --workspace --doc --locked

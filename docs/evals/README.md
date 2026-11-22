@@ -230,3 +230,27 @@ AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --sui
 The score is a source review. Real signed application replacement, authorization
 cancellation, relaunch, persistent data/session restoration and verified hosted
 publication remain separate acceptance requirements in [the update guide](../updates.md).
+
+### Linux headless idle resource benchmark
+
+The Linux archive producer in [CI](../../.github/workflows/ci.yml) measures the
+already-built workspace node. The fixture creates a fresh temporary encrypted
+profile, uses a separate UDP discovery port, waits for the real listener, then
+allows five seconds to settle. Five samples span about 15 seconds with no test
+traffic. No extra Cargo build, native desktop session or external peer is needed.
+
+Run on Linux after building `mesh-talk-node`:
+
+```sh
+python3 -B -m unittest discover -s scripts/evals -p test_resource_benchmark.py
+python3 -B scripts/evals/resource_benchmark.py target/debug/mesh-talk-node /tmp/resource-benchmark.json
+```
+
+The report records single-core CPU percentage from cumulative process ticks,
+peak sampled private resident KiB from `smaps_rollup`, and kernel-attributed
+write bytes from `/proc/PID/io`. The initial diagnostic budgets are 2%, 64 MiB,
+and 128 KiB per measurement window. Compare reports from the same runner and
+build profile. CI emits a warning and retains a summary and JSON artifact for
+breaches or measurement errors. The diagnostic is non-blocking while hosted
+baselines accumulate. See the [performance guide](../performance-requirements.md#evidence-and-maintenance)
+for the longer reference workload and desktop attribution method.

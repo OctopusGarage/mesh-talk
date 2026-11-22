@@ -261,7 +261,7 @@ test("browser and native dependency installation use the same Linux-only prepara
 test("only auxiliary diagnostic transport is optional; acceptance artifacts stay mandatory", () => {
   const optional = {
     "check-health.yml": ["health-diagnostics-", "frontend-coverage-"],
-    "ci.yml": ["runner-storage-", "native-crash-linux-", "test-timing-", "macos-remaining-producer-log-"],
+    "ci.yml": ["runner-storage-", "native-crash-linux-", "linux-idle-resources-", "test-timing-", "macos-remaining-producer-log-"],
     "linux-workspace-consumer.yml": ["native-crash-linux-", "runner-storage-"],
     "sanitizers.yml": ["runner-storage-", "asan-build-diagnostics-"],
     "mutants.yml": ["runner-storage-"],

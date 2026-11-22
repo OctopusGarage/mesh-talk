@@ -345,6 +345,19 @@ by default, and emit after releasing observation guards without adding a timer.
 Record startup timings at their actual milestone. The desktop log records
 `desktop_host_ready_ms` once when Tauri signals readiness after setup. Measure
 first usable UI, authentication and account hydration separately.
+For routine Linux feedback, use the [headless idle benchmark](evals/README.md#linux-headless-idle-resource-benchmark).
+Its short window and fresh profile are diagnostic. Compare the same runner and
+build profile before tightening budgets or using results for release acceptance.
+
+For macOS desktop attribution, confirm process membership from the launch
+cohort and app-scoped WebKit evidence. Record host and helper counters over the
+same elapsed interval. Use `sample` to identify active Rust and WebKit stacks
+and `vmmap -summary` to partition renderer memory into graphics, allocators and
+other mappings. Waiting threads dominate wall-stack counts, so those counts
+cannot apportion CPU time. Keep resident, compressed or swapped, and reserved
+bytes separate. Collect an isolated same-build empty-shell comparison and
+retaining paths before assigning renderer memory to specific application state.
+
 Heap snapshots/retaining paths distinguish
 leaks from stable bloat and allocation churn. Forced working-set trims, periodic
 GC, cache deletion or moving pressure to disk do not prove a fix.

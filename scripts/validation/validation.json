@@ -447,6 +447,8 @@
         "scripts/ci/migrate-required-checks.mjs",
         "scripts/diagnostics/required-checks.test.mjs",
         "scripts/evals/backend-runner.mjs",
+        "scripts/evals/resource_benchmark.py",
+        "scripts/evals/test_resource_benchmark.py",
         "scripts/diagnostics/backend-eval-report.test.mjs",
         "scripts/ci/timing-report.mjs",
         "scripts/diagnostics/ci-timing-report.test.mjs",
