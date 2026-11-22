@@ -297,6 +297,12 @@ jobs:
             release_zips/mesh-talk-update*
             release_zips/mesh-talk-patch_*
 
+      - name: Attest standalone Linux installer provenance
+        if: runner.os == 'Linux'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: release_zips/mesh-talk-installer_*
+
       # 📦 SBOM (CycloneDX): full dependency inventory for supply-chain auditing. Generated
       # once on Linux x64 (deps are platform-independent) and shipped with the release.
       - name: Generate SBOM (CycloneDX)
@@ -360,7 +366,7 @@ jobs:
           path: workflow-assets
       - name: Verify workflow artifacts
         id: verified_workflow
-        run: bash scripts/release/verify-release.sh workflow-assets "$ARTIFACT_TAG" "$RELEASE_VERSION" "$SOURCE_REPO" "$SOURCE_REF" "$SOURCE_SHA"
+        run: bash scripts/release/verify-release.sh workflow-assets "$ARTIFACT_TAG" "$RELEASE_VERSION" "$SOURCE_REPO" "$SOURCE_REF" "$SOURCE_SHA" --require-linux-downloads
       - name: Recheck draft state immediately before the single upload
         if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
         run: node scripts/release/release-state.mjs guard "$ARTIFACT_TAG"

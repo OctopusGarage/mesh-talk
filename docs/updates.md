@@ -211,6 +211,10 @@ uses Zstandard with larger blocks when recompression reduces the download and
 the full filesystem content and metadata match. The conversion precedes both
 installer collection and updater signing. The Windows download page offers the
 standalone NSIS executable when its detached update signature is published.
+Linux download pages can link directly to DEB, RPM and AppImage for the
+selected architecture. The standalone files carry exact-source provenance
+and must match their installer checksums in the signed platform ZIP.
+When the AppImage updater is published, the download page reuses it.
 
 Manual downloads carry no updater payload bytes. Their signed checksum manifests are limited
 to 64 KiB each, and their installer formats remain an exact platform-specific set. macOS DMGs and

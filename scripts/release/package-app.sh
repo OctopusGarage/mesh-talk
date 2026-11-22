@@ -153,6 +153,18 @@ package() {
   BUNDLE_FILE="${ZIP_NAME}.bundle"
   node scripts/release/sign-blob.mjs "$ZIP_NAME" "$BUNDLE_FILE"
 
+  # The signed ZIP's SHA256SUMS binds the same installer bytes. Publish
+  # individually so Linux users need only download their chosen format.
+  if [[ "$OS_NAME" == linux ]]; then
+    for file in "${installer_files[@]}"; do
+      if [[ "$file" == *.AppImage && -f "release/mesh-talk-update_${TAG}_${OS_NAME}_${ARCH}.AppImage" ]]; then
+        rm -f "release_zips/mesh-talk-installer_${TAG}_${OS_NAME}_${ARCH}.AppImage"
+        continue
+      fi
+      cp "$file" "release_zips/mesh-talk-installer_${TAG}_${OS_NAME}_${ARCH}.${file##*.}"
+    done
+  fi
+
   echo "✅ Bundle signature generated: $BUNDLE_FILE"
   ls -lh release_zips
 }

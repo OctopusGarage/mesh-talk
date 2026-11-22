@@ -117,7 +117,7 @@
       (selectedPlatform === detected ? architecture : null);
     const key = `${selectedPlatform}_${selectedArch}`;
     const asset = packages.get(key);
-    if (asset) {
+    if (asset && !(asset.os === "linux" && asset.individual.length)) {
       primary.href = asset.url;
       primary.dataset.package = key;
       putAttribute(primary, "aria-label", "Download for {platform}", {
@@ -198,12 +198,28 @@
           os === "windows" && publishedAsset(`${executable}.sig`)
             ? publishedAsset(executable)
             : null;
+        const individual = [];
+        if (standalone) individual.push({ ...standalone, format: "EXE" });
+        if (os === "linux") {
+          for (const format of ["deb", "rpm", "AppImage"]) {
+            const installer = publishedAsset(
+              `mesh-talk-installer_${tag}_${key}.${format}`,
+            );
+            const update = `mesh-talk-update_${tag}_${key}.AppImage`;
+            const image =
+              format === "AppImage" && publishedAsset(`${update}.sig`)
+                ? publishedAsset(update)
+                : null;
+            if (installer || image)
+              individual.push({ ...(installer ?? image), format });
+          }
+        }
         result.set(key, {
           url: asset.browser_download_url,
           label,
           size: asset.size,
           os,
-          standalone,
+          individual,
         });
       }
     }
@@ -211,20 +227,17 @@
     return { tag, packages: result };
   }
 
-  function packageLink(key, asset, standalone = false) {
+  function packageLink(key, asset, standalone = null) {
     const link = document.createElement("a");
     link.className = "package-link";
-    link.href = standalone ? asset.standalone.browser_download_url : asset.url;
+    link.href = standalone?.browser_download_url ?? asset.url;
     if (!standalone) link.dataset.package = key;
     const label = document.createElement("strong");
     put(label, "Download for {label}", { label: asset.label });
     const detail = document.createElement("span");
-    put(detail, standalone ? "EXE · {size} MB" : "ZIP · {size} MB", {
-      size: (
-        (standalone ? asset.standalone.size : asset.size) /
-        1024 /
-        1024
-      ).toFixed(1),
+    put(detail, standalone ? "{format} · {size} MB" : "ZIP · {size} MB", {
+      format: standalone?.format,
+      size: ((standalone?.size ?? asset.size) / 1024 / 1024).toFixed(1),
     });
     link.append(label, detail);
     return link;
@@ -255,9 +268,12 @@
             const key = `${os}_${arch}`;
             const asset = packages.get(key);
             if (asset)
-              return asset.standalone
-                ? [packageLink(key, asset, true), packageLink(key, asset)]
-                : [packageLink(key, asset)];
+              return [
+                ...asset.individual.map((installer) =>
+                  packageLink(key, asset, installer),
+                ),
+                packageLink(key, asset),
+              ];
             const missing = document.createElement("p");
             missing.className = "package-unavailable";
             put(missing, "{label} is unavailable in this release.", { label });
@@ -388,6 +404,13 @@
       event.altKey
     )
       return;
+    if (
+      selectedPlatform === "linux" &&
+      [...packages.values()].some(
+        (asset) => asset.os === "linux" && asset.individual.length,
+      )
+    )
+      return; // The normal anchor leads to the individual format choices.
     if (![...packages.values()].some((asset) => asset.os === selectedPlatform))
       return;
     event.preventDefault();

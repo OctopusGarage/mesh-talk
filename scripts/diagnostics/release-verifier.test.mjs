@@ -25,6 +25,8 @@ test("signature and provenance failures stop the real aggregate verifier before 
       writeFileSync(relay, "fixture archive");
       writeFileSync(`${relay}.bundle`, "fixture signature");
     }
+    const standalone = join(assets, "mesh-talk-installer_v0.1.5_linux_x86_64.deb");
+    writeFileSync(standalone, "fixture installer");
     writeFileSync(join(bin, "cosign"), '#!/usr/bin/env bash\nexit "${SIGNATURE_EXIT:-0}"\n', { mode: 0o755 });
     const record = join(root, "provenance-args.txt");
     writeFileSync(join(bin, "gh"), '#!/usr/bin/env bash\nprintf "%s\\n" "$@" >> "$VERIFIER_ARGS_RECORD"\nexit "${PROVENANCE_EXIT:-0}"\n', { mode: 0o755 });
@@ -36,7 +38,9 @@ test("signature and provenance failures stop the real aggregate verifier before 
     for (const value of ["--source-digest", sha, "--source-ref", "refs/tags/v0.1.5", "--signer-workflow", "OctopusGarage/mesh-talk/.github/workflows/release.yml", "--deny-self-hosted-runners"]) assert.ok(forwarded.includes(value), value);
     // All crypto verifier commands succeeding cannot bypass malformed contents.
     assert.notEqual(spawnSync("bash", args, { env }).status, 0);
-    assert.equal(readFileSync(record, "utf8").split(/\r?\n/).filter((value) => value === "--deny-self-hosted-runners").length, 13, "the app and the relay of all six platforms are checked after the single deliberate provenance failure");
+    const finalArgs = readFileSync(record, "utf8").split(/\r?\n/);
+    assert.ok(finalArgs.includes(bashPath(standalone)), "standalone installer provenance is checked");
+    assert.equal(finalArgs.filter((value) => value === "--deny-self-hosted-runners").length, 14, "the app and relay archives, and the standalone installer, are checked after the deliberate provenance failure");
     // Empty PATH is set inside the already-running Bash process, so missing
     // verification tooling is a deterministic failure on every platform.
     const missing = spawnSync("bash", ["-c", 'PATH="$1"; source "$2" "${@:3}"', "fixture", bashPath(join(root, "empty-bin")), ...args]);
