@@ -1,0 +1,13 @@
+so the requirement is complete now. ?
+
+---
+
+and why windows and linux is too large now, can reduce the size??
+
+---
+
+now analyze whether it can be optimize to smaller ?
+
+---
+
+optimism and implement and verify all of them
