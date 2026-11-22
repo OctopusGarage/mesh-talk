@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M81GF1WSHP766MPTAVVHDYXT",
+  "strategy": "manual-commit",
+  "branch": "requirements-work",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/evals/README.md",
+    "docs/evals/scheduled-work-ai-eval-suite.json",
+    "frontend/src/lib/notify.test.ts",
+    "frontend/src/lib/notify.ts",
+    "scripts/test-ai-eval.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 41731,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 11845632,
+    "output_tokens": 9586,
+    "api_call_count": 44,
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 175,
+    "layers": {
+      "betterleaks": 2,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 188,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
