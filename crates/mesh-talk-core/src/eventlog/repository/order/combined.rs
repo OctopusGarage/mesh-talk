@@ -213,6 +213,9 @@ impl EventRepository {
             type HistoryJobRow = (bool,Option<Vec<u8>>,i64,Vec<u8>,Vec<u8>,i64);
             let (ready,signed,mut signed_rank,mut clock,mut archive,mut rank):HistoryJobRow=c.query_row("SELECT ready,signed_job,signed_rank,archive_clock,archive_id,next_rank FROM history_order_jobs WHERE job=?1",[job.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
             if ready{return Ok(HistoryGeneration{job,ready:true,count:usize::try_from(rank).map_err(|_|LogError::RepositoryCounterExhausted)?});}
+            if signed.is_none() {
+                return rank_unsigned_history_page(c, job, &clock, &archive, rank);
+            }
             let mut done=false;
             for _ in 0..128 {
                 let signed_head:Option<(Vec<u8>,Vec<u8>,i64)>=if let Some(signed)=&signed {c.query_row("SELECT e.wall_clock,e.id,r.rank FROM event_order_rows r JOIN retained_events e ON e.domain=?1 AND e.id=r.id WHERE r.job=?2 AND r.rank>?3 ORDER BY r.rank LIMIT 1",params![self.domain.0.as_slice(),signed,signed_rank],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?}else{None};
@@ -306,4 +309,46 @@ impl EventRepository {
             Ok(result)
         })
     }
+}
+
+fn rank_unsigned_history_page(
+    transaction: &rusqlite::Transaction<'_>,
+    job: [u8; 16],
+    clock: &[u8],
+    id: &[u8],
+    rank: i64,
+) -> Result<HistoryGeneration, LogError> {
+    const PAGE_ROWS: usize = 128;
+    let inserted = transaction.execute(
+        "INSERT INTO history_order_rows(job,rank,id)
+         SELECT ?1, ?4 + (row_number() OVER (ORDER BY clock,id) - 1), id
+         FROM (SELECT clock,id FROM history_order_candidates
+               WHERE job=?1 AND (clock,id)>(?2,?3) ORDER BY clock,id LIMIT ?5)",
+        params![job.as_slice(), clock, id, rank, integer(PAGE_ROWS)?],
+    )?;
+    let next_rank = rank
+        .checked_add(integer(inserted)?)
+        .ok_or(LogError::RepositoryCounterExhausted)?;
+    let ready = inserted < PAGE_ROWS;
+    // Read back the last ordered candidate by its exact rank. Commit its cursor
+    // with the batch so a failed transaction cannot skip any candidates.
+    transaction.execute(
+        "UPDATE history_order_jobs
+         SET ready=?2, next_rank=?3,
+             (archive_clock,archive_id)=(
+                 SELECT clock,id FROM history_order_candidates
+                 WHERE ?4>0 AND job=?1 AND id=(
+                     SELECT id FROM history_order_rows WHERE job=?1 AND rank=?3-1
+                 )
+                 UNION ALL SELECT archive_clock,archive_id WHERE ?4=0
+                 LIMIT 1
+             )
+         WHERE job=?1",
+        params![job.as_slice(), ready, next_rank, integer(inserted)?],
+    )?;
+    Ok(HistoryGeneration {
+        job,
+        ready,
+        count: usize::try_from(next_rank).map_err(|_| LogError::RepositoryCounterExhausted)?,
+    })
 }

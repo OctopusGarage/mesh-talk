@@ -1308,7 +1308,7 @@ fn runtime_metadata_interrupted_history_retirement_cannot_reuse_partial_ready_ge
                 job,
                 combined::HistorySelector {
                     id: EventId::new(id),
-                    clock: n,
+                    clock: n / 3,
                     source_kind: 2,
                     ordinal: n as i64 + 1,
                     priority: 2,
@@ -1366,8 +1366,12 @@ fn runtime_metadata_interrupted_history_retirement_cannot_reuse_partial_ready_ge
         let rows = repo
             .history_selectors(ready.job, start, (start + 128).min(300), 4096)
             .unwrap();
-        assert_eq!(rows.first().unwrap().clock, start as u64);
-        assert_eq!(rows.len(), (300 - start).min(128));
+        let end = (start + 128).min(300);
+        assert_eq!(rows.len(), end - start);
+        for (n, row) in (start..end).zip(rows) {
+            assert_eq!(row.clock, n as u64 / 3);
+            assert_eq!(&row.id.as_bytes()[..8], &(n as u64).to_be_bytes());
+        }
     }
     assert_eq!(repo.body_read_counts(), (0, 0));
 }
