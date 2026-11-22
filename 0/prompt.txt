@@ -1,0 +1,1 @@
+可以去充分调研一下业界成熟IM的做法和各种实现机制，然后也可以观察一下目前本地运行的微信或飞书，各项指标都是低消耗的，optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；optimise；
