@@ -2689,6 +2689,34 @@ describe("conversation cache LRU", () => {
     expect(useChat.getState().messages["account:a0"][0].text).toBe("back");
   });
 
+  it("evicts inactive message payloads before reaching the conversation count limit", async () => {
+    const text = "x".repeat(3 * 1024 * 1024);
+    invoke.mockImplementation((cmd: string) =>
+      Promise.resolve(
+        cmd === "owner_account_history"
+          ? [
+              {
+                id: "retained-message",
+                from_me: false,
+                who: "alice",
+                text,
+                wall_clock: 1,
+                reply_to: null,
+              },
+            ]
+          : [],
+      ),
+    );
+    for (const id of ["first", "second", "active"]) {
+      await useChat.getState().open({ kind: "account", id, name: id });
+    }
+    const { messages, cacheOrder } = useChat.getState();
+    expect(cacheOrder).toEqual(["account:second", "account:active"]);
+    expect(messages["account:first"]).toBeUndefined();
+    expect(messages["account:second"][0].text).toBe(text);
+    expect(messages["account:active"][0].text).toBe(text);
+  });
+
   it("keeps unread counts while evicting cached conversation state", async () => {
     invoke.mockResolvedValue([]);
     await useChat.getState().open({ kind: "account", id: "a0", name: "x" });

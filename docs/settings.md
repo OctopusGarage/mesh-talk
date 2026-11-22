@@ -285,6 +285,9 @@ must be upgraded rather than transferring history first.
 Synchronization resumes when a trusted source is reachable and still retains the
 selected data. Local retention and deletion can remove that source; this feature
 is not an unlimited cloud archive. A local save remains useful while offline.
+The recent page displayed when opening a conversation is independent of this
+sync permission. Eligible older history can still arrive from a linked device
+that retains it.
 
 ## Favorites and linked-device permissions
 
@@ -366,6 +369,11 @@ At 1 GiB the page suggests reviewing retention or creating a backup. It never
 changes retention or deletes data on its own. Forever remains the default.
 Deleting visible history may leave signed synchronization records and exact local
 deletion evidence, so shorter retention does not promise immediate disk savings.
+Exact local deletion records are kept on disk so older copies from linked
+devices cannot restore a deleted message. Repeating the same deletion reuses
+its record. Distinct deleted messages can increase metadata storage, which is
+included in the profile's logical size. See [backup recovery](backup-recovery.md)
+for which backup formats preserve these records across restore.
 
 History retention belongs to the signed-in account on this device. Changing it
 does not change another linked device's retention or delete its history. Older
