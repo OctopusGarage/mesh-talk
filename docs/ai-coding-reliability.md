@@ -311,6 +311,9 @@ hold the actual list promise beyond its UI deadline before requesting refresh.
 The [serial view reader tests](../frontend/src/features/chat/useSerialPoll.test.ts)
 apply the same lifetime rule to recovery timers and event coalescing, including
 hidden views and a follow-up admitted after all 64 read slots were occupied.
+The [notification permission tests](../frontend/src/lib/notify.test.ts) also
+cover two foreground observers after the watchdog expires. Both share the
+original native read until settlement, then the next activation may read again.
 
 Consume the canonical process owner's result contract rather than deriving a new
 verdict from a diagnostic flag. Windows atomically terminates its owned job even

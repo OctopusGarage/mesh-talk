@@ -144,3 +144,50 @@ it("rechecks permission once on foreground activation without polling or prompti
     vi.useRealTimers();
   }
 });
+
+it("keeps a timed-out native check shared until it physically settles", async () => {
+  vi.useFakeTimers();
+  const host = new EventTarget();
+  const page = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  vi.stubGlobal("window", host);
+  vi.stubGlobal("document", page);
+  let finish!: (permission: typeof allowed) => void;
+  check
+    .mockImplementationOnce(
+      () => new Promise<typeof allowed>((resolve) => (finish = resolve)),
+    )
+    .mockResolvedValue(denied);
+  const stop = watchNotificationPermission();
+  let stopSecond: (() => void) | undefined;
+  try {
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(useNotificationPermission.getState().checking).toBe(false);
+    expect(useNotificationPermission.getState().permission?.status).toBe(
+      "unknown",
+    );
+
+    stopSecond = watchNotificationPermission();
+    host.dispatchEvent(new Event("focus"));
+    page.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledOnce();
+
+    finish(allowed);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useNotificationPermission.getState().permission?.status).toBe(
+      "unknown",
+    );
+    host.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(useNotificationPermission.getState().permission).toEqual(denied);
+    expect(request).not.toHaveBeenCalled();
+  } finally {
+    finish(allowed);
+    stopSecond?.();
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  }
+});

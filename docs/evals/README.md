@@ -255,3 +255,16 @@ build profile. CI emits a warning and retains a summary and JSON artifact for
 breaches or measurement errors. The diagnostic is non-blocking while hosted
 baselines accumulate. See the [performance guide](../performance-requirements.md#evidence-and-maintenance)
 for the longer reference workload and desktop attribution method.
+
+## Event-driven scheduling
+
+The [scheduled work suite](scheduled-work-ai-eval-suite.json) evaluates native
+alert scheduling, scoped device-sync refresh, notification permission on
+foreground activation, and the AI registration and recovery guidance. It pairs
+source judgments with the desktop reception tests, frontend timing tests and
+notification permission and linked-device browser scenarios. Native OS wakeups,
+energy and CPU require separate packaged-app measurements.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/scheduled-work-ai-eval-suite.json --report target/ai-eval/scheduled-work-report.json
+```
