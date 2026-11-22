@@ -1,0 +1,5 @@
+what you implement on REQ-005. tell me the design detail
+
+---
+
+是不是应该仔细分析整个app，提前定义好更多常用的时间，包括后台或UI层面的，以及用户交互的层面的各种事件，供后续业务接入和调整，方便后续业务开发以及提升现有业务的性能等，应该提前定义好各种事件和注册监听方式等等，然后新增一个专门的事件驱动文档，用于指引后续的业务重构和接入，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
