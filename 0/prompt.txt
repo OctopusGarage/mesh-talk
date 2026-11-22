@@ -1,0 +1,10 @@
+so   is **REQ-017 **complete now ?
+
+---
+
+please complete REQ-017
+
+---
+
+For REQ-017, should I validate and document the existing retention, sync, and deletion rules, or are there specific product rules you want changed before closing it?
+Keep current policies and verify them
