@@ -172,6 +172,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
+            squashfs-tools \
+            xz-utils \
             protobuf-compiler
 
       # 4️⃣ Cache Cargo
@@ -210,6 +212,12 @@ jobs:
 
       - name: Build headless post-office node
         run: cargo build --locked --release --target ${{ matrix.target }} -p mesh-talk-core --bin mesh-talk-node
+
+      - name: Optimize Linux installers before collection
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/release/optimize_linux.py "target/${TARGET}/release/bundle"
 
       - name: Verify frontend assets
         shell: bash

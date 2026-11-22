@@ -133,6 +133,46 @@ test("Mac chip choice leads to a direct archive download and first-run dialog", 
   await expect(hero).toBeFocused();
 });
 
+test("Windows offers the published standalone EXE alongside the archive", async ({
+  page,
+}) => {
+  await setup(page, "Windows", "x86");
+  const fixture = release();
+  const filename = "mesh-talk-update_v9.8.7_windows_x86_64.nsis.exe";
+  for (const name of [filename, `${filename}.sig`]) {
+    fixture.assets.push({
+      name,
+      size: name.endsWith(".sig") ? 512 : 15_737_932,
+      state: "uploaded",
+      browser_download_url: `${root}/download/v9.8.7/${name}`,
+    });
+  }
+  await page.route(api, (route) =>
+    route.fulfill({
+      json: fixture,
+      headers: { "access-control-allow-origin": "*" },
+    }),
+  );
+  await page.goto(site);
+  const packages = page.locator('[data-packages="windows"]');
+  const exe = packages.getByRole("link", { name: /x64.*EXE/ });
+  const zip = packages.getByRole("link", { name: /x64.*ZIP/ });
+  await expect(exe).toHaveAttribute(
+    "href",
+    `${root}/download/v9.8.7/${filename}`,
+  );
+  await expect(zip).toHaveAttribute(
+    "href",
+    `${root}/download/v9.8.7/mesh-talk_v9.8.7_windows_x86_64.zip`,
+  );
+  await expect(packages.getByRole("link", { name: /ARM64.*EXE/ })).toHaveCount(
+    0,
+  );
+  const download = observePackageRequest(page);
+  await exe.click();
+  expect(await download).toBe(`${root}/download/v9.8.7/${filename}`);
+});
+
 for (const [os, architecture, platform, target] of [
   ["Windows", "x86", "Windows", "windows_x86_64"],
   ["Windows", "arm", "Windows", "windows_arm64"],

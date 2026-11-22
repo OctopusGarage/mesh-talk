@@ -174,27 +174,36 @@
       throw Error("Invalid Stable release");
     const tag = data.tag_name;
     const result = new Map();
+    function publishedAsset(name) {
+      const matches = data.assets.filter((asset) => asset?.name === name);
+      if (matches.length !== 1) return null;
+      const asset = matches[0];
+      const url = `${releases}/download/${tag}/${name}`;
+      return asset.state === "uploaded" &&
+        asset.browser_download_url === url &&
+        Number.isSafeInteger(asset.size) &&
+        asset.size > 0 &&
+        asset.size <= 1024 ** 3
+        ? asset
+        : null;
+    }
     for (const [os, platform] of Object.entries(platforms)) {
       for (const [arch, label] of Object.entries(platform.targets)) {
         const key = `${os}_${arch}`;
         const name = `mesh-talk_${tag}_${key}.zip`;
-        const matches = data.assets.filter((asset) => asset?.name === name);
-        if (matches.length !== 1) continue;
-        const asset = matches[0];
-        const url = `${releases}/download/${tag}/${name}`;
-        if (
-          asset.state !== "uploaded" ||
-          asset.browser_download_url !== url ||
-          !Number.isSafeInteger(asset.size) ||
-          asset.size <= 0 ||
-          asset.size > 1024 ** 3
-        )
-          continue;
+        const asset = publishedAsset(name);
+        if (!asset) continue;
+        const executable = `mesh-talk-update_${tag}_${key}.nsis.exe`;
+        const standalone =
+          os === "windows" && publishedAsset(`${executable}.sig`)
+            ? publishedAsset(executable)
+            : null;
         result.set(key, {
           url: asset.browser_download_url,
           label,
           size: asset.size,
           os,
+          standalone,
         });
       }
     }
@@ -202,16 +211,20 @@
     return { tag, packages: result };
   }
 
-  function packageLink(key, asset) {
+  function packageLink(key, asset, standalone = false) {
     const link = document.createElement("a");
     link.className = "package-link";
-    link.href = asset.url;
-    link.dataset.package = key;
+    link.href = standalone ? asset.standalone.browser_download_url : asset.url;
+    if (!standalone) link.dataset.package = key;
     const label = document.createElement("strong");
     put(label, "Download for {label}", { label: asset.label });
     const detail = document.createElement("span");
-    put(detail, "ZIP · {size} MB", {
-      size: (asset.size / 1024 / 1024).toFixed(1),
+    put(detail, standalone ? "EXE · {size} MB" : "ZIP · {size} MB", {
+      size: (
+        (standalone ? asset.standalone.size : asset.size) /
+        1024 /
+        1024
+      ).toFixed(1),
     });
     link.append(label, detail);
     return link;
@@ -237,14 +250,18 @@
       packages = selected.packages;
       document.querySelectorAll("[data-packages]").forEach((container) => {
         const os = container.dataset.packages;
-        const choices = Object.entries(platforms[os].targets).map(
+        const choices = Object.entries(platforms[os].targets).flatMap(
           ([arch, label]) => {
             const key = `${os}_${arch}`;
-            if (packages.has(key)) return packageLink(key, packages.get(key));
+            const asset = packages.get(key);
+            if (asset)
+              return asset.standalone
+                ? [packageLink(key, asset, true), packageLink(key, asset)]
+                : [packageLink(key, asset)];
             const missing = document.createElement("p");
             missing.className = "package-unavailable";
             put(missing, "{label} is unavailable in this release.", { label });
-            return missing;
+            return [missing];
           },
         );
         container.replaceChildren(...choices);

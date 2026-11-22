@@ -206,6 +206,12 @@ supports this disk-image format. Intel macOS keeps the original DMG format
 for older macOS installations. The updater payload is collected separately;
 the release verifier still checks that its executable matches the manual DMG.
 
+Linux release builds use XZ for DEB and RPM payloads. The AppImage filesystem
+uses Zstandard with larger blocks when recompression reduces the download and
+the full filesystem content and metadata match. The conversion precedes both
+installer collection and updater signing. The Windows download page offers the
+standalone NSIS executable when its detached update signature is published.
+
 Manual downloads carry no updater payload bytes. Their signed checksum manifests are limited
 to 64 KiB each, and their installer formats remain an exact platform-specific set. macOS DMGs and
 their outer ZIPs each have a 24 MiB limit, enforced independently before native inspection by

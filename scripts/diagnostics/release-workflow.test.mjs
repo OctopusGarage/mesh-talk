@@ -22,6 +22,15 @@ test("release artifact steps delegate policy with target passed as data", () => 
   assert.doesNotMatch(packageSource, /\$\{\{/);
 });
 
+test("Linux installer compression precedes both release roles and uses Tauri RPM support", () => {
+  const optimization = workflow.indexOf("python3 scripts/release/optimize_linux.py");
+  assert.ok(optimization > 0);
+  assert.ok(optimization < workflow.indexOf("scripts/release/package-app.sh collect"));
+  assert.ok(optimization < workflow.indexOf("scripts/release/updater.mjs collect"));
+  const config = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
+  assert.deepEqual(config.bundle.linux.rpm.compression, { type: "xz", level: 6 });
+});
+
 test("manual packages exclude updater payloads while the signed manifest binds standalone roles", { skip: process.platform === "win32" }, () => {
   for (const [target, platform, extensions] of [
     ["aarch64-apple-darwin", "macos_arm64", ["dmg"]],

@@ -69,7 +69,7 @@ def normalize_bundle_markers(section):
     return re.sub(rb"__TAURI_BUNDLE_TYPE_VAR_(?:DEB|RPM|APP)", b"__TAURI_BUNDLE_TYPE_VAR_UNK", section)
 
 
-def appimage_executable(path):
+def appimage_payload_offset(path):
     # Follow AppImage/type2-runtime's read_elf64 offset calculation without
     # executing the runtime. Ubuntu's 7-Zip lacks some SquashFS compression codecs.
     total = path.stat().st_size
@@ -87,7 +87,11 @@ def appimage_executable(path):
         require(payload_offset + 96 <= total, "AppImage filesystem bounds")
         image.seek(payload_offset)
         require(image.read(4) == b"hsqs", "AppImage SquashFS signature")
-    return subprocess.check_output(["unsquashfs", "-cat", "-no-wildcards", "-o", str(payload_offset), str(path), "usr/bin/mesh-talk"], timeout=60)
+    return payload_offset
+
+
+def appimage_executable(path):
+    return subprocess.check_output(["unsquashfs", "-cat", "-no-wildcards", "-o", str(appimage_payload_offset(path)), str(path), "usr/bin/mesh-talk"], timeout=60)
 
 
 def elf_fingerprint(binary, platform=None):

@@ -59,6 +59,9 @@
     "linux": {
       "deb": {
         "depends": []
+      },
+      "rpm": {
+        "compression": { "type": "xz", "level": 6 }
       }
     }
   },

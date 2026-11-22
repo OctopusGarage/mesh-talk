@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,6 +82,29 @@ test("the ARM64 collector compresses and verifies a real DMG before checksumming
     execFileSync("shasum", ["-a", "256", "-c", "SHA256SUMS"], { cwd: join(root, "release"), stdio: "pipe" });
     run("collect", "x86_64-apple-darwin");
     assert.deepEqual(readFileSync(output), readFileSync(source));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("DEB recompression preserves package control and filesystem bytes", {
+  skip: process.platform === "win32" || spawnSync("dpkg-deb", ["--version"]).status !== 0,
+}, () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "mesh-deb-compression-")));
+  const release = new URL("../release/", import.meta.url).pathname;
+  try {
+    mkdirSync(join(root, "input/DEBIAN"), { recursive: true });
+    writeFileSync(join(root, "input/DEBIAN/control"), "Package: mesh-talk-fixture\nVersion: 1\nArchitecture: all\nMaintainer: Fixture <fixture@example.com>\nDescription: Compression fixture\n");
+    mkdirSync(join(root, "input/usr/share/mesh-talk"), { recursive: true });
+    writeFileSync(join(root, "input/usr/share/mesh-talk/probe"), "release fixture\n".repeat(10_000));
+    const deb = join(root, "original.deb");
+    execFileSync("dpkg-deb", ["--root-owner-group", "-Zgzip", "-b", join(root, "input"), deb], { stdio: "pipe" });
+    const contents = () => ["--ctrl-tarfile", "--fsys-tarfile"].map(mode =>
+      createHash("sha256").update(execFileSync("dpkg-deb", [mode, deb])).digest("hex"));
+    const before = contents();
+    execFileSync("python3", ["-B", "-c", "from optimize_linux import optimize_deb; from pathlib import Path; import sys; optimize_deb(Path(sys.argv[1]), Path(sys.argv[2]))", deb, root], { cwd: release, stdio: "pipe" });
+    assert.match(execFileSync("ar", ["t", deb], { encoding: "utf8" }), /data\.tar\.xz/);
+    assert.deepEqual(contents(), before);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
