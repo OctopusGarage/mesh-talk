@@ -198,9 +198,25 @@ fn require_scope(
     Ok(())
 }
 
+async fn wait_for_native_alert_change(
+    changes: &mut tokio::sync::watch::Receiver<u64>,
+    earliest: tokio::time::Instant,
+) -> bool {
+    if changes.changed().await.is_err() {
+        return false;
+    }
+    if earliest > tokio::time::Instant::now() {
+        tokio::time::sleep_until(earliest).await;
+    }
+    // Include changes during the delay in the bounded observation. A change
+    // during the observation remains pending for the next turn.
+    changes.borrow_and_update();
+    true
+}
+
 /// Native notifications are best effort: begin at this launch's high-water,
-/// coalesce to at most eight observations per second, and never replay a former
-/// session's unread backlog as a live alarm. Durable desktop receipt ACKs are
+/// observe at most one batch of eight receipts per second, and never replay a
+/// former session's unread backlog as a live alarm. Durable desktop receipt ACKs are
 /// independent of this optional presentation consumer.
 pub(crate) async fn native_alerts<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -209,16 +225,16 @@ pub(crate) async fn native_alerts<R: tauri::Runtime>(
     mut cursor: ReceptionCursor,
 ) {
     let mut changes = node.subscribe_ui_changes();
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut first = true;
+    let mut earliest = None;
     loop {
-        interval.tick().await;
-        if !first && !changes.has_changed().unwrap_or(false) {
-            continue;
+        if let Some(deadline) = earliest {
+            if !wait_for_native_alert_change(&mut changes, deadline).await {
+                return;
+            }
+        } else {
+            changes.borrow_and_update();
         }
-        first = false;
-        changes.borrow_and_update();
+        earliest = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
         if authority.current(|_| ()).is_err() {
             return;
         }
@@ -414,6 +430,50 @@ mod tests {
             runtime_id: "installed".into(),
         }
     }
+    #[tokio::test(start_paused = true)]
+    async fn native_alert_wake_stays_parked_while_idle_and_stops_when_closed() {
+        use tokio::time::{Duration, Instant, timeout};
+
+        let (send, mut changes) = tokio::sync::watch::channel(0);
+        assert!(
+            timeout(
+                Duration::from_secs(300),
+                wait_for_native_alert_change(&mut changes, Instant::now()),
+            )
+            .await
+            .is_err()
+        );
+        drop(send);
+        assert!(!wait_for_native_alert_change(&mut changes, Instant::now()).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_alert_wake_coalesces_changes_until_the_next_observation() {
+        use tokio::time::{Duration, Instant, timeout};
+
+        let (send, mut changes) = tokio::sync::watch::channel(0);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        send.send(1).unwrap();
+        {
+            let wait = wait_for_native_alert_change(&mut changes, deadline);
+            tokio::pin!(wait);
+            assert!(
+                timeout(Duration::from_millis(900), &mut wait)
+                    .await
+                    .is_err()
+            );
+            send.send(2).unwrap();
+            assert!(wait.await);
+        }
+        assert!(Instant::now() >= deadline);
+        assert_eq!(*changes.borrow(), 2);
+        assert!(!changes.has_changed().unwrap());
+
+        send.send(3).unwrap();
+        assert!(wait_for_native_alert_change(&mut changes, deadline).await);
+        assert_eq!(*changes.borrow(), 3);
+    }
+
     #[test]
     fn qualified_non_group_emitter_preserves_domains_and_unknown_fallback() {
         let app = tauri::test::mock_app();
