@@ -1,0 +1,9 @@
+so can start next REQ now?
+
+---
+
+so continue to start the next requirement now
+
+---
+
+and why this CI is fail , check and fix : https://github.com/OctopusGarage/mesh-talk/actions/runs/44980483370/job/137087562678
