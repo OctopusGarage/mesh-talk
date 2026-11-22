@@ -34,7 +34,7 @@ test("nextest security minimum and every CI installer follow the version owner",
     config.match(/^nextest-version = "([^"]+)"$/mu)?.[1],
     versions.nextest,
   );
-  for (const file of ["ci.yml", "windows-workspace.yml", "linux-workspace-consumer.yml", "sanitizers.yml", "mutants.yml"]) {
+  for (const file of ["ci.yml", "windows-workspace.yml", "sanitizers.yml", "mutants.yml"]) {
     const source = read(file);
     const pins = [...source.matchAll(/cargo-nextest@([0-9.]+)/gu)].map(
       (match) => match[1],
@@ -140,7 +140,7 @@ test("Linux archives preserve the sole native cache writer and strict required a
   assert.match(upload,/if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(!\(github\.event_name == 'pull_request' && github\.base_ref == 'dev' && github\.event\.pull_request\.user\.login == 'dependabot\[bot\]'\)\) \}\}/u);
 
   const consumer=read("linux-workspace-consumer.yml");
-  assert.ok(consumer.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
+  assert.ok(producer.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
   assert.doesNotMatch(consumer,/rust-cache|npm ci|npm run build|cargo (?:build|test|clippy)|frontend\//u);
   assert.match(consumer,/timeout-minutes: 90/u);
   for(const text of ["needs.checks.outputs.rustVersion","linux-workspace-consumer.yml"]) assert.ok(ci.includes(text));
@@ -963,4 +963,16 @@ test("macOS native notification coverage is appended once after defaults and bef
   assert.ok(native.indexOf("name: Test + coverage (macOS)") < native.indexOf("name: Verify native notification"));
   assert.ok(native.indexOf("name: Verify native notification") < native.indexOf("name: Upload coverage to Codecov"));
   assert.match(native, /--test-concurrency=1 [^\n]*scripts\/ci\/notification-native\.test\.mjs/u);
+});
+
+test("Linux archive consumers reuse the producer's pinned tools in the same attempt", () => {
+  const producer = read("ci.yml");
+  const consumer = read("linux-workspace-consumer.yml");
+  assert.match(producer, /toolsArtifactId: \$\{\{ steps\.validation_tools\.outputs\.artifact-id \}\}/u);
+  assert.match(consumer, /artifact-ids: \$\{\{ inputs\.tools_artifact_id \}\}/u);
+  assert.match(consumer, /sha256sum --check --strict SHA256SUMS/u);
+  assert.match(consumer, /diff -u identity/u);
+  assert.doesNotMatch(consumer, /taiki-e\/install-action/);
+  assert.match(consumer, /cargo-nextest" --version/);
+  assert.match(consumer, /cargo-llvm-cov" --version/);
 });

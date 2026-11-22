@@ -783,8 +783,11 @@ uninstrumented remaining-workspace consumers plus native Host coverage.
 
 The Linux consumers restore no Rust cache, install no frontend dependencies and
 compile no Cargo targets. They install the producer's exact Rust version,
-matching LLVM tools, pinned prebuilt Nextest/llvm-cov and required Tauri runtime
-packages. Both producer and consumer dependency installers explicitly request every
+matching LLVM tools and required Tauri runtime packages. The producer installs
+pinned prebuilt Nextest and llvm-cov once. Consumers fetch those binaries by
+immutable artifact ID and verify their checksums and source/run/attempt identity
+before executing them. This removes external tool downloads from test fan-out.
+Both producer and consumer dependency installers explicitly request every
 package sealed by the Linux runtime identity, including `libc6`. Preinstalled
 runner-image copies can remain older when only development or runtime dependencies
 are requested. Keep exact package equality as an admission gate. The installer

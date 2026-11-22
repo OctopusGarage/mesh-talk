@@ -11,6 +11,12 @@ on:
       rust_version:
         type: string
         required: true
+      tools_artifact_id:
+        type: string
+        required: true
+      tools_manifest_sha:
+        type: string
+        required: true
       manifest_sha:
         type: string
         required: true
@@ -76,11 +82,38 @@ jobs:
         with:
           toolchain: ${{ inputs.rust_version }}
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2.90.3
+      - name: Require producer validation tool metadata
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        shell: bash
+        env:
+          TOOLS_ARTIFACT_ID: ${{ inputs.tools_artifact_id }}
+          TOOLS_MANIFEST_SHA: ${{ inputs.tools_manifest_sha }}
+        run: |
+          if [[ ! "$TOOLS_ARTIFACT_ID" =~ ^[0-9]+$ || ! "$TOOLS_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing or invalid Linux validation tool artifact metadata"
+            exit 1
+          fi
+      - uses: actions/download-artifact@v8
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
-          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.150
-          fallback: none
+          artifact-ids: ${{ inputs.tools_artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/linux-validation-tools
+      - name: Activate producer validation tools
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        shell: bash
+        env:
+          TOOLS_MANIFEST_SHA: ${{ inputs.tools_manifest_sha }}
+        run: |
+          tools="$RUNNER_TEMP/linux-validation-tools"
+          cd "$tools"
+          printf '%s  SHA256SUMS\n' "$TOOLS_MANIFEST_SHA" | sha256sum --check --strict
+          sha256sum --check --strict SHA256SUMS
+          diff -u identity <(printf '%s\n' "$GITHUB_SHA $GITHUB_RUN_ID $GITHUB_RUN_ATTEMPT")
+          chmod +x "$tools/cargo-nextest" "$tools/cargo-llvm-cov"
+          "$tools/cargo-nextest" --version
+          "$tools/cargo-llvm-cov" --version
+          printf '%s\n' "$tools" >> "$GITHUB_PATH"
       - name: Prepare and verify Linux native crash evidence
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: |
