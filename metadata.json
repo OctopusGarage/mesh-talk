@@ -1,0 +1,41 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M81XGAAGHGMHZDDMA2Q9KCFH",
+  "strategy": "manual-commit",
+  "branch": "docs/f01-fresh-inventory-20261121",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "crates/mesh-talk-core/src/node/serving/receive_projection.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 367944,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 42735616,
+    "output_tokens": 107369,
+    "api_call_count": 302,
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 20100,
+    "layers": {
+      "betterleaks": 31,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 20069,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
