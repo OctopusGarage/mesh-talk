@@ -1633,6 +1633,7 @@ async fn protected_image_expiry_hides_explicit_and_ordinary_bytes() {
 fn indexed_runtime_recent_history_fetches_only_selected_bodies_after_reopen() {
     use crate::identity::account::Account;
     use crate::node::conversation::account_conversation_id;
+    use crate::node::transcript_repository::take_header_reads_for_test;
     let dir = tempfile::tempdir().unwrap();
     let identity = DeviceIdentity::generate();
     let secrets = identity.secret_bytes();
@@ -1694,7 +1695,14 @@ fn indexed_runtime_recent_history_fetches_only_selected_bodies_after_reopen() {
     );
     assert_eq!(reopened.received.lock().unwrap().body_reads(), 0);
     assert_eq!(reopened.received_files.lock().unwrap().body_reads(), 0);
+    take_header_reads_for_test();
+    let commits = reopened.storage.database().successful_write_commits();
     assert_eq!(reopened.account_history(&peer, 50).unwrap(), page);
+    assert_eq!(take_header_reads_for_test(), 0);
+    assert_eq!(
+        reopened.storage.database().successful_write_commits(),
+        commits
+    );
     assert_eq!(reopened.sentlog.lock().unwrap().body_reads(), 50);
     assert_eq!(
         generation(&reopened),
