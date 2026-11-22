@@ -110,10 +110,13 @@ jobs:
           printf '%s  SHA256SUMS\n' "$TOOLS_MANIFEST_SHA" | sha256sum --check --strict
           sha256sum --check --strict SHA256SUMS
           diff -u identity <(printf '%s\n' "$GITHUB_SHA $GITHUB_RUN_ID $GITHUB_RUN_ATTEMPT")
-          chmod +x "$tools/cargo-nextest" "$tools/cargo-llvm-cov"
-          "$tools/cargo-nextest" --version
-          "$tools/cargo-llvm-cov" llvm-cov --version
-          printf '%s\n' "$tools" >> "$GITHUB_PATH"
+          # The sealed coverage environment binds the absolute Rust compiler wrapper path.
+          cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          mkdir -p "$cargo_bin"
+          install -m 0755 "$tools/cargo-nextest" "$tools/cargo-llvm-cov" "$cargo_bin/"
+          "$cargo_bin/cargo-nextest" --version
+          "$cargo_bin/cargo-llvm-cov" llvm-cov --version
+          printf '%s\n' "$cargo_bin" >> "$GITHUB_PATH"
       - name: Prepare and verify Linux native crash evidence
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: |

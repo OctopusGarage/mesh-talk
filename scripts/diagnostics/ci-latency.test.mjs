@@ -973,6 +973,7 @@ test("Linux archive consumers reuse the producer's pinned tools in the same atte
   assert.match(consumer, /sha256sum --check --strict SHA256SUMS/u);
   assert.match(consumer, /diff -u identity/u);
   assert.doesNotMatch(consumer, /taiki-e\/install-action/);
+  assert.match(consumer, /install -m 0755 "\$tools\/cargo-nextest" "\$tools\/cargo-llvm-cov" "\$cargo_bin\/"/u);
   assert.match(consumer, /cargo-nextest" --version/);
   assert.match(consumer, /cargo-llvm-cov" llvm-cov --version/u);
 });
