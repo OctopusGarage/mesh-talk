@@ -1,0 +1,5 @@
+so first REQ is finished ??
+
+---
+
+finish this as well : "A repeatable resource benchmark in CI, a clear way to surface regressions, and attribution of the remaining CPU and memory costs."
