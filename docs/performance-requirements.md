@@ -365,6 +365,10 @@ other mappings. Waiting threads dominate wall-stack counts, so those counts
 cannot apportion CPU time. Keep resident, compressed or swapped, and reserved
 bytes separate. Collect an isolated same-build empty-shell comparison and
 retaining paths before assigning renderer memory to specific application state.
+Inspect automation components for work that remains active between commands.
+The macOS WebDriver fixture installs a repeating main-run-loop pump for
+off-screen automation. Use its resource counters for matched fixture diagnostics
+and use the shipping entry point for the production idle budget.
 
 Heap snapshots/retaining paths distinguish
 leaks from stable bloat and allocation churn. Forced working-set trims, periodic
