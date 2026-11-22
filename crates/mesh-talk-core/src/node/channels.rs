@@ -3248,32 +3248,29 @@ impl Node {
             book.state(&channel)
                 .is_some_and(|state| self.channel_identity_matches_account(state))
         };
+        let local_device = self.user_id();
         let own_devices: HashSet<_> = self
             .linked_devices()
             .into_iter()
             .map(|device| device.public.user_id())
-            .chain(std::iter::once(self.user_id()))
+            .chain(std::iter::once(local_device.clone()))
             .collect();
-        let own_local = self
+        // One validated signed record supports both authorship predicates. Keep
+        // it row-local so repeated IDs still observe intervening changes.
+        let author = self
             .log
             .lock()
             .expect("log mutex")
             .get(&id)?
-            .is_some_and(|event| {
+            .filter(|event| {
                 event.conversation_id == channel
                     && matches!(event.kind, EventKind::Message | EventKind::FileManifest)
-                    && event.author.user_id() == self.user_id()
-            });
-        let own_signed = self
-            .log
-            .lock()
-            .expect("log mutex")
-            .get(&id)?
-            .is_some_and(|event| {
-                event.conversation_id == channel
-                    && matches!(event.kind, EventKind::Message | EventKind::FileManifest)
-                    && own_devices.contains(&event.author.user_id())
-            });
+            })
+            .map(|event| event.author.user_id());
+        let own_local = author.as_deref() == Some(local_device.as_str());
+        let own_signed = author
+            .as_ref()
+            .is_some_and(|device| own_devices.contains(device));
         let own_archived = self
             .received
             .lock()

@@ -1551,6 +1551,11 @@ without adding a group transport or claiming recipient delivery. Channel authori
 determines eligible external member principals. The footer distinguishes missing
 status from a known zero count; its status coordinator clears stale projections
 only for the messages and runtime lifetime it requested.
+Native custody reads admit one bounded batch at a time and use participant-owned
+blocking work. The batch releases desktop session and runtime-slot guards during
+the query. Result publication rechecks the exact installed runtime, session and
+app-lock revision. Each row reads its signed record once and rechecks current
+custody and membership facts independently.
 The document store keeps a separate bounded custody-key quota and an owned-file
 scan budget consistent with legal document counts. `media_store.rs` prunes the
 enumerated unreferenced regular files in one pass, preserving live files and

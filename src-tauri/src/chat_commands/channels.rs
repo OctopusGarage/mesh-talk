@@ -385,26 +385,63 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
         .iter()
         .map(|id| parse_event_id(id))
         .collect::<Result<Vec<_>, _>>()?;
-    let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
+    let app = app.state::<AppState>();
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let lock = app.app_lock();
+    let (node, work, lock_revision) = admission
+        .with_runtime(|runtime| {
+            let revision = lock.authorization_revision()?;
+            lock.with_unchanged_revision(revision, || {
+                Ok((runtime.handle(), runtime.blocking_work(), revision))
+            })
+        })
+        .await?;
+
+    // Preserve the existing serialized custody workload without occupying the
+    // session mutex or runtime slot through SQLite and certificate checks.
+    static CUSTODY_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let capacity = tokio::time::timeout(std::time::Duration::from_secs(5), CUSTODY_READS.acquire())
+        .await
+        .map_err(|_| CommandError::Internal("custody observation timed out".into()))?
+        .map_err(|_| CommandError::not_started())?;
+    #[cfg(test)]
+    let observation_hook = app.custody_observation_hook.lock().unwrap().take();
+    let observed_node = node.clone();
+    let mut tasks = tokio::task::JoinSet::new();
+    if !work.spawn(&mut tasks, move || {
+        let _capacity = capacity;
+        #[cfg(test)]
+        if let Some(hook) = observation_hook {
+            hook();
+        }
+
+        let batch = observed_node.channel_custody_counts(channel, &ids)?;
+        Ok::<_, CommandError>(
+            ids.into_iter()
+                .zip(batch)
+                .filter_map(|(id, (replicas, post_offices))| {
+                    Some(ChannelCustodyInfo {
+                        id: id.to_hex(),
+                        replicas: replicas?,
+                        post_offices: post_offices?,
+                    })
+                })
+                .collect(),
+        )
+    }) {
+        return Err(CommandError::not_started());
+    }
+    let observed = tasks
+        .join_next()
+        .await
+        .ok_or_else(CommandError::not_started)?
+        .map_err(|error| CommandError::Internal(error.to_string()))?;
     admission
-        .with_runtime(move |runtime| {
-            let node = runtime.handle();
-            let mut counts = Vec::new();
-            let batch = node.channel_custody_counts(channel, &ids)?;
-            for (id, (replicas, post_offices)) in ids.into_iter().zip(batch) {
-                let Some(replicas) = replicas else {
-                    continue;
-                };
-                let Some(post_offices) = post_offices else {
-                    continue;
-                };
-                counts.push(ChannelCustodyInfo {
-                    id: id.to_hex(),
-                    replicas,
-                    post_offices,
-                });
+        .with_runtime(|runtime| {
+            if !std::sync::Arc::ptr_eq(&node, &runtime.handle()) {
+                return Err(CommandError::not_started());
             }
-            Ok(counts)
+            lock.with_unchanged_revision(lock_revision, || observed)
         })
         .await
 }

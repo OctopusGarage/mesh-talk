@@ -2,7 +2,7 @@ use crate::services::auth_service::AuthService;
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-type FileProgressHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>>;
+type BlockingTestHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>>;
 #[cfg(test)]
 type HostOperationGate = Arc<
     Mutex<
@@ -33,7 +33,9 @@ pub struct AppState {
     #[cfg(test)]
     pub(crate) owner_command_captured: Arc<Mutex<Option<std::sync::mpsc::Sender<&'static str>>>>,
     #[cfg(test)]
-    pub(crate) owner_file_progress_hook: FileProgressHook,
+    pub(crate) owner_file_progress_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(crate) custody_observation_hook: BlockingTestHook,
     pub(crate) integrations: crate::integrations::local_access::DesktopIntegrations,
     auth_service: AuthService,
     badge_revision: Arc<Mutex<BadgeRevision>>,
@@ -59,6 +61,8 @@ impl AppState {
             owner_command_captured: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             owner_file_progress_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            custody_observation_hook: Arc::new(Mutex::new(None)),
             integrations: crate::integrations::local_access::DesktopIntegrations::default(),
             auth_service,
             badge_revision: Arc::new(Mutex::new(BadgeRevision::default())),

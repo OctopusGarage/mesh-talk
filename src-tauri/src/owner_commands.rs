@@ -2604,6 +2604,59 @@ mod tests {
     }
 
     #[test]
+    fn held_channel_custody_read_does_not_block_session_and_rejects_authority_change() {
+        use std::time::Duration;
+        use tauri::Manager;
+        for lock in [true, false] {
+            let fixture = Fixture::new();
+            let (entered, running) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let released = std::sync::Mutex::new(released);
+            *fixture.app_state.custody_observation_hook.lock().unwrap() =
+                Some(Box::new(move || {
+                    entered.send(()).unwrap();
+                    released
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }));
+            let webview = fixture.webview.clone();
+            let query = std::thread::spawn(move || {
+                invoke(
+                    &webview,
+                    "channel_custody_statuses",
+                    serde_json::json!({"channelId":"11".repeat(32),"ids":["22".repeat(32)]}),
+                )
+            });
+            running.recv_timeout(Duration::from_secs(5)).unwrap();
+            let webview = fixture.webview.clone();
+            let app = fixture.app_state.clone();
+            let (changed, observed) = std::sync::mpsc::channel();
+            let change = std::thread::spawn(move || {
+                if lock {
+                    crate::app_lock::lock_app(
+                        webview.state::<AppState>(),
+                        webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap();
+                    // A transient lock must fence an older query even after unlock.
+                    app.app_lock().clear();
+                } else {
+                    app.session()
+                        .set("replacement".into(), user("alice"), "pw".into());
+                }
+                changed.send(()).unwrap();
+            });
+            let responsive = observed.recv_timeout(Duration::from_secs(2));
+            release.send(()).unwrap();
+            change.join().unwrap();
+            responsive.expect("desktop authority should be available during custody reads");
+            assert_eq!(query.join().unwrap().unwrap_err()["kind"], "authorization");
+        }
+    }
+
+    #[test]
     fn registered_group_control_requires_typed_access_for_every_generic_document_command() {
         let fixture = Fixture::new();
         let account = fixture

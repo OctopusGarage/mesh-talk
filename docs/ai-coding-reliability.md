@@ -277,6 +277,9 @@ cancelled-observer controls in [owner commands](../src-tauri/src/owner_commands.
 require unrelated identity/peer progress and retirement to await the actual
 worker. Frontend roster tickets belong to one invalidation, preserve original
 evidence age and never carry a result into another runtime generation.
+The same rule applies to [channel custody reads](../src-tauri/src/chat_commands/channels.rs).
+Their held-read regression checks that both a transient app lock and same-owner
+replacement can proceed while the batch is held and can fence its result.
 
 ## R03: Actual work owns its lifetime
 
