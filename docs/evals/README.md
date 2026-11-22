@@ -253,7 +253,20 @@ write bytes from `/proc/PID/io`. The initial diagnostic budgets are 2%, 64 MiB,
 and 128 KiB per measurement window. Compare reports from the same runner and
 build profile. CI emits a warning and retains a summary and JSON artifact for
 breaches or measurement errors. The diagnostic is non-blocking while hosted
-baselines accumulate. See the [performance guide](../performance-requirements.md#evidence-and-maintenance)
+baselines accumulate.
+
+To verify the real Linux counter and alert path, opt in to the quiet and
+synthetic pressure controls:
+
+```sh
+MESH_RESOURCE_CONTROL=1 python3 -B -m unittest discover -s scripts/evals -p test_resource_benchmark.py
+```
+
+The control keeps the normal warmup and sample windows and adds about 40 seconds.
+It checks the process exit status, JSON report and CI summary using real kernel
+counters. The pressure process caps storage writes at 32 MiB and reuses one
+temporary file. Use this as calibration evidence alongside the real-node
+benchmark. See the [performance guide](../performance-requirements.md#evidence-and-maintenance)
 for the longer reference workload and desktop attribution method.
 
 ## Event-driven scheduling
