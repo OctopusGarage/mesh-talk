@@ -106,6 +106,9 @@ capacity, cancellation boundary and the focused regression for these rules.
 
 ## Schedule work by purpose
 
+See [Scheduled work and recovery](scheduled-work.md) for existing components,
+registration contracts and verification.
+
 | Purpose | Reuse policy |
 | --- | --- |
 | Absolute expiry or lease | Reuse the owning expiry path, such as [chat expiry](../frontend/src/store/chatExpiry.ts). Schedule the nearest deadline and recompute after resume. Preserve persisted expiry and authority across restart. |

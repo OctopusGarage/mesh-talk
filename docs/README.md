@@ -76,6 +76,7 @@ subscriptions and incoming HTTP webhooks are later stages.
 | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | [`AGENTS.md`](../AGENTS.md)                                                                   | Repository guidelines for AI agents / contributors — structure, build/test commands, conventions.              |
 | [`docs/event-driven-design.md`](event-driven-design.md)                                      | Event catalog, listener registration, lifecycle, recovery, and scheduling design.                               |
+| [`docs/scheduled-work.md`](scheduled-work.md)                                                | Scheduled-work owners, registration contracts, retry, recovery, and lifecycle verification.                    |
 | [`docs/performance-requirements.md`](performance-requirements.md)                             | Low-power resource budgets, demand-driven work, bounded retention and performance regression evidence.         |
 | [`docs/ai-coding-reliability.md`](ai-coding-reliability.md)                                   | Risk-triggered coding and review rules, deadlock prevention, failure-path evidence and continuous improvement. |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md)                                                       | How to set up, build, test, and submit changes.                                                                |

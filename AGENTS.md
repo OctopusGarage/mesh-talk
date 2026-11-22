@@ -3,7 +3,8 @@
 ## Reliability before implementation
 
 - For new events, subscriptions, timers and polling changes, consult the
-  [event-driven design guide](docs/event-driven-design.md) before editing.
+  [event-driven design guide](docs/event-driven-design.md) and
+  [scheduled work guide](docs/scheduled-work.md) before editing.
 
 - For background work, synchronization, storage, caching or UI-state changes, read
   [performance requirements](docs/performance-requirements.md). Identify the work
