@@ -1,0 +1,28 @@
+Background command completed (exit 0): /bin/zsh -lc 'candidate=$(git diff --binary | shasum -a 256)
+while kill -0 77950 2>/dev/null; do sleep 8; done
+test "$candidate" = "$(git diff --binary | shasum -a 256)" &&
+rg -q '"'expiry_worker_park...
+
+Output tail:
+Structural standards: pass; 1219 source inputs, 177 contracts
+structural standards only; no correctness or acceptance certification
+Syntax checked 0 changed worktree source files.
+Source checks passed. Run affected tests before opening a PR.
+[requirements-work af9800c4] perf(expiry): park cleanup until committed expiry work arrives
+ 11 files changed, 241 insertions(+), 61 deletions(-)
+
+---
+
+Background command completed (exit 0): /bin/zsh -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('crates/mesh-talk-core/src/node/channels.rs')
+s=p.read_text()
+a=s.index('        let own_devices:',s.index('    fn channel_custody_count_...
+
+---
+
+Background command completed (exit 0): /bin/zsh -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('src-tauri/src/chat_commands/channels.rs')
+s=p.read_text()
+a=s.index('    let admission = RuntimeAdmission::capture_current(',s.index('pu...
