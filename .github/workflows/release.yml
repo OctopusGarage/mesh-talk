@@ -282,6 +282,10 @@ jobs:
           archive="$(bash scripts/release/package-post-office.sh '${{ matrix.target }}' "$ARTIFACT_TAG")"
           node scripts/release/sign-blob.mjs "$archive" "${archive}.bundle"
 
+      - name: Report release download sizes
+        shell: bash
+        run: bash scripts/release/package-app.sh report_sizes >> "$GITHUB_STEP_SUMMARY"
+
       # 🔏 SLSA build provenance: a GitHub-native, signed attestation of exactly which
       # repo/commit/workflow produced this artifact. Verified by `gh attestation verify`.
       - name: Attest build provenance

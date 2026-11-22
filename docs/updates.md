@@ -194,6 +194,13 @@ The same signing key authenticates canonical full packages and optional incremen
 
 ### Manual package size budgets
 
+Release builds record compressed download bytes for each target in the GitHub
+Actions job summary. Run `bash scripts/release/package-app.sh report_sizes`
+after local packaging to see the same report. Compare the same artifact role,
+platform, architecture and format against its last verified release. Measure
+the installed footprint separately. Include the byte delta and its source in
+review for changes to dependencies, bundled assets or packaging.
+
 [`package-app.sh`](../scripts/release/package-app.sh) owns installer collection,
 checksum roles and fresh signed application ZIPs. The release workflow passes the
 validated tag and target to that script; the existing signing and verification

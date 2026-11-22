@@ -11,6 +11,24 @@ const packageApp = fileURLToPath(new URL("../release/package-app.sh", import.met
 const packageSource = readFileSync(packageApp, "utf8");
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
+test("release size reports list exact download bytes and omit detached signatures", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-talk-release-size-"));
+  try {
+    const directory = join(root, "release_zips");
+    mkdirSync(directory);
+    writeFileSync(join(directory, "mesh-talk_fixture.zip"), "archive");
+    writeFileSync(join(directory, "mesh-talk-installer_fixture.deb"), "installer");
+    writeFileSync(join(directory, "mesh-talk-update_fixture.AppImage.sig"), "signature");
+    const report = execFileSync("bash", [packageApp, "report_sizes"], { cwd: root, encoding: "utf8" });
+    assert.match(report, /mesh-talk_fixture\.zip \| 7 \|/);
+    assert.match(report, /mesh-talk-installer_fixture\.deb \| 9 \|/);
+    assert.doesNotMatch(report, /\.sig/);
+    assert.match(workflow, /package-app\.sh report_sizes >> "\$GITHUB_STEP_SUMMARY"/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("release artifact steps delegate policy with target passed as data", () => {
   for (const [name, mode] of [["Collect build artifacts", "collect"], ["Generate SHA256 checksums", "checksums"], ["Package and sign artifacts", "package"]]) {
     const step = workflow.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));

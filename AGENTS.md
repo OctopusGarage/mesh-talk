@@ -115,6 +115,13 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 
 ## Maintaining standards as requirements change
 
+- When changing production dependencies, bundled assets, compiler profiles or
+  installer settings, check [package size budgets](docs/updates.md#manual-package-size-budgets).
+  Compare download bytes against a baseline for the same platform, architecture
+  and installer format. Record installed footprint separately and explain each
+  meaningful increase. If a production package was unavailable, record that
+  evidence gap. Preserve native install, update and signature verification.
+
 - Before changing tests, fixtures, dependencies or workflows in ways that affect
   CI cost or reliability, read [CI maintenance](docs/ci-maintenance.md). Reuse
   existing owners, measure the affected cost, and preserve acceptance evidence;

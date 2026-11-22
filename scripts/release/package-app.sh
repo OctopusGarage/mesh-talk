@@ -169,7 +169,21 @@ package() {
   ls -lh release_zips
 }
 
+report_sizes() {
+  shopt -s nullglob
+  local file bytes
+  local archives=(release_zips/*.zip)
+  test "${#archives[@]}" -gt 0
+  printf '### Release download sizes\n\n| Artifact | Bytes |\n| --- | ---: |\n'
+  for file in "${archives[@]}" release_zips/mesh-talk-installer_* release_zips/mesh-talk-update_*; do
+    case "$file" in *.sig|*.json) continue ;; esac
+    [[ -f "$file" && ! -L "$file" ]] || continue
+    bytes=$(wc -c < "$file")
+    printf '| %s | %d |\n' "${file##*/}" "$bytes"
+  done
+}
+
 case "${1:-}" in
-  collect|checksums|package) "$1" ;;
-  *) echo "Usage: package-app.sh collect|checksums|package" >&2; exit 1 ;;
+  collect|checksums|package|report_sizes) "$1" ;;
+  *) echo "Usage: package-app.sh collect|checksums|package|report_sizes" >&2; exit 1 ;;
 esac
