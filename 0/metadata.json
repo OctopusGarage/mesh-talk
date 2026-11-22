@@ -1,0 +1,44 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M8169X39YM3Q6CN7VH7HPPGD",
+  "session_id": "01a1feaf-24d9-7612-a284-664abd64a2c4",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-22T08:35:02.423962Z",
+  "branch": "requirements-work",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/linux-workspace-consumer.yml"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.2-sol",
+  "turn_id": "a76fd00e5dcd",
+  "checkpoint_transcript_start": 6897,
+  "transcript_lines_at_start": 6897,
+  "compact_transcript_start": 1049,
+  "token_usage": {
+    "input_tokens": 84044,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 6269312,
+    "output_tokens": 7686,
+    "api_call_count": 33,
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 155,
+    "layers": {
+      "betterleaks": 2,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 166,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 35
+  }
+}
