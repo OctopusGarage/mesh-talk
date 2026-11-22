@@ -16,6 +16,7 @@ The [performance guide](performance-requirements.md) owns resource budgets.
 | Observe Host work after a runtime is installed | [NodeRuntime host-task registration](../crates/mesh-talk-core/src/node/runtime.rs) | The task belongs to an authenticated runtime. Register it with the runtime so retirement closes admission and joins owned work. Use graceful registration for adapters that need asynchronous cleanup. |
 | Rate-limit a pending Host observation | [Native reception alerts](../src-tauri/src/reception_host.rs) | An existing watch is reliable. Await the watch and arm one delay only if a pending observation arrives before its next eligible time. |
 | Refresh from a native event with a sparse safety check | [Network cost observer](../src-tauri/src/network_cost/mod.rs) | Native inputs may be missed or unavailable. The Linux and Windows adapter serializes the initial query, change-triggered queries and five-minute repair. macOS uses its native callback path. |
+| Project an account nickname into desktop credentials | [Account profile commit watch](../crates/mesh-talk-core/src/node/account_profile_data/indexed.rs) and [Host runtime projection](../src-tauri/src/runtime_bootstrap.rs) | The signed own-account profile is authoritative. Reconcile once on installation and wake on committed changes. Failed reads or credential writes retry after 500 ms. A five-minute repair deadline covers missed work. |
 | Schedule retries for delivery | [Core delivery retry owner](../crates/mesh-talk-core/src/node/delivery_retry.rs) and [file delivery scheduler](../crates/mesh-talk-core/src/node/delivery_runtime.rs) | Work already belongs to delivery. Keep its destination keys, retry eligibility, worker limits and durable progress with that owner. |
 | Combine multiple deadlines with changes | [Core profile publication loop](../crates/mesh-talk-core/src/node/runtime.rs) | A runtime owner already has change subscriptions, pending operations and semantic deadlines. Await the nearest known deadline alongside those signals. |
 
@@ -75,8 +76,8 @@ durable work identity and the existing policy for eligible destinations.
    wakeups. Tokio timers and WebView timers run on their existing executors.
 2. Convert revision-checking idle timers first. Next, compare duplicate
    foreground repair and deadline paths for matching lifecycle semantics. Trace
-   Host account-profile projection and Core account reconciliation before
-   changing them. Their storage and reconnect recovery need explicit proof.
+   Core account reconciliation before changing it. Its storage and reconnect
+   recovery need explicit proof.
 3. Test a quiet window and return to idle. Cover a change while work runs,
    replacement of a pending deadline, failure and later recovery, late
    completion after retirement, and the applicable sleep/resume behavior.

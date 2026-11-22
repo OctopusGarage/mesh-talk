@@ -196,6 +196,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         ),
                     )),
                 );
+                let profile_changes = runtime.handle().subscribe_own_account_profile_changes();
                 runtime.register_graceful_host_task(
                     profile_shutdown,
                     tokio::spawn(after_install(
@@ -205,6 +206,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                             authority.clone(),
                             integration_state.clone(),
                             node_handle.clone(),
+                            profile_changes,
                             profile_stopping,
                         ),
                     )),
@@ -380,11 +382,25 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
     authority: RuntimeAuthority,
     state: crate::state::AppState,
     node: crate::chat_commands::NodeState,
+    mut changes: tokio::sync::watch::Receiver<()>,
     mut stopping: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    use tokio::time::{Duration, Instant, sleep_until};
+
+    const REPAIR: Duration = Duration::from_secs(300);
+    const RETRY: Duration = Duration::from_millis(500);
+    let mut next = Instant::now();
     loop {
-        tokio::select! { _ = &mut stopping => return, _ = interval.tick() => {} }
+        tokio::select! {
+            biased;
+            _ = &mut stopping => return,
+            changed = changes.changed() => if changed.is_err() { return; },
+            _ = sleep_until(next) => {},
+        }
+        // Reconcile the latest committed value after a burst. Arrivals during
+        // the read or the owned credential write retain a follow-up wake.
+        changes.borrow_and_update();
+        next = Instant::now() + REPAIR;
         let auth = tokio::select! {
             _ = &mut stopping => return,
             auth = state.auth_operation.clone().lock_owned() => auth,
@@ -400,6 +416,7 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
                 log::warn!(
                     "Account profile reconciliation deferred after storage failure: {error}"
                 );
+                next = Instant::now() + RETRY;
                 continue;
             }
         };
@@ -443,6 +460,8 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
                     serde_json::json!({"user": crate::commands::UserInfo::from(user), "account_id": identity.0, "device_id": identity.1}),
                 );
             });
+        } else {
+            next = Instant::now() + RETRY;
         }
     }
 }
@@ -966,6 +985,7 @@ mod tests {
             authority.clone(),
             state.clone(),
             node.clone(),
+            handle.subscribe_own_account_profile_changes(),
             stopping,
         ));
         assert!(

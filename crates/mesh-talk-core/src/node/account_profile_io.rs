@@ -42,6 +42,14 @@ impl Node {
             .min())
     }
 
+    /// Observe committed changes to this account's current signed profile.
+    pub fn subscribe_own_account_profile_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.profiles
+            .lock()
+            .expect("profiles mutex not poisoned")
+            .subscribe_own_changes(self.account_id())
+    }
+
     pub fn account_profile(&self, account_id: &str) -> Result<Option<AccountProfile>, LogError> {
         #[cfg(test)]
         if let Some(hook) = self.profile_read_hook.lock().unwrap().take() {
