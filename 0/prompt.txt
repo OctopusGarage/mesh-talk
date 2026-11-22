@@ -1,0 +1,17 @@
+so the REQ is implement and verify??
+
+---
+
+why pending, complete all of them?
+
+---
+
+so continue to start the next requirement now?
+
+---
+
+now analyze whether it can be optimize to smaller ?
+
+---
+
+optimism and implement and verify all of them

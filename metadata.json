@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M810EVZK638CN5P8VF9J8CXE",
+  "strategy": "manual-commit",
+  "branch": "requirements-work",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".github/workflows/release.yml",
+    "docs/updates.md",
+    "scripts/diagnostics/release-assets.test.mjs",
+    "scripts/diagnostics/release-workflow.test.mjs",
+    "scripts/release/package-app.sh"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 113087,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 33440768,
+    "output_tokens": 28406,
+    "api_call_count": 122,
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 118,
+    "layers": {
+      "betterleaks": 2,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 126,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
