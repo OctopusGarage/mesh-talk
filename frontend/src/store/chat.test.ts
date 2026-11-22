@@ -7977,6 +7977,10 @@ it.each(["held", "failed"])(
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => storage.set(key, value),
     });
+    const page = Object.assign(new EventTarget(), {
+      visibilityState: "visible",
+    });
+    vi.stubGlobal("document", page);
     const scope = {
       owner: "host",
       account_id: "myacct",
@@ -8055,6 +8059,19 @@ it.each(["held", "failed"])(
       captured.current?.onRosterChanged({ ...scope, runtime_id: "retired" });
       await vi.advanceTimersByTimeAsync(0);
       expect(invoke).not.toHaveBeenCalled();
+      page.visibilityState = "hidden";
+      page.dispatchEvent(new Event("visibilitychange"));
+      for (let i = 0; i < 10; i++) captured.current?.onRosterChanged(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke).not.toHaveBeenCalled();
+      captured.current?.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+        "owner_reception_page",
+        "owner_reception_ack",
+      ]);
+      invoke.mockClear();
+      page.visibilityState = "visible";
       captured.current?.onRosterChanged(scope);
       await vi.advanceTimersByTimeAsync(0);
       expect(useChat.getState().peers).toEqual([peer]);
@@ -8082,6 +8099,15 @@ it.each(["held", "failed"])(
       if (mode === "failed")
         expect(usePresence.getState().unavailable).toBe(true);
       else expect(usePresence.getState().map.friend.online).toBe(true);
+      invoke.mockClear();
+      page.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke.mock.calls.map(([command]) => command)).toContain(
+        "get_presence",
+      );
+      expect(invoke.mock.calls.map(([command]) => command)).toContain(
+        "list_peers",
+      );
     } finally {
       stopPresence();
       stopChat();

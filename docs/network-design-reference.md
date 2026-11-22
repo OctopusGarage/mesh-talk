@@ -241,7 +241,10 @@ The desktop forwards coalesced roster changes as installation-scoped hints.
 Roster-only renewals bypass the durable reception page and its ACK. A retired
 runtime or locked app cannot publish them to the active renderer. Startup and
 foreground repair read current state independently of these hints, and local
-presence still expires from its last observed deadline if a hint is lost.
+presence still expires from its last observed deadline if a hint is lost. While
+the desktop document is hidden, these roster hints do not start presence or
+roster queries. Foreground activation reconciles current state. Durable message
+wakes continue to be processed while hidden.
 
 An ordinary roster invalidation shares one lazy, event-owned peer/people
 observation between the chat and presence consumers. The chat consumer uses the

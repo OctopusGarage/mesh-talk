@@ -1611,7 +1611,15 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         if (matchesRuntime(scope)) wakeReception();
       },
       onRosterChanged: (scope) => {
-        if (get().ready && matchesRuntime(scope)) applyInvalidation("roster");
+        // These hints only update the roster presentation. Activation uses a
+        // fresh snapshot, and durable receipt wakes have their own handler.
+        if (
+          get().ready &&
+          matchesRuntime(scope) &&
+          (typeof document === "undefined" ||
+            document.visibilityState !== "hidden")
+        )
+          applyInvalidation("roster");
       },
       onStateChanged: (e) => {
         const state = get();

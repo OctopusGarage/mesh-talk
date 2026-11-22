@@ -728,7 +728,7 @@
             "reference": "docs/network-design-reference.md#person-presence-contract"
           },
           {
-            "name": "One event-owned lazy peer/people observation serves independent consumers, retains original evidence age and never crosses runtime generations. Chat reuses the admitted snapshot identity on success and checks runtime identity separately on failure. Blocked group metadata does not block peer publication.",
+            "name": "One event-owned lazy peer/people observation serves independent consumers, retains original evidence age and never crosses runtime generations. Chat reuses the admitted snapshot identity on success and checks runtime identity separately on failure. Blocked group metadata does not block peer publication. Hidden renderers skip scoped roster hints, retain durable receipt processing, and reconcile on foreground activation.",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]
