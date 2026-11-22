@@ -1,0 +1,6 @@
+so continue to start the next requirement now?
+
+---
+
+For REQ-010’s first release, should contact QR codes use Mesh Talk’s existing account IDs, or should it also recognize generic vCards?
+Mesh Talk account IDs (Recommended)
