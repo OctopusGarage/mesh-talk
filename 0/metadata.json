@@ -1,0 +1,69 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M8459KBT5XYZSM24W36XAFVK",
+  "session_id": "01a1feaf-24d9-7612-a284-664abd64a2c4",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-23T12:15:14.065081Z",
+  "branch": "requirements-work",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "crates/mesh-talk-core/src/node/attachment_consent.rs",
+    "crates/mesh-talk-core/src/node/channel/checkpoint/reception.rs",
+    "crates/mesh-talk-core/src/node/delivery_observation.rs",
+    "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+    "crates/mesh-talk-core/src/node/delivery_store.rs",
+    "crates/mesh-talk-core/src/node/file_completion.rs",
+    "crates/mesh-talk-core/src/node/files/channel_receive.rs",
+    "crates/mesh-talk-core/src/node/join_history/indexed/receive.rs",
+    "crates/mesh-talk-core/src/node/received_store.rs",
+    "crates/mesh-talk-core/src/transport/diagnostics.rs",
+    "docs/performance-requirements.md",
+    "frontend/e2e/tray-navigation.spec.ts",
+    "frontend/src/features/chat/diagnostics/HostResourceMonitor.tsx",
+    "frontend/src/lib/api/diagnostics.ts",
+    "frontend/src/locales/en.json",
+    "frontend/src/locales/es.json",
+    "frontend/src/locales/ja.json",
+    "frontend/src/locales/ko.json",
+    "frontend/src/locales/pt-BR.json",
+    "frontend/src/locales/yue.json",
+    "frontend/src/locales/zh-Hans.json",
+    "frontend/src/locales/zh-Hant.json",
+    "frontend/validation.json",
+    "src-tauri/src/chat_commands/channels.rs",
+    "src-tauri/src/chat_commands/files.rs",
+    "src-tauri/src/chat_commands/messaging.rs",
+    "src-tauri/src/diagnostics.rs"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.2-sol",
+  "turn_id": "b42cf1f4f6ef",
+  "checkpoint_transcript_start": 45993,
+  "transcript_lines_at_start": 45993,
+  "compact_transcript_start": 7404,
+  "token_usage": {
+    "input_tokens": 96203,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 25017856,
+    "output_tokens": 32865,
+    "api_call_count": 94,
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 3174,
+    "layers": {
+      "betterleaks": 162,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 3027,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 412
+  }
+}

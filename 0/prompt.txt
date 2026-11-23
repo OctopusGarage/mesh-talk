@@ -1,0 +1,25 @@
+有没有复用app本身业务逻辑的数据，加入埋点之类的来统计，增加这个新的监控和数据，没带来额外的性能负担吧，不然就本末倒置了，analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+verify and do some AI evals to the changes
+
+---
+
+check 指标是否全面和专业，是否需要补充和优化修正等，analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+optimise all of them
+
+---
+
+verify and do some AI evals to the changes
+
+---
+
+发现的问题修复掉，另外我希望同样有发送消息成功，失败，超时，接受消息数量，大小，类型等等这些数据指标，全面分析一下还有哪些有用的遗漏的指标可以补充的，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+implement all of them
