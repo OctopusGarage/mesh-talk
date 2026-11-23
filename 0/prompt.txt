@@ -1,0 +1,5 @@
+重新看下全部30个需求，看看接下来做哪一个需求，analyze；analyze；analyze；analyze；analyze；
+
+---
+
+ok, continue to implement next REQ
