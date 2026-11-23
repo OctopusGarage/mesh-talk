@@ -1,0 +1,3 @@
+Act as the research sub-agent for this task.
+
+Research REQ-029, analysis only. Verify official sources of LAN Messenger, BeeBEEP, Squiggle and Bitchat for temporary local group communication and file handoff. Contrast capabilities and gaps with Mesh Talk using committed checkout at /Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-029. No builds, code edits or commits, no delegates. Write evidence in that checkout's ignored tmp/req-029-peer-evidence.md and report findings. Treat claims about user demand as hypotheses. Historical roadmap available git show 6b28c838^:docs/development-roadmap.md.
