@@ -1,0 +1,3 @@
+Act as the research sub-agent for this task.
+
+Read-only code investigation; no implementation. Work in /Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-023, exact requirement ~/Downloads/requirements-intake.md lines 843–866. Check existing group membership/device authority and call reuse constraints, report exact code references and gaps. Save concise findings in ignored tmp/req-023-admission.md inside worktree; no tests or commits.
