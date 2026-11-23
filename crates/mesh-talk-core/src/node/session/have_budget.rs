@@ -64,17 +64,15 @@ impl ReceivedHave {
             return Err(overload());
         }
         let comparison_fingerprint = if eligible {
-            use sha2::{Digest, Sha256};
             ids.sort_unstable();
             if ids.windows(2).any(|pair| pair[0] == pair[1]) {
                 None
             } else {
-                let mut hash = Sha256::new();
-                hash.update((ids.len() as u64).to_le_bytes());
+                let mut hash = mesh_replication::InventoryDigest::new(ids.len() as u64);
                 for id in &ids {
                     hash.update(id.as_bytes());
                 }
-                Some(hash.finalize().into())
+                Some(hash.finish())
             }
         } else {
             None

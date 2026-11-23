@@ -16,9 +16,7 @@ fn invalid() -> SenderKeyError {
 }
 
 impl SenderChain {
-    pub(in crate::channel) fn encode_checkpoint(
-        &self,
-    ) -> Result<Zeroizing<Vec<u8>>, SenderKeyError> {
+    pub fn encode_checkpoint(&self) -> Result<Zeroizing<Vec<u8>>, SenderKeyError> {
         if self.skipped.len() > MAX_SKIPPED_TOTAL || self.order.len() != self.skipped.len() {
             return Err(invalid());
         }
@@ -44,7 +42,7 @@ impl SenderChain {
         Ok(bytes)
     }
 
-    pub(in crate::channel) fn decode_checkpoint(bytes: &[u8]) -> Result<Self, SenderKeyError> {
+    pub fn decode_checkpoint(bytes: &[u8]) -> Result<Self, SenderKeyError> {
         // No allocation depends on the declared count until size and count have
         // both been checked against the fixed local bound and exact input length.
         if !(HEADER..=MAX_BYTES).contains(&bytes.len()) || &bytes[..5] != MAGIC {

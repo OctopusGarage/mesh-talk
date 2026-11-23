@@ -449,10 +449,10 @@ async fn requester_selection_reuse_fixture(fresh_connections: bool, age_entries:
         }
         // An ordinary query remains valid even when the optional digest probe
         // was skipped or differed. Exercise its actual paged network path.
-        let mut progress = SyncProgress {
+        let mut progress = SyncProgress(legacy_round::SyncProgress {
             started: true,
             ..Default::default()
-        };
+        });
         while !progress
             .step_burst_paged(channel.as_mut().unwrap(), &store, conversation, 1)
             .await
@@ -462,7 +462,7 @@ async fn requester_selection_reuse_fixture(fresh_connections: bool, age_entries:
         for _ in 0..2 {
             completions.recv().await.unwrap();
         }
-        assert_eq!(progress.total.applied, 0);
+        assert_eq!(progress.0.total.applied, 0);
         assert_eq!(
             progress.remote_have_count(),
             Some(if round < 6 { 32 } else { 33 })
@@ -2704,7 +2704,7 @@ async fn requester_have_selection_reuse_loopback() {
         let mut channel = SecureChannel::connect(stream, &node.identity, Some(&proof.public()))
             .await.unwrap();
         // A continuing production round has already completed capability probing.
-        let mut progress = SyncProgress { started: true, ..Default::default() };
+        let mut progress = SyncProgress(legacy_round::SyncProgress { started: true, ..Default::default() });
         let store = node.sync_store(&proof.public());
         let client = progress.step_burst_paged(&mut channel, &store, conversation, 1);
         let mut appended = None;
@@ -2734,7 +2734,7 @@ async fn requester_have_selection_reuse_loopback() {
                 assert!(exported.contains(&id), "fresh cutoff omitted concurrent append");
                 assert_eq!(counts(), (2, 3));
             } else if mutation == "received" {
-                assert_eq!(progress.total.applied, 1, "peer event was not durably applied");
+                assert_eq!(progress.0.total.applied, 1, "peer event was not durably applied");
                 assert_eq!(counts(), (2, 3), "received causal event must select a new cutoff");
                 assert!(!exported.contains(&received_id), "remote Have was ignored");
             } else {
@@ -2808,8 +2808,8 @@ async fn requester_no_progress_reuses_only_local_preparation_loopback() {
             });
             let stream = tokio::net::TcpStream::connect(address).await.unwrap();
             let mut channel = SecureChannel::connect(stream, &node.identity, Some(&proof.public())).await.unwrap();
-            let mut progress = SyncProgress { started: true,
-                rounds: if max_round { MAX_SYNC_ROUNDS - 1 } else { 0 }, ..Default::default() };
+            let mut progress = SyncProgress(legacy_round::SyncProgress { started: true,
+                rounds: if max_round { MAX_SYNC_ROUNDS - 1 } else { 0 }, ..Default::default() });
             if !max_round {
                 assert!(!progress.step_burst_paged(&mut channel, &store, conversation, 1).await.unwrap());
             }
@@ -2990,8 +2990,8 @@ async fn guarded_default_fingerprint_quiet_path_survives_unrelated_source_append
             {}
             let metadata =
                 NetworkSyncStore::probe_metadata(&*store.lock().unwrap(), &conversation)?;
-            let applied = progress.total.applied;
-            let rounds = progress.rounds;
+            let applied = progress.0.total.applied;
+            let rounds = progress.0.rounds;
             drop(store);
             drop(channel);
             let (fingerprints, requests, remote_metadata) = received
@@ -3311,8 +3311,8 @@ async fn guarded_pull_subset_fixture(change: &'static str) {
             };
             let hint = NetworkSyncStore::quiet_comparison(&*store.lock().unwrap(), &conversation)?
                 .is_some();
-            let applied = progress.total.applied;
-            let pushed = progress.pushed_total;
+            let applied = progress.0.total.applied;
+            let pushed = progress.0.pushed_total;
             let intersection = progress.remote_have_count();
             drop(store);
             drop(channel);
@@ -3615,4 +3615,97 @@ async fn legacy_optional_custody_close_does_not_defer_completed_control_fanout()
         assert!(source.channel_custody_observations(conversation, event).is_empty(),
             "a closed optional query must publish neither positive nor negative custody evidence");
     }).await.expect("legacy optional custody scenario timed out");
+}
+
+#[tokio::test]
+async fn paged_reconciliation_accepts_an_alternate_frame_session() {
+    struct MemorySession {
+        peer: crate::identity::device::PublicIdentity,
+        outgoing: tokio::sync::mpsc::Sender<Vec<u8>>,
+        incoming: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    }
+
+    impl SdkSession for MemorySession {
+        type Peer = ReconciliationPeer;
+        type Error = SessionError;
+
+        fn peer_identity(&self) -> &crate::identity::device::PublicIdentity {
+            &self.peer
+        }
+
+        async fn send(&mut self, frame: &[u8]) -> Result<(), SessionError> {
+            self.outgoing.send(frame.to_vec()).await.unwrap();
+            Ok(())
+        }
+
+        async fn recv(&mut self) -> Result<Vec<u8>, SessionError> {
+            Ok(self.incoming.recv().await.unwrap())
+        }
+    }
+
+    let (_directory, store, signer, conversation) = tiny_fixture();
+    let event = Event::new(
+        &signer,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![],
+    );
+    let recipient = DeviceIdentity::generate();
+    let mut source = EventLog::default();
+    source.append(event.clone()).unwrap();
+    let (to_server, from_client) = tokio::sync::mpsc::channel(4);
+    let (to_client, from_server) = tokio::sync::mpsc::channel(4);
+    let mut client = MemorySession {
+        peer: signer.public(),
+        outgoing: to_server,
+        incoming: from_server,
+    };
+    let mut server = MemorySession {
+        peer: recipient.public(),
+        outgoing: to_client,
+        incoming: from_client,
+    };
+    let destination = Mutex::new(store);
+    let source = Mutex::new(source);
+    let (destination, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
+            async move {
+                let mut progress = SyncProgress::default();
+                while !progress
+                    .step_backend(
+                        &mut client,
+                        &PagedNetworkBackend(&destination, None),
+                        conversation,
+                        1,
+                    )
+                    .await
+                    .unwrap()
+                {}
+                destination
+            },
+            async {
+                let backend = LegacyCollectingNetworkAdapter(&source);
+                while let Some(frame) = server.incoming.recv().await {
+                    serve_wire_backend(&mut server, &backend, &frame)
+                        .await
+                        .unwrap();
+                }
+            },
+        )
+    })
+    .await
+    .expect("in-memory reconciliation timed out");
+    assert!(
+        destination
+            .lock()
+            .unwrap()
+            .repo
+            .get(&event.id)
+            .unwrap()
+            .is_some()
+    );
 }

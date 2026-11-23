@@ -62,6 +62,29 @@ access. Network waits in one producer must not serialize identity, presence,
 history or unrelated sends. Retirement still waits for every admitted lease;
 session authorization continues to enclose synchronous commits.
 
+### Mesh Foundation libraries
+
+Mesh Talk composes seven libraries from the [Mesh Foundation source snapshot](../vendor/mesh-foundation/README.md).
+
+| Library | Reusable implementation |
+| --- | --- |
+| `mesh-connect` | Noise sessions, bounded framing, sockets, signed discovery and candidate selection |
+| `mesh-replication` | Inventories and digests, bounded reconciliation, paged requester and responder |
+| `mesh-identity` | Device signing keys, account identities and device certificates |
+| `mesh-e2ee` | Ratchets, sender keys and encrypted-state checkpoints |
+| `mesh-storage` | Encrypted records, durable append and atomic rewrite |
+| `mesh-mailbox` | Opaque envelopes, bounded delta retrieval, capacity and durable spool |
+| `mesh-blob` | Chunk encryption, indexed nonces and integrity checks |
+
+Replication accepts session and authorized store adapters. Mesh Talk uses its
+existing authenticated protocol and indexed event repository to implement them.
+The node owns group membership, key distribution, and account trust. It also
+schedules discovery, reconnects, and relay maintenance. Its mailbox service
+uses the library's request dispatcher with the existing indexed custody store.
+Other hosts can use the library's bounded spool with their own admission and
+expiry scheduling. File transfers use the library's chunk primitives while
+Mesh Talk owns the manifest and transfer lifecycle.
+
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
 ### Protected messages
@@ -167,7 +190,7 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   authenticated identity is still checked afterward. `accept_with_admission`
   lets an SDK host reject a verified device before sending its own identity auth.
   Noise XX still reveals the responder's static key, so this is not anonymity.
-- **DM crypto** — **Double Ratchet** (`ratchet/state.rs` + `node/dm_ratchet.rs`):
+- **DM crypto** — **Double Ratchet** (`mesh-e2ee::ratchet` + `node/dm_ratchet.rs`):
   `shared_root = HKDF(DH(me,peer))`; init_alice/init_bob; DH ratchet on each inbound →
   fresh DH chains provide forward secrecy + post-compromise recovery, subject to
   the bootstrap limitation below; bounded out-of-order (1000/2000); lower
@@ -192,7 +215,7 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   and durable clear tombstones preserve offline convergence without coupling
   updates to membership epochs or ordinary message retention. Private avatar
   overrides retain their account-document owner. See [group announcements](help/topics/channels.md#group-announcements).
-- **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
+- **Channels** — per-sender **sender-key** group ratchet (`mesh-e2ee::sender_key`):
   single-use message keys; membership add/remove rotates the **epoch** and re-distributes
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are
   persisted so a restarted node can resume sending. The static-recipient sealed

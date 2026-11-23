@@ -352,7 +352,7 @@ impl Node {
         conversation: Option<ConversationId>,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.opaque_relay_round_for(channel, recipient, conversation, None)
             .await
@@ -366,7 +366,7 @@ impl Node {
         confirm: Option<EventId>,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.opaque_relay_round_with_intent(
             channel,
@@ -387,7 +387,7 @@ impl Node {
         confirm: Option<EventId>,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         if !self.relay_send_allowed(channel.peer_identity()) {
             return Ok(Vec::new());
@@ -475,7 +475,7 @@ impl Node {
         super::session::SessionError,
     >
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let result = self
             .opaque_relay_round_with_intent_observing(
@@ -506,7 +506,7 @@ impl Node {
         intent: MailboxIntent,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         Ok(self
             .opaque_relay_round_with_intent_observing(
@@ -531,7 +531,7 @@ impl Node {
         observe: bool,
     ) -> Result<PublicationRound, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         if !self.relay_send_allowed(channel.peer_identity())
             && !self.relay_receive_allowed(channel.peer_identity())
@@ -589,7 +589,7 @@ impl Node {
         mailbox: RelayMailbox,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.opaque_mailbox_round_confirmed(
             channel,
@@ -613,7 +613,7 @@ impl Node {
         intent: MailboxIntent,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         Ok(self
             .opaque_mailbox_round_confirmed_observing(
@@ -640,7 +640,7 @@ impl Node {
         observe: bool,
     ) -> Result<PublicationRound, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let privacy = self.privacy.generation.load(Ordering::SeqCst);
         let bridge = self.bridge_generation.load(Ordering::SeqCst);
@@ -768,7 +768,7 @@ impl Node {
         progress: &mut OpaqueMailboxProgress,
     ) -> Result<bool, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.advance_opaque_mailbox_if(channel, progress, &|| true)
             .await
@@ -781,7 +781,7 @@ impl Node {
         authorize_upload: &F,
     ) -> Result<bool, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
         F: Fn() -> bool + Sync,
     {
         if channel.peer_identity() != &progress.relay {

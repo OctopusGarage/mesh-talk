@@ -1,0 +1,20 @@
+[package]
+name = "mesh-identity"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/OctopusGarage/mesh-foundation"
+description = "Mesh Talk-compatible device identities and account certificates"
+
+[features]
+test-observability = []
+
+[dependencies]
+bincode = "1.3"
+ed25519-dalek = "3"
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+x25519-dalek = { version = "3", features = ["static_secrets", "getrandom"] }
+zeroize = "1"

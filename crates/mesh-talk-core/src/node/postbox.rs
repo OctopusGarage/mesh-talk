@@ -192,7 +192,7 @@ impl super::Node {
 #[cfg(test)]
 pub async fn serve_relay_connection<IO>(channel: SecureChannel<IO>, store: Arc<Mutex<PostOffice>>)
 where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
 {
     serve_relay_or_bridge_connection(channel, store, None).await;
 }
@@ -203,7 +203,7 @@ pub(super) async fn serve_relay_or_bridge_connection<IO>(
     store: Arc<Mutex<PostOffice>>,
     directory: Option<Arc<Mutex<BridgeDirectory>>>,
 ) where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
 {
     serve_relay_or_bridge_connection_with_trust(channel, store, directory, None, None).await;
 }
@@ -221,7 +221,7 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
     federation_trust: Option<RelayTrust>,
     origin_signer: Option<&DeviceIdentity>,
 ) where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let mut first = match tokio::time::timeout(RELAY_IDLE_TIMEOUT, channel.recv()).await {
         Ok(Ok(bytes)) => bytes,

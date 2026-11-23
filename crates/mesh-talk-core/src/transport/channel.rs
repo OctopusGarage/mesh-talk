@@ -8,12 +8,17 @@ use crate::discovery::Announce;
 use crate::identity::account_transition::AccountBindingTransition;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 #[cfg(test)]
+use crate::transport::MAX_FRAME;
+#[cfg(test)]
 use crate::transport::auth::build_auth;
 use crate::transport::handshake::{Handshake, HandshakeOutput};
 use crate::transport::presence_auth;
 use crate::transport::session::Session;
-use crate::transport::{MAX_FRAME, TransportError, VerifiedPeer};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use crate::transport::{TransportError, VerifiedPeer};
+pub(crate) use mesh_connect::frame::{read_frame, write_frame};
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
 #[cfg(test)]
 type TestFrameObserver = dyn Fn(bool, &[u8]) + Send + Sync;
@@ -549,57 +554,6 @@ fn verify_peer(
 ) -> Result<VerifiedPeer, TransportError> {
     let bytes = session.decrypt(peer_ct)?;
     presence_auth::verify(&bytes, handshake_hash, remote_static)
-}
-
-/// Write a length-prefixed frame (4-byte big-endian length + blob) and flush.
-pub(crate) async fn write_frame<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    blob: &[u8],
-) -> Result<(), TransportError> {
-    let len = blob.len() as u32;
-    w.write_all(&len.to_be_bytes()).await?;
-    w.write_all(blob).await?;
-    w.flush().await?;
-    Ok(())
-}
-
-/// Read one length-prefixed frame, rejecting absurd lengths before allocating.
-pub(crate) async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, TransportError> {
-    fn incomplete_frame(error: std::io::Error) -> std::io::Error {
-        use std::io::ErrorKind;
-        match error.kind() {
-            ErrorKind::UnexpectedEof
-            | ErrorKind::ConnectionReset
-            | ErrorKind::ConnectionAborted
-            | ErrorKind::BrokenPipe
-            | ErrorKind::NotConnected => std::io::Error::new(ErrorKind::InvalidData, error),
-            _ => error,
-        }
-    }
-
-    let mut len_buf = [0u8; 4];
-    // Only a close before any frame bytes is a compatibility/liveness signal.
-    // Partial framing is malformed data and must never authorize a downgrade.
-    let received = r.read(&mut len_buf).await?;
-    if received == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "transport closed at frame boundary",
-        )
-        .into());
-    }
-    if received < len_buf.len() {
-        r.read_exact(&mut len_buf[received..])
-            .await
-            .map_err(incomplete_frame)?;
-    }
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > MAX_FRAME {
-        return Err(TransportError::FrameTooLarge(len));
-    }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf).await.map_err(incomplete_frame)?;
-    Ok(buf)
 }
 
 #[cfg(test)]

@@ -1,11 +1,3 @@
-//! Double Ratchet for DMs (Phase 3): forward secrecy + post-compromise security over
-//! the existing X25519 / HKDF-SHA256 / AES-256-GCM primitives. `kdf` is the key
-//! schedule; this module is the state machine. Pure — durable state + the Node DM
-//! integration are later plans.
+//! Compatibility exports for the existing Double Ratchet API.
 
-mod kdf;
-pub mod state;
-
-pub(crate) use kdf::{kdf_ck, message_keys};
-
-pub use state::{Header, RatchetError, RatchetState, init_alice, init_bob};
+pub use mesh_e2ee::ratchet::{Header, RatchetError, RatchetState, init_alice, init_bob, state};

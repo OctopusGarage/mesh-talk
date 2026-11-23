@@ -4,27 +4,7 @@ use super::{ApplyReport, FileConsentStatus};
 use crate::eventlog::{AppendOutcome, ConversationId, Event, EventId, LogError};
 use std::collections::HashSet;
 
-/// Scalar metadata from a finite owned view or an exactly qualified probe cache.
-/// This grants no Have/export authority. A missing fingerprint skips the optional
-/// probe; it never denotes an empty set.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SyncMetadata {
-    pub count: u64,
-    pub channel_v2: bool,
-    pub channel_v3: bool,
-    pub channel_v4: bool,
-    pub channel_v5: bool,
-    pub fingerprint: Option<[u8; 32]>,
-}
-
-/// Local scheduling evidence for a completed quiet remote subset, never equality,
-/// custody or delivery. The issuing backend must revalidate the opaque local token.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct QuietComparison {
-    pub local_token: [u8; 32],
-    pub remote_fingerprint: [u8; 32],
-    pub remote_count: u64,
-}
+pub use mesh_replication::legacy_round::{QuietComparison, SyncMetadata};
 
 /// Work includes rejected rows and graph edges, not just selected output. The
 /// transport releases the store lock and yields after each preparation step.

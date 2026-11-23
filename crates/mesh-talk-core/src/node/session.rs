@@ -8,11 +8,14 @@
 //! The store is shared as a `&Mutex<S>` and locked only for the synchronous
 //! handler calls — never across an `.await` — so a `std::sync::Mutex` is correct.
 
-use crate::eventlog::event::{ConversationId, EventId, EventKind};
+#[cfg(test)]
+use crate::eventlog::event::EventKind;
+use crate::eventlog::event::{ConversationId, EventId};
+#[cfg(test)]
+use crate::eventlog::sync::SyncRequest;
 use crate::eventlog::sync::network::NetworkSyncStore;
 use crate::eventlog::sync::{
-    ApplyReport, FileConsentStatus, FpRequest, FpResponse, MAX_REJECTED_DETAIL, SyncFollowup,
-    SyncRequest, SyncResponse, SyncStore,
+    ApplyReport, FileConsentStatus, FpRequest, FpResponse, SyncFollowup, SyncResponse, SyncStore,
 };
 use crate::transport::{MAX_PLAINTEXT, SecureChannel, TransportError};
 mod backend;
@@ -20,20 +23,47 @@ mod have_budget;
 pub(crate) mod mailbox;
 pub(crate) mod mailbox_watch;
 use backend::*;
-use bincode::Options;
 pub use have_budget::RemoteHaveBudget;
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use mesh_replication::session::{
+    HaveError, HaveFrame, HaveLimits, ReconciliationSession as SdkSession, receive_have,
+};
+
+type ReconciliationPeer = crate::identity::device::PublicIdentity;
+
+trait ReconciliationSession: SdkSession<Peer = ReconciliationPeer, Error = SessionError> {}
+impl<T: SdkSession<Peer = ReconciliationPeer, Error = SessionError>> ReconciliationSession for T {}
+
+impl<IO: AsyncRead + AsyncWrite + Unpin + Send> SdkSession for SecureChannel<IO> {
+    type Peer = ReconciliationPeer;
+    type Error = SessionError;
+
+    fn peer_identity(&self) -> &crate::identity::device::PublicIdentity {
+        SecureChannel::peer_identity(self)
+    }
+
+    async fn send(&mut self, frame: &[u8]) -> Result<(), SessionError> {
+        Ok(SecureChannel::send(self, frame).await?)
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>, SessionError> {
+        Ok(SecureChannel::recv(self).await?)
+    }
+}
+
 /// Backstop on sync rounds for one conversation (a peer that resends
 /// non-applying events forever can't spin us indefinitely).
-const MAX_SYNC_ROUNDS: usize = 10_000;
+#[cfg(test)]
+const MAX_SYNC_ROUNDS: usize = legacy_round::MAX_SYNC_ROUNDS;
 
 /// Keep file bursts short enough for the transfer scheduler's per-step deadline
 /// and to let other destinations make progress. Existing peers already accept
 /// consecutive Followup frames, so this does not change the wire format.
-pub(in crate::node) const FILE_FOLLOWUP_BURST: usize = 4;
+pub(in crate::node) const FILE_FOLLOWUP_BURST: usize = legacy_round::FILE_FOLLOWUP_BURST;
 
 /// Bytes per event id (a 32-byte hash) — used to estimate the `have`-set bandwidth in the
 /// sync-cost telemetry below.
@@ -51,131 +81,20 @@ const MAX_HAVE_CHUNKS: usize = 1000;
 /// caps it at ~6 MB while staying far above any realistic conversation's id-set.
 pub(super) const MAX_HAVE_IDS_TOTAL: usize = 200_000;
 
-/// One framed sync message on the wire.
-///
-/// The requester's and responder's `have` id-sets are streamed as a sequence of
-/// `ReqHave`/`RespHave` chunk frames (terminated by `more == false`) rather than
-/// inlined into `Request`/`Response`, so a conversation with more event-ids than
-/// fit one frame (~2040) still reconciles. `Request`/`Response` therefore carry an
-/// empty `have` on this networked path (the in-process `reconcile` keeps inlining it).
-#[derive(Debug, Serialize, Deserialize)]
-enum SyncWire {
-    Request(SyncRequest),
-    Response(SyncResponse),
-    Followup(SyncFollowup),
-    ReqHave(HaveChunk),
-    RespHave(HaveChunk),
-    // Appended (stable discriminants) for the whole-conversation fingerprint short-circuit.
-    FpRequest(FpRequest),
-    FpResponse(FpResponse),
-    // Optional final custody probe. Legacy endpoints close this disposable
-    // connection; ordinary reconciliation remains byte-for-byte compatible.
-    DurableHaveRequest {
-        conversation: ConversationId,
-        event_id: EventId,
-    },
-    DurableHaveResponse {
-        conversation: ConversationId,
-        event_id: EventId,
-        stored: bool,
-    },
-    FileConsentRequest {
-        file: ConversationId,
-        manifest: EventId,
-    },
-    FileConsentResponse {
-        file: ConversationId,
-        manifest: EventId,
-        status: FileConsentStatus,
-    },
-    /// Appended variants gate kind-14 events from pre-replica builds. Older
-    /// decoders close on these before receiving an unsupported event.
-    FpRequestV2(FpRequest),
-    RequestV2(SyncRequest),
-    FollowupV2(SyncFollowup),
-    UpgradeRequired {
-        conversation: ConversationId,
-    },
-    SignedFileConsentRequest {
-        file: ConversationId,
-        manifest: EventId,
-    },
-    SignedFileConsentResponse {
-        file: ConversationId,
-        manifest: EventId,
-        control: Option<crate::eventlog::Event>,
-    },
-    /// History policy and key release require support for kinds 15 and 16.
-    /// Keep these appended so every earlier envelope retains its wire tag.
-    FpRequestV3(FpRequest),
-    RequestV3(SyncRequest),
-    FollowupV3(SyncFollowup),
-    /// Account-principal membership and certified-device inheritance (17/18).
-    FpRequestV4(FpRequest),
-    RequestV4(SyncRequest),
-    FollowupV4(SyncFollowup),
-    /// Optional local-artwork reuse; old decoders close this disposable session.
-    StickerFileConsentRequest {
-        file: ConversationId,
-        manifest: EventId,
-        headers: Vec<crate::eventlog::Event>,
-    },
-    StickerFileConsentResponse {
-        file: ConversationId,
-        manifest: EventId,
-        control: Option<crate::eventlog::Event>,
-    },
-    StickerFileProofRequest {
-        file: ConversationId,
-        manifest: EventId,
-    },
-    StickerFileProofResponse {
-        file: ConversationId,
-        manifest: EventId,
-        headers: Option<Vec<crate::eventlog::Event>>,
-    },
-    /// Appended optional metadata exchange; MFM3 and history card bytes stay frozen.
-    FileMessageIdentitiesRequest {
-        requests: Vec<(ConversationId, EventId)>,
-        offers: Vec<crate::eventlog::Event>,
-    },
-    FileMessageIdentitiesResponse {
-        bundles: Vec<crate::eventlog::Event>,
-    },
-    /// Encrypted owner group metadata requires kind 19.
-    FpRequestV5(FpRequest),
-    RequestV5(SyncRequest),
-    FollowupV5(SyncFollowup),
-    SignedChunkRequest {
-        file: ConversationId,
-        author: crate::eventlog::Author,
-        index: u32,
-    },
-    SignedChunkResponse {
-        file: ConversationId,
-        index: u32,
-        event: Option<crate::eventlog::Event>,
-    },
-    SignedChunkAvailabilityRequest {
-        file: ConversationId,
-        author: crate::eventlog::Author,
-        start: u32,
-        count: u32,
-    },
-    SignedChunkAvailabilityResponse {
-        file: ConversationId,
-        start: u32,
-        availability: Option<Vec<bool>>,
-    },
-}
+use mesh_replication::legacy_wire::{self, HaveChunk, SyncWire};
 
-fn supports_event_kind(kind: EventKind, v2: bool, v3: bool, v4: bool, v5: bool) -> bool {
-    match kind {
-        EventKind::ChannelMetadata => v5,
-        EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance => v4,
-        EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory => v3,
-        EventKind::ChannelReplica => v2,
-        _ => true,
+use mesh_replication::legacy_round::{self, RoundFault};
+
+impl From<RoundFault> for SessionError {
+    fn from(error: RoundFault) -> Self {
+        match error {
+            RoundFault::Wire(message) => Self::Serialization(message),
+            RoundFault::UnexpectedMessage => Self::UnexpectedMessage,
+            RoundFault::NoProgress => Self::NoProgress,
+            RoundFault::CounterExhausted => {
+                crate::eventlog::LogError::RepositoryCounterExhausted.into()
+            }
+        }
     }
 }
 
@@ -318,15 +237,6 @@ pub(in crate::node) fn event_fits_frame(event: &crate::eventlog::Event) -> bool 
     })
 }
 
-/// One chunk of a streamed `have` id-set.
-#[derive(Debug, Serialize, Deserialize)]
-struct HaveChunk {
-    conversation: ConversationId,
-    ids: Vec<EventId>,
-    /// `true` if more chunks of this id-set follow.
-    more: bool,
-}
-
 /// Errors from a sync session.
 #[derive(Debug)]
 pub enum SessionError {
@@ -379,23 +289,11 @@ impl From<TransportError> for SessionError {
 }
 
 fn encode(wire: &SyncWire) -> Result<Vec<u8>, SessionError> {
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .reject_trailing_bytes()
-        .serialize(wire)
-        .map_err(|e| SessionError::Serialization(e.to_string()))
+    legacy_wire::encode(wire).map_err(SessionError::Serialization)
 }
 
 fn decode(bytes: &[u8]) -> Result<SyncWire, SessionError> {
-    if bytes.len() > MAX_PLAINTEXT {
-        return Err(SessionError::Serialization("oversized sync frame".into()));
-    }
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(MAX_PLAINTEXT as u64)
-        .reject_trailing_bytes()
-        .deserialize(bytes)
-        .map_err(|e| SessionError::Serialization(e.to_string()))
+    legacy_wire::decode(bytes).map_err(SessionError::Serialization)
 }
 
 /// A qualified exact storage claim over the authenticated channel, issued only
@@ -619,7 +517,7 @@ where
     }
 }
 
-pub(in crate::node) const MAX_FILE_IDENTITIES: usize = 8;
+pub(in crate::node) const MAX_FILE_IDENTITIES: usize = legacy_round::MAX_FILE_IDENTITIES;
 
 /// Optional exact-ID metadata, separately negotiated from attachment bytes/history.
 pub(crate) async fn request_file_message_identities<IO>(
@@ -681,55 +579,51 @@ where
 /// Receive a streamed `have` id-set (chunk frames until `more == false`), accepting
 /// only the expected variant (`want_req` → `ReqHave`, else `RespHave`). Bounded by
 /// `MAX_HAVE_CHUNKS` so a peer can't stream forever.
-async fn recv_have<IO>(
-    channel: &mut SecureChannel<IO>,
+async fn recv_have(
+    channel: &mut impl ReconciliationSession,
     want_req: bool,
     conversation: ConversationId,
-) -> Result<Vec<EventId>, SessionError>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut have = Vec::new();
-    for _ in 0..MAX_HAVE_CHUNKS {
-        let chunk = match decode(&channel.recv().await?)? {
-            SyncWire::ReqHave(c) if want_req => c,
-            SyncWire::RespHave(c) if !want_req => c,
+) -> Result<Vec<EventId>, SessionError> {
+    receive_have(channel, HAVE_LIMITS, |bytes| {
+        let chunk = match decode(bytes)? {
+            SyncWire::ReqHave(chunk) if want_req => chunk,
+            SyncWire::RespHave(chunk) if !want_req => chunk,
             _ => return Err(SessionError::UnexpectedMessage),
         };
         if chunk.conversation != conversation {
             return Err(SessionError::UnexpectedMessage);
         }
-        // A well-behaved sender chunks at HAVE_IDS_PER_CHUNK; reject an over-stuffed chunk so
-        // a peer can't pack a frame full of ids to amplify the accumulated `have` (bounds the
-        // total at HAVE_IDS_PER_CHUNK * MAX_HAVE_CHUNKS).
-        if chunk.ids.len() > HAVE_IDS_PER_CHUNK {
-            return Err(SessionError::UnexpectedMessage);
-        }
-        // Direct cap on accumulated ids (not just per-chunk × chunk-count), bounding relay memory.
-        if have.len() + chunk.ids.len() > MAX_HAVE_IDS_TOTAL {
-            return Err(SessionError::UnexpectedMessage);
-        }
-        let required = have.len() + chunk.ids.len();
-        if required > have.capacity() {
-            let target = required
-                .max(have.capacity().saturating_mul(2))
-                .min(MAX_HAVE_IDS_TOTAL);
-            have.try_reserve_exact(target - have.len())
-                .map_err(|_| SessionError::ResourceUnavailable)?;
-            if have.capacity() > MAX_HAVE_IDS_TOTAL {
-                return Err(SessionError::ResourceUnavailable);
-            }
-        }
-        have.extend(chunk.ids);
-        if !chunk.more {
-            return Ok(have);
-        }
-    }
-    Err(SessionError::UnexpectedMessage)
+        Ok(HaveFrame {
+            ids: chunk.ids,
+            more: chunk.more,
+        })
+    })
+    .await
+    .map_err(SessionError::from)
 }
 
-async fn recv_have_owned<IO: AsyncRead + AsyncWrite + Unpin>(
-    channel: &mut SecureChannel<IO>,
+const HAVE_LIMITS: HaveLimits = HaveLimits {
+    ids_per_frame: HAVE_IDS_PER_CHUNK,
+    frames: MAX_HAVE_CHUNKS,
+    total_ids: MAX_HAVE_IDS_TOTAL,
+};
+
+impl From<HaveError<SessionError>> for SessionError {
+    fn from(error: HaveError<SessionError>) -> Self {
+        match error {
+            HaveError::Exchange(error) => error,
+            HaveError::Limit => Self::UnexpectedMessage,
+            HaveError::Allocation => Self::ResourceUnavailable,
+            HaveError::CountMismatch => crate::eventlog::LogError::CorruptFile(
+                "network Have count disagrees with captured view".into(),
+            )
+            .into(),
+        }
+    }
+}
+
+async fn recv_have_owned(
+    channel: &mut impl ReconciliationSession,
     want_req: bool,
     conversation: ConversationId,
     budget: Option<&RemoteHaveBudget>,
@@ -761,7 +655,7 @@ pub async fn request_round<S, IO>(
 ) -> Result<ApplyReport, SessionError>
 where
     S: SyncStore,
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let mut progress = SyncProgress::default();
     while !progress.step(channel, store, conversation).await? {}
@@ -769,40 +663,24 @@ where
         target: "mesh_talk::sync",
         "sync conv={} have={} have_kib={} applied={} dup={} pushed={} diff={} rounds={}",
         hex::encode(&conversation.as_bytes()[..4]),
-        progress.first_have,
-        progress.first_have * EVENT_ID_BYTES / 1024,
-        progress.total.applied,
-        progress.total.duplicates,
-        progress.pushed_total,
-        progress.total.applied + progress.pushed_total,
-        progress.rounds,
+        progress.0.first_have,
+        progress.0.first_have * EVENT_ID_BYTES / 1024,
+        progress.0.total.applied,
+        progress.0.total.duplicates,
+        progress.0.pushed_total,
+        progress.0.total.applied + progress.0.pushed_total,
+        progress.0.rounds,
     );
-    Ok(progress.total)
+    Ok(progress.0.total)
 }
 
-/// Resume only between complete protocol exchanges, never midway through
-/// a Noise frame. A caller timing out a step must discard its channel and state.
+/// Mesh Talk bindings for the SDK requester.
 #[derive(Default)]
-pub(in crate::node) struct SyncProgress {
-    started: bool,
-    v2: bool,
-    v3: bool,
-    v4: bool,
-    v5: bool,
-    rounds: usize,
-    previous_push: std::collections::HashSet<EventId>,
-    total: ApplyReport,
-    first_have: usize,
-    pushed_total: usize,
-    received_wire_total: usize,
-    comparison_disabled: bool,
-    /// Intersection of local advertised IDs and peer availability, never custody.
-    remote_have_count: Option<usize>,
-}
+pub(in crate::node) struct SyncProgress(legacy_round::SyncProgress);
 
 impl SyncProgress {
     pub(in crate::node) fn remote_have_count(&self) -> Option<usize> {
-        self.remote_have_count
+        self.0.remote_have_count
     }
 
     pub(in crate::node) async fn step<S, IO>(
@@ -813,7 +691,7 @@ impl SyncProgress {
     ) -> Result<bool, SessionError>
     where
         S: SyncStore,
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.step_burst(channel, store, conversation, 1).await
     }
@@ -827,7 +705,7 @@ impl SyncProgress {
     ) -> Result<bool, SessionError>
     where
         S: SyncStore,
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.step_backend(
             channel,
@@ -840,7 +718,7 @@ impl SyncProgress {
 
     pub(in crate::node) async fn step_burst_paged<
         S: NetworkSyncStore,
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     >(
         &mut self,
         channel: &mut SecureChannel<IO>,
@@ -856,355 +734,21 @@ impl SyncProgress {
         )
         .await
     }
-    async fn step_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpin>(
+    async fn step_backend<B: SessionBackend>(
         &mut self,
-        channel: &mut SecureChannel<IO>,
+        channel: &mut impl ReconciliationSession,
         backend: &B,
         conversation: ConversationId,
         max_followups: usize,
     ) -> Result<bool, SessionError> {
-        if max_followups == 0 || max_followups > FILE_FOLLOWUP_BURST {
-            return Err(SessionError::UnexpectedMessage);
-        }
-        backend.bind_session_peer(channel.peer_identity());
-        // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
-        // id-set; if the responder's matches, the logs are identical and we skip the O(N)
-        // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
-        // the full reconciliation below. (Correctness: a digest match means equal sets; a
-        // false match is cryptographically negligible and, since ingest re-validates, could
-        // only skip a diff — never corrupt — so this is safe.)
-        if !self.started {
-            self.started = true;
-            let (metadata, probe_view) = backend::prepared_probe(backend, &conversation).await?;
-            let local_count = usize::try_from(metadata.count)
-                .map_err(|_| crate::eventlog::LogError::RepositoryCounterExhausted)?;
-            let (local_v2, local_v3, local_v4, local_v5) = (
-                metadata.channel_v2,
-                metadata.channel_v3,
-                metadata.channel_v4,
-                metadata.channel_v5,
-            );
-            self.v2 |= local_v2 || local_v3 || local_v4 || local_v5;
-            self.v3 |= local_v3 || local_v4 || local_v5;
-            self.v4 |= local_v4 || local_v5;
-            self.v5 |= local_v5;
-            let comparison = if self.comparison_disabled {
-                None
-            } else {
-                backend.quiet_comparison(&conversation)?
-            };
-            if let Some(fp) = comparison
-                .map(|hint| hint.remote_fingerprint)
-                .or(metadata.fingerprint)
-            {
-                if let Some(view) = &probe_view {
-                    backend.validate_view(view)?;
-                }
-                let request = FpRequest {
-                    conversation,
-                    fingerprint: fp,
-                };
-                channel
-                    .send(&encode(&if self.v5 {
-                        SyncWire::FpRequestV5(request)
-                    } else if self.v4 {
-                        SyncWire::FpRequestV4(request)
-                    } else if self.v3 {
-                        SyncWire::FpRequestV3(request)
-                    } else if self.v2 {
-                        SyncWire::FpRequestV2(request)
-                    } else {
-                        SyncWire::FpRequest(request)
-                    })?)
-                    .await?;
-                match decode(&channel.recv().await?)? {
-                    SyncWire::UpgradeRequired { conversation: c }
-                        if c == conversation && !self.v5 =>
-                    {
-                        self.comparison_disabled = true;
-                        self.v5 = self.v4;
-                        self.v4 = self.v3;
-                        self.v3 = self.v2;
-                        self.v2 = true;
-                        self.started = false;
-                        return Ok(false);
-                    }
-                    SyncWire::FpResponse(FpResponse { matched: true }) => {
-                        if let Some(hint) = comparison {
-                            if !backend.validate_quiet_comparison(&conversation, hint)? {
-                                self.comparison_disabled = true;
-                                self.started = false;
-                                return Ok(false);
-                            }
-                            if let Some(view) = probe_view {
-                                backend.validate_view(&view)?;
-                                drop(backend.retain_custody_view(view)?);
-                            }
-                            self.remote_have_count = Some(have_count(hint.remote_count)?);
-                            return Ok(true);
-                        }
-                        if let Some(view) = probe_view {
-                            backend.validate_view(&view)?;
-                            drop(backend.retain_custody_view(view)?);
-                        }
-                        self.remote_have_count = Some(local_count);
-                        log::debug!(
-                            target: "mesh_talk::sync",
-                            "sync conv={} fp_match skipped",
-                            hex::encode(&conversation.as_bytes()[..4]),
-                        );
-                        return Ok(true);
-                    }
-                    SyncWire::FpResponse(FpResponse { matched: false }) => {
-                        self.comparison_disabled |= comparison.is_some();
-                        // A differing remote digest does not invalidate our
-                        // local authorization selection. Transfer its one
-                        // existing lease to the following Have/export phase.
-                        if let Some(view) = probe_view {
-                            backend.validate_view(&view)?;
-                            drop(backend.retain_custody_view(view)?);
-                        }
-                        // A complete exchange is a scheduling boundary for
-                        // bounded callers, even when reconciliation must follow.
-                        return Ok(false);
-                    }
-                    _ => return Err(SessionError::UnexpectedMessage),
-                }
-            }
-        }
-
-        // Sync-cost telemetry (see node/session.rs sync docs): we re-stream the FULL id-set
-        // (`have`) every round in both directions regardless of how small the diff is, so the
-        // metadata cost is O(N) per round. Capture N, the diff, and the round count so we can
-        // evaluate reconciliation scaling (e.g. range-based / Negentropy) on real workloads.
-        let round = self.rounds;
-        let have_view = backend::open_prepared_view(backend, &conversation).await?;
-        let local_count = have_count(backend.advertised_count(&have_view)?)?;
-        if round == 0 {
-            self.first_have = local_count;
-        }
-        self.rounds += 1;
-        let comparison_token = if !self.comparison_disabled
-            && self.received_wire_total == 0
-            && self.pushed_total == 0
-            && self.total.applied == 0
-            && self.total.rejected.is_empty()
-        {
-            backend.quiet_comparison_token(&have_view)?
-        } else {
-            None
-        };
-        // Opening Request carries an empty inline have; the real set is streamed.
-        let request = SyncRequest {
-            conversation,
-            have: Vec::new(),
-        };
-        channel
-            .send(&encode(&if self.v5 {
-                SyncWire::RequestV5(request)
-            } else if self.v4 {
-                SyncWire::RequestV4(request)
-            } else if self.v3 {
-                SyncWire::RequestV3(request)
-            } else if self.v2 {
-                SyncWire::RequestV2(request)
-            } else {
-                SyncWire::Request(request)
-            })?)
-            .await?;
-        send_have_pages(
-            channel,
-            backend,
-            &have_view,
-            conversation,
-            SyncWire::ReqHave,
-        )
-        .await?;
-
-        // Response carries the (bounded) events; the responder's have is streamed after.
-        let response = match decode(&channel.recv().await?)? {
-            SyncWire::Response(r) => r,
-            SyncWire::UpgradeRequired { conversation: c } if c == conversation && !self.v5 => {
-                self.v5 = self.v4;
-                self.v4 = self.v3;
-                self.v3 = self.v2;
-                self.v2 = true;
-                self.comparison_disabled = true;
-                self.started = false;
-                return Ok(false);
-            }
-            _ => return Err(SessionError::UnexpectedMessage),
-        };
-        if response.conversation != conversation
-            || response.events.iter().any(|event| {
-                event.conversation_id != conversation
-                    || !supports_event_kind(event.kind, self.v2, self.v3, self.v4, self.v5)
-            })
-        {
-            return Err(SessionError::UnexpectedMessage);
-        }
-        self.received_wire_total += response.events.len();
-        let remote_have = recv_have_owned(
-            channel,
-            false,
-            conversation,
-            backend.remote_have_budget(),
-            comparison_token.is_some() && self.received_wire_total == 0,
-        )
-        .await?;
-        self.remote_have_count = Some(intersection_count(backend, &have_view, &remote_have).await?);
-        let report = backend.apply(&response.events)?;
-        if backend.admission_denied() {
-            return Err(SessionError::UnexpectedMessage);
-        }
-        // Keep only the owned selection across apply, never a store guard.
-        // Ingest or concurrent changes may add causal parents or change policy;
-        // only an exact freshly qualified source may reuse prepared decisions.
-        let outgoing_view = if backend.reusable_view(&have_view)? {
-            have_view
-        } else {
-            drop(have_view);
-            backend::open_prepared_view(backend, &conversation).await?
-        };
-        let mut followups = select_export_frames(
-            backend,
-            &outgoing_view,
-            conversation,
-            &remote_have,
-            max_followups,
-        )
-        .await?;
-        let made_progress = report.applied > 0;
-        // New controls may arrive after the fingerprint probe. Complete this
-        // round empty and restart with the required capability before sending.
-        let needs_v3 = followups
-            .iter()
-            .flat_map(|frame| &frame.events)
-            .any(|event| !supports_event_kind(event.kind, true, false, false, false));
-        let needs_v4 = followups
-            .iter()
-            .flat_map(|frame| &frame.events)
-            .any(|event| !supports_event_kind(event.kind, true, true, false, false));
-        let needs_v5 = followups
-            .iter()
-            .flat_map(|frame| &frame.events)
-            .any(|event| event.kind == EventKind::ChannelMetadata);
-        let unsupported = followups
-            .iter()
-            .flat_map(|frame| &frame.events)
-            .any(|event| !supports_event_kind(event.kind, self.v2, self.v3, self.v4, self.v5));
-        if unsupported {
-            let empty = SyncFollowup {
+        self.0
+            .step(
+                channel,
+                &backend::RoundStoreAdapter(backend),
                 conversation,
-                events: Vec::new(),
-            };
-            let wire = if self.v5 {
-                SyncWire::FollowupV5(empty)
-            } else if self.v4 {
-                SyncWire::FollowupV4(empty)
-            } else if self.v3 {
-                SyncWire::FollowupV3(empty)
-            } else if self.v2 {
-                SyncWire::FollowupV2(empty)
-            } else {
-                SyncWire::Followup(empty)
-            };
-            channel.send(&encode(&wire)?).await?;
-            self.total.applied += report.applied;
-            self.total.duplicates += report.duplicates;
-            self.v2 = true;
-            self.v3 |= needs_v3;
-            self.v4 |= needs_v4;
-            self.v5 |= needs_v5;
-            self.comparison_disabled = true;
-            self.started = false;
-            self.previous_push.clear();
-            return Ok(false);
-        }
-        // Sending is not progress: projected stores can ingest a duplicate but
-        // omit it from their Have set. Require evidence of acceptance before
-        // repeating a push, unless this round advanced our own store instead.
-        if !self.previous_push.is_empty()
-            && !made_progress
-            && !remote_have.iter().any(|id| self.previous_push.contains(id))
-        {
-            // The peer did not accept our push. Preserve only qualified local
-            // preparation, never remote acceptance; cache failure cannot replace
-            // the protocol outcome. I/O failures/cancellation still drop the view.
-            drop(backend.retain_custody_view(outgoing_view));
-            return Err(SessionError::NoProgress);
-        }
-        let more_to_push = !followups.is_empty();
-        self.pushed_total += followups
-            .iter()
-            .map(|frame| frame.events.len())
-            .sum::<usize>();
-        self.previous_push = followups
-            .iter()
-            .flat_map(|frame| frame.events.iter().map(|event| event.id))
-            .collect();
-        if followups.is_empty() {
-            followups.push(SyncFollowup {
-                conversation,
-                events: Vec::new(),
-            });
-        }
-        for followup in followups {
-            backend.validate_view(&outgoing_view)?;
-            channel
-                .send(&encode(&if self.v5 {
-                    SyncWire::FollowupV5(followup)
-                } else if self.v4 {
-                    SyncWire::FollowupV4(followup)
-                } else if self.v3 {
-                    SyncWire::FollowupV3(followup)
-                } else if self.v2 {
-                    SyncWire::FollowupV2(followup)
-                } else {
-                    SyncWire::Followup(followup)
-                })?)
-                .await?;
-        }
-
-        self.total.applied += report.applied;
-        self.total.duplicates += report.duplicates;
-        // Bound accumulated reject detail across rounds (diagnostics only) so a peer that
-        // keeps a multi-round sync alive while interleaving bad events can't grow it.
-        if self.total.rejected.len() < MAX_REJECTED_DETAIL {
-            self.total.rejected.extend(report.rejected);
-        }
-
-        let complete = !made_progress && !more_to_push;
-        if !complete && round + 1 == MAX_SYNC_ROUNDS {
-            // All followups completed; the bounded-round failure also leaves
-            // unchanged local preparation reusable without claiming delivery.
-            drop(backend.retain_custody_view(outgoing_view));
-            return Err(SessionError::NoProgress);
-        }
-        if complete
-            && self.received_wire_total == 0
-            && self.pushed_total == 0
-            && self.total.applied == 0
-            && self.total.rejected.is_empty()
-            && remote_have.len() < local_count
-            && self.remote_have_count == Some(remote_have.len())
-            && let (Some(local_token), Some(remote_fingerprint)) =
-                (comparison_token, remote_have.comparison_fingerprint())
-        {
-            backend.retain_quiet_comparison(
-                &outgoing_view,
-                crate::eventlog::sync::network::QuietComparison {
-                    local_token,
-                    remote_fingerprint,
-                    remote_count: remote_have.len() as u64,
-                },
-            )?;
-        }
-        // Retain after every followup was sent successfully. Changed
-        // source/policy rejects retention; I/O failures/cancellation drop the lease.
-        // Repeated queries reuse preparation without retaining historical bodies.
-        drop(backend.retain_custody_view(outgoing_view)?);
-        Ok(complete)
+                max_followups,
+            )
+            .await
     }
 }
 
@@ -1228,7 +772,7 @@ pub async fn serve_one<S, IO>(
 ) -> Result<Served, SessionError>
 where
     S: SyncStore,
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let bytes = match channel.recv().await {
         Ok(b) => b,
@@ -1249,13 +793,13 @@ pub async fn serve_wire_bytes<S, IO>(
 ) -> Result<Served, SessionError>
 where
     S: SyncStore,
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
 {
     serve_wire_backend(channel, &LegacyCollectingNetworkAdapter(store), bytes).await
 }
 
-async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpin>(
-    channel: &mut SecureChannel<IO>,
+async fn serve_wire_backend<B: SessionBackend>(
+    channel: &mut impl ReconciliationSession,
     backend: &B,
     bytes: &[u8],
 ) -> Result<Served, SessionError> {
@@ -1322,241 +866,11 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             Ok(Served::Handled(file))
         }
 
-        SyncWire::FileMessageIdentitiesRequest { requests, offers } => {
-            if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
-                return Err(SessionError::UnexpectedMessage);
-            }
-            let conversation = requests
-                .first()
-                .map(|(file, _)| *file)
-                .or_else(|| offers.first().map(|event| event.conversation_id))
-                .unwrap_or(ConversationId::new([0; 32]));
-            for bundle in offers {
-                backend.accept_file_message_identity(bundle)?;
-            }
-            let mut seen = std::collections::HashSet::new();
-            let mut bundles = Vec::new();
-            for (file, manifest) in requests {
-                if let Some(bundle) = backend.file_message_identity(&file, &manifest)?
-                    && seen.insert(bundle.id)
-                {
-                    bundles.push(bundle);
-                }
-            }
-            channel
-                .send(&encode(&SyncWire::FileMessageIdentitiesResponse {
-                    bundles,
-                })?)
-                .await?;
-            Ok(Served::Handled(conversation))
+        _ => {
+            let scope =
+                legacy_round::serve(channel, &backend::RoundStoreAdapter(backend), bytes).await?;
+            Ok(Served::Handled(scope))
         }
-        SyncWire::StickerFileProofRequest { file, manifest } => {
-            let headers = backend.sticker_file_proof(&file, &manifest)?;
-            channel
-                .send(&encode(&SyncWire::StickerFileProofResponse {
-                    file,
-                    manifest,
-                    headers,
-                })?)
-                .await?;
-            Ok(Served::Handled(file))
-        }
-        SyncWire::StickerFileConsentRequest {
-            file,
-            manifest,
-            headers,
-        } => {
-            let control = if headers.len() <= 64
-                && headers.iter().all(|event| {
-                    event.ciphertext.is_empty() && event.parents.len() <= 1 && event.sig.len() == 64
-                }) {
-                backend.sticker_file_consent(&file, &manifest, headers)?
-            } else {
-                None
-            };
-            channel
-                .send(&encode(&SyncWire::StickerFileConsentResponse {
-                    file,
-                    manifest,
-                    control,
-                })?)
-                .await?;
-            Ok(Served::Handled(file))
-        }
-        SyncWire::SignedFileConsentRequest { file, manifest } => {
-            let control = backend.signed_file_consent(&file, &manifest)?;
-            channel
-                .send(&encode(&SyncWire::SignedFileConsentResponse {
-                    file,
-                    manifest,
-                    control,
-                })?)
-                .await?;
-            Ok(Served::Handled(file))
-        }
-        SyncWire::FileConsentRequest { file, manifest } => {
-            let status = backend.file_consent(&file, &manifest)?;
-            channel
-                .send(&encode(&SyncWire::FileConsentResponse {
-                    file,
-                    manifest,
-                    status,
-                })?)
-                .await?;
-            Ok(Served::Handled(file))
-        }
-        SyncWire::DurableHaveRequest {
-            conversation,
-            event_id,
-        } => {
-            let view = match backend.take_custody_view(&conversation)? {
-                Some(view) => view,
-                None => backend::open_prepared_view(backend, &conversation).await?,
-            };
-            let stored = backend.durable_have_in_view(&view, &conversation, &event_id)?;
-            backend.validate_view(&view)?;
-            let uncached_view = backend.retain_custody_view(view)?;
-            channel
-                .send(&encode(&SyncWire::DurableHaveResponse {
-                    conversation,
-                    event_id,
-                    stored,
-                })?)
-                .await?;
-            drop(uncached_view);
-            Ok(Served::Handled(conversation))
-        }
-        SyncWire::Request(request)
-        | SyncWire::RequestV2(request)
-        | SyncWire::RequestV3(request)
-        | SyncWire::RequestV4(request)
-        | SyncWire::RequestV5(request) => {
-            let conversation = request.conversation;
-            let v5 = matches!(decode(bytes)?, SyncWire::RequestV5(_));
-            let v4 = v5 || matches!(decode(bytes)?, SyncWire::RequestV4(_));
-            let v3 = v4 || matches!(decode(bytes)?, SyncWire::RequestV3(_));
-            let v2 = v3 || matches!(decode(bytes)?, SyncWire::RequestV2(_));
-            // The Request's inline have is empty on the networked path; read the
-            // requester's streamed have, then answer.
-            let have = recv_have_owned(
-                channel,
-                true,
-                conversation,
-                backend.remote_have_budget(),
-                false,
-            )
-            .await?;
-            // Transfer the existing connection-owned lease before awaiting.
-            // Incomplete responses drop it; only a fully sent response is retained.
-            let view = match backend.take_custody_view(&conversation)? {
-                Some(view) => view,
-                None => backend::open_prepared_view(backend, &conversation).await?,
-            };
-            let metadata = backend.metadata(&view)?;
-            have_count(metadata.count)?;
-            let response = if unsupported_metadata(metadata, v2, v3, v4, v5) {
-                None
-            } else {
-                let mut frames =
-                    select_export_frames(backend, &view, conversation, &have, 1).await?;
-                let events = frames.pop().map_or_else(Vec::new, |frame| frame.events);
-                events
-                    .iter()
-                    .all(|event| supports_event_kind(event.kind, v2, v3, v4, v5))
-                    .then_some(events)
-            };
-            let Some(response) = response else {
-                channel
-                    .send(&encode(&SyncWire::UpgradeRequired { conversation })?)
-                    .await?;
-                return Ok(Served::Handled(conversation));
-            };
-            backend.validate_view(&view)?;
-            channel
-                .send(&encode(&SyncWire::Response(SyncResponse {
-                    conversation,
-                    events: response,
-                    have: Vec::new(),
-                }))?)
-                .await?;
-            send_have_pages(channel, backend, &view, conversation, SyncWire::RespHave).await?;
-            drop(backend.retain_custody_view(view)?);
-            Ok(Served::Handled(conversation))
-        }
-        SyncWire::Followup(followup)
-        | SyncWire::FollowupV2(followup)
-        | SyncWire::FollowupV3(followup)
-        | SyncWire::FollowupV4(followup)
-        | SyncWire::FollowupV5(followup) => {
-            let conversation = followup.conversation;
-            let v5 = matches!(decode(bytes)?, SyncWire::FollowupV5(_));
-            let v4 = v5 || matches!(decode(bytes)?, SyncWire::FollowupV4(_));
-            let v3 = v4 || matches!(decode(bytes)?, SyncWire::FollowupV3(_));
-            let v2 = v3 || matches!(decode(bytes)?, SyncWire::FollowupV2(_));
-            if followup.events.iter().any(|event| {
-                event.conversation_id != conversation
-                    || !supports_event_kind(event.kind, v2, v3, v4, v5)
-            }) {
-                return Err(SessionError::UnexpectedMessage);
-            }
-            backend.apply(&followup.events)?;
-            if backend.admission_denied() {
-                return Err(SessionError::UnexpectedMessage);
-            }
-            Ok(Served::Handled(conversation))
-        }
-        SyncWire::FpRequest(req)
-        | SyncWire::FpRequestV2(req)
-        | SyncWire::FpRequestV3(req)
-        | SyncWire::FpRequestV4(req)
-        | SyncWire::FpRequestV5(req) => {
-            // Compare the requester's whole-set digest to ours. On match the requester
-            // skips the full exchange; on mismatch it follows up with a normal Request.
-            let conversation = req.conversation;
-            let v5 = matches!(decode(bytes)?, SyncWire::FpRequestV5(_));
-            let v4 = v5 || matches!(decode(bytes)?, SyncWire::FpRequestV4(_));
-            let v3 = v4 || matches!(decode(bytes)?, SyncWire::FpRequestV3(_));
-            let v2 = v3 || matches!(decode(bytes)?, SyncWire::FpRequestV2(_));
-            let (metadata, probe_view) = backend::prepared_probe(backend, &conversation).await?;
-            let matched = if unsupported_metadata(metadata, v2, v3, v4, v5) {
-                None
-            } else {
-                Some(metadata.fingerprint.is_some_and(|fp| fp == req.fingerprint))
-            };
-            let Some(matched) = matched else {
-                channel
-                    .send(&encode(&SyncWire::UpgradeRequired { conversation })?)
-                    .await?;
-                return Ok(Served::Handled(conversation));
-            };
-            if let Some(view) = &probe_view {
-                backend.validate_view(view)?;
-            }
-            channel
-                .send(&encode(&SyncWire::FpResponse(FpResponse { matched }))?)
-                .await?;
-            if let Some(view) = probe_view {
-                // The response completed this probe, not the local view's
-                // useful lifetime. A following ordinary Request may reuse it.
-                backend.validate_view(&view)?;
-                drop(backend.retain_custody_view(view)?);
-            }
-            Ok(Served::Handled(conversation))
-        }
-        // A Response/FpResponse, or a stray have-chunk outside its stream, is out of order.
-        SyncWire::Response(_)
-        | SyncWire::ReqHave(_)
-        | SyncWire::RespHave(_)
-        | SyncWire::FpResponse(_)
-        | SyncWire::UpgradeRequired { .. } => Err(SessionError::UnexpectedMessage),
-        SyncWire::DurableHaveResponse { .. }
-        | SyncWire::FileConsentResponse { .. }
-        | SyncWire::SignedFileConsentResponse { .. }
-        | SyncWire::StickerFileConsentResponse { .. }
-        | SyncWire::StickerFileProofResponse { .. }
-        | SyncWire::FileMessageIdentitiesResponse { .. }
-        | SyncWire::SignedChunkResponse { .. }
-        | SyncWire::SignedChunkAvailabilityResponse { .. } => Err(SessionError::UnexpectedMessage),
     }
 }
 
@@ -2548,10 +1862,10 @@ mod tests {
             let local = Mutex::new(EventLog::default());
             let mut progress = SyncProgress::default();
             assert!(!progress.step(&mut channel, &local, conv()).await.unwrap());
-            assert!(!progress.v4);
+            assert!(!progress.0.v4);
             local.lock().unwrap().append(added).unwrap();
             assert!(!progress.step(&mut channel, &local, conv()).await.unwrap());
-            assert!(progress.v4);
+            assert!(progress.0.v4);
             assert!(
                 !remote.lock().unwrap().has(&added_id),
                 "the incomplete legacy round must carry no new-version event"
@@ -3203,7 +2517,7 @@ mod tests {
         drop(channel);
         let (remote, handled) = server.await.unwrap();
         assert_eq!(
-            progress.total.applied, 0,
+            progress.0.total.applied, 0,
             "progress comes entirely from remote acceptance"
         );
         assert!(
@@ -3243,7 +2557,7 @@ mod tests {
         }
         assert_eq!(progress.remote_have_count(), Some(ids.len()));
         assert!(
-            progress.rounds <= 3,
+            progress.0.rounds <= 3,
             "burst must avoid per-chunk reconciliation"
         );
         drop(channel);
@@ -3982,7 +3296,7 @@ mod paged_tests;
 /// Direct mandatory paged requester. On cancellation/error discard the channel;
 /// a partially streamed exchange cannot be reused.
 #[allow(dead_code)] // Direct callers land in the separate SQL runtime cutover.
-pub async fn request_round_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+pub async fn request_round_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin + Send>(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
     conversation: ConversationId,
@@ -3992,11 +3306,11 @@ pub async fn request_round_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite
         .step_backend(channel, &PagedNetworkBackend(store, None), conversation, 1)
         .await?
     {}
-    Ok(progress.total)
+    Ok(progress.0.total)
 }
 pub(in crate::node) async fn request_file_round_paged<
     S: NetworkSyncStore,
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
 >(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
@@ -4007,11 +3321,11 @@ pub(in crate::node) async fn request_file_round_paged<
         .step_burst_paged(channel, store, conversation, FILE_FOLLOWUP_BURST)
         .await?
     {}
-    Ok(progress.total)
+    Ok(progress.0.total)
 }
 /// Serve one frame using the direct bounded store contract.
 #[allow(dead_code)] // Direct callers land in the separate SQL runtime cutover.
-pub async fn serve_one_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+pub async fn serve_one_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin + Send>(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
 ) -> Result<Served, SessionError> {
@@ -4023,7 +3337,10 @@ pub async fn serve_one_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + U
 }
 /// Serve an already-read frame through the direct paged backend.
 #[allow(dead_code)] // Direct callers land in the separate SQL runtime cutover.
-pub async fn serve_wire_bytes_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+pub async fn serve_wire_bytes_paged<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
+>(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
     bytes: &[u8],
@@ -4034,7 +3351,7 @@ pub async fn serve_wire_bytes_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWr
 /// Dedicated runtime requester; the process owner's shared Have budget is mandatory.
 pub(crate) async fn request_round_budgeted<
     S: NetworkSyncStore,
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
 >(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
@@ -4051,12 +3368,12 @@ pub(crate) async fn request_round_budgeted<
         )
         .await?
     {}
-    Ok(progress.total)
+    Ok(progress.0.total)
 }
 /// Dedicated runtime responder; every path retains the process owner RAM gate.
 pub(crate) async fn serve_wire_bytes_budgeted<
     S: NetworkSyncStore,
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
 >(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
@@ -4065,7 +3382,10 @@ pub(crate) async fn serve_wire_bytes_budgeted<
 ) -> Result<Served, SessionError> {
     serve_wire_backend(channel, &PagedNetworkBackend(store, Some(budget)), bytes).await
 }
-pub(crate) async fn serve_one_budgeted<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn serve_one_budgeted<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
+>(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
     budget: &RemoteHaveBudget,

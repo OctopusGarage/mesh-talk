@@ -26,3 +26,13 @@ implementation and verification. Link it from the agent instructions and
 point. A shared file keeps lookup and updates simple when the reader has little
 prior context. Revisit the organization if topic headings and search no longer
 make relevant decisions easy to find.
+
+## Share the Mesh Foundation libraries through a pinned source snapshot
+
+Keep the reusable Rust libraries together in Mesh Foundation. Mesh Talk
+consumes a pinned source snapshot so its builds can run without credentials
+for the private SDK repository. Update the snapshot from a verified SDK
+revision and keep its provenance alongside the source. Keep Mesh Talk's
+product authorization and lifecycle in its adapters. Replication defines its
+own transport interface so a consumer can compose it with Mesh Connect or
+another suitable channel. See the [architecture reference](ARCHITECTURE.md#mesh-foundation-libraries).

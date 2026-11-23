@@ -1365,6 +1365,7 @@
       "id": "core-discovery",
       "paths": ["crates/mesh-talk-core/src/discovery/"],
       "rust": [
+        { "package": "mesh-connect", "filters": ["discovery::", "net::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1413,8 +1414,12 @@
     },
     {
       "id": "core-eventlog",
-      "paths": ["crates/mesh-talk-core/src/eventlog/"],
+      "paths": [
+        "vendor/mesh-foundation/crates/mesh-replication/",
+        "crates/mesh-talk-core/src/eventlog/"
+      ],
       "rust": [
+        { "package": "mesh-replication", "filters": ["legacy_event::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1512,11 +1517,20 @@
     },
     {
       "id": "core-file",
-      "paths": ["crates/mesh-talk-core/src/file/"],
+      "paths": [
+        "crates/mesh-talk-core/src/file/",
+        "vendor/mesh-foundation/crates/mesh-blob/",
+        "vendor/mesh-foundation/README.md",
+        "vendor/mesh-foundation/LICENSE"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": ["file::"]
+        },
+        {
+          "package": "mesh-blob",
+          "filters": ["tests::"]
         }
       ],
       "escalation": [
@@ -1527,11 +1541,13 @@
     {
       "id": "core-identity",
       "paths": [
+        "vendor/mesh-foundation/crates/mesh-identity/",
         "crates/mesh-talk-core/src/identity/",
         "crates/mesh-talk-core/src/node/account_devices.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs"
       ],
       "rust": [
+        { "package": "mesh-identity", "filters": ["tests::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1580,6 +1596,7 @@
     {
       "id": "core-postoffice",
       "paths": [
+        "vendor/mesh-foundation/crates/mesh-mailbox/",
         "crates/mesh-talk-core/src/postoffice/",
         "crates/mesh-talk-core/src/bin/mesh-talk-node/federation_runtime.rs",
         "crates/mesh-talk-core/src/bin/mesh-talk-node.rs",
@@ -1587,6 +1604,7 @@
         "crates/mesh-talk-core/tests/indexed_relay_cli.rs"
       ],
       "rust": [
+        { "package": "mesh-mailbox", "filters": ["tests::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1681,11 +1699,18 @@
     },
     {
       "id": "core-ratchet",
-      "paths": ["crates/mesh-talk-core/src/ratchet/"],
+      "paths": [
+        "crates/mesh-talk-core/src/ratchet/",
+        "vendor/mesh-foundation/crates/mesh-e2ee/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": ["ratchet::"]
+        },
+        {
+          "package": "mesh-e2ee",
+          "filters": ["tests::"]
         }
       ],
       "escalation": [
@@ -1801,8 +1826,12 @@
           }
         ]
       },
-      "paths": ["crates/mesh-talk-core/src/storage/"],
+      "paths": [
+        "vendor/mesh-foundation/crates/mesh-storage/",
+        "crates/mesh-talk-core/src/storage/"
+      ],
       "rust": [
+        { "package": "mesh-storage", "filters": ["tests::", "record_log::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1827,7 +1856,10 @@
     },
     {
       "id": "core-transport",
-      "paths": ["crates/mesh-talk-core/src/transport/"],
+      "paths": [
+        "vendor/mesh-foundation/crates/mesh-connect/",
+        "crates/mesh-talk-core/src/transport/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -1835,6 +1867,7 @@
         }
       ],
       "escalation": [
+        "Run cargo test -p mesh-connect --test connect for the extracted frame session.",
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
       "consumers": [

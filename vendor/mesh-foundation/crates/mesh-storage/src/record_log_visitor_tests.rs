@@ -85,13 +85,13 @@ fn visitor_error_preserves_source_including_torn_tail() {
     let result = EncryptedRecordLog::<Rec>::open_with_visitor(&path, "pw", TEST_MAGIC, |_| {
         visits += 1;
         if visits == 2 {
-            Err(LogError::Serialization("visitor stopped".into()))
+            Err(RecordLogError::Serialization("visitor stopped".into()))
         } else {
             Ok(())
         }
     });
     assert!(
-        matches!(result, Err(LogError::Serialization(message)) if message == "visitor stopped")
+        matches!(result, Err(RecordLogError::Serialization(message)) if message == "visitor stopped")
     );
     assert_eq!(visits, 2);
     assert_eq!(std::fs::read(&path).unwrap(), source);
@@ -178,7 +178,7 @@ fn visitor_rejects_bad_authentication_or_decode_without_repair() {
             "record failed to decrypt"
         };
         assert!(
-            matches!(result, Err(LogError::CorruptFile(message)) if message.starts_with(expected_error))
+            matches!(result, Err(RecordLogError::CorruptFile(message)) if message.starts_with(expected_error))
         );
         assert_eq!(visited, vec![rec(1, b"good")]);
         assert_eq!(std::fs::read(&path).unwrap(), source);
@@ -276,7 +276,7 @@ fn durability_failed_file_or_parent_sync_is_retried() {
         } else {
             sync_observations::fail_file();
         }
-        assert!(matches!(log.sync(), Err(LogError::Io(_))));
+        assert!(matches!(log.sync(), Err(RecordLogError::Io(_))));
         assert_eq!(
             sync_observations::counts(),
             if parent { (1, 1) } else { (1, 0) }
@@ -299,7 +299,7 @@ fn durability_failed_durable_append_rollback_cannot_restore_a_clean_claim() {
     sync_observations::fail_parent();
     assert!(matches!(
         log.append_durable(&rec(2, b"rejected")),
-        Err(LogError::Io(_))
+        Err(RecordLogError::Io(_))
     ));
     assert!(!log.poisoned);
     sync_observations::reset();
@@ -324,7 +324,7 @@ fn durability_poisoned_rollback_rejects_sync_without_io() {
     assert!(log.append_durable(&rec(1, b"uncertain")).is_err());
     assert!(log.poisoned);
     sync_observations::reset();
-    assert!(matches!(log.sync(), Err(LogError::CorruptFile(_))));
+    assert!(matches!(log.sync(), Err(RecordLogError::CorruptFile(_))));
     assert_eq!(sync_observations::counts(), (0, 0));
 }
 

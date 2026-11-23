@@ -3358,30 +3358,104 @@ dependencies = [
 [[package]]
 name = "mesh-blob"
 version = "0.1.0"
-source = "git+https://github.com/OctopusGarage/mesh-foundation.git?rev=9968cf68c26298b98eee3110c93d2a6778ae3393#9968cf68c26298b98eee3110c93d2a6778ae3393"
 dependencies = [
  "aes-gcm 0.11.1",
- "futures-util",
- "mesh-connect",
  "rand_core 0.6.4",
  "sha2 0.10.9",
- "tempfile",
- "tokio",
  "zeroize",
 ]
 
 [[package]]
 name = "mesh-connect"
 version = "0.1.0"
-source = "git+https://github.com/OctopusGarage/mesh-foundation.git?rev=9968cf68c26298b98eee3110c93d2a6778ae3393#9968cf68c26298b98eee3110c93d2a6778ae3393"
 dependencies = [
+ "bincode",
  "futures-util",
+ "hex",
  "if-addrs",
  "log",
+ "mesh-identity",
+ "serde",
  "snow",
  "socket2",
  "tokio",
- "windows-sys 0.61.2",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "mesh-e2ee"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.11.1",
+ "bincode",
+ "hex",
+ "hkdf",
+ "rand_core 0.6.4",
+ "serde",
+ "sha2 0.10.9",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "mesh-identity"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "ed25519-dalek",
+ "hex",
+ "rand_core 0.6.4",
+ "serde",
+ "sha2 0.10.9",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "mesh-mailbox"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.11.1",
+ "bincode",
+ "hkdf",
+ "mesh-identity",
+ "mesh-replication",
+ "mesh-storage",
+ "rand_core 0.6.4",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "mesh-replication"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "hex",
+ "log",
+ "mesh-identity",
+ "serde",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
+name = "mesh-storage"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.11.1",
+ "bincode",
+ "log",
+ "pbkdf2",
+ "rand_core 0.6.4",
+ "ring",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]
@@ -3463,6 +3537,11 @@ dependencies = [
  "log",
  "mesh-blob",
  "mesh-connect",
+ "mesh-e2ee",
+ "mesh-identity",
+ "mesh-mailbox",
+ "mesh-replication",
+ "mesh-storage",
  "mesh-talk-core",
  "pbkdf2",
  "rand_chacha",

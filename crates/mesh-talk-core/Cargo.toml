@@ -28,8 +28,13 @@ name = "mesh-talk-node"
 path = "src/bin/mesh-talk-node.rs"
 
 [dependencies]
-mesh-blob = { git = "https://github.com/OctopusGarage/mesh-foundation.git", rev = "9968cf68c26298b98eee3110c93d2a6778ae3393", features = ["mesh-connect"] }
-mesh-connect = { git = "https://github.com/OctopusGarage/mesh-foundation.git", rev = "9968cf68c26298b98eee3110c93d2a6778ae3393", default-features = false }
+mesh-mailbox = { path = "../../vendor/mesh-foundation/crates/mesh-mailbox" }
+mesh-replication = { path = "../../vendor/mesh-foundation/crates/mesh-replication" }
+mesh-connect = { path = "../../vendor/mesh-foundation/crates/mesh-connect" }
+mesh-identity = { path = "../../vendor/mesh-foundation/crates/mesh-identity" }
+mesh-storage = { path = "../../vendor/mesh-foundation/crates/mesh-storage" }
+mesh-blob = { path = "../../vendor/mesh-foundation/crates/mesh-blob" }
+mesh-e2ee = { path = "../../vendor/mesh-foundation/crates/mesh-e2ee" }
 rusqlite = { version = "0.42.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "cache", "blob"] }
 serde_json = "1"
 tokio = { workspace = true }
@@ -69,6 +74,10 @@ libc = "0.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+mesh-storage = { path = "../../vendor/mesh-foundation/crates/mesh-storage", features = ["test-observability"] }
+mesh-connect = { path = "../../vendor/mesh-foundation/crates/mesh-connect", features = ["test-observability"] }
+mesh-replication = { path = "../../vendor/mesh-foundation/crates/mesh-replication", features = ["test-observability"] }
+mesh-identity = { path = "../../vendor/mesh-foundation/crates/mesh-identity", features = ["test-observability"] }
 pbkdf2 = { workspace = true } # Independent reference for production-format fixtures.
 tokio = { workspace = true, features = ["test-util"] }
 rand_chacha = "0.10" # seeded CSPRNG for deterministic property tests (rand_core 0.10 traits)

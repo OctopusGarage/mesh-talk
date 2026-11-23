@@ -1,5 +1,5 @@
 use super::*;
-use sha2::{Digest, Sha256};
+use mesh_replication::InventoryDigest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ConversationMetadata {
@@ -281,7 +281,7 @@ impl EventRepository {
     ) -> Result<([u8; 32], u64), LogError> {
         self.database.transaction(|tx| {
             let Some(metadata)=self.metadata_on(tx,conv)? else {
-                return Ok((Sha256::digest(0u64.to_le_bytes()).into(),0));
+                return Ok((InventoryDigest::new(0).finish(),0));
             };
             let (cached_revision,cached):(Option<i64>,Option<Vec<u8>>)=tx.query_row("SELECT fingerprint_revision,fingerprint FROM event_conversations WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
             match (cached_revision,cached) {
@@ -294,16 +294,16 @@ impl EventRepository {
                 (None,None)=>{},
                 _=>return Err(corrupt("incomplete persisted fingerprint")),
             }
-            let mut hasher=Sha256::new();hasher.update(metadata.count.to_le_bytes());
+            let mut hasher=InventoryDigest::new(metadata.count);
             let mut stmt=tx.prepare("SELECT id FROM retained_events WHERE domain=?1 AND conversation=?2 ORDER BY id")?;
             let mut rows=stmt.query(params![self.domain.0.as_slice(),conv.as_bytes().as_slice()])?;
             let mut count=0u64;
             while let Some(row)=rows.next()? {
-                hasher.update(blob::<32>(row,0)?);count=count.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?;
+                hasher.update(&blob::<32>(row,0)?);count=count.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?;
                 #[cfg(test)] self.fingerprint_ids.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
             }
             if count!=metadata.count {return Err(corrupt("fingerprint event count disagrees"));}
-            let digest:[u8;32]=hasher.finalize().into();
+            let digest:[u8;32]=hasher.finish();
             tx.execute("UPDATE event_conversations SET fingerprint_revision=?3,fingerprint=?4 WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conv.as_bytes().as_slice(),metadata.revision,digest.as_slice()])?;
             Ok((digest,count))
         })
