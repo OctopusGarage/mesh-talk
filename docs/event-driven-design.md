@@ -5,7 +5,9 @@ polling. [Architecture](ARCHITECTURE.md) and the [network design
 reference](network-design-reference.md#push-driven-reconciliation-and-recovery)
 own protocol and recovery semantics. The [module map](module-boundaries.md)
 owns implementation boundaries. The [performance guide](performance-requirements.md)
-owns resource budgets and measurement.
+owns resource budgets and measurement. Use its
+[core business metric coverage](performance-requirements.md#core-business-metric-coverage)
+to locate the operation owner before instrumenting a new event.
 
 ## Choose the right kind of signal
 

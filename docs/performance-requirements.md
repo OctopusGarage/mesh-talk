@@ -454,6 +454,59 @@ identifiers or per-message sample history are retained. Group recipient delivery
 network retransmissions have separate meanings and must not be inferred from
 these aggregates.
 
+## Core business metric coverage
+
+Use the business owner below to choose the capture point. This inventory records
+coverage and gaps. A proposed metric needs an executable test at its owning
+boundary before it becomes a supported dashboard measure. The
+[event contract](event-driven-design.md#choose-the-right-kind-of-signal)
+distinguishes committed facts from coalesced wakes and observations.
+
+| Business area | Existing diagnostic evidence | Metrics to add and event owner |
+| --- | --- | --- |
+| Startup and profile lifecycle | Desktop host ready and initial interface preparation | Login outcome and time, authenticated runtime install, first actionable conversation, hydration duration, lock, logout and owner retirement. Use authentication results and the active [runtime installation owner](../src-tauri/src/chat_commands/state.rs), then the renderer's first usable state. Time user authorization independently. |
+| Routing, discovery and transport | Authentication channel count, encrypted application bytes, discovery RTT and route-related delivery cancellations | Successful and failed authenticated connects, reconnect duration, eligible route changes, presence lease expiry and time to recover. Record attempts at [session admission](../crates/mesh-talk-core/src/node/session_pool.rs) and route transitions at the authoritative [roster](../crates/mesh-talk-core/src/discovery/roster.rs). |
+| Direct and group messaging | Local acceptance, direct receipts, failures at acceptance, retry timeouts, direct backlog, fixed receipt latency buckets and received volume by type | Capture final expiration or cancellation where the owning delivery record retires. Time a nonempty backlog episode from recovery start to empty. Group recipient delivery requires qualified recipient evidence. Route-specific delivery latency requires the path that produced the accepted receipt. See [delivery](../crates/mesh-talk-core/src/node/delivery_runtime.rs). |
+| Attachments and inline media | Declared offer bytes, approval or decline, verified completions and interval volume | Transfer starts and terminal outcomes, retry or cancellation, active transfers, transfer age and time to verified completion. Use the transfer worker and [durable completion owner](../crates/mesh-talk-core/src/node/file_completion.rs). Keep network bytes, verified bytes and local save errors distinct. |
+| Calls | Transport activity; call transport itself is outside encrypted application frame totals | Offer, ring, answer, connection, timeout, user cancellation and disconnect outcomes from the [call state owner](../frontend/src/store/calls.ts). If needed, sample WebRTC quality while connected using the active call's existing ownership. Retain setup-time and active-call quality separately. |
+| Account and linked-device sync | Observed history, catch-up and own-device arrivals in the monitor | Accepted, unchanged, rejected or deferred pages and rows/bytes applied, catch-up/repair age, conflicts and retry counts. Capture from [account sync's apply boundary](../crates/mesh-talk-core/src/node/account_sync.rs). Record device linkage and key changes at their authenticated [linking owner](../crates/mesh-talk-core/src/node/linking.rs). |
+| Local history, search and storage | Process write samples | Search latency and outcome, empty/cancelled requests, bounded result counts, history page hydration, committed writes and retention/expiry rows and bytes. Capture search completion in [owner search](../src-tauri/src/owner_commands/search.rs) and cleanup outcome in [expiry](../crates/mesh-talk-core/src/node/expiry_policy.rs). |
+| Recovery and migration | Existing recovery validation and startup milestones | Backup/export/import and migration start, completion or failure, elapsed time, verified rows and bytes, resumptions and retired work. Reuse [recovery](../crates/mesh-talk-core/src/node/recovery.rs) results and validated progress checkpoints. |
+| Post-office mailboxes | Existing bounded diagnostic [mailbox work observations](../crates/mesh-talk-core/src/node/work_observation.rs) | Accepted, duplicate, rejected, expired and reclaimed envelopes, bytes held, queue depth and oldest eligible age, pull outcome and time to drain. Use the durable custody and cleanup owners in [post office](../crates/mesh-talk-core/src/postoffice/mod.rs). Relay counters describe opaque envelopes. |
+| Post-office federation | Relay work observations and existing reconciliation revisions | Session outcomes, committed pages and bytes, unchanged rounds, bounded retry age, expiry and convergence time. Use the [federation sync outcome](../crates/mesh-talk-core/src/postoffice/federation.rs) and existing history revision. Separate peer authorization failure from healthy idle. |
+| Integrations and updates | Existing operation state, audit and updater progress | Integration requests by fixed operation, allow/deny, rate limiting and result; update checks, download/verification/install outcome and duration. Reuse [integration dispatch](../crates/mesh-talk-integrations/src/service.rs) and [desktop update outcomes](../src-tauri/src/updates.rs). |
+
+### Capture and performance contract
+
+- Record work only at an owner that knows its outcome. Existing revision or
+  notification streams can wake a panel to read a summary, but their delivery
+  and coalescing behavior cannot establish counts or business success.
+- Reuse owner counters and monotonic elapsed times from completed operations.
+  For current state, use an existing bounded snapshot. Avoid copying payloads,
+  reopening databases, rescanning retained events or queuing one notification
+  per operation merely to produce statistics.
+- Keep fixed dimensions per process role and observation session. Useful
+  dimensions include operation class, direct/group, outcome, and trusted route
+  class when evidence provides it. Exclude contents, raw IDs and addresses.
+  Long-lived results may retain a bounded histogram and sample count. Separate
+  cancellations, retries, missing measurements and explicit failures.
+- The existing desktop observation lock serializes frame counters and business
+  totals while sampling is enabled. Treat it as a performance constraint before
+  adding high-frequency owners. Benchmark same-build off/on comparisons before
+  expanding the hot path. Prefer owner-local aggregation or batched publication
+  when contention is measurable. A late update from a retired observation must
+  not be applied to a new observation.
+- Keep relay measurements on the relay and desktop measurements on the
+  desktop. Reuse the existing visible serial refresh for desktop presentation
+  and existing relay diagnostic output or an explicit snapshot for headless
+  use. Do not start a background collector just to serve a dashboard.
+- Validate idle, burst, failure, duplicate/replay, scope retirement and
+  recovery. Measure disabled overhead and observer-on cost separately,
+  including CPU, wakeups, memory and business tail latency. Count success
+  against a correctness witness such as the authenticated receipt or verified
+  recovered bytes. A synthetic microbenchmark measures a code path, not the
+  cost of an entire installed app or relay.
+
 ## Evidence and maintenance
 
 Before optimizing, identify the owner and capture the offending operation count
