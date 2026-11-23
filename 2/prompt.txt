@@ -1,0 +1,29 @@
+基于requirements-work分支，我们开个新的worktree分支，做一下REQ-022这个任务，先一起调研清楚，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+其实这个需求是建立一种闭环的机制吧，方便后续AI和用户在实现讨论完成等场景过程中，能适当记录核心简洁关键的内容，这样方便后续迭代过程中不会重复分析之类的等等，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+我觉得建立一个文档，专门记录就行了，看看那里合适，索引好。方便AI后续有需要时方便找到查阅或者新增就行了。analyst；analyst；analyst；analyst；analyst；analyst；analyst；analyst；
+
+---
+
+那看看分析一下，这个需求是不是算做完了？专业分析就行了，analyze；analyze；analyze；analyze；analyze；
+
+---
+
+commit all changes
+
+---
+
+if all finish and verify and pass AI evals, commit all changes
+
+---
+
+why not optimise until all the full AI eval  pass.
+
+---
+
+finish and commit
