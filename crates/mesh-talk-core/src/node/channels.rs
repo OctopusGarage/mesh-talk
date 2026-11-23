@@ -789,31 +789,42 @@ impl Node {
     pub(in crate::node) fn linked_invite_candidate(&self) -> Option<ConversationId> {
         let me = self.user_id();
         let account = self.account_id();
-        let peers: HashMap<_, _> = self
-            .routing_peers()
-            .into_iter()
-            .map(|peer| (peer.public.user_id(), peer))
-            .collect();
+        let peers = self.linked_invite_peers();
         let book = self.channels.lock().expect("channels mutex not poisoned");
         let mut channels = book.channel_ids();
         channels.sort_unstable_by_key(|id| *id.as_bytes());
         channels.into_iter().find(|channel| {
-            let Some(state) = book.state(channel) else {
-                return false;
-            };
-            state.pending_invite()
-                && !state.is_dissolved()
-                && state.is_member(&me)
-                && state.members().iter().any(|member| {
-                    member.user_id() != me
-                        && state.is_accepted_member(&member.user_id())
-                        && peers.get(&member.user_id()).is_some_and(|peer| {
-                            peer.public == *member
-                                && !peer.post_office
-                                && peer.account_id.as_deref() == Some(account.as_str())
-                        })
-                })
+            book.state(channel)
+                .is_some_and(|state| Self::linked_invite_eligible(state, &peers, &me, &account))
         })
+    }
+
+    fn linked_invite_peers(&self) -> HashMap<String, PeerRecord> {
+        self.routing_peers()
+            .into_iter()
+            .map(|peer| (peer.public.user_id(), peer))
+            .collect()
+    }
+
+    fn linked_invite_eligible(
+        state: &ChannelState,
+        peers: &HashMap<String, PeerRecord>,
+        me: &str,
+        account: &str,
+    ) -> bool {
+        state.pending_invite()
+            && !state.is_dissolved()
+            && state.is_member(me)
+            && state.members().iter().any(|member| {
+                let id = member.user_id();
+                id != me
+                    && state.is_accepted_member(&id)
+                    && peers.get(&id).is_some_and(|peer| {
+                        peer.public == *member
+                            && !peer.post_office
+                            && peer.account_id.as_deref() == Some(account)
+                    })
+            })
     }
 
     pub(in crate::node) async fn auto_accept_one_linked_invite(
@@ -822,8 +833,8 @@ impl Node {
         let Some(channel) = self.linked_invite_candidate() else {
             return Ok(false);
         };
-        self.accept_channel_invite(channel).await?;
-        Ok(true)
+        self.accept_channel_invite_inner(channel, true, |commit| commit())
+            .await
     }
 
     /// Run bounded anti-entropy for every host that serves TCP, including CLI and SDK nodes.
@@ -2804,20 +2815,37 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.accept_channel_invite_inner(channel, false, authorize)
+            .await
+            .map(|_| ())
+    }
+
+    async fn accept_channel_invite_inner(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        automatic: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<bool, NodeError> {
         self.await_channel_metadata(channel).await?;
         let own_proof = self.own_group_proof();
+        // Route collection may advance unrelated channel admission. Capture
+        // bindings before serialization, then check this group's signed state.
+        let linked_peers = automatic.then(|| self.linked_invite_peers());
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
-            if self
-                .account_group_projection(channel)?
-                .authority
-                .current_event()
-                .is_some()
+            let projection = self.account_group_projection(channel)?;
+            if let Some(peers) = &linked_peers
+                && !projection.state.as_ref().is_some_and(|state| {
+                    Self::linked_invite_eligible(state, peers, &self.user_id(), &self.account_id())
+                })
             {
+                return Ok(());
+            }
+            if projection.authority.current_event().is_some() {
                 let (members, event) = self.apply_account_self_control(
                     channel,
                     account_self_control::AccountSelfControlInput::Accept,
@@ -2842,7 +2870,7 @@ impl Node {
             Ok(())
         })?;
         let Some((members, event)) = distribution else {
-            return Ok(());
+            return Ok(false);
         };
         self.await_channel_metadata(channel).await?;
         if let Some(event) = event
@@ -2855,7 +2883,7 @@ impl Node {
             ));
         }
         self.distribute_channel(channel, &members).await;
-        Ok(())
+        Ok(true)
     }
 
     /// Retry signed departures after a peer was offline during the initial push.

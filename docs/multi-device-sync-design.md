@@ -96,7 +96,17 @@ information can be released to it. Membership applies through admitted signed
 controls, with account membership inherited by verified devices where the group
 supports account grants. A signed control committed locally and the effective
 state on another device are separate observations. An offline device learns
-about a removal when it applies the relevant authenticated controls.
+about a removal when it applies the relevant authenticated controls. Legacy
+automatic acceptance rechecks the selected invitation and accepted sibling
+against the current signed group projection at the membership commit boundary.
+An ordinary invitation still requires the recipient's consent.
+
+A linked-device archive authenticates the requester as a sibling and qualifies
+the serving device against signed membership and the group sharing policy.
+Retaining a sibling's plaintext copy creates no membership, group key or
+delivery receipt. Public group event admission and current metadata access
+use their respective group authorities. Keep archived readable history distinct
+from authorization to obtain new group content.
 
 Announcements are independently revisioned, owner-authorized group metadata.
 A selected announcement still waiting for its current key or local projection
