@@ -421,6 +421,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::list_peers,
                 crate::chat_commands::send_dm,
                 crate::chat_commands::send_call_signal,
+                crate::chat_commands::group_voice_member,
                 crate::chat_commands::history,
                 crate::chat_commands::account_id,
                 crate::chat_commands::publish_avatar,

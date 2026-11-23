@@ -556,7 +556,7 @@
     "retentionDays": "{{count}} days",
     "sectionExperimental": "Experimental",
     "calls": "Voice & video calls",
-    "callsDesc": "Enable 1:1 voice and video calls. Experimental: LAN-only and may be unreliable.",
+    "callsDesc": "Enable direct voice and video calls and LAN group voice meetings. Experimental calls may be unreliable.",
     "ringtone": "Ringtone",
     "ringtoneDesc": "The sound for incoming calls. Pick one to preview it.",
     "ringtonePreview": "Preview",
@@ -1643,5 +1643,24 @@
     "choosePhoto": "Choose photo",
     "retry": "Retry",
     "capturing": "Capturing…"
+  },
+  "groupVoice": {
+    "title": "Group voice",
+    "join": "Join group voice",
+    "start": "Start group voice",
+    "joining": "Joining group voice…",
+    "mute": "Mute",
+    "unmute": "Unmute",
+    "leave": "Leave",
+    "end": "End meeting",
+    "play": "Play participant audio",
+    "dismiss": "Dismiss",
+    "ended": "The group voice meeting ended.",
+    "access": "Your group voice access changed.",
+    "unable": "Unable to join group voice. Check group access and microphone permissions.",
+    "expired": "This group voice invitation has expired.",
+    "denied": "The group voice meeting did not accept your join.",
+    "unreachable": "Could not reach the group voice meeting.",
+    "failed": "A participant’s audio connection failed."
   }
 }

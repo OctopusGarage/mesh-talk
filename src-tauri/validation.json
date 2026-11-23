@@ -2,6 +2,31 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-group-voice-admission",
+      "paths": [
+        "src-tauri/src/chat_commands/messaging.rs"
+      ],
+      "capability": {
+        "summary": "Gate live group-voice device admission on the experimental calls preference and the current signed group membership.",
+        "guide": "docs/help/topics/calls.md",
+        "invariants": [
+          {
+            "name": "The installed session must be unlocked and the device must resolve to an accepted account in the exact group.",
+            "reference": "CONTEXT.md"
+          }
+        ]
+      },
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["settings::tests::old_settings_json_without_the_new_fields_loads_with_defaults"]
+        }
+      ],
+      "escalation": [
+        "Verify installed-app playback and group admission across native clients on a physical LAN."
+      ]
+    },
+    {
       "id": "desktop-group-metadata",
       "paths": [
         "src-tauri/src/chat_commands/channel_metadata.rs",

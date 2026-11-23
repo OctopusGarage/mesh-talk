@@ -70,6 +70,7 @@ import { VerifyContactDialog } from "./VerifyContactDialog";
 import { MemberProfileDialog } from "./MemberProfileDialog";
 import type { MemberProfileTarget } from "./memberProfileDetails";
 import { CallButtons } from "./CallDialog";
+import { GroupVoiceEntry } from "./GroupVoiceControls";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
 import { AttachmentReceiveSettings } from "./AttachmentReceiveSettings";
 import { TransferBar } from "./TransferBar";
@@ -594,6 +595,39 @@ export function ConversationView() {
         <ConversationHistoryDialog
           conversation={{ ...active, name: headerName }}
         />
+        {isChannel &&
+          owner &&
+          !previousAccount &&
+          !sharedReference &&
+          !archived &&
+          !pendingInvite &&
+          !left &&
+          !dissolved && (
+            <GroupVoiceEntry
+              group={active.id}
+              self={myId}
+              owner={owner}
+              memberDevices={() => {
+                const accepted = members.filter((member) => !member.pending);
+                const devices = new Set(
+                  accepted.map((member) => member.user_id),
+                );
+                const accounts = new Set(
+                  accepted.map((member) => member.account_id).filter(Boolean),
+                );
+                return useChat
+                  .getState()
+                  .peers.filter(
+                    (peer) =>
+                      !peer.post_office &&
+                      peer.directly_reachable !== false &&
+                      (devices.has(peer.user_id) ||
+                        (peer.account_id && accounts.has(peer.account_id))),
+                  )
+                  .map((peer) => peer.user_id);
+              }}
+            />
+          )}
         {isChannel &&
         !previousAccount &&
         (sharedReference || (!archived && !pendingInvite)) ? (

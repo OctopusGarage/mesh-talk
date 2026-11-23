@@ -56,6 +56,36 @@ pub async fn send_call_signal(
         .await
 }
 
+/// Read the exact group's current signed membership for a meeting device.
+#[tauri::command]
+pub async fn group_voice_member(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    settings: tauri::State<'_, crate::settings::SettingsState>,
+    group_id: String,
+    device_id: String,
+) -> Result<Option<String>, CommandError> {
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    if group_id.len() != 64 || device_id.len() != 32 {
+        return Ok(None);
+    }
+    let group = parse_channel_id(&group_id)?;
+    admission
+        .with_runtime(|runtime| {
+            if !settings
+                .get_for_owner(admission.lease().owner())?
+                .calls_enabled
+            {
+                return Ok(None);
+            }
+            runtime
+                .handle()
+                .group_voice_member(group, &device_id)
+                .map_err(CommandError::from)
+        })
+        .await
+}
+
 #[tauri::command]
 pub async fn history<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

@@ -2192,6 +2192,9 @@
         "frontend/src/features/chat/settings/MediaDeviceCheck.tsx",
         "frontend/src/features/chat/settings/MediaDeviceCheck.test.ts",
         "frontend/e2e/media-device-check.spec.ts",
+        "frontend/src/store/groupVoice.ts",
+        "frontend/src/store/groupVoice.test.ts",
+        "frontend/src/features/chat/GroupVoiceControls.tsx",
         "frontend/src/store/calls.ts",
         "frontend/src/store/calls.test.ts",
         "frontend/src/features/chat/CallDialog.tsx",
@@ -2205,6 +2208,7 @@
         "docs/help/topics/calls.md"
       ],
       "frontend": [
+        "src/store/groupVoice.test.ts",
         "src/store/calls.test.ts",
         "src/features/chat/CallDialog.test.ts",
         "src/lib/localeParity.test.ts",

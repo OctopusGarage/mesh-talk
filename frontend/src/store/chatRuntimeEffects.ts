@@ -6,6 +6,7 @@ import type {
 import { useAccountProfiles } from "./accountProfiles";
 import { useAvatars } from "./avatars";
 import { useCalls } from "./calls";
+import { handleGroupVoiceSignal, stopGroupVoice } from "./groupVoice";
 import { resetFileAvailability } from "./fileAvailability";
 import { useTransfers } from "./transfers";
 
@@ -18,6 +19,7 @@ export function resetChatFiles() {
 
 export function stopChatCalls() {
   useCalls.getState().teardown();
+  stopGroupVoice();
 }
 
 export function syncChatAvatarIdentity(
@@ -49,8 +51,8 @@ export function applyChatProfile(event: ProfileReceivedEvent) {
   void useAccountProfiles.getState().invalidate(event.account_id);
 }
 
-export function applyChatCallSignal(event: CallSignalEvent) {
-  useCalls.getState().onSignal(event);
+export function applyChatCallSignal(event: CallSignalEvent, self: string) {
+  if (!handleGroupVoiceSignal(event, self)) useCalls.getState().onSignal(event);
 }
 
 export { resetFileAvailability as resetChatFileAvailability };

@@ -1346,7 +1346,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
                   applyChatProfile(receipt.event);
                   break;
                 case "call":
-                  applyChatCallSignal(receipt.event);
+                  applyChatCallSignal(receipt.event, get().myId);
                   break;
                 case "progress":
                   applyChatFileProgress(receipt.event);
@@ -1700,7 +1700,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         if (lease.current()) applyChatProfile(e);
       },
       onCallSignal: (e) => {
-        if (lease.current()) applyChatCallSignal(e);
+        if (lease.current()) applyChatCallSignal(e, get().myId);
       },
     });
 

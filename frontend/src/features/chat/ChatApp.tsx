@@ -12,6 +12,7 @@ import { AccountProtectionNotice } from "./AccountProtectionNotice";
 import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
 import { CallDialog } from "./CallDialog";
+import { GroupVoiceControls } from "./GroupVoiceControls";
 import { chat as chatApi } from "@/lib/api";
 import { startUnreadBadge } from "@/store/unreadBadge";
 import { useChat } from "@/store/chat";
@@ -173,6 +174,7 @@ export function ChatApp() {
           <Sidebar />
           <ConversationView />
           <CallDialog />
+          <GroupVoiceControls />
           <div className="absolute inset-x-4 top-3 z-40 flex flex-col gap-2">
             {draftError && (
               <div

@@ -553,7 +553,7 @@
     "retentionDays": "{{count}} días",
     "sectionExperimental": "Experimental",
     "calls": "Llamadas de voz y vídeo",
-    "callsDesc": "Activa las llamadas de voz y vídeo 1:1. Experimental: solo LAN y puede ser poco fiable.",
+    "callsDesc": "Activa las llamadas individuales de voz y vídeo y las reuniones de voz grupales en la red local. Las llamadas experimentales pueden ser poco fiables.",
     "ringtone": "Tono de llamada",
     "ringtoneDesc": "El sonido de las llamadas entrantes. Elige uno para escucharlo.",
     "ringtonePreview": "Escuchar",
@@ -1643,5 +1643,24 @@
     "choosePhoto": "Elegir foto",
     "retry": "Reintentar",
     "capturing": "Capturando…"
+  },
+  "groupVoice": {
+    "title": "Voz de grupo",
+    "join": "Unirse a la llamada de grupo",
+    "start": "Iniciar llamada de grupo",
+    "joining": "Uniéndose a la llamada de grupo…",
+    "mute": "Silenciar",
+    "unmute": "Activar micrófono",
+    "leave": "Salir",
+    "end": "Finalizar reunión",
+    "play": "Reproducir audio del participante",
+    "dismiss": "Cerrar",
+    "ended": "La llamada de grupo ha terminado.",
+    "access": "Tu acceso a la llamada de grupo ha cambiado.",
+    "unable": "No se pudo unir a la llamada. Comprueba el acceso al grupo y los permisos del micrófono.",
+    "expired": "La invitación ha caducado.",
+    "denied": "La reunión no ha aceptado tu solicitud.",
+    "unreachable": "No se pudo conectar con la reunión.",
+    "failed": "Falló la conexión de audio de un participante."
   }
 }

@@ -148,3 +148,46 @@ async fn current_group_membership_unapplied_leave_fails_closed_and_advances_boun
         before
     );
 }
+
+#[tokio::test]
+async fn group_voice_member_requires_the_exact_accepted_device() {
+    let root = tempfile::tempdir().unwrap();
+    let (node, _) = super::tests::node(&root.path().join("alice"));
+    let (invitee, _) = super::tests::node(&root.path().join("bob"));
+    let group = node
+        .create_channel_invited("Voice", vec![invitee.identity.public()])
+        .await
+        .unwrap();
+    let accepted_group = node
+        .create_channel("Accepted voice", vec![invitee.identity.public()])
+        .await
+        .unwrap();
+    crate::node::test_support::settle_group_metadata(&node, accepted_group);
+    node.roster.lock().unwrap().update(
+        &invitee.own_group_proof(),
+        std::net::Ipv4Addr::LOCALHOST.into(),
+        &node.user_id(),
+    );
+    crate::node::test_support::settle_group_metadata(&node, group);
+    assert_eq!(
+        node.group_voice_member(group, &node.user_id()).unwrap(),
+        Some(node.account_id())
+    );
+    assert_eq!(
+        node.group_voice_member(group, &invitee.user_id()).unwrap(),
+        None
+    );
+    assert_eq!(
+        node.group_voice_member(accepted_group, &invitee.user_id())
+            .unwrap(),
+        Some(invitee.account_id())
+    );
+    assert_eq!(
+        node.group_voice_member(
+            crate::eventlog::ConversationId::new([91; 32]),
+            &node.user_id()
+        )
+        .unwrap(),
+        None
+    );
+}

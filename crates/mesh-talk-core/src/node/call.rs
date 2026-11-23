@@ -15,6 +15,7 @@
 
 use super::*;
 use crate::discovery::roster::UserId;
+use crate::eventlog::{ConversationId, LogError};
 use crate::node::session::SessionError;
 use crate::node::wire::{frame, unframe};
 use crate::transport::SecureChannel;
@@ -50,6 +51,57 @@ pub struct ReceivedCallSignal {
 }
 
 impl Node {
+    /// Resolve an authenticated device to an accepted account in one exact group.
+    /// Unpublished or stale checkpoints never grant meeting access.
+    pub fn group_voice_member(
+        &self,
+        group: ConversationId,
+        device_id: &str,
+    ) -> Result<Option<String>, NodeError> {
+        use super::account_group::AccountGroupRole;
+
+        let own = self.own_group_proof();
+        let proof = if device_id == self.user_id() {
+            own.clone()
+        } else {
+            let public = self
+                .roster
+                .lock()
+                .expect("roster lock not poisoned")
+                .get(device_id)
+                .map(|peer| peer.public.clone());
+            let Some(public) = public else {
+                return Ok(None);
+            };
+            let Some(proof) = self
+                .historical_author(&public.ed25519_pub)
+                .filter(|proof| proof.public() == public && !proof.post_office)
+            else {
+                return Ok(None);
+            };
+            proof
+        };
+        let Some(account) = proof.account_id().filter(|_| proof.verify()) else {
+            return Ok(None);
+        };
+        let log = self.log.lock().expect("log lock not poisoned");
+        let projection = match self.account_group_projection_with_log(&log, group) {
+            Ok(projection) => projection,
+            Err(LogError::StaleCursor) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let accepted = |proof: &crate::discovery::Announce| {
+            Self::public_account_group_source(group, &projection, &proof.public(), proof)
+                .is_some_and(|source| {
+                    matches!(
+                        source.role,
+                        AccountGroupRole::Owner | AccountGroupRole::Member
+                    )
+                })
+        };
+        Ok((accepted(&own) && accepted(&proof)).then_some(account))
+    }
+
     /// Send an opaque call-signaling `payload` to a specific device `target_user_id`, right
     /// now, over a fresh authenticated Noise channel. Ephemeral: nothing is appended to the
     /// event log, and there is NO post-office fallback — a live call requires both devices

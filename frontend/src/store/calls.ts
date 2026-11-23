@@ -1,3 +1,4 @@
+import { useGroupVoice } from "./groupVoice";
 import { create } from "zustand";
 import { calls, privacy } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
@@ -157,7 +158,7 @@ async function getLocalMedia(
 
 /** Non-trickle signaling requires a complete, usable description. Call retirement
  * cancels this wait; elapsed time alone never certifies candidate readiness. */
-function gatherComplete(
+export function gatherComplete(
   conn: RTCPeerConnection,
   signal: AbortSignal,
 ): Promise<string> {
@@ -340,7 +341,7 @@ export const useCalls = create<CallState>((set, get) => {
     retryTarget: null,
 
     startCall: async (target, video) => {
-      if (get().phase !== "idle") return; // one call at a time
+      if (get().phase !== "idle" || useGroupVoice.getState().active) return;
       if (target.deviceIds.length === 0) return;
       const owner = useAuth.getState().user?.id;
       if (!owner) return;
@@ -611,7 +612,7 @@ export const useCalls = create<CallState>((set, get) => {
           return;
         }
         // Busy: already in a call → tell the caller, don't disturb the active one.
-        if (phase !== "idle") {
+        if (phase !== "idle" || useGroupVoice.getState().active) {
           void send(e.from, {
             callId: msg.callId,
             kind: "bye",

@@ -929,6 +929,7 @@
       "paths": [
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
         "crates/mesh-talk-core/src/node/group_membership_query_tests.rs",
+        "crates/mesh-talk-core/src/node/call.rs",
         "crates/mesh-talk-core/src/node/channel.rs",
         "crates/mesh-talk-core/src/node/channel_account_authority.rs",
         "crates/mesh-talk-core/src/node/channel_account_bootstrap.rs",

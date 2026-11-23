@@ -556,7 +556,7 @@
     "retentionDays": "{{count}} 天",
     "sectionExperimental": "实验功能",
     "calls": "语音与视频通话",
-    "callsDesc": "启用 1:1 语音和视频通话。实验性：仅限局域网，可能不稳定。",
+    "callsDesc": "启用一对一语音、视频通话和局域网群语音会议。实验性通话可能不稳定。",
     "ringtone": "铃声",
     "ringtoneDesc": "来电时的提示音。选择即可试听。",
     "ringtonePreview": "试听",
@@ -1643,5 +1643,24 @@
     "choosePhoto": "选择照片",
     "retry": "重试",
     "capturing": "正在拍摄…"
+  },
+  "groupVoice": {
+    "title": "群语音",
+    "join": "加入群语音",
+    "start": "发起群语音",
+    "joining": "正在加入群语音…",
+    "mute": "静音",
+    "unmute": "取消静音",
+    "leave": "离开",
+    "end": "结束会议",
+    "play": "播放参会者音频",
+    "dismiss": "关闭",
+    "ended": "群语音会议已结束。",
+    "access": "你的群语音权限已变更。",
+    "unable": "无法加入群语音，请检查群成员资格和麦克风权限。",
+    "expired": "群语音邀请已过期。",
+    "denied": "群语音会议未接受你的加入请求。",
+    "unreachable": "无法连接群语音会议。",
+    "failed": "一位参会者的音频连接失败。"
   }
 }

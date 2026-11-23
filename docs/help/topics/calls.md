@@ -1,6 +1,6 @@
 # Enable experimental voice and video calls
 
-Enable calling in settings, then use a reachable direct conversation.
+Experimental calling is off by default. Enable it in settings to use direct voice and video calls or group voice meetings.
 
 ## Enable calling
 
@@ -8,6 +8,24 @@ Enable calling in settings, then use a reachable direct conversation.
 2. Enable the experimental calling option.
 3. Open a direct conversation and use its call control.
 4. Grant microphone or camera access when the operating system asks.
+
+## Group voice meetings
+
+Open an existing group with reachable devices on the same LAN. Start a voice
+meeting from the group, or choose to join an available meeting. Each participant
+needs experimental calling enabled and must choose to join before the app
+requests microphone access. Invitations go to up to 64 known reachable group
+devices when the meeting starts and expire after two minutes.
+
+Group voice currently supports up to four participating devices. Each device
+sends its microphone audio directly to the other participants and plays their
+audio locally. Group messages and post offices carry no meeting audio.
+Existing group membership is required. A working group chat can coexist with
+a blocked direct audio connection, for example on a Wi-Fi network that isolates
+clients.
+
+Leaving releases your microphone. If the initiator leaves, existing
+connections can continue and new joins pause.
 
 ## Check microphone and camera
 

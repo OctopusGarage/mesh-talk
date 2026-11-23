@@ -553,7 +553,7 @@
     "retentionDays": "{{count}} 日",
     "sectionExperimental": "實驗功能",
     "calls": "語音同視像通話",
-    "callsDesc": "開啟 1:1 語音同視像通話。實驗功能：淨係喺區域網用，可能唔穩定。",
+    "callsDesc": "開啟一對一語音、視像通話同區域網群組語音會議。實驗性通話可能唔穩定。",
     "ringtone": "鈴聲",
     "ringtoneDesc": "有電話打入時嘅鈴聲。揀一個就會試播。",
     "ringtonePreview": "試聽",
@@ -1643,5 +1643,24 @@
     "choosePhoto": "選擇照片",
     "retry": "重試",
     "capturing": "正在拍攝…"
+  },
+  "groupVoice": {
+    "title": "群組語音",
+    "join": "加入群組語音",
+    "start": "開啟群組語音",
+    "joining": "加入群組語音中…",
+    "mute": "靜音",
+    "unmute": "解除靜音",
+    "leave": "離開",
+    "end": "結束會議",
+    "play": "播放參加者嘅聲音",
+    "dismiss": "關閉",
+    "ended": "群組語音會議已經結束。",
+    "access": "你嘅群組語音權限有變。",
+    "unable": "加入唔到群組語音，請檢查群組成員資格同咪高峰權限。",
+    "expired": "群組語音邀請已經過期。",
+    "denied": "群組語音會議未接受你嘅加入要求。",
+    "unreachable": "連接唔到群組語音會議。",
+    "failed": "有參加者嘅聲音連接失敗。"
   }
 }
