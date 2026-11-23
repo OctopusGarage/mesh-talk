@@ -1,0 +1,3 @@
+Act as the research sub-agent for this task.
+
+Read-only research on REQ-002 in /Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-002, base 0ae1a692. Existing local evidence in sibling req-029/tmp. Locate original WORK-14/T041–T043 if readily available, verify boundaries using committed docs, identify unresolved product decisions. Save short Markdown at this worktree tmp/req-002-source-audit.md. No implementation, no subagents.
