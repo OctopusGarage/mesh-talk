@@ -360,6 +360,12 @@ impl Node {
             self.note_account_local_change();
         }
         let manifest = validated_manifest(&entry.plaintext).expect("validated retained manifest");
+        crate::node::received_store::note_message_reception(
+            &entry,
+            &metadata,
+            true,
+            Some(&manifest),
+        );
         self.remember_manifest_scope(
             manifest.file_conv(),
             entry.conversation,

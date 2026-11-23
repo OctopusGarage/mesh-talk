@@ -284,6 +284,9 @@ impl ReceivedStore {
             )
         })?;
         self.note_channel_commit(usize::from(inserted));
+        if inserted {
+            note_message_reception(entry, metadata, false, None);
+        }
         Ok(())
     }
     #[cfg(test)]
@@ -367,6 +370,13 @@ impl ReceivedStore {
             Ok(inserted)
         })?;
         self.note_channel_commit(usize::from(inserted));
+        if inserted
+            && let Some(metadata) = metadata
+            && crate::transport::diagnostics::observing_messages()
+            && let Some(manifest) = super::files::validated_manifest(&entry.plaintext)
+        {
+            note_message_reception(entry, metadata, false, Some(&manifest));
+        }
         Ok(())
     }
     /// The channel owner calls this after its receiver CAS and before batch
@@ -692,4 +702,59 @@ impl ReceivedStore {
 #[cfg(test)]
 pub(in crate::node) mod deadline_observations {
     std::thread_local! { pub static ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+}
+
+pub(in crate::node) fn note_message_reception(
+    entry: &ReceivedEntry,
+    metadata: &super::reception_effects::ReceptionMetadata,
+    group: bool,
+    manifest: Option<&crate::file::AnyManifest>,
+) {
+    use super::reception_effects::ArrivalKind;
+    use crate::transport::diagnostics::{self, ContentKind};
+
+    if !diagnostics::observing_messages() {
+        return;
+    }
+    // Keep decoding outside the diagnostics lock; no work when the lease is off.
+    if metadata.own_device || metadata.arrival_kind == ArrivalKind::HistorySync {
+        diagnostics::record_message(|metrics| {
+            let counter = if metadata.own_device {
+                &mut metrics.own_device_sync
+            } else {
+                &mut metrics.history_sync
+            };
+            *counter = counter.saturating_add(1);
+        });
+        return;
+    }
+    let (kind, size) = if let Some(manifest) = manifest {
+        let kind = if super::media_store::manifest_is_media(manifest) {
+            ContentKind::Media
+        } else {
+            ContentKind::Attachment
+        };
+        (kind, manifest.size())
+    } else {
+        let envelope = (!group)
+            .then(|| super::DmEnvelope::decode(&entry.plaintext))
+            .flatten();
+        let bytes = envelope
+            .as_ref()
+            .map_or(entry.plaintext.as_slice(), |envelope| {
+                envelope.body.as_slice()
+            });
+        let body = super::MessageBody::decode(bytes);
+        if let Some(sticker) = body.sticker {
+            (ContentKind::Sticker, sticker.len() as u64)
+        } else {
+            (ContentKind::Text, body.text.len() as u64)
+        }
+    };
+    diagnostics::record_message(|metrics| {
+        if metadata.arrival_kind == ArrivalKind::CatchUp {
+            metrics.catch_up = metrics.catch_up.saturating_add(1);
+        }
+        metrics.received(group, kind, size);
+    });
 }

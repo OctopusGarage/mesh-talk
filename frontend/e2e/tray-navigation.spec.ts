@@ -115,6 +115,29 @@ test("tray diagnostics releases resource sampling when closed", async ({
           authenticated_channels: 2,
           sent_frame_bytes: 120,
           received_frame_bytes: 64,
+          messages: {
+            accepted: 8,
+            delivered: 6,
+            rejected: 1,
+            send_request_errors: 1,
+            route_restarts: 1,
+            direct_storage_holds: 4,
+            relay_storage_holds: 2,
+            attachments_accepted: 1,
+            attachments_declined: 0,
+            attempt_timeouts: 2,
+            retries_scheduled: 3,
+            received_direct: [{ count: 4, bytes: 120 }],
+            received_group: [{ count: 2, bytes: 45 }],
+            catch_up: 2,
+            history_sync: 0,
+            own_device_sync: 0,
+            duplicate_direct_events: 1,
+            attachments_verified: 1,
+            verified_attachment_bytes: 1000,
+            delivery_latency: [2, 3, 1, 0, 0, 0, 0, 0],
+          },
+          direct_backlog: [2, 1300],
         };
       }
       if (cmd === "stop_host_resource_sampling") {
@@ -143,7 +166,11 @@ test("tray diagnostics releases resource sampling when closed", async ({
   await expect(
     dialog.locator("dl").getByText("20 MB", { exact: true }).first(),
   ).toBeVisible();
-  await expect(dialog.getByText("120 byte")).toBeVisible();
+  await expect(dialog.getByText("120 byte", { exact: true })).toBeVisible();
+  await dialog.getByText("Message activity", { exact: true }).click();
+  await expect(dialog.getByText("Confirmed direct deliveries")).toBeVisible();
+  await expect(dialog.getByText("≤ 250 ms")).toBeVisible();
+  await expect(dialog.getByText("4 · 120 byte")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect.poll(calls).toEqual(["start", "sample:7", "stop:7"]);

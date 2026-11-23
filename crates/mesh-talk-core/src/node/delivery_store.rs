@@ -1430,6 +1430,20 @@ impl DeliveryStore {
         &self.pending
     }
 
+    /// Installed direct delivery work only. Avoid scanning a large outbox for diagnostics.
+    pub(crate) fn diagnostic_backlog(&self) -> (usize, Option<u64>) {
+        let count = self.messages.len();
+        let oldest = if count <= 1024 {
+            self.messages
+                .values()
+                .map(|message| message.wall_clock)
+                .min()
+        } else {
+            None
+        };
+        (count, oldest)
+    }
+
     pub(crate) fn status(&self, id: EventId) -> Option<DeliveryStatus> {
         if self.completed.contains_key(&id) {
             return Some(DeliveryStatus::Delivered);
@@ -2007,6 +2021,16 @@ impl DeliveryStore {
         final_chunk: EventId,
     ) -> Result<(), LogError> {
         self.install_record(OutboxRecord::FileComplete(card, final_chunk))
+    }
+
+    pub(crate) fn has_completed_transfer(
+        &self,
+        conversation: ConversationId,
+        final_chunk: EventId,
+    ) -> bool {
+        self.completion_index
+            .get(&(*conversation.as_bytes(), final_chunk))
+            .is_some_and(|ids| !ids.is_empty())
     }
 
     pub(crate) fn completed_files(

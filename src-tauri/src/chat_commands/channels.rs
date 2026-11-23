@@ -698,28 +698,35 @@ pub async fn send_channel_message(
     reply_to: Option<String>,
     expires_at_ms: Option<u64>,
 ) -> Result<(), CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
-    admission
-        .detached(move |runtime, admission| {
-            Box::pin(async move {
-                let id = parse_channel_id(&channel_id)?;
-                let reply = match reply_to {
-                    Some(h) => Some(parse_event_id(&h)?),
-                    None => None,
-                };
-                let node = runtime.handle();
-                node.send_channel_message_reply_expiring_if(
-                    id,
-                    text.as_bytes(),
-                    reply,
-                    expires_at_ms,
-                    |commit| admission.authorize_accept(runtime, commit),
-                )
-                .await
-                .map_err(CommandError::from)
+    let result = async {
+        let admission = RuntimeAdmission::capture_current(&app, &state)?;
+        admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    let id = parse_channel_id(&channel_id)?;
+                    let reply = match reply_to {
+                        Some(h) => Some(parse_event_id(&h)?),
+                        None => None,
+                    };
+                    let node = runtime.handle();
+                    node.send_channel_message_reply_expiring_if(
+                        id,
+                        text.as_bytes(),
+                        reply,
+                        expires_at_ms,
+                        |commit| admission.authorize_accept(runtime, commit),
+                    )
+                    .await
+                    .map_err(CommandError::from)
+                })
             })
-        })
-        .await
+            .await
+    }
+    .await;
+    if result.is_err() {
+        mesh_talk_core::transport::diagnostics::note_send_request_error();
+    }
+    result
 }
 
 /// Map the UI's "sent via the media button?" flag to a manifest file kind, so the receiver

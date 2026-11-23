@@ -40,6 +40,8 @@ pub struct HostResourceSample {
     authenticated_channels: u64,
     sent_frame_bytes: u64,
     received_frame_bytes: u64,
+    messages: mesh_talk_core::transport::diagnostics::MessageCounters,
+    direct_backlog: Option<(usize, Option<u64>)>,
 }
 
 #[tauri::command]
@@ -53,7 +55,15 @@ pub fn stop_host_resource_sampling(ticket: u64) {
 }
 
 #[tauri::command]
-pub async fn host_resource_sample(ticket: u64) -> Result<Option<HostResourceSample>, CommandError> {
+pub async fn host_resource_sample(
+    state: tauri::State<'_, crate::chat_commands::NodeState>,
+    ticket: u64,
+) -> Result<Option<HostResourceSample>, CommandError> {
+    let node = state
+        .0
+        .try_read()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|runtime| runtime.handle()));
     tauri::async_runtime::spawn_blocking(move || {
         use std::{sync::OnceLock, time::Instant};
         static SAMPLE_ORIGIN: OnceLock<Instant> = OnceLock::new();
@@ -70,6 +80,8 @@ pub async fn host_resource_sample(ticket: u64) -> Result<Option<HostResourceSamp
             authenticated_channels: transport.authenticated_channels,
             sent_frame_bytes: transport.sent_frame_bytes,
             received_frame_bytes: transport.received_frame_bytes,
+            messages: transport.messages,
+            direct_backlog: node.and_then(|node| node.diagnostic_delivery_backlog()),
         })
     })
     .await

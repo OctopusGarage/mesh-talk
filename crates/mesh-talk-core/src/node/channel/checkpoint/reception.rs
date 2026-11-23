@@ -184,6 +184,9 @@ impl ChannelCheckpointStore {
             Ok(Some(metadata))
         })?;
         received.note_channel_commit(usize::from(installed.is_some()));
+        if let Some(metadata) = installed.as_ref() {
+            crate::node::received_store::note_message_reception(entry, metadata, true, None);
+        }
         Ok(installed)
     }
     pub(in crate::node) fn finish_batch(

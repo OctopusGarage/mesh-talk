@@ -424,6 +424,36 @@ startup acceptance. These startup milestones are available without sampling.
   request/reply measurement within its presence lifetime. The Peers tab
   displays the sample age, or indicates that no recent RTT is available.
 
+The expandable **Message activity** view uses the same lease. Local acceptance is
+a newly committed outgoing intent. Outbox acceptance failures include validation,
+capacity and journal errors. A failed desktop command is also shown separately
+and can overlap an outbox failure. First authenticated direct receipts count
+once per logical message.
+Attempt timeouts and scheduled retries are exact-owner attempt outcomes; they
+do not turn pending messages into failed messages. Route restarts count exact
+active destinations cancelled on a changed route set. Direct storage and
+post-office custody count observed storage outcomes, independently of recipient
+receipts. The direct backlog covers the installed outbox. A busy writer or more
+than 1,024 entries can make the
+oldest age unavailable. Receipt latency uses the local message timestamp and
+fixed buckets from 50 ms through 10 seconds, with an overflow bucket. Clock
+rollback omits a latency sample.
+
+Newly committed private and group receipts show counts and bytes by text,
+sticker, media and attachment. Text uses body bytes, stickers use identifier
+bytes, and attachments use manifest-declared size. Catch-up is a subset.
+Recognized history and own-device arrivals roll into their own counters.
+Previously processed direct events are counted at the delivery deduplication
+boundary. Explicit attachment decisions count changes across equivalent signed
+offers.
+Verified incoming attachments use completed transfer evidence and verified
+payload size; multiple cards for the same retained transfer do not multiply
+it. The displayed verified throughput is bytes newly completed in the sample
+window. It can be bursty for large transfers. No message content, account
+identifiers or per-message sample history are retained. Group recipient delivery, route-specific delivery attribution and
+network retransmissions have separate meanings and must not be inferred from
+these aggregates.
+
 ## Evidence and maintenance
 
 Before optimizing, identify the owner and capture the offending operation count

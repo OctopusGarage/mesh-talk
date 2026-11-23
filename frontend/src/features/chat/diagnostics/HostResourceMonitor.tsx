@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { obs } from "@/lib/api";
 import type {
   HostResourceSample,
+  MessageResourceCounters,
   ProcessResourceReading,
 } from "@/lib/api/diagnostics";
 import {
@@ -190,12 +191,136 @@ function HostResourceReadings() {
       <p className="text-xs text-muted-foreground">
         {t("diagnostics.resources.scope")}
       </p>
+      {sample.messages && (
+        <MessageReadings
+          metrics={sample.messages}
+          backlog={sample.direct_backlog}
+          formatSize={size}
+          verifiedRate={rate(interval?.verifiedBytes)}
+        />
+      )}
       {sample.bounded && (
         <p className="text-xs text-muted-foreground">
           {t("diagnostics.resources.bounded")}
         </p>
       )}
     </>
+  );
+}
+
+const RECEIVED_TYPES = ["text", "sticker", "media", "attachment"] as const;
+const LATENCY_BUCKET_MS = [50, 100, 250, 500, 1000, 3000, 10000];
+
+function MessageReadings({
+  metrics,
+  backlog,
+  formatSize,
+  verifiedRate,
+}: {
+  metrics: MessageResourceCounters;
+  backlog: HostResourceSample["direct_backlog"];
+  formatSize: (bytes: number | null) => string;
+  verifiedRate: string;
+}) {
+  const { t, i18n } = useTranslation();
+  const count = new Intl.NumberFormat(i18n.language);
+  const formatCount = (value?: number) =>
+    value === undefined ? "—" : count.format(value);
+  const milliseconds = (value: number) =>
+    t("diagnostics.resources.messages.milliseconds", {
+      value: count.format(value),
+    });
+  const samples = metrics.delivery_latency.reduce(
+    (sum, value) => sum + value,
+    0,
+  );
+  const percentile = (fraction: number) => {
+    if (samples === 0) return "—";
+    let remaining = Math.ceil(samples * fraction);
+    for (const [index, bucket] of metrics.delivery_latency.entries()) {
+      remaining -= bucket;
+      if (remaining <= 0) {
+        const ceiling = LATENCY_BUCKET_MS[index];
+        return ceiling === undefined
+          ? "> " + milliseconds(10_000)
+          : "≤ " + milliseconds(ceiling);
+      }
+    }
+    return "—";
+  };
+  const rows = [
+    ["accepted", formatCount(metrics.accepted)],
+    ["delivered", formatCount(metrics.delivered)],
+    ["rejected", formatCount(metrics.rejected)],
+    ["requestErrors", formatCount(metrics.send_request_errors)],
+    ["timeouts", formatCount(metrics.attempt_timeouts)],
+    ["retries", formatCount(metrics.retries_scheduled)],
+    ["routeRestarts", formatCount(metrics.route_restarts)],
+    ["directStorage", formatCount(metrics.direct_storage_holds)],
+    ["relayStorage", formatCount(metrics.relay_storage_holds)],
+    ["awaiting", formatCount(backlog?.[0])],
+    ["oldest", backlog?.[1] == null ? "—" : milliseconds(backlog[1])],
+    ["p50", percentile(0.5)],
+    ["p95", percentile(0.95)],
+    ["latencySamples", formatCount(samples)],
+    ["catchUp", formatCount(metrics.catch_up)],
+    ["historySync", formatCount(metrics.history_sync)],
+    ["ownDevice", formatCount(metrics.own_device_sync)],
+    ["duplicateDirect", formatCount(metrics.duplicate_direct_events)],
+    ["attachmentAccepted", formatCount(metrics.attachments_accepted)],
+    ["attachmentDeclined", formatCount(metrics.attachments_declined)],
+    ["verified", formatCount(metrics.attachments_verified)],
+    ["verifiedBytes", formatSize(metrics.verified_attachment_bytes)],
+    ["verifiedRate", verifiedRate],
+  ];
+  return (
+    <details className="text-xs">
+      <summary className="cursor-pointer rounded-sm focus-visible:outline-2">
+        {t("diagnostics.resources.messages.title")}
+      </summary>
+      <dl className="mt-2 grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 tabular-nums">
+        {rows.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt>{t(`diagnostics.resources.messages.${label}`)}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <table className="mt-3 w-full text-left tabular-nums">
+        <caption className="text-left">
+          {t("diagnostics.resources.messages.received")}
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">{t("diagnostics.resources.messages.type")}</th>
+            <th scope="col">{t("diagnostics.resources.messages.direct")}</th>
+            <th scope="col">{t("diagnostics.resources.messages.group")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {RECEIVED_TYPES.map((kind, index) => (
+            <tr key={kind}>
+              <th scope="row" className="font-normal">
+                {t(`diagnostics.resources.messages.${kind}`)}
+              </th>
+              {[
+                metrics.received_direct[index],
+                metrics.received_group[index],
+              ].map((bucket, scope) => (
+                <td key={scope}>
+                  {bucket
+                    ? `${formatCount(bucket.count)} · ${formatSize(bucket.bytes)}`
+                    : "—"}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mt-2 text-muted-foreground">
+        {t("diagnostics.resources.messages.scope")}
+      </p>
+    </details>
   );
 }
 
@@ -229,6 +354,7 @@ interface IntervalReading {
   sent: number | null;
   received: number | null;
   processCpu: Map<number, number>;
+  verifiedBytes: number | null;
 }
 
 function compareReadings(
@@ -275,6 +401,12 @@ function compareReadings(
     sent: perSecond(delta(older.sent_frame_bytes, latest.sent_frame_bytes)),
     received: perSecond(
       delta(older.received_frame_bytes, latest.received_frame_bytes),
+    ),
+    verifiedBytes: perSecond(
+      delta(
+        older.messages?.verified_attachment_bytes ?? null,
+        latest.messages?.verified_attachment_bytes ?? null,
+      ),
     ),
     processCpu,
   };

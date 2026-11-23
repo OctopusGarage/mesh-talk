@@ -125,11 +125,11 @@ impl DeliveryObservations {
             1
         });
         self.serial = next;
-        if let Some(entry) = self
-            .entries
-            .get_mut(&token.logical)
-            .filter(|e| e.token == token && token.generation == generation)
-        {
+        if let Some(entry) = self.entries.get_mut(&token.logical).filter(|e| {
+            e.token == token
+                && token.generation == generation
+                && e.kind == DeliveryObservationKind::Attempting
+        }) {
             entry.kind = DeliveryObservationKind::RetryScheduled;
             entry.reason = reason;
             entry.observed = now;
@@ -269,6 +269,12 @@ impl Node {
             .generation
             .load(std::sync::atomic::Ordering::SeqCst);
         if observations.finished_with_reason(token, generation, std::time::Instant::now(), reason) {
+            crate::transport::diagnostics::record_message(|metrics| {
+                metrics.retries_scheduled = metrics.retries_scheduled.saturating_add(1);
+                if reason == Some(DeliveryRecoveryReason::AttemptTimedOut) {
+                    metrics.attempt_timeouts = metrics.attempt_timeouts.saturating_add(1);
+                }
+            });
             self.delivery_status_notify.notify_waiters();
         }
     }

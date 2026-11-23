@@ -21,6 +21,34 @@ export interface ProcessResourceReading {
   io_write_bytes: number | null;
 }
 
+export interface MessageVolume {
+  count: number;
+  bytes: number;
+}
+
+export interface MessageResourceCounters {
+  accepted: number;
+  delivered: number;
+  rejected: number;
+  send_request_errors: number;
+  route_restarts: number;
+  direct_storage_holds: number;
+  relay_storage_holds: number;
+  attachments_accepted: number;
+  attachments_declined: number;
+  attempt_timeouts: number;
+  retries_scheduled: number;
+  received_direct: MessageVolume[];
+  received_group: MessageVolume[];
+  catch_up: number;
+  history_sync: number;
+  own_device_sync: number;
+  duplicate_direct_events: number;
+  attachments_verified: number;
+  verified_attachment_bytes: number;
+  delivery_latency: number[];
+}
+
 export interface HostResourceSample {
   sampled_at_ms: number;
   processes: ProcessResourceReading[];
@@ -28,6 +56,8 @@ export interface HostResourceSample {
   authenticated_channels: number;
   sent_frame_bytes: number;
   received_frame_bytes: number;
+  messages?: MessageResourceCounters;
+  direct_backlog?: [count: number, oldestMs: number | null] | null;
 }
 
 export const diag = {

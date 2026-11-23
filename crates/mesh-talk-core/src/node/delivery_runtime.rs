@@ -1001,7 +1001,22 @@ impl Node {
             .pending_transactions()
             .iter()
             .any(|pending| pending.id() == transaction.id());
-        let id = store.begin(transaction)?;
+        use crate::transport::diagnostics;
+        let tracks_message = matches!(
+            transaction.body(),
+            DeliveryTransaction::Outgoing { .. }
+                | DeliveryTransaction::OutgoingManifest { .. }
+                | DeliveryTransaction::ChannelOutgoing { .. }
+        );
+        let result = store.begin(transaction);
+        if tracks_message {
+            diagnostics::record_message(|metrics| match &result {
+                Ok(_) if !already_pending => metrics.accepted = metrics.accepted.saturating_add(1),
+                Err(_) => metrics.rejected = metrics.rejected.saturating_add(1),
+                _ => {}
+            });
+        }
+        let id = result?;
         if !already_pending {
             self.note_delivery_demand();
         }
@@ -1049,6 +1064,7 @@ impl Node {
             return Err(LogError::CorruptFile("invalid manifest device pair".into()));
         }
         if self.files.lock().expect("files lock").processed(event.id)? {
+            crate::transport::diagnostics::note_duplicate_receive();
             return Ok(());
         }
         let manifest = super::files::validated_manifest(&received.plaintext)
@@ -1369,6 +1385,7 @@ impl Node {
             .expect("received mutex")
             .processed(event.id)?
         {
+            crate::transport::diagnostics::note_duplicate_receive();
             return Ok(Some(()));
         }
         if sibling && !self.device_sync_policy().history {
@@ -1931,6 +1948,15 @@ impl Node {
         Ok(())
     }
 
+    /// Read existing direct outbox state without waiting on an active writer.
+    pub fn diagnostic_delivery_backlog(&self) -> Option<(usize, Option<u64>)> {
+        let (count, oldest) = self.delivery.try_lock().ok()?.diagnostic_backlog();
+        Some((
+            count,
+            oldest.and_then(|time| super::node::now_millis().checked_sub(time)),
+        ))
+    }
+
     /// Current profile's local durable acceptance / authenticated delivery state.
     pub fn delivery_status(&self, id: EventId) -> Option<DeliveryStatus> {
         self.delivery
@@ -2124,6 +2150,8 @@ impl Node {
         {
             return;
         }
+        let first_delivery =
+            store.status(authenticated.logical_id()) == Some(DeliveryStatus::Awaiting);
         if store
             .mark_delivered_for(
                 authenticated.logical_id(),
@@ -2131,6 +2159,11 @@ impl Node {
             )
             .is_ok()
         {
+            if first_delivery {
+                crate::transport::diagnostics::record_message(|metrics| {
+                    metrics.delivered(super::node::now_millis().checked_sub(message.wall_clock));
+                });
+            }
             self.retire_retained_delivery_control(event.id);
             self.delivery_observations
                 .lock()
@@ -2661,6 +2694,9 @@ impl Node {
             // A completed-but-unjoined old task may have moved its observation
             // token out of its Drop guard. Remove only that exact destination.
             if let ControlWork::Destination(event) = key {
+                crate::transport::diagnostics::record_message(|metrics| {
+                    metrics.route_restarts = metrics.route_restarts.saturating_add(1);
+                });
                 self.delivery_observations
                     .lock()
                     .expect("delivery observations lock not poisoned")
@@ -3474,6 +3510,15 @@ impl Node {
         }
         // This return value is remote storage evidence. The scheduling owner
         // separately checks whether durable destination work actually advanced.
+        if context != DeliveryAttemptContext::ReceiptRecovery && (held || relay_held) {
+            crate::transport::diagnostics::record_message(|metrics| {
+                metrics.direct_storage_holds =
+                    metrics.direct_storage_holds.saturating_add(u64::from(held));
+                metrics.relay_storage_holds = metrics
+                    .relay_storage_holds
+                    .saturating_add(u64::from(relay_held));
+            });
+        }
         let held = held || relay_held;
         (
             held,

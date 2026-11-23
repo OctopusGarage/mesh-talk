@@ -1339,7 +1339,7 @@
         "src/features/chat/useSerialPoll.test.ts"
       ],
       "capability": {
-        "summary": "Show the desktop startup milestone, opt-in process and encrypted transport counters, and measured peer discovery latency in Diagnostics.",
+        "summary": "Show desktop startup milestones, process and transport samples, and bounded message activity from existing commit owners in Diagnostics.",
         "guide": "docs/performance-requirements.md#desktop-resource-monitor",
         "invariants": [
           {
