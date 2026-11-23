@@ -3,7 +3,7 @@
   "checkpoint_id": "01M83WQ3WSN6F9PYSMGBGXF2M8",
   "strategy": "manual-commit",
   "branch": "requirements-work",
-  "checkpoints_count": 16,
+  "checkpoints_count": 21,
   "files_touched": [
     "docs/ci-maintenance.md",
     "scripts/diagnostics/validation-stage.test.mjs",
@@ -31,25 +31,32 @@
       "compact_transcript": "/2/transcript.jsonl",
       "content_hash": "/2/content_hash.txt",
       "prompt": "/2/prompt.txt"
+    },
+    {
+      "metadata": "/3/metadata.json",
+      "transcript": "/3/full.jsonl",
+      "compact_transcript": "/3/transcript.jsonl",
+      "content_hash": "/3/content_hash.txt",
+      "prompt": "/3/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 733907,
+    "input_tokens": 929526,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 115856384,
-    "output_tokens": 190664,
-    "api_call_count": 641,
+    "cache_read_tokens": 139531392,
+    "output_tokens": 212134,
+    "api_call_count": 860,
     "subagent_tokens_complete": false
   },
   "redaction": {
-    "replacements": 3172,
+    "replacements": 3185,
     "layers": {
       "betterleaks": 186,
       "connection_string": 0,
       "credential_key": 0,
       "credential_value": 0,
       "credentialed_uri": 0,
-      "entropy": 3001,
+      "entropy": 3015,
       "key_context": 0,
       "provider_token": 0,
       "shell_stdin": 0

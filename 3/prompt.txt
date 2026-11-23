@@ -1,0 +1,33 @@
+基于requirements-work分支，我们开个新的worktree分支，做一下REQ-023这个任务，先一起调研清楚，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+Delegated task node:delegated-task:command%3Amcp%3Ae4bbb107-14d3-4464-90fb-be5eef92459a%3Adelegate-task%3Aa56c823d-4df8-43da-aa8c-0921fa7ed9b2 (REQ-023 admission and call feasibility) [completed]:
+Saved the read-only findings with exact code references in [req-023-admission.md](/Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-023/tmp/req-023-admission.md).
+
+The signed group projection already distinguishes accepted members from invitees and binds each authorized device to its current membership grant. The existing shared-group privacy check is too broad for meeting admission because it can match any shared group.
+
+Direct Noise signaling and parts of the WebRTC capture and cleanup flow are reusable. The current call session selects one answering device and maintains one peer connection. Group meetings still need meeting-scoped admission, voluntary join and leave, and defined behavior when membership changes. The source inspection did not establish a blanket dependency on REQ-018.
+
+The report is Git-ignored. No implementation changes, tests, or commits.
+
+---
+
+所以你这个群的语音会议是具体打算怎么实现的，怎么实现推流拉流？大家的语音数据在群里怎么混合播放和接收之类的，而且这是一个去中心的app，你先充分分析和调研清楚方案先把，然后我们再一起讨论清楚吧，research and analyze; research and analyze; research and analyze; research and analyze; research and analyze; research and analyze; research and analyze; research and analyze;
+
+---
+
+Delegated task node:delegated-task:command%3Amcp%3Ae4bbb107-14d3-4464-90fb-be5eef92459a%3Adelegate-task%3A2664eed2-594c-4206-bf6f-b7eeb7901dc2 (REQ-023 WebRTC media topology research) [completed]:
+Wrote the [REQ-023 media research note](/Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-023/tmp/req-023-media-sources.md). It uses the existing calls code and primary standards to evaluate full-mesh WebRTC, local playback mixing, codec negotiation, metrics, desktop WebKit risks, and SFU and MCU tradeoffs.
+
+Bounded full mesh is the first topology to evaluate. Participant capacity and native WebView behavior still need measurement on the target devices and LANs.
+
+Verified that the note is ignored. The tracked worktree is clean, and no tests were run.
+
+---
+
+所以是接收方，独自接受所有的每个人的语言并自行混合播放是吗？？analyze； analyze； analyze； analyze； analyze； analyze； analyze；
+
+---
+
+行吧，你实现完，跟语音通话和视频通话一样，归到实验性质那一类吧，开启后才能使用，默认不开启吧，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
