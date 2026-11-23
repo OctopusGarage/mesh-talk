@@ -866,6 +866,12 @@
     "hangup": "挂断",
     "mute": "静音",
     "unmute": "取消静音",
+    "shareWindow": "共享窗口",
+    "stopWindowShare": "停止共享",
+    "windowSharing": "正在共享窗口",
+    "windowRequired": "请选择一个窗口进行共享。",
+    "shareFailed": "无法共享窗口。请检查屏幕采集权限后重试。",
+    "restoreFailed": "共享已停止，无法恢复摄像头。",
     "cameraOff": "关闭摄像头",
     "cameraOn": "打开摄像头",
     "audioOnly": "仅语音",
@@ -1607,6 +1613,15 @@
     "selected": "已选 {{count}} 条",
     "cancel": "取消",
     "favorite": "添加到收藏夹"
+  },
+  "voiceCapture": {
+    "title": "语音消息",
+    "description": "最多录制 30 秒，发送前可以试听。",
+    "failed": "无法录制或发送语音。请检查麦克风权限后重试。",
+    "stop": "停止录音",
+    "record": "录音",
+    "again": "重新录音",
+    "send": "发送语音"
   },
   "cameraCapture": {
     "title": "拍照",

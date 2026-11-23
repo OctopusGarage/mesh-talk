@@ -985,7 +985,10 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   finish; stale continuations do not record paths into a replacement session.
 - The call store owns local terminal signaling before resource disposal and an
   independent incoming-ring deadline. Disposing local media alone is not a
-  distributed call termination. The local WebRTC diagnostic separately owns a
+  distributed call termination. Window sharing belongs to the same live peer
+  connection and uses an already negotiated outgoing video transceiver. The
+  call owner stops capture and ignores late picker results after retirement.
+  The local WebRTC diagnostic separately owns a
   run generation; closing or unmounting disposes its peers, timers and tracks,
   stops late captures and settles its pending media waits.
 - Own DM/account reaction state uses an account-scoped encrypted projection with

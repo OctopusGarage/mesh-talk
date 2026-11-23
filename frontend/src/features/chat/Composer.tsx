@@ -16,6 +16,7 @@ import {
   Smile,
   Sticker as StickerIcon,
   Camera,
+  Mic,
   ScanLine,
   Image as ImageIcon,
   Plus,
@@ -113,6 +114,7 @@ export function Composer({
   onDraftChange,
   onAttach,
   onCamera,
+  onVoice,
   onAttachDirectory,
   onPasteFiles,
   onScreenshot,
@@ -146,6 +148,7 @@ export function Composer({
   ) => void;
   onDraftChange?: (text: string) => void;
   onCamera?: () => void;
+  onVoice?: () => void;
   onAttach?: () => void;
   onAttachDirectory?: () => void;
   /** Send copied files after the user presses Enter or Send. */
@@ -939,7 +942,11 @@ export function Composer({
               <ScanLine className="h-4 w-4" />
             </Button>
           )}
-          {(onAttach || onImage || onCamera || onAttachDirectory) && (
+          {(onAttach ||
+            onImage ||
+            onCamera ||
+            onVoice ||
+            onAttachDirectory) && (
             <Popover>
               <PopoverTrigger asChild>
                 <Button
@@ -972,6 +979,13 @@ export function Composer({
                     label: t("cameraCapture.title"),
                     id: "composer-camera",
                     blocked: false,
+                  },
+                  {
+                    action: onVoice,
+                    icon: Mic,
+                    label: t("voiceCapture.title"),
+                    id: "composer-voice",
+                    blocked: !!protection,
                   },
                   {
                     action: onAttach,

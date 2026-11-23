@@ -111,7 +111,9 @@ function FileBubble({
   );
   const available = !!savedPath || !!status?.ready;
   const [saving, setSaving] = useState(false);
-  const autoFailure = useAutomaticDownloads((s) => s.failures[file.fileConv]);
+  const autoFailure = useAutomaticDownloads((s) =>
+    savedPath ? undefined : s.failures[file.fileConv],
+  );
   const automatic = useChat(
     (s) =>
       !mine &&

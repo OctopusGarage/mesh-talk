@@ -4,6 +4,7 @@ import {
   FlaskConical,
   Mic,
   MicOff,
+  MonitorUp,
   Phone,
   PhoneIncoming,
   PhoneOff,
@@ -188,6 +189,15 @@ export function CallDialog() {
   const hangup = useCalls((s) => s.hangup);
   const toggleMic = useCalls((s) => s.toggleMic);
   const toggleCam = useCalls((s) => s.toggleCam);
+  const sharedWindow = useCalls((s) => s.sharedWindow);
+  const windowShareAvailable = useCalls((s) => s.windowShareAvailable);
+  const windowShareBusy = useCalls((s) => s.windowShareBusy);
+  const windowShareError = useCalls((s) => s.windowShareError);
+  const canShareWindow =
+    phase === "connected" &&
+    windowShareAvailable &&
+    !!navigator.mediaDevices?.getDisplayMedia;
+
   const clearEnded = useCalls((s) => s.clearEnded);
   const failureKind = useCalls((s) => s.failureKind);
   const retryTarget = useCalls((s) => s.retryTarget);
@@ -304,7 +314,7 @@ export function CallDialog() {
                   <StreamVideo
                     stream={remoteStream}
                     className={
-                      remoteHasVideo ? "h-full w-full object-cover" : "hidden"
+                      remoteHasVideo ? "h-full w-full object-contain" : "hidden"
                     }
                   />
                 )}
@@ -331,9 +341,9 @@ export function CallDialog() {
                 )}
 
                 {/* Local preview (muted to avoid echo). Hidden when audio-only or camera off. */}
-                {localStream && hasVideo && camOn && (
+                {(sharedWindow || (localStream && hasVideo && camOn)) && (
                   <StreamVideo
-                    stream={localStream}
+                    stream={sharedWindow ?? localStream!}
                     muted
                     className="absolute bottom-3 right-3 h-28 w-40 rounded-lg border border-white/20 object-cover shadow-lg"
                   />
@@ -343,6 +353,15 @@ export function CallDialog() {
                   <div className="absolute left-3 top-3 rounded-full bg-black/50 px-3 py-1 text-sm text-white">
                     {who}
                   </div>
+                )}
+
+                {sharedWindow && (
+                  <span
+                    role="status"
+                    className="absolute bottom-3 left-3 rounded-md bg-black/80 px-2 py-1 text-xs text-white"
+                  >
+                    {t("call.windowSharing")}
+                  </span>
                 )}
 
                 {/* Always mark the call as experimental. */}
@@ -355,6 +374,11 @@ export function CallDialog() {
                 </div>
               </div>
 
+              {windowShareError && (
+                <p role="alert" className="px-4 pt-3 text-sm text-destructive">
+                  {t(`call.${windowShareError}`)}
+                </p>
+              )}
               {/* Controls. */}
               <div className="flex items-center justify-center gap-3 p-4">
                 {phase === "incoming" ? (
@@ -394,7 +418,7 @@ export function CallDialog() {
                             <MicOff className="h-4 w-4" />
                           )}
                         </Button>
-                        {hasVideo && (
+                        {hasVideo && !sharedWindow && (
                           <Button
                             variant="secondary"
                             size="icon"
@@ -412,6 +436,27 @@ export function CallDialog() {
                           </Button>
                         )}
                       </>
+                    )}
+                    {canShareWindow && (
+                      <Button
+                        variant="secondary"
+                        disabled={windowShareBusy}
+                        onClick={() => {
+                          const call = useCalls.getState();
+                          void (sharedWindow
+                            ? call.stopWindowShare()
+                            : call.startWindowShare());
+                        }}
+                        data-testid="call-window-share"
+                        className="gap-2"
+                      >
+                        <MonitorUp className="h-4 w-4" aria-hidden="true" />
+                        {t(
+                          sharedWindow
+                            ? "call.stopWindowShare"
+                            : "call.shareWindow",
+                        )}
+                      </Button>
                     )}
                     <Button
                       onClick={() => hangup()}

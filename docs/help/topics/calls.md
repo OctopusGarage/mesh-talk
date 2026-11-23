@@ -53,6 +53,12 @@ Replacing a stream or closing its view pauses playback and detaches the old stre
 Hangup and media connection failure stop local capture and close the peer
 connection. A failed media connection shows the call failure notice.
 
+## Share a window
+
+During an established one-to-one video call, choose **Share window** when the app offers it. The control requires a client with window capture and an outgoing video track negotiated for the call. Select one application window in the system picker. The shared window replaces your outgoing camera picture. Your microphone setting still applies, and sharing does not capture system audio.
+
+**Sharing a window** appears while your window is being sent. Choose **Stop sharing**, close the shared window, or use the system stop control to end the share. The call restores the camera to its previous state. Hanging up, losing the call, or locking the app ends the capture. If the picker returns a display or browser tab, choose a window instead.
+
 ## Connection limits
 
 Calling is experimental. A working message or post-office route does not guarantee a usable media path. Post offices are not a general media relay, and a cross-site introduction does not make the peers directly reachable.

@@ -85,3 +85,9 @@ JPEG with a maximum long edge of 1920 pixels.
 If access is denied, allow camera access in your operating system's privacy
 settings and retry. If the camera is unavailable or busy, close other apps using
 it and retry, or choose an existing photo instead.
+
+## Send a voice message
+
+Open the composer attachment tools and choose **Voice message**. Select **Record** to request the microphone and begin a recording of up to 30 seconds. Stop to listen, record again if needed, or choose **Send voice message** to send it as an ordinary encrypted attachment. Cancelling discards the recording.
+
+Receive and save the voice file the same way as any other attachment. Use **Reveal** to open its folder and play the file with a player that supports its format, including while offline.

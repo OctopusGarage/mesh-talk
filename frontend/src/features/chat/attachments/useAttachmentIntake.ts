@@ -74,6 +74,11 @@ export function useAttachmentIntake(
     policy: AttachmentSendOptions;
   } | null>(null);
 
+  const [voice, setVoice] = useState<{
+    current: Current;
+    policy: AttachmentSendOptions;
+  } | null>(null);
+
   const screenshotPolicies = useRef(new WeakMap<File, AttachmentSendOptions>());
   const submittedPolicies = useRef(
     new WeakMap<File, { policy: AttachmentSendOptions; current: Current }>(),
@@ -337,6 +342,7 @@ export function useAttachmentIntake(
         conversationEpoch.current++;
         setScreenshot(null);
         setCamera(null);
+        setVoice(null);
         setStagedScreenshot(null);
         setDragOver(false);
       }
@@ -349,6 +355,7 @@ export function useAttachmentIntake(
         conversationEpoch.current++;
         setScreenshot(null);
         setCamera(null);
+        setVoice(null);
         setStagedScreenshot(null);
       }
     });
@@ -429,6 +436,34 @@ export function useAttachmentIntake(
   }, [t]);
 
   return {
+    voiceOpen: !!voice?.current(),
+    openVoice: () => {
+      const current = capture();
+      const policy = snapshot();
+      if (current() && !policy.protection) setVoice({ current, policy });
+    },
+    cancelVoice: () => setVoice(null),
+    sendVoice: async (file: File) => {
+      if (!voice?.current()) return false;
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const extension = file.name.split(".").pop()!;
+        const accepted = await stage(
+          bytes,
+          extension,
+          file.name,
+          false,
+          voice.current,
+          voice.policy,
+        );
+        if (!accepted) return false;
+        if (voice.current()) setVoice(null);
+        return true;
+      } catch (error) {
+        report(error, voice.current);
+        return false;
+      }
+    },
     cameraOpen: !!camera?.current(),
     openCamera: () => {
       const current = capture();

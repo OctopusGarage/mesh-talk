@@ -866,6 +866,12 @@
     "hangup": "Hang up",
     "mute": "Mute",
     "unmute": "Unmute",
+    "shareWindow": "Share window",
+    "stopWindowShare": "Stop sharing",
+    "windowSharing": "Sharing a window",
+    "windowRequired": "Choose a window to share.",
+    "shareFailed": "Could not share the window. Check capture permission and try again.",
+    "restoreFailed": "Sharing stopped. Could not restore the camera.",
     "cameraOff": "Turn camera off",
     "cameraOn": "Turn camera on",
     "audioOnly": "Audio only",
@@ -1607,6 +1613,15 @@
     "selected": "{{count}} selected",
     "cancel": "Cancel",
     "favorite": "Add to Favorites"
+  },
+  "voiceCapture": {
+    "title": "Voice message",
+    "description": "Record up to 30 seconds, then listen before sending.",
+    "failed": "Could not record or send the clip. Check the microphone permission and try again.",
+    "stop": "Stop recording",
+    "record": "Record",
+    "again": "Record again",
+    "send": "Send voice message"
   },
   "cameraCapture": {
     "title": "Take photo",

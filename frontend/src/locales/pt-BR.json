@@ -866,6 +866,12 @@
     "hangup": "Encerrar chamada",
     "mute": "Silenciar microfone",
     "unmute": "Ativar microfone",
+    "shareWindow": "Compartilhar janela",
+    "stopWindowShare": "Parar de compartilhar",
+    "windowSharing": "Compartilhando uma janela",
+    "windowRequired": "Escolha uma janela para compartilhar.",
+    "shareFailed": "Não foi possível compartilhar a janela. Verifique a permissão de captura e tente novamente.",
+    "restoreFailed": "O compartilhamento terminou. Não foi possível restaurar a câmera.",
     "cameraOff": "Desativar câmera",
     "cameraOn": "Ativar câmera",
     "audioOnly": "Somente áudio",
@@ -1607,6 +1613,15 @@
     "selected": "{{count}} selecionadas",
     "cancel": "Cancelar",
     "favorite": "Adicionar aos Favoritos"
+  },
+  "voiceCapture": {
+    "title": "Mensagem de voz",
+    "description": "Grave até 30 segundos e ouça antes de enviar.",
+    "failed": "Não foi possível gravar ou enviar o áudio. Verifique a permissão do microfone e tente novamente.",
+    "stop": "Parar gravação",
+    "record": "Gravar",
+    "again": "Gravar novamente",
+    "send": "Enviar mensagem de voz"
   },
   "cameraCapture": {
     "title": "Tirar foto",

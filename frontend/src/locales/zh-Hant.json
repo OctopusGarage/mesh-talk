@@ -866,6 +866,12 @@
     "hangup": "掛斷",
     "mute": "靜音",
     "unmute": "取消靜音",
+    "shareWindow": "分享視窗",
+    "stopWindowShare": "停止分享",
+    "windowSharing": "正在分享視窗",
+    "windowRequired": "請選擇要分享的視窗。",
+    "shareFailed": "無法分享視窗。請檢查螢幕擷取權限後重試。",
+    "restoreFailed": "已停止分享，無法恢復相機。",
     "cameraOff": "關閉相機",
     "cameraOn": "開啟相機",
     "audioOnly": "僅語音",
@@ -1607,6 +1613,15 @@
     "selected": "已選 {{count}} 則",
     "cancel": "取消",
     "favorite": "加入收藏夾"
+  },
+  "voiceCapture": {
+    "title": "語音訊息",
+    "description": "最多錄製 30 秒，傳送前可以試聽。",
+    "failed": "無法錄製或傳送語音。請檢查麥克風權限後重試。",
+    "stop": "停止錄音",
+    "record": "錄音",
+    "again": "重新錄音",
+    "send": "傳送語音"
   },
   "cameraCapture": {
     "title": "拍照",

@@ -6,6 +6,21 @@ import type { ChatMessage } from "@/store/chat";
 import type { Transfer } from "@/store/transfers";
 import { encodeStickerMediaName } from "@/lib/stickerMedia";
 
+const download = vi.hoisted(() => ({
+  saved: {} as Record<string, string>,
+  errors: {} as Record<string, string>,
+}));
+vi.mock("@/lib/savedDownloads", async (original) => ({
+  ...(await original<typeof import("@/lib/savedDownloads")>()),
+  useSavedDownloads: () => download.saved,
+}));
+vi.mock("@/lib/automaticDownloads", async (original) => ({
+  ...(await original<typeof import("@/lib/automaticDownloads")>()),
+  useAutomaticDownloads: (
+    select: (state: { failures: Record<string, string> }) => unknown,
+  ) => select({ failures: download.errors }),
+}));
+
 const transfer = vi.hoisted(() => ({
   value: undefined as Transfer | undefined,
 }));
@@ -29,6 +44,8 @@ import { MessageBubble } from "./MessageBubble";
 
 beforeEach(() => {
   transfer.value = undefined;
+  download.saved = {};
+  download.errors = {};
 });
 function render(m: Partial<ChatMessage>, readOnly = false) {
   return renderToStaticMarkup(
@@ -140,4 +157,21 @@ it("keeps ordinary Unicode emoji in the text bubble without sticker geometry", (
   expect(html).toContain("👍");
   expect(html).toContain("bg-bubble-own");
   expect(html).not.toContain("h-32 w-32");
+});
+
+it("clears the attachment's stale write error after Save as succeeds", () => {
+  const file = {
+    ...photo,
+    name: "report.pdf",
+    mime: "application/pdf",
+    media: false,
+  };
+  download.errors.file = "disk full";
+  expect(render({ file, fromMe: false })).toContain("disk full");
+
+  download.saved.file = "/new/report.pdf";
+  const saved = render({ file, fromMe: false });
+  expect(saved).toContain("Reveal");
+  expect(saved).toContain("/new/report.pdf");
+  expect(saved).not.toContain("disk full");
 });

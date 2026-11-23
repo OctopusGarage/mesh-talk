@@ -17,8 +17,17 @@ export const diag = {
   networkInfo: () => invoke<DiagNetworkInfo>("diag_network_info"),
   /** Force an immediate re-announce + rescan (manual "announce now"). */
   rescan: () => invoke<void>("rescan_peers"),
-  probeEndpoint: (host: string) =>
-    invoke<void>("probe_peer_endpoint", { host }),
+  probeEndpoint: (endpoint: string) => {
+    const address = endpoint.trim();
+    // A bare IPv6 literal has no port. Brackets disambiguate an IPv6 port.
+    const qualified =
+      /^\[([^\]]+)\](?::([0-9]{1,5}))?$/u.exec(address) ??
+      /^([^:]+):([0-9]{1,5})$/u.exec(address);
+    return invoke<void>("probe_peer_endpoint", {
+      host: qualified?.[1] ?? address,
+      port: qualified?.[2] === undefined ? undefined : Number(qualified[2]),
+    });
+  },
 };
 
 export const presence = {

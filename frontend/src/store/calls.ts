@@ -79,6 +79,10 @@ interface CallState {
   video: boolean;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
+  sharedWindow: MediaStream | null;
+  windowShareAvailable: boolean;
+  windowShareBusy: boolean;
+  windowShareError: "windowRequired" | "shareFailed" | "restoreFailed" | null;
   micOn: boolean;
   camOn: boolean;
   /** Whether the LOCAL capture has a video track (false = audio-only fallback). */
@@ -101,6 +105,8 @@ interface CallState {
   hangup: () => void;
   toggleMic: () => void;
   toggleCam: () => void;
+  startWindowShare: () => Promise<void>;
+  stopWindowShare: () => Promise<void>;
   onSignal: (e: CallSignalEvent) => void;
   /** Dismiss the transient end-of-call note (declined / busy / failed). */
   clearEnded: () => void;
@@ -190,6 +196,37 @@ function gatherComplete(
 }
 
 export const useCalls = create<CallState>((set, get) => {
+  let share: {
+    sender: RTCRtpSender;
+    camera: MediaStreamTrack;
+    track: MediaStreamTrack;
+    stream: MediaStream;
+    ended: () => void;
+  } | null = null;
+
+  function releaseWindow() {
+    const previous = share;
+    share = null;
+    if (previous) {
+      previous.track.removeEventListener("ended", previous.ended);
+      stopStream(previous.stream);
+    }
+    return previous;
+  }
+
+  function currentConnection(conn: RTCPeerConnection) {
+    return pc === conn && get().phase === "connected";
+  }
+  function windowSender(conn: RTCPeerConnection) {
+    return conn
+      .getTransceivers()
+      .find(
+        ({ sender, currentDirection }) =>
+          sender.track?.kind === "video" &&
+          (currentDirection === "sendrecv" || currentDirection === "sendonly"),
+      )?.sender;
+  }
+
   /** Build a peer connection wired to surface the remote stream + connection state. */
   function newPc(): { conn: RTCPeerConnection; signal: AbortSignal } {
     const conn = new RTCPeerConnection({ iceServers: [] });
@@ -206,7 +243,7 @@ export const useCalls = create<CallState>((set, get) => {
       if (s === "connected") {
         if (connectTimer) clearTimeout(connectTimer);
         connectTimer = null;
-        set({ phase: "connected" });
+        set({ phase: "connected", windowShareAvailable: !!windowSender(conn) });
       } else if (s === "failed") {
         end("failed", "failed");
       }
@@ -215,6 +252,7 @@ export const useCalls = create<CallState>((set, get) => {
   }
 
   function cleanup() {
+    releaseWindow();
     if (connectTimer) clearTimeout(connectTimer);
     connectTimer = null;
     pcPreparation?.abort();
@@ -257,6 +295,10 @@ export const useCalls = create<CallState>((set, get) => {
       video: true,
       localStream: null,
       remoteStream: null,
+      sharedWindow: null,
+      windowShareAvailable: false,
+      windowShareBusy: false,
+      windowShareError: null,
       micOn: true,
       camOn: true,
       hasVideo: false,
@@ -285,6 +327,10 @@ export const useCalls = create<CallState>((set, get) => {
     video: true,
     localStream: null,
     remoteStream: null,
+    sharedWindow: null,
+    windowShareAvailable: false,
+    windowShareBusy: false,
+    windowShareError: null,
     micOn: true,
     camOn: true,
     hasVideo: false,
@@ -457,6 +503,87 @@ export const useCalls = create<CallState>((set, get) => {
       const next = !micOn;
       for (const t of localStream.getAudioTracks()) t.enabled = next;
       set({ micOn: next });
+    },
+
+    startWindowShare: async () => {
+      const conn = pc;
+      const media = navigator.mediaDevices;
+      const { hasVideo, windowShareBusy } = get();
+      if (
+        !conn ||
+        !currentConnection(conn) ||
+        !hasVideo ||
+        windowShareBusy ||
+        share ||
+        !media?.getDisplayMedia
+      )
+        return;
+      const sender = windowSender(conn);
+      const camera = get().localStream?.getVideoTracks()[0];
+      if (!sender || !camera) return;
+
+      set({ windowShareBusy: true, windowShareError: null });
+      try {
+        const stream = await media.getDisplayMedia({
+          video: { displaySurface: "window", frameRate: { max: 15 } },
+          audio: false,
+        });
+        if (!currentConnection(conn)) {
+          stopStream(stream);
+          return;
+        }
+        const track = stream.getVideoTracks()[0];
+        if (
+          track?.getSettings().displaySurface !== "window" ||
+          stream.getTracks().length !== 1
+        ) {
+          stopStream(stream);
+          set({ windowShareError: "windowRequired" });
+          return;
+        }
+        share = {
+          sender,
+          camera,
+          track,
+          stream,
+          ended: () => {
+            void get().stopWindowShare();
+          },
+        };
+        await sender.replaceTrack(track);
+        if (!currentConnection(conn)) return;
+        if (track.readyState === "ended") {
+          await get().stopWindowShare();
+          return;
+        }
+        track.addEventListener("ended", share.ended, { once: true });
+        set({ sharedWindow: stream });
+      } catch {
+        if (!currentConnection(conn)) return;
+        releaseWindow();
+        set({ windowShareError: "shareFailed" });
+      } finally {
+        if (currentConnection(conn)) set({ windowShareBusy: false });
+      }
+    },
+
+    stopWindowShare: async () => {
+      const conn = pc;
+      if (!conn || !currentConnection(conn)) return;
+      const previous = releaseWindow();
+      if (!previous) return;
+      set({
+        sharedWindow: null,
+        windowShareBusy: true,
+        windowShareError: null,
+      });
+      try {
+        await previous.sender.replaceTrack(previous.camera);
+      } catch {
+        if (currentConnection(conn)) set({ windowShareError: "restoreFailed" });
+      } finally {
+        if (currentConnection(conn)) set({ windowShareBusy: false });
+      }
     },
 
     toggleCam: () => {

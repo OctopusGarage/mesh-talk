@@ -866,6 +866,12 @@
     "hangup": "終了",
     "mute": "ミュート",
     "unmute": "ミュート解除",
+    "shareWindow": "ウィンドウを共有",
+    "stopWindowShare": "共有を停止",
+    "windowSharing": "ウィンドウを共有中",
+    "windowRequired": "共有するウィンドウを選んでください。",
+    "shareFailed": "ウィンドウを共有できませんでした。画面収録の権限を確認して再試行してください。",
+    "restoreFailed": "共有を停止しました。カメラを復元できませんでした。",
     "cameraOff": "カメラをオフ",
     "cameraOn": "カメラをオン",
     "audioOnly": "音声のみ",
@@ -1607,6 +1613,15 @@
     "selected": "{{count}} 件選択済み",
     "cancel": "キャンセル",
     "favorite": "お気に入りに追加"
+  },
+  "voiceCapture": {
+    "title": "音声メッセージ",
+    "description": "最大30秒録音し、送信前に確認できます。",
+    "failed": "録音または送信できませんでした。マイクの権限を確認して再試行してください。",
+    "stop": "録音を停止",
+    "record": "録音",
+    "again": "録り直す",
+    "send": "音声メッセージを送信"
   },
   "cameraCapture": {
     "title": "写真を撮る",

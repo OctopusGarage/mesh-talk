@@ -866,6 +866,12 @@
     "hangup": "통화 종료",
     "mute": "마이크 끄기",
     "unmute": "마이크 켜기",
+    "shareWindow": "창 공유",
+    "stopWindowShare": "공유 중지",
+    "windowSharing": "창 공유 중",
+    "windowRequired": "공유할 창을 선택하세요.",
+    "shareFailed": "창을 공유할 수 없습니다. 화면 캡처 권한을 확인하고 다시 시도하세요.",
+    "restoreFailed": "공유를 중지했습니다. 카메라를 복원할 수 없습니다.",
     "cameraOff": "카메라 끄기",
     "cameraOn": "카메라 켜기",
     "audioOnly": "음성만",
@@ -1607,6 +1613,15 @@
     "selected": "{{count}}개 선택됨",
     "cancel": "취소",
     "favorite": "즐겨찾기에 추가"
+  },
+  "voiceCapture": {
+    "title": "음성 메시지",
+    "description": "최대 30초까지 녹음하고 보내기 전에 들어 보세요.",
+    "failed": "녹음하거나 보낼 수 없습니다. 마이크 권한을 확인하고 다시 시도하세요.",
+    "stop": "녹음 중지",
+    "record": "녹음",
+    "again": "다시 녹음",
+    "send": "음성 메시지 보내기"
   },
   "cameraCapture": {
     "title": "사진 촬영",

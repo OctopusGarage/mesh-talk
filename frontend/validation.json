@@ -2221,6 +2221,10 @@
             "reference": "docs/help/topics/calls.md#check-microphone-and-camera"
           },
           {
+            "name": "Connected video calls can replace their outgoing camera with one explicitly selected window, restore the camera when sharing stops, and release display capture on retirement.",
+            "reference": "docs/help/topics/calls.md#share-a-window"
+          },
+          {
             "name": "A connected remote audio stream has an unmuted playback element even without video; replacement and unmount pause and detach the old stream.",
             "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"
           },
@@ -2290,6 +2294,7 @@
     {
       "id": "frontend-inline-media",
       "paths": [
+        "frontend/e2e/download-remembered.spec.ts",
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/src/features/chat/MediaPreview.tsx",
         "frontend/src/features/chat/ImageQrResult.tsx",
@@ -2562,6 +2567,33 @@
           }
         ]
       }
+    },
+    {
+      "id": "frontend-voice-message",
+      "paths": [
+        "frontend/src/features/chat/VoiceCaptureDialog.tsx",
+        "frontend/src/features/chat/attachments/voiceRecording.ts",
+        "frontend/src/features/chat/attachments/voiceRecording.test.ts",
+        "frontend/e2e/voice-message.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/attachments/voiceRecording.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Record a bounded voice clip and send it only after explicit review and confirmation.",
+        "guide": "docs/help/topics/send-files.md#send-a-voice-message",
+        "invariants": [
+          {
+            "name": "Microphone ownership ends when recording stops or the owning dialog closes; sent clips use ordinary attachment admission.",
+            "reference": "docs/help/topics/send-files.md#send-a-voice-message"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/voice-message.spec.ts and verify capture, audition and offline attachment playback with a microphone on target native desktop engines."
+      ]
     },
     {
       "id": "frontend-camera-capture",
@@ -3413,6 +3445,8 @@
         "frontend/e2e/fixtures/video-metadata.json",
         "frontend/e2e/media-message-presentation.spec.ts",
         "frontend/e2e/screenshot-portable.spec.ts",
+        "frontend/e2e/download-remembered.spec.ts",
+        "frontend/src/features/chat/FilesTray.tsx",
         "frontend/e2e/automatic-delivery.spec.ts"
       ],
       "browser": [
@@ -3424,6 +3458,7 @@
         "e2e/ui-visual-regression.spec.ts",
         "e2e/image-receiving.spec.ts",
         "e2e/file-receive-controls.spec.ts",
+        "e2e/download-remembered.spec.ts",
         "e2e/video-player-layout.spec.ts",
         "e2e/media-message-presentation.spec.ts",
         "e2e/screenshot-portable.spec.ts",

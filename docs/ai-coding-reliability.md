@@ -2400,6 +2400,10 @@ expression preview/fallback/decode geometry consistent and preserve incoming
 consent, unavailable, retry and protected/read-only access through the existing
 [inline-media owner](module-boundaries.md#inline-media-presentation).
 
+Attachment save status follows the last successful local outcome. A verified saved path takes precedence over an earlier automatic-write error, including recovery through Save as. Both the conversation card and received-files view use that precedence. The [download recovery browser fixture](../frontend/e2e/download-remembered.spec.ts) covers explicit retry and saving to a different destination.
+
+Browser diagnostics fixtures must check the native command arguments. For manual discovery, the React adapter separates a user-entered endpoint into the host and optional discovery port expected by IPC. A bare IPv6 address stays intact. The [connection recovery browser scenario](../frontend/e2e/connection-recovery.spec.ts) checks the IPC payload and the query-sent state. The native diagnostics test observes the UDP query at a bound endpoint. Both boundaries are needed to validate manual discovery.
+
 Independent message kinds should have independent browser scenarios. The
 [automatic delivery fixture](../frontend/e2e/automatic-delivery.spec.ts) checks
 text, sticker and file-card Awaiting/explicit projection separately; keep the
