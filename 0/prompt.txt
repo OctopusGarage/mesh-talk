@@ -1,0 +1,1 @@
+覆盖所有用的核心的业务指标吧。全面覆盖全吧，但要注意高效采集和性能，可以尽量使用各种事件驱动埋点等等，analyze；analyze；analyze；analyze；analyze；analyze；
