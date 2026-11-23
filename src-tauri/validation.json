@@ -1067,7 +1067,7 @@
         "guide": "docs/performance-requirements.md#evidence-and-maintenance",
         "invariants": [
           {
-            "name": "Desktop host readiness logs one elapsed time at Tauri Ready after setup, before shutdown. The native acceptance harness observes the metric while the desktop is running.",
+            "name": "Desktop host readiness logs one elapsed time at Tauri Ready. The initial interface acknowledgement records its own elapsed time from the same launch clock; the visibility fallback never fabricates an acknowledgement.",
             "reference": "docs/performance-requirements.md#evidence-and-maintenance"
           },
           {

@@ -187,7 +187,9 @@ pub(crate) fn initial_presentation_ready<R: tauri::Runtime>(
     if window.label() != "main" {
         return Err("Initial presentation belongs to the main window".into());
     }
-    complete_initial_presentation(&window).map_err(|error| error.to_string())
+    complete_initial_presentation(&window).map_err(|error| error.to_string())?;
+    crate::diagnostics::record_initial_interface();
+    Ok(())
 }
 
 #[cfg(test)]

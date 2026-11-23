@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { obs } from "@/lib/api";
-import type { HostResourceSample } from "@/lib/api/diagnostics";
+import type {
+  HostResourceSample,
+  ProcessResourceReading,
+} from "@/lib/api/diagnostics";
 import {
   isNativeWindowMinimized,
   subscribeNativeWindowMinimized,
@@ -43,12 +46,14 @@ function HostResourceReadings() {
     null,
   );
   const [sample, setSample] = useState<HostResourceSample>();
-  const [cpuPercent, setCpuPercent] = useState<number | null>(null);
+  const [interval, setIntervalReading] = useState<IntervalReading>();
+  const [memoryPeak, setMemoryPeak] = useState<number | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const clear = () => {
     previous.current = null;
     setSample(undefined);
-    setCpuPercent(null);
+    setIntervalReading(undefined);
+    setMemoryPeak(null);
   };
   useEffect(() => {
     const hidden = () => {
@@ -91,7 +96,12 @@ function HostResourceReadings() {
         reset();
         return;
       }
-      setCpuPercent(cpuUsage(previous.current, { at, reading }));
+      setIntervalReading(compareReadings(previous.current, { at, reading }));
+      if (!reading.bounded) {
+        const resident = total(reading.processes, "resident_bytes");
+        if (resident !== null)
+          setMemoryPeak((peak) => Math.max(peak ?? 0, resident));
+      }
       previous.current = { at, reading };
       setSample(reading);
     },
@@ -119,25 +129,29 @@ function HostResourceReadings() {
       maximumFractionDigits: 1,
     }).format(value / scale);
   };
-  const total = (
-    metric: "resident_bytes" | "disk_write_bytes" | "io_write_bytes",
-  ) => {
-    const values = sample.processes.map((process) => process[metric]);
-    return values.some((value) => value === null)
-      ? null
-      : values.reduce<number>((sum, value) => sum + (value ?? 0), 0);
-  };
+  const rate = (bytes: number | null | undefined) =>
+    bytes == null
+      ? "—"
+      : t("diagnostics.resources.perSecond", { size: size(bytes) });
+  const percentValue = (value: number | null | undefined) =>
+    value == null ? "—" : percent.format(value);
   const rows = [
-    ["cpu", cpuPercent === null ? "—" : percent.format(cpuPercent)],
-    ["memory", size(total("resident_bytes"))],
-    ["writes", size(total("disk_write_bytes"))],
-    ["processes", count.format(sample.processes.length)],
+    ["cpu", percentValue(interval?.cpu)],
+    ["memory", size(total(sample.processes, "resident_bytes"))],
+    ["memoryPeak", size(memoryPeak)],
+    ["writes", size(total(sample.processes, "disk_write_bytes"))],
+    ["diskRate", rate(interval?.disk)],
     ["connections", count.format(sample.authenticated_channels)],
     ["sent", size(sample.sent_frame_bytes)],
     ["received", size(sample.received_frame_bytes)],
+    ["sendRate", rate(interval?.sent)],
+    ["receiveRate", rate(interval?.received)],
   ];
   if (sample.processes.some((process) => process.io_write_bytes !== null))
-    rows.splice(3, 0, ["ioWrites", size(total("io_write_bytes"))]);
+    rows.push(
+      ["ioWrites", size(total(sample.processes, "io_write_bytes"))],
+      ["ioRate", rate(interval?.io)],
+    );
   return (
     <>
       <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 text-xs tabular-nums">
@@ -148,6 +162,37 @@ function HostResourceReadings() {
           </div>
         ))}
       </dl>
+      <details className="text-xs">
+        <summary className="cursor-pointer rounded-sm focus-visible:outline-2">
+          {t("diagnostics.resources.processDetails", {
+            count: sample.processes.length,
+          })}
+        </summary>
+        <ul className="mt-2 grid gap-1 tabular-nums">
+          {sample.processes.map((process, index) => (
+            <li
+              key={process.birth + ":" + process.pid}
+              className="flex flex-wrap justify-between gap-x-2"
+            >
+              <span>
+                {t(
+                  index === 0
+                    ? "diagnostics.resources.hostPid"
+                    : "diagnostics.resources.childPid",
+                  { pid: process.pid },
+                )}
+              </span>
+              <span>
+                {percentValue(interval?.processCpu.get(process.pid))} ·{" "}
+                {size(process.resident_bytes)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </details>
+      <p className="text-xs text-muted-foreground">
+        {t("diagnostics.resources.scope")}
+      </p>
       {sample.bounded && (
         <p className="text-xs text-muted-foreground">
           {t("diagnostics.resources.bounded")}
@@ -170,20 +215,74 @@ function release(lease: { current: Promise<number | null> | null }) {
 
 type TimedReading = { at: number; reading: HostResourceSample };
 
-function cpuUsage(before: TimedReading | null, after: TimedReading) {
-  if (!before || before.reading.bounded || after.reading.bounded) return null;
-  const elapsed = after.at - before.at;
-  if (elapsed <= 0 || elapsed > 2 * SAMPLE_INTERVAL_MS) return null;
-  const baseline = new Map(
-    before.reading.processes.map((entry) => [entry.pid, entry]),
-  );
-  if (baseline.size !== after.reading.processes.length) return null;
-  let consumed = 0;
-  for (const entry of after.reading.processes) {
-    const older = baseline.get(entry.pid);
-    if (!older || older.birth !== entry.birth || older.cpu_ms > entry.cpu_ms)
-      return null;
-    consumed += entry.cpu_ms - older.cpu_ms;
+type ProcessMetric = "resident_bytes" | "disk_write_bytes" | "io_write_bytes";
+
+function total(processes: ProcessResourceReading[], metric: ProcessMetric) {
+  let sum = 0;
+  for (const process of processes) {
+    const value = process[metric];
+    if (value === null) return null;
+    sum += value;
   }
-  return consumed / elapsed;
+  return sum;
+}
+
+interface IntervalReading {
+  cpu: number | null;
+  disk: number | null;
+  io: number | null;
+  sent: number | null;
+  received: number | null;
+  processCpu: Map<number, number>;
+}
+
+function compareReadings(
+  before: TimedReading | null,
+  after: TimedReading,
+): IntervalReading | undefined {
+  if (!before) return;
+  const elapsed = after.at - before.at;
+  if (elapsed <= 0 || elapsed > 2 * SAMPLE_INTERVAL_MS) return;
+  const older = before.reading;
+  const latest = after.reading;
+  const delta = (first: number | null, next: number | null) =>
+    first === null || next === null || next < first ? null : next - first;
+  const perSecond = (amount: number | null) =>
+    amount === null ? null : (amount * 1000) / elapsed;
+  const baseline = new Map(older.processes.map((entry) => [entry.pid, entry]));
+  const processCpu = new Map<number, number>();
+  let complete =
+    !older.bounded &&
+    !latest.bounded &&
+    baseline.size === latest.processes.length;
+  let cpu = 0;
+  let disk: number | null = 0;
+  let io: number | null = 0;
+  const add = (sum: number | null, amount: number | null) =>
+    sum === null || amount === null ? null : sum + amount;
+  for (const entry of latest.processes) {
+    const prior = baseline.get(entry.pid);
+    if (!prior || prior.birth !== entry.birth) {
+      complete = false;
+      continue;
+    }
+    const consumed = delta(prior.cpu_ms, entry.cpu_ms);
+    if (consumed === null) complete = false;
+    else {
+      processCpu.set(entry.pid, consumed / elapsed);
+      cpu += consumed;
+    }
+    disk = add(disk, delta(prior.disk_write_bytes, entry.disk_write_bytes));
+    io = add(io, delta(prior.io_write_bytes, entry.io_write_bytes));
+  }
+  return {
+    cpu: complete ? cpu / elapsed : null,
+    disk: complete ? perSecond(disk) : null,
+    io: complete ? perSecond(io) : null,
+    sent: perSecond(delta(older.sent_frame_bytes, latest.sent_frame_bytes)),
+    received: perSecond(
+      delta(older.received_frame_bytes, latest.received_frame_bytes),
+    ),
+    processCpu,
+  };
 }

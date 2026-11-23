@@ -7,10 +7,27 @@ use serde::Serialize;
 
 mod process_resources;
 
+static DESKTOP_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static INITIAL_INTERFACE_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+pub(crate) fn record_desktop_start(started: std::time::Instant) {
+    let _ = DESKTOP_STARTED.set(started);
+}
+
+pub(crate) fn record_initial_interface() {
+    if let Some(started) = DESKTOP_STARTED.get() {
+        INITIAL_INTERFACE_MS.get_or_init(|| elapsed_ms(started.elapsed()));
+    }
+}
+
+fn elapsed_ms(elapsed: std::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
 static DESKTOP_READY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 pub(crate) fn record_desktop_ready(elapsed: std::time::Duration) {
-    let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let millis = elapsed_ms(elapsed);
     let _ = DESKTOP_READY_MS.set(millis);
     log::info!(target: crate::logger::STARTUP_LOG_TARGET, "desktop_host_ready_ms={millis}");
 }
@@ -99,6 +116,7 @@ pub struct EnvInfo {
     /// Debug vs release build.
     pub build_profile: String,
     pub desktop_ready_ms: Option<u64>,
+    pub initial_interface_ms: Option<u64>,
 }
 
 /// Snapshot the logical build identity and environment facts. `TARGET` is resolved at
@@ -117,6 +135,7 @@ pub fn env_info(app_handle: tauri::AppHandle) -> Result<EnvInfo, CommandError> {
         // `TARGET` is exported to the build by tauri-build; fall back to a derived triple.
         target: option_env!("TARGET").unwrap_or("unknown").to_string(),
         desktop_ready_ms: DESKTOP_READY_MS.get().copied(),
+        initial_interface_ms: INITIAL_INTERFACE_MS.get().copied(),
         build_profile: if cfg!(debug_assertions) {
             "debug".to_string()
         } else {

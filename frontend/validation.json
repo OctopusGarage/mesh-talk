@@ -1343,7 +1343,7 @@
         "guide": "docs/performance-requirements.md#desktop-resource-monitor",
         "invariants": [
           {
-            "name": "Sampling runs only for an enabled visible panel and releases its current lease on hide, disable or retirement. A missing or interrupted observation never becomes a fabricated zero.",
+            "name": "Sampling runs only for an enabled visible panel and releases its current lease on hide, disable or retirement. Rates require a valid interval without counter rollback; aggregate process rates also require stable process identities. A missing or interrupted observation never becomes a fabricated zero.",
             "reference": "docs/performance-requirements.md#desktop-resource-monitor"
           }
         ]

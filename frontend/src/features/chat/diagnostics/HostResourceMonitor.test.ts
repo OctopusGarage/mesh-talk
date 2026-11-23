@@ -13,7 +13,15 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (key: string) => key, i18n: { language: "en" } }),
+  useTranslation: () => ({
+    t: (key: string, options?: { size?: string; pid?: number }) =>
+      options?.size
+        ? options.size + "/s"
+        : options?.pid
+          ? String(options.pid)
+          : key,
+    i18n: { language: "en" },
+  }),
 }));
 
 it("samples only when enabled and visible, and discards readings when stopped", async () => {
@@ -32,7 +40,7 @@ it("samples only when enabled and visible, and discards readings when stopped", 
         birth: "host",
         cpu_ms: cpuMs,
         resident_bytes: 15_000_000,
-        disk_write_bytes: null,
+        disk_write_bytes: 0,
         io_write_bytes: null,
       },
       {
@@ -40,7 +48,7 @@ it("samples only when enabled and visible, and discards readings when stopped", 
         birth,
         cpu_ms: cpuMs,
         resident_bytes: 5_000_000,
-        disk_write_bytes: null,
+        disk_write_bytes: 0,
         io_write_bytes: null,
       },
     ],
@@ -65,15 +73,30 @@ it("samples only when enabled and visible, and discards readings when stopped", 
     expect(container.textContent).toContain("20 MB");
     expect(read).toHaveBeenLastCalledWith(1);
     expect(container.textContent).toContain("1.5 kB");
-    read.mockResolvedValue(sample(115));
+    read.mockResolvedValue({
+      ...sample(115),
+      sent_frame_bytes: 7_500,
+      processes: sample(115).processes.map((entry) => ({
+        ...entry,
+        resident_bytes: 20_000_000,
+        disk_write_bytes: 4_500,
+      })),
+    });
     await advance();
     expect(read).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain("1%");
+    expect(container.textContent).toContain("2 kB/s");
+    expect(container.textContent).toContain("3 kB/s");
+    expect(container.textContent).toContain("40 MB");
+    expect(container.querySelector("details")?.textContent).toContain("10");
 
     read.mockResolvedValue(sample(130, "replacement"));
     await advance();
     expect(read).toHaveBeenCalledTimes(3);
     expect(container.textContent).not.toContain("1%");
+    expect(container.textContent).not.toContain("2 kB/s");
+    expect(container.textContent).not.toContain("3 kB/s");
+    expect(container.textContent).toContain("40 MB");
 
     hidden.mockReturnValue(true);
     await act(async () =>

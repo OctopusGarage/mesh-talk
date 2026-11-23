@@ -274,6 +274,13 @@ export function DiagnosticsDialog({
                     })}
                   </p>
                 )}
+                {env?.initial_interface_ms != null && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("diagnostics.resources.presentation", {
+                      ms: env.initial_interface_ms,
+                    })}
+                  </p>
+                )}
                 {open && <HostResourceMonitor />}
               </Panel>
               <Panel

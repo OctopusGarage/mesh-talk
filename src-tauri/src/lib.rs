@@ -127,7 +127,9 @@ pub fn run_tauri_configured(
             .set(root)
             .expect("runtime configured only once");
     }
-    let mut desktop_start = Some(std::time::Instant::now());
+    let started = std::time::Instant::now();
+    crate::diagnostics::record_desktop_start(started);
+    let mut desktop_start = Some(started);
     log::info!("Starting Mesh-Talk desktop runtime");
 
     // Data directory + file manager (~/.mesh-talk), shared by the auth keystore.

@@ -87,7 +87,11 @@ test("tray diagnostics releases resource sampling when closed", async ({
     win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
       if (cmd === "env_info") {
         const env = await invoke(cmd, args);
-        return { ...(env as Record<string, unknown>), desktop_ready_ms: 125 };
+        return {
+          ...(env as Record<string, unknown>),
+          desktop_ready_ms: 125,
+          initial_interface_ms: 390,
+        };
       }
       if (cmd === "start_host_resource_sampling") {
         win.__resourceLeaseCalls.push("start");
@@ -124,6 +128,9 @@ test("tray diagnostics releases resource sampling when closed", async ({
   const start = dialog.getByRole("button", { name: "Start sampling" });
   await expect(start).toBeVisible();
   await expect(dialog.getByText("Desktop host ready in 125 ms")).toBeVisible();
+  await expect(
+    dialog.getByText("Initial interface prepared in 390 ms"),
+  ).toBeVisible();
   const calls = () =>
     page.evaluate(
       () =>
@@ -132,7 +139,9 @@ test("tray diagnostics releases resource sampling when closed", async ({
     );
   expect(await calls()).toEqual([]);
   await start.click();
-  await expect(dialog.getByText("20 MB")).toBeVisible();
+  await expect(
+    dialog.locator("dl").getByText("20 MB", { exact: true }).first(),
+  ).toBeVisible();
   await expect(dialog.getByText("120 byte")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();

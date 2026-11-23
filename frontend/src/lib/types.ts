@@ -434,6 +434,7 @@ export interface EnvInfo {
   target: string;
   build_profile: string;
   desktop_ready_ms?: number | null;
+  initial_interface_ms?: number | null;
 }
 
 export type UpdateChannel = "stable" | "nightly";

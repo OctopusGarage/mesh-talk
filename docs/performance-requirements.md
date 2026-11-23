@@ -392,16 +392,21 @@ Closing or hiding the panel, minimizing the window or turning sampling off
 releases its lease. An abandoned lease expires after five seconds without a
 refresh. The feature adds no collector, persistence or probe traffic. Sample
 baselines and traffic totals reset with each observation. The Overview also
-shows the existing desktop host readiness duration from the current launch.
-This startup milestone is available without enabling sampling. Live CPU and
-traffic observations begin when the user enables sampling.
+shows the desktop host readiness duration and, when the renderer acknowledges
+initial presentation, the elapsed time to that acknowledgement from the same
+launch clock. The acknowledgement measures preparation of the initial surface,
+which can be the sign-in screen. The ten-second visibility fallback produces
+no acknowledgement. Measure the first actionable conversation separately in
+startup acceptance. These startup milestones are available without sampling.
 
 - **CPU and memory** cover the desktop host and up to 31 descendants identified
   by platform process data on macOS, Linux and Windows. CPU shows the change
   in summed CPU time relative to one logical core. It needs two readings of
   the same process identities within six seconds. Resident memory sums process
   residency and can count shared pages more than once. OS-owned WebKit helpers
-  outside the process tree are outside this attribution.
+  outside the process tree are outside this attribution. The panel shows each
+  observed process and retains one scalar peak for residency across complete
+  samples in the current observation.
 - **Writes** are cumulative for the currently observed processes. macOS and
   Linux expose attributed disk-write bytes. Windows exposes logical process I/O
   writes, which include other I/O. Missing counters display as unavailable.
@@ -409,6 +414,11 @@ traffic observations begin when the user enables sampling.
   Multiple channels can belong to a single peer. **Traffic** counts successful
   encrypted application frames and their length prefixes during the sampling
   lease. It excludes handshake bytes, discovery packets, media and TCP overhead.
+- **Rates** use two existing samples and their elapsed interval. Process write
+  rates require matching process identities and monotonic counters. Transport
+  rates require monotonic byte counters from the current observation. A
+  missing baseline, counter reset or interrupted interval leaves the rate
+  unavailable. The panel retains no time series.
 - **Peer latency** uses the last successful signed routed-discovery
   request/reply measurement within its presence lifetime. The Peers tab
   displays the sample age, or indicates that no recent RTT is available.
