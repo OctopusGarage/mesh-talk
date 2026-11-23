@@ -424,7 +424,10 @@ startup acceptance. These startup milestones are available without sampling.
   request/reply measurement within its presence lifetime. The Peers tab
   displays the sample age, or indicates that no recent RTT is available.
 
-The expandable **Message activity** view uses the same lease. Local acceptance is
+The expandable **Message activity** view uses the same lease. Folded details
+stay unmounted. The native snapshot reads direct backlog only while message
+details are open. File receive observations reuse the manifest validated by the
+commit owner. Local acceptance is
 a newly committed outgoing intent. Outbox acceptance failures include validation,
 capacity and journal errors. A failed desktop command is also shown separately
 and can overlap an outbox failure. First authenticated direct receipts count

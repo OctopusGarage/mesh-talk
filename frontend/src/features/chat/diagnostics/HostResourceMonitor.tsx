@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { obs } from "@/lib/api";
@@ -14,6 +14,8 @@ import {
 import { useSerialPoll } from "../useSerialPoll";
 
 const SAMPLE_INTERVAL_MS = 3000;
+const DISCLOSURE_CLASS =
+  "cursor-pointer rounded-lg px-3 py-2 font-medium marker:text-muted-foreground hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-ring motion-safe:transition-colors";
 
 export function HostResourceMonitor() {
   const { t } = useTranslation();
@@ -44,6 +46,26 @@ export function HostResourceMonitor() {
 
 function HostResourceReadings() {
   const { t, i18n } = useTranslation();
+  const [processDetailsOpen, setProcessDetailsOpen] = useState(false);
+  const [messageDetailsOpen, setMessageDetailsOpen] = useState(false);
+  const { percent, count, byte, kilobyte, megabyte } = useMemo(() => {
+    const formatBytes = (unit: string) =>
+      new Intl.NumberFormat(i18n.language, {
+        style: "unit",
+        unit,
+        maximumFractionDigits: 1,
+      });
+    return {
+      percent: new Intl.NumberFormat(i18n.language, {
+        style: "percent",
+        maximumFractionDigits: 2,
+      }),
+      count: new Intl.NumberFormat(i18n.language),
+      byte: formatBytes("byte"),
+      kilobyte: formatBytes("kilobyte"),
+      megabyte: formatBytes("megabyte"),
+    };
+  }, [i18n.language]);
   const lease = useRef<Promise<number | null> | null>(null);
   const previous = useRef<HostResourceSample | null>(null);
   const [sample, setSample] = useState<HostResourceSample>();
@@ -55,6 +77,8 @@ function HostResourceReadings() {
     setSample(undefined);
     setIntervalReading(undefined);
     setMemoryPeak(null);
+    setProcessDetailsOpen(false);
+    setMessageDetailsOpen(false);
   };
   useEffect(() => {
     const hidden = () => {
@@ -86,7 +110,7 @@ function HostResourceReadings() {
         ));
       const id = await ticket;
       if (id === null || lease.current !== ticket) return null;
-      const reading = await obs.hostResources(id);
+      const reading = await obs.hostResources(id, messageDetailsOpen);
       return { reading, ticket };
     },
     (result) => {
@@ -110,24 +134,11 @@ function HostResourceReadings() {
   if (unavailable)
     return <p role="status">{t("diagnostics.resources.unavailable")}</p>;
   if (!sample) return <p role="status">{t("common.loading")}</p>;
-  const percent = new Intl.NumberFormat(i18n.language, {
-    style: "percent",
-    maximumFractionDigits: 2,
-  });
-  const count = new Intl.NumberFormat(i18n.language);
   const size = (value: number | null) => {
     if (value === null) return "—";
-    const [unit, scale] =
-      value >= 1_000_000
-        ? ["megabyte", 1_000_000]
-        : value >= 1_000
-          ? ["kilobyte", 1_000]
-          : ["byte", 1];
-    return new Intl.NumberFormat(i18n.language, {
-      style: "unit",
-      unit,
-      maximumFractionDigits: 1,
-    }).format(value / scale);
+    if (value >= 1_000_000) return megabyte.format(value / 1_000_000);
+    if (value >= 1_000) return kilobyte.format(value / 1_000);
+    return byte.format(value);
   };
   const rate = (bytes: number | null | undefined) =>
     bytes == null
@@ -180,41 +191,57 @@ function HostResourceReadings() {
         title={t("diagnostics.resources.sections.traffic")}
         metrics={labels(network)}
       />
-      <details className="rounded-lg border border-border/65 text-xs">
-        <summary className="cursor-pointer rounded-lg px-3 py-2 font-medium marker:text-muted-foreground hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-ring motion-safe:transition-colors">
+      <details
+        className="rounded-lg border border-border/65 text-xs"
+        onToggle={(event) => setProcessDetailsOpen(event.currentTarget.open)}
+      >
+        <summary className={DISCLOSURE_CLASS}>
           {t("diagnostics.resources.processDetails", {
             count: sample.processes.length,
           })}
         </summary>
-        <ul className="grid gap-1.5 border-t border-border/65 px-3 py-2 tabular-nums">
-          {sample.processes.map((process, index) => (
-            <li
-              key={process.birth + ":" + process.pid}
-              className="flex flex-wrap justify-between gap-x-2"
-            >
-              <span>
-                {t(
-                  index === 0
-                    ? "diagnostics.resources.hostPid"
-                    : "diagnostics.resources.childPid",
-                  { pid: process.pid },
-                )}
-              </span>
-              <span>
-                {percentValue(interval?.processCpu.get(process.pid))} ·{" "}
-                {size(process.resident_bytes)}
-              </span>
-            </li>
-          ))}
-        </ul>
+        {processDetailsOpen && (
+          <ul className="grid gap-1.5 border-t border-border/65 px-3 py-2 tabular-nums">
+            {sample.processes.map((process, index) => (
+              <li
+                key={process.birth + ":" + process.pid}
+                className="flex flex-wrap justify-between gap-x-2"
+              >
+                <span>
+                  {t(
+                    index === 0
+                      ? "diagnostics.resources.hostPid"
+                      : "diagnostics.resources.childPid",
+                    { pid: process.pid },
+                  )}
+                </span>
+                <span>
+                  {percentValue(interval?.processCpu.get(process.pid))} ·{" "}
+                  {size(process.resident_bytes)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </details>
       {sample.messages && (
-        <MessageReadings
-          metrics={sample.messages}
-          backlog={sample.direct_backlog}
-          formatSize={size}
-          verifiedRate={rate(interval?.verifiedBytes)}
-        />
+        <details
+          className="rounded-lg border border-border/65 text-xs"
+          onToggle={(event) => setMessageDetailsOpen(event.currentTarget.open)}
+        >
+          <summary className={DISCLOSURE_CLASS}>
+            {t("diagnostics.resources.messages.title")}
+          </summary>
+          {messageDetailsOpen && (
+            <MessageReadings
+              metrics={sample.messages}
+              backlog={sample.direct_backlog}
+              formatSize={size}
+              formatNumber={count.format}
+              verifiedRate={rate(interval?.verifiedBytes)}
+            />
+          )}
+        </details>
       )}
       <p className="text-xs leading-relaxed text-muted-foreground">
         {sample.bounded && (
@@ -236,19 +263,20 @@ function MessageReadings({
   backlog,
   formatSize,
   verifiedRate,
+  formatNumber,
 }: {
   metrics: MessageResourceCounters;
   backlog: HostResourceSample["direct_backlog"];
   formatSize: (bytes: number | null) => string;
   verifiedRate: string;
+  formatNumber: (value: number) => string;
 }) {
-  const { t, i18n } = useTranslation();
-  const count = new Intl.NumberFormat(i18n.language);
+  const { t } = useTranslation();
   const formatCount = (value?: number) =>
-    value === undefined ? "—" : count.format(value);
+    value === undefined ? "—" : formatNumber(value);
   const milliseconds = (value: number) =>
     t("diagnostics.resources.messages.milliseconds", {
-      value: count.format(value),
+      value: formatNumber(value),
     });
   const samples = metrics.delivery_latency.reduce(
     (sum, value) => sum + value,
@@ -311,55 +339,48 @@ function MessageReadings({
     />
   );
   return (
-    <details className="rounded-lg border border-border/65 text-xs">
-      <summary className="cursor-pointer rounded-lg px-3 py-2 font-medium marker:text-muted-foreground hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-ring motion-safe:transition-colors">
-        {t("diagnostics.resources.messages.title")}
-      </summary>
-      <div className="grid gap-2.5 border-t border-border/65 bg-muted/20 p-2.5">
-        {group("delivery")}
-        <div className="overflow-x-auto rounded-lg border border-border/65 bg-background/50 px-3 py-2">
-          <table className="w-full text-left tabular-nums [&_td]:py-1 [&_th]:pr-2 [&_tbody_tr]:border-t [&_tbody_tr]:border-border/55">
-            <caption className="mb-1.5 text-left font-medium">
-              {t("diagnostics.resources.messages.received")}
-            </caption>
-            <thead>
-              <tr>
-                <th scope="col">{t("diagnostics.resources.messages.type")}</th>
-                <th scope="col">
-                  {t("diagnostics.resources.messages.direct")}
+    <div className="grid gap-2.5 border-t border-border/65 bg-muted/20 p-2.5">
+      {group("delivery")}
+      <div className="overflow-x-auto rounded-lg border border-border/65 bg-background/50 px-3 py-2">
+        <table className="w-full text-left tabular-nums [&_td]:py-1 [&_th]:pr-2 [&_tbody_tr]:border-t [&_tbody_tr]:border-border/55">
+          <caption className="mb-1.5 text-left font-medium">
+            {t("diagnostics.resources.messages.received")}
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">{t("diagnostics.resources.messages.type")}</th>
+              <th scope="col">{t("diagnostics.resources.messages.direct")}</th>
+              <th scope="col">{t("diagnostics.resources.messages.group")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {RECEIVED_TYPES.map((kind, index) => (
+              <tr key={kind}>
+                <th scope="row" className="font-normal">
+                  {t(`diagnostics.resources.messages.${kind}`)}
                 </th>
-                <th scope="col">{t("diagnostics.resources.messages.group")}</th>
+                {[
+                  metrics.received_direct[index],
+                  metrics.received_group[index],
+                ].map((bucket, scope) => (
+                  <td key={scope}>
+                    {bucket
+                      ? `${formatCount(bucket.count)} · ${formatSize(bucket.bytes)}`
+                      : "—"}
+                  </td>
+                ))}
               </tr>
-            </thead>
-            <tbody>
-              {RECEIVED_TYPES.map((kind, index) => (
-                <tr key={kind}>
-                  <th scope="row" className="font-normal">
-                    {t(`diagnostics.resources.messages.${kind}`)}
-                  </th>
-                  {[
-                    metrics.received_direct[index],
-                    metrics.received_group[index],
-                  ].map((bucket, scope) => (
-                    <td key={scope}>
-                      {bucket
-                        ? `${formatCount(bucket.count)} · ${formatSize(bucket.bytes)}`
-                        : "—"}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {group("recovery")}
-        {group("sync")}
-        {group("attachments")}
-        <p className="leading-relaxed text-muted-foreground">
-          {t("diagnostics.resources.messages.scope")}
-        </p>
+            ))}
+          </tbody>
+        </table>
       </div>
-    </details>
+      {group("recovery")}
+      {group("sync")}
+      {group("attachments")}
+      <p className="leading-relaxed text-muted-foreground">
+        {t("diagnostics.resources.messages.scope")}
+      </p>
+    </div>
   );
 }
 

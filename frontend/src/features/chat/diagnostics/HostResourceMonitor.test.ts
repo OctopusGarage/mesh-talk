@@ -72,7 +72,7 @@ it("samples only when enabled and visible, and discards readings when stopped", 
     await act(async () => container.querySelector("button")!.click());
     expect(read).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain("20 MB");
-    expect(read).toHaveBeenLastCalledWith(1);
+    expect(read).toHaveBeenLastCalledWith(1, false);
     expect(container.textContent).toContain("1.5 kB");
     read.mockResolvedValue({
       ...sample(115),
@@ -91,7 +91,18 @@ it("samples only when enabled and visible, and discards readings when stopped", 
     expect(container.textContent).toContain("3 kB/s");
     expect(container.textContent).not.toContain("2 kB/s");
     expect(container.textContent).toContain("40 MB");
-    expect(container.querySelector("details")?.textContent).toContain("10");
+    const processDetails = container.querySelector("details")!;
+    expect(processDetails.querySelector("li")).toBeNull();
+    await act(async () => {
+      processDetails.open = true;
+      processDetails.dispatchEvent(new Event("toggle"));
+    });
+    expect(processDetails.querySelector("li")?.textContent).toContain("10");
+    await act(async () => {
+      processDetails.open = false;
+      processDetails.dispatchEvent(new Event("toggle"));
+    });
+    expect(processDetails.querySelector("li")).toBeNull();
 
     read.mockResolvedValue(sample(130, "replacement"));
     await advance();
@@ -113,7 +124,7 @@ it("samples only when enabled and visible, and discards readings when stopped", 
     await act(async () =>
       document.dispatchEvent(new Event("visibilitychange")),
     );
-    expect(read).toHaveBeenLastCalledWith(2);
+    expect(read).toHaveBeenLastCalledWith(2, false);
     expect(container.textContent).not.toContain("1.5%");
     await act(async () => container.querySelector("button")!.click());
     expect(stop).toHaveBeenCalledWith(2);

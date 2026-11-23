@@ -58,12 +58,18 @@ pub fn stop_host_resource_sampling(ticket: u64) {
 pub async fn host_resource_sample(
     state: tauri::State<'_, crate::chat_commands::NodeState>,
     ticket: u64,
+    include_backlog: Option<bool>,
 ) -> Result<Option<HostResourceSample>, CommandError> {
-    let node = state
-        .0
-        .try_read()
-        .ok()
-        .and_then(|slot| slot.as_ref().map(|runtime| runtime.handle()));
+    let node = include_backlog
+        .unwrap_or(false)
+        .then(|| {
+            state
+                .0
+                .try_read()
+                .ok()
+                .and_then(|slot| slot.as_ref().map(|runtime| runtime.handle()))
+        })
+        .flatten();
     tauri::async_runtime::spawn_blocking(move || {
         use std::{sync::OnceLock, time::Instant};
         static SAMPLE_ORIGIN: OnceLock<Instant> = OnceLock::new();

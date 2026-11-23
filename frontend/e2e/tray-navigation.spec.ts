@@ -98,7 +98,9 @@ test("tray diagnostics releases resource sampling when closed", async ({
         return 7;
       }
       if (cmd === "host_resource_sample") {
-        win.__resourceLeaseCalls.push(`sample:${args.ticket}`);
+        win.__resourceLeaseCalls.push(
+          `sample:${args.ticket}:${args.includeBacklog}`,
+        );
         return {
           processes: [
             {
@@ -137,7 +139,7 @@ test("tray diagnostics releases resource sampling when closed", async ({
             verified_attachment_bytes: 1000,
             delivery_latency: [2, 3, 1, 0, 0, 0, 0, 0],
           },
-          direct_backlog: [2, 1300],
+          direct_backlog: args.includeBacklog ? [2, 1300] : null,
         };
       }
       if (cmd === "stop_host_resource_sampling") {
@@ -167,6 +169,9 @@ test("tray diagnostics releases resource sampling when closed", async ({
     dialog.locator("dl").getByText("20 MB", { exact: true }).first(),
   ).toBeVisible();
   await expect(dialog.getByText("120 byte", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("table", { includeHidden: true })).toHaveCount(
+    0,
+  );
   await dialog.getByText("Message activity", { exact: true }).click();
   await expect(dialog.getByText("Confirmed direct deliveries")).toBeVisible();
   await expect(
@@ -186,7 +191,18 @@ test("tray diagnostics releases resource sampling when closed", async ({
       dialog.evaluate((element) => element.scrollWidth <= element.clientWidth),
     )
     .toBe(true);
+  await expect.poll(calls).toContain("sample:7:true");
+  await dialog.getByText("Message activity", { exact: true }).click();
+  await expect(dialog.getByRole("table", { includeHidden: true })).toHaveCount(
+    0,
+  );
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
-  await expect.poll(calls).toEqual(["start", "sample:7", "stop:7"]);
+  await expect
+    .poll(async () => {
+      const observed = await calls();
+      return observed[observed.length - 1];
+    })
+    .toBe("stop:7");
+  expect((await calls()).slice(0, 2)).toEqual(["start", "sample:7:false"]);
 });

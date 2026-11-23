@@ -98,8 +98,11 @@ export const obs = {
   envInfo: () => invoke<EnvInfo>("env_info"),
   startHostResourceSampling: () =>
     invoke<number>("start_host_resource_sampling"),
-  hostResources: (ticket: number) =>
-    invoke<HostResourceSample | null>("host_resource_sample", { ticket }),
+  hostResources: (ticket: number, includeBacklog: boolean) =>
+    invoke<HostResourceSample | null>("host_resource_sample", {
+      ticket,
+      includeBacklog,
+    }),
   stopHostResourceSampling: (ticket: number) =>
     invoke<void>("stop_host_resource_sampling", { ticket }),
   logsDir: () => invoke<string>("get_logs_dir"),
