@@ -1,0 +1,41 @@
+基于requirements-work分支，我们开个新的worktree分支，做一下REQ-002这个任务，先一起调研清楚，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+"同一 LAN 或已互通 VPN 上临时看一份内容" continue; continue; continue; continue; continue;
+
+---
+
+ok, continue;
+
+---
+
+continue to verify for your self
+
+---
+
+用http就行了，局域网，不搞复杂的https了，continue；continue；continue；continue；continue；continue；
+
+---
+
+verify and do AI evals
+
+---
+
+if all finish and verify and pass AI evals, commit all changes
+
+---
+
+why continue until complete ???
+
+---
+
+why not continue until complete ???
+
+---
+
+continue to complete all of tasks
+
+---
+
+能不能快点啊，，，analyze；analyze；analyze；analyze；analyze；analyze；analyze；
