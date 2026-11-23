@@ -2670,6 +2670,34 @@
       ]
     },
     {
+      "id": "frontend-lan-review",
+      "paths": [
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/LanReviewDialog.tsx",
+        "frontend/src/features/chat/LanReviewDialog.test.ts"
+      ],
+      "frontend": [
+        "src/features/chat/LanReviewDialog.test.ts",
+        "src/features/chat/MessageBubble.test.ts",
+        "src/features/chat/ConversationView.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Preview a single selected message, disclose same-network plaintext HTTP exposure, and create or revoke a temporary review link only by explicit user action.",
+        "guide": "docs/lan-review.md",
+        "invariants": [
+          {
+            "name": "Link creation requires confirmation of the actual preview and the current runtime owner. Retired sessions cannot publish previews. Revocation failure retains the URL and its revoke control.",
+            "reference": "docs/ai-coding-reliability.md#r06-exact-authority-and-stale-completions"
+          }
+        ]
+      },
+      "escalation": [
+        "Check the packaged desktop action and access from a second physical device on the same LAN. Verify visible preview, warnings, copy, revoke, expiry and lock while a link is active. Unit-level IPC substitutes do not certify native network behavior."
+      ]
+    },
+    {
       "id": "frontend-message-forwarding",
       "paths": [
         "frontend/src/features/chat/forwarding/",

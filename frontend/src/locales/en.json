@@ -1386,6 +1386,21 @@
     "activityAccepted": "Accepted",
     "activityRetried": "Retried"
   },
+  "lanReview": {
+    "title": "Share a LAN review link",
+    "exposure": "This shares the message below as plaintext over unencrypted HTTP. Anyone on this local network who gets the link can open it, including people it is forwarded to.",
+    "activeHint": "Anyone on this local network with the link can read the message for up to 15 minutes. Keep this window open while they review it. Closing this window revokes the link.",
+    "url": "LAN review URL",
+    "loading": "Loading the message preview…",
+    "create": "Create temporary link",
+    "copy": "Copy link",
+    "copied": "Link copied",
+    "revoke": "Revoke link",
+    "previewFailed": "This message is unavailable for LAN review.",
+    "startFailed": "Could not create the link. Check your local network connection and try again. If the message changed, reopen the preview.",
+    "revokeFailed": "Could not revoke the link. Try again.",
+    "copyFailed": "Could not copy the link. Select the URL to copy it manually."
+  },
   "messageFavorites": {
     "title": "Favorites",
     "add": "Add to Favorites",

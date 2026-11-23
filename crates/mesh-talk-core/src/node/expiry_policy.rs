@@ -30,10 +30,13 @@ impl ReceivedExpirySchedule {
 
     fn retain(&mut self, deadline: u64, sent: u64, first_seen: std::time::Instant) {
         self.wall = Some(self.wall.map_or(deadline, |prior| prior.min(deadline)));
-        let lifetime = deadline.saturating_sub(sent).min(30 * 24 * 60 * 60 * 1000);
-        let at = first_seen + std::time::Duration::from_millis(lifetime);
+        let at = first_seen + recipient_lifetime(deadline, sent);
         self.monotonic = Some(self.monotonic.map_or(at, |prior| prior.min(at)));
     }
+}
+
+pub(in crate::node) fn recipient_lifetime(deadline: u64, sent: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(deadline.saturating_sub(sent).min(30 * 24 * 60 * 60 * 1000))
 }
 
 /// Deadline authenticated inside either an account envelope or direct plaintext.
@@ -82,9 +85,6 @@ impl Node {
         if deadline <= self.expiry_now() {
             return true;
         }
-        let lifetime = deadline
-            .saturating_sub(sent_at_ms)
-            .min(30 * 24 * 60 * 60 * 1000);
         let mut seen = self
             .expiry_first_seen
             .lock()
@@ -92,7 +92,7 @@ impl Node {
         seen.entry(id)
             .or_insert_with(std::time::Instant::now)
             .elapsed()
-            >= std::time::Duration::from_millis(lifetime)
+            >= recipient_lifetime(deadline, sent_at_ms)
     }
     pub(in crate::node) fn expired_received_file(
         &self,
@@ -124,7 +124,8 @@ impl Node {
         }
     }
     /// The process anchor prevents setting the wall clock backward from extending a deadline.
-    pub(in crate::node) fn expiry_now(&self) -> u64 {
+    /// Absolute time used by retained message expiry, with a monotonic floor.
+    pub fn expiry_now(&self) -> u64 {
         let (start, wall) = self.expiry_clock_start;
         super::node::now_millis().max(wall.saturating_add(start.elapsed().as_millis() as u64))
     }

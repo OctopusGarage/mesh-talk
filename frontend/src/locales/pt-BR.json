@@ -1386,6 +1386,21 @@
     "activityAccepted": "Aceita",
     "activityRetried": "Repetida"
   },
+  "lanReview": {
+    "title": "Compartilhar link de revisão na rede local",
+    "exposure": "Isso compartilha a mensagem abaixo em texto aberto via HTTP sem criptografia. Qualquer pessoa nesta rede local que tiver o link pode abri-lo, inclusive se o receber por encaminhamento.",
+    "activeHint": "Qualquer pessoa nesta rede local com o link pode ler a mensagem por até 15 minutos. Mantenha esta janela aberta durante a revisão. Fechar a janela revoga o link.",
+    "url": "URL de revisão na rede local",
+    "loading": "Carregando prévia da mensagem…",
+    "create": "Criar link temporário",
+    "copy": "Copiar link",
+    "copied": "Link copiado",
+    "revoke": "Revogar link",
+    "previewFailed": "Esta mensagem não está disponível para revisão na rede local.",
+    "startFailed": "Não foi possível criar o link. Verifique a conexão com a rede local e tente novamente. Se a mensagem mudou, reabra a prévia.",
+    "revokeFailed": "Não foi possível revogar o link. Tente novamente.",
+    "copyFailed": "Não foi possível copiar o link. Selecione a URL para copiá-la manualmente."
+  },
   "messageFavorites": {
     "title": "Favoritos",
     "add": "Adicionar aos Favoritos",

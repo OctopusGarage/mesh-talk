@@ -229,5 +229,5 @@ mod account_profile_io;
 
 pub use favorites::{
     FavoriteFile, FavoriteInspection, FavoriteMessage, FavoriteMetadata, FavoriteSource,
-    MessageFavorite, MessageFavoriteList,
+    LanReviewText, MessageFavorite, MessageFavoriteList,
 };

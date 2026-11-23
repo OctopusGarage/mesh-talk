@@ -36,6 +36,7 @@ pub struct AppState {
     pub(crate) owner_file_progress_hook: BlockingTestHook,
     #[cfg(test)]
     pub(crate) custody_observation_hook: BlockingTestHook,
+    pub(crate) lan_review: crate::lan_review::LanReview,
     pub(crate) integrations: crate::integrations::local_access::DesktopIntegrations,
     auth_service: AuthService,
     badge_revision: Arc<Mutex<BadgeRevision>>,
@@ -63,6 +64,7 @@ impl AppState {
             owner_file_progress_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             custody_observation_hook: Arc::new(Mutex::new(None)),
+            lan_review: crate::lan_review::LanReview::default(),
             integrations: crate::integrations::local_access::DesktopIntegrations::default(),
             auth_service,
             badge_revision: Arc::new(Mutex::new(BadgeRevision::default())),

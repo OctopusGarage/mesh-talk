@@ -21,6 +21,13 @@ pub struct FavoriteSource {
     pub target: String,
     pub message_ids: Vec<String>,
 }
+/// Exact ordinary-text projection and both retained expiry constraints.
+pub struct LanReviewText {
+    pub text: String,
+    pub expires_at_ms: Option<u64>,
+    pub recipient_expires_at: Option<std::time::Instant>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FavoriteMetadata {
     pub title: String,

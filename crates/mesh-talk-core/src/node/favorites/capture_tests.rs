@@ -1316,3 +1316,111 @@ fn favorite_search_matches_sticker_presentation_and_respects_expiry() {
         );
     }
 }
+
+#[test]
+fn lan_review_text_resolves_one_current_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let mut selected = source(&node);
+    assert!(node.inspect_lan_review_text(&selected).is_err());
+
+    selected.message_ids.truncate(1);
+    assert_eq!(
+        node.inspect_lan_review_text(&selected).unwrap().text,
+        "second"
+    );
+
+    node.clear_account_conversation(&selected.target).unwrap();
+    assert!(node.inspect_lan_review_text(&selected).is_err());
+}
+
+#[test]
+fn lan_review_text_rejects_invalid_protected_oversized_and_sticker_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let peer = "ab".repeat(16);
+    let conv = super::super::conversation::account_conversation_id(&node.account_id(), &peer);
+    let cases = [
+        super::super::MessageBody::new(vec![0xff], None),
+        super::super::MessageBody::new(vec![b'x'; 16 * 1024 + 1], None),
+        super::super::MessageBody::sticker("fixture-sticker".into(), b"fallback".to_vec()),
+        super::super::MessageBody::protected(
+            b"private".to_vec(),
+            None,
+            super::super::MessageProtection::Click,
+        ),
+    ];
+    for (index, body) in cases.into_iter().enumerate() {
+        let sequence = index as u64 + 1;
+        let id = [sequence as u8; 32];
+        let envelope =
+            super::super::DmEnvelope::new(node.account_id(), peer.clone(), id, body.encode());
+        node.sentlog
+            .lock()
+            .unwrap()
+            .record(conv, sequence, sequence, &envelope.encode())
+            .unwrap();
+        let selected = FavoriteSource {
+            kind: "account".into(),
+            target: peer.clone(),
+            message_ids: vec![hex::encode(id)],
+        };
+        assert!(node.inspect_lan_review_text(&selected).is_err());
+    }
+}
+
+#[test]
+fn lan_review_text_preserves_the_recipient_deadline() {
+    use crate::eventlog::EventId;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let peer = Account::generate().account_id();
+    let own = node.account_id();
+    let conv = super::super::conversation::account_conversation_id(&own, &peer);
+    let deadline = node.expiry_now() + 60_000;
+    let sent = deadline - 1_000;
+    let id = EventId::new([7; 32]);
+    let body = super::super::MessageBody::new(b"received text".to_vec(), None).encode();
+    let env = super::super::DmEnvelope::new(
+        peer.clone(),
+        own,
+        *id.as_bytes(),
+        crate::expiry::wrap(&body, Some(deadline)),
+    );
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conv,
+            peer.clone(),
+            sent,
+            &env.encode(),
+            EventId::new([8; 32]),
+        )
+        .unwrap();
+    let first_seen = Instant::now();
+    node.expiry_first_seen
+        .lock()
+        .unwrap()
+        .insert(id, first_seen);
+    let selected = FavoriteSource {
+        kind: "account".into(),
+        target: peer,
+        message_ids: vec![id.to_hex()],
+    };
+    let projected = node.inspect_lan_review_text(&selected).unwrap();
+    assert_eq!(projected.expires_at_ms, Some(deadline));
+    assert_eq!(
+        projected.recipient_expires_at,
+        Some(first_seen + Duration::from_secs(1))
+    );
+
+    node.expiry_first_seen
+        .lock()
+        .unwrap()
+        .insert(id, first_seen - Duration::from_secs(2));
+    assert!(node.expiry_now() < deadline);
+    assert!(node.inspect_lan_review_text(&selected).is_err());
+}

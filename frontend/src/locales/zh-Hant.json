@@ -1386,6 +1386,21 @@
     "grantedConversations_one": "已授權 {{count}} 個對話",
     "grantedConversations_other": "已授權 {{count}} 個對話"
   },
+  "lanReview": {
+    "title": "分享區域網路檢視連結",
+    "exposure": "下方訊息將透過未加密的 HTTP 以明文分享。此區域網路內取得連結的任何人都能開啟，包括收到轉傳連結的人。",
+    "activeHint": "此區域網路內持有連結的人最多可檢視訊息 15 分鐘。檢視期間請保持此視窗開啟。關閉視窗將撤銷連結。",
+    "url": "區域網路檢視網址",
+    "loading": "正在載入訊息預覽…",
+    "create": "建立臨時連結",
+    "copy": "複製連結",
+    "copied": "已複製連結",
+    "revoke": "撤銷連結",
+    "previewFailed": "此訊息無法在區域網路中檢視。",
+    "startFailed": "無法建立連結。請檢查區域網路連線後再試一次。如果訊息已變更，請重新開啟預覽。",
+    "revokeFailed": "無法撤銷連結，請再試一次。",
+    "copyFailed": "無法複製連結，請選取網址後手動複製。"
+  },
   "messageFavorites": {
     "title": "收藏夾",
     "add": "加入收藏夾",

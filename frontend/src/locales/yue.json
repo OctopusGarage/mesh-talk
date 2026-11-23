@@ -1386,6 +1386,21 @@
     "activityAccepted": "已接受",
     "activityRetried": "已重試"
   },
+  "lanReview": {
+    "title": "分享區域網絡查閱連結",
+    "exposure": "下面嘅訊息會以明文經未加密嘅 HTTP 分享。同一個區域網絡上，任何攞到連結嘅人都打得開，包括收到轉發連結嘅人。",
+    "activeHint": "同一個區域網絡上，有連結嘅人最多可以睇訊息 15 分鐘。查閱期間請保持呢個視窗開住。閂視窗就會撤銷連結。",
+    "url": "區域網絡查閱網址",
+    "loading": "載入緊訊息預覽…",
+    "create": "建立臨時連結",
+    "copy": "複製連結",
+    "copied": "已複製連結",
+    "revoke": "撤銷連結",
+    "previewFailed": "呢條訊息唔可以喺區域網絡查閱。",
+    "startFailed": "建立唔到連結。請檢查區域網絡連線，再試多次。如果訊息改咗，請重新打開預覽。",
+    "revokeFailed": "撤銷唔到連結，請再試多次。",
+    "copyFailed": "複製唔到連結，請揀取網址再手動複製。"
+  },
   "messageFavorites": {
     "title": "收藏夾",
     "add": "加入收藏夾",

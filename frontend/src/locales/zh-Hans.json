@@ -1386,6 +1386,21 @@
     "grantedConversations_one": "已授权 {{count}} 个会话",
     "grantedConversations_other": "已授权 {{count}} 个会话"
   },
+  "lanReview": {
+    "title": "分享局域网查看链接",
+    "exposure": "下方消息将通过未加密的 HTTP 以明文分享。此局域网内拿到链接的任何人都能打开，包括收到转发链接的人。",
+    "activeHint": "此局域网内持有链接的人最多可查看消息 15 分钟。查看期间请保持此窗口打开。关闭窗口将撤销链接。",
+    "url": "局域网查看网址",
+    "loading": "正在加载消息预览…",
+    "create": "创建临时链接",
+    "copy": "复制链接",
+    "copied": "已复制链接",
+    "revoke": "撤销链接",
+    "previewFailed": "此消息无法在局域网中查看。",
+    "startFailed": "无法创建链接。请检查局域网连接后重试。如果消息已更改，请重新打开预览。",
+    "revokeFailed": "无法撤销链接，请重试。",
+    "copyFailed": "无法复制链接，请选中网址后手动复制。"
+  },
   "messageFavorites": {
     "title": "收藏夹",
     "add": "添加到收藏夹",

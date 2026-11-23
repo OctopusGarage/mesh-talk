@@ -12,6 +12,7 @@ import { useLayoutEffect, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Star,
+  Link2,
   ListChecks,
   Copy,
   CornerUpLeft,
@@ -362,10 +363,12 @@ export function MessageBubble({
   onRecall,
   onReEdit,
   onCollect,
+  onLanReview,
   onForward,
   onSelectMessages,
   collected = false,
 }: {
+  onLanReview?: (m: ChatMessage) => void;
   onCollect?: (m: ChatMessage) => void;
   onForward?: (m: ChatMessage) => void;
   onSelectMessages?: (m: ChatMessage) => void;
@@ -730,6 +733,19 @@ export function MessageBubble({
                   {t("messageForwarding.forward")}
                 </ContextMenuItem>
               )}
+              {onLanReview &&
+                canCollect(m) &&
+                !m.file &&
+                !m.sticker &&
+                !!m.text.trim() && (
+                  <ContextMenuItem
+                    data-testid="msg-lan-review"
+                    onSelect={() => onLanReview(m)}
+                  >
+                    <Link2 className="h-3.5 w-3.5 opacity-70" />
+                    {t("lanReview.title")}
+                  </ContextMenuItem>
+                )}
               {onCollect && canCollect(m) && (
                 <ContextMenuItem
                   data-testid="msg-collect"

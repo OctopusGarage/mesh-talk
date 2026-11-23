@@ -1,3 +1,6 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { LanReviewDialog } from "./LanReviewDialog";
+import type { FavoriteSource } from "@/lib/api/messageFavorites";
 import { useMessageArrivalMotion } from "./useMessageArrivalMotion";
 import { ReactionSummaryDialog } from "./ReactionSummaryDialog";
 import { DeleteChatDialog } from "./DeleteChatDialog";
@@ -20,7 +23,11 @@ import {
 import { ForwardDialog } from "./forwarding/ForwardDialog";
 import { canForward, forwardSource } from "./forwarding/selection";
 import type { ForwardSource } from "@/lib/api/messageForwarding";
-import { canCollect, MAX_FAVORITE_MESSAGES } from "./favorites/selection";
+import {
+  canCollect,
+  MAX_FAVORITE_MESSAGES,
+  selectionSource,
+} from "./favorites/selection";
 import { useFavoriteMembership } from "./favorites/useFavoriteMembership";
 import { NotificationPermissionNotice } from "./NotificationPermissionNotice";
 import { useNotificationPermissionReminder } from "./useNotificationPermissionReminder";
@@ -216,6 +223,21 @@ export function ConversationView() {
     setForwardingState({ scope: forwardingScope, source });
   if (forwardingState.scope !== forwardingScope)
     setForwardingState({ scope: forwardingScope, source: null });
+  const reviewScope = `${owner}:${authGeneration}:${receptionScope}`;
+  const [review, setReview] = useState<{
+    scope: string;
+    source: FavoriteSource;
+    expiresAt: ChatMessage["expiresAtMs"];
+  } | null>(null);
+  if (review && review.scope !== reviewScope) setReview(null);
+  const reviewDialog = review?.scope === reviewScope && (
+    <LanReviewDialog
+      key={reviewScope}
+      source={review.source}
+      expiresAt={review.expiresAt}
+      onClose={() => setReview(null)}
+    />
+  );
   const collection = useMessageCollection(
     active,
     `${owner}:${authGeneration}:${receptionScope}:${key}`,
@@ -469,6 +491,7 @@ export function ConversationView() {
             className="h-10 shrink-0"
           />
         )}
+        {reviewDialog}
         {ready ? (
           <EmptyState />
         ) : bootFailed ? (
@@ -704,6 +727,7 @@ export function ConversationView() {
           }}
         />
       )}
+      {reviewDialog}
       {collection.draft && (
         <FavoriteEditor
           key={`favorite:${owner}:${authGeneration}:${key}`}
@@ -914,6 +938,16 @@ export function ConversationView() {
                       canForward(m)
                         ? (message) =>
                             setForwarding(forwardSource(active, [message]))
+                        : undefined
+                    }
+                    onLanReview={
+                      isTauri()
+                        ? (message) =>
+                            setReview({
+                              scope: reviewScope,
+                              source: selectionSource(active, [message]),
+                              expiresAt: message.expiresAtMs,
+                            })
                         : undefined
                     }
                     onCollect={

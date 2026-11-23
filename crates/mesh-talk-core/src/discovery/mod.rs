@@ -21,4 +21,5 @@ pub mod visibility;
 
 pub use announce::Announce;
 pub use roster::{PeerRecord, Roster, UpdateOutcome, UserId};
+pub use scope::LanIpv4Scope;
 pub use visibility::DiscoveryVisibility;

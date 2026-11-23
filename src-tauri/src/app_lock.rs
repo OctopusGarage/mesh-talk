@@ -184,6 +184,7 @@ impl AppLock {
                 if still_due {
                     inner.authorization_revision = inner.authorization_revision.wrapping_add(1);
                     inner.lease = Some(lease.clone());
+                    app.lan_review.stop(&lease);
                 }
                 still_due
             })
@@ -232,7 +233,11 @@ pub fn lock_app(
         .capture()
         .map_err(CommandError::Authorization)?;
     app.session()
-        .matching(&lease, |_| state.lock(lease.clone()))
+        .matching(&lease, |_| {
+            state.lock(lease.clone())?;
+            app.lan_review.stop(&lease);
+            Ok::<(), CommandError>(())
+        })
         .map_err(CommandError::Authorization)??;
     *app.drafts.lock().unwrap() = None;
     Ok(())

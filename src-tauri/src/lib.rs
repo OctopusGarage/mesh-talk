@@ -34,6 +34,8 @@ pub mod favorites;
 mod google_drive;
 mod history_storage;
 mod integrations;
+mod lan_review;
+mod lan_review_http;
 mod linked_account;
 pub mod logger;
 pub mod message_favorites;
@@ -496,6 +498,9 @@ pub fn run_tauri_configured(
                 crate::owner_commands::owner_search_recent,
                 crate::owner_commands::owner_search_context,
                 crate::owner_commands::owner_reaction_summaries,
+                crate::lan_review::owner_preview_lan_review,
+                crate::lan_review::owner_start_lan_review,
+                crate::lan_review::owner_revoke_lan_review,
                 crate::message_forwarding::owner_inspect_forward_messages,
                 crate::message_forwarding::owner_list_forward_batches,
                 crate::message_forwarding::owner_forward_messages,

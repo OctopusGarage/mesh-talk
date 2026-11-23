@@ -29,7 +29,10 @@ const native = vi.hoisted(() => ({
 let editor: ComponentProps<typeof ScreenshotEditor> | null;
 let composer: ComponentProps<typeof Composer>;
 let actualComposer: typeof Composer | null = null;
-vi.mock("@tauri-apps/api/core", () => ({ invoke: native.invoke }));
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
+  invoke: native.invoke,
+}));
 vi.mock("@/lib/api/language", () => ({}));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: native.open }));
 vi.mock("@tauri-apps/api/webview", () => ({

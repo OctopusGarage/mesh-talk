@@ -98,6 +98,12 @@ impl Node {
     pub fn subscribe_ui_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.ui_changes.subscribe()
     }
+
+    /// Observe changes to the network paths used by this participant.
+    pub fn subscribe_network_changes(&self) -> watch::Receiver<u64> {
+        self.network_changes.subscribe()
+    }
+
     /// Desktop consumers retain all coalesced domains independently. Internal
     /// workers keep the legacy subscription and its existing wake semantics.
     /// Copy the revision value before running queries or awaiting other work.

@@ -794,6 +794,44 @@
       ]
     },
     {
+      "id": "desktop-lan-review",
+      "paths": [
+        "src-tauri/src/lan_review.rs",
+        "src-tauri/src/lan_review_http.rs",
+        "docs/lan-review.md"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "lan_review_http::",
+            "lan_review::tests::",
+            "registered_lan_review_preview_"
+          ]
+        },
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "lan_review_text",
+            "discovery::scope::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Temporarily disclose one eligible exact text message over an on-demand LAN HTTP listener.",
+        "guide": "docs/lan-review.md",
+        "invariants": [
+          {
+            "name": "Current source and desktop authority gate disclosure, and invalidation retires the bounded listener.",
+            "reference": "docs/lan-review.md#authority-and-lifetime"
+          }
+        ]
+      },
+      "escalation": [
+        "Verify native desktop issuance and revocation with a second-device browser on the selected physical LAN, followed by shutdown and idle cleanup."
+      ]
+    },
+    {
       "id": "desktop-chat",
       "escalation": [
         "IPC command names/payloads and emitted events require typed frontend API/store consumer checks and affected browser behavior; file/native side effects require focused native evidence."

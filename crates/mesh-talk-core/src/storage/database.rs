@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -210,6 +210,7 @@ pub(crate) struct EncryptedDatabase {
     connection: Mutex<work_clock::OwnedConnection>,
     path: PathBuf,
     faulted: AtomicBool,
+    source_epoch: AtomicU64,
     source_changes: tokio::sync::watch::Sender<u64>,
     maintenance_changes: tokio::sync::watch::Sender<u64>,
     write_observer: Option<Mutex<observation::Observer>>,
@@ -343,6 +344,7 @@ impl EncryptedDatabase {
             connection: Mutex::new(work_clock::OwnedConnection::new(connection)),
             path,
             faulted: AtomicBool::new(false),
+            source_epoch: AtomicU64::new(0),
             source_changes: tokio::sync::watch::channel(0).0,
             maintenance_changes: tokio::sync::watch::channel(0).0,
             write_observer,
@@ -524,6 +526,24 @@ impl EncryptedDatabase {
     pub(crate) fn subscribe_source_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.source_changes.subscribe()
     }
+    pub(crate) fn source_epoch(&self) -> u64 {
+        self.source_epoch.load(Ordering::Acquire)
+    }
+
+    /// Order a bounded, storage-free handoff against source commits. A busy,
+    /// retired or changed owner must retry rather than publish an old snapshot.
+    pub(crate) fn with_source_epoch<T>(
+        &self,
+        epoch: u64,
+        handoff: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let _connection = self.connection.try_lock().ok()?;
+        if self.faulted.load(Ordering::Acquire) || self.source_epoch() != epoch {
+            return None;
+        }
+        Some(handoff())
+    }
+
     /// Retained local maintenance demand, separate from network source evidence.
     pub(crate) fn maintenance_waker(&self) -> MaintenanceWake {
         MaintenanceWake(self.maintenance_changes.clone())
@@ -546,6 +566,9 @@ impl EncryptedDatabase {
         let before = connection.total_changes();
         let result = self.checked_operation(operation(&connection));
         let changed = connection.total_changes() != before;
+        if changed {
+            self.source_epoch.fetch_add(1, Ordering::Release);
+        }
         drop(connection);
         // Legacy read closures can perform auto-committed writes, even before
         // returning an error. Conservatively invalidate rather than lose them.
@@ -727,6 +750,9 @@ impl EncryptedDatabase {
                         .map(|before| connection.total_changes().saturating_sub(before));
                     let source_changed =
                         purpose.is_none() && connection.total_changes() != changes_before;
+                    if source_changed {
+                        self.source_epoch.fetch_add(1, Ordering::Release);
+                    }
                     // Observation/logging never retain the durable connection owner.
                     drop(connection);
                     if source_changed {
@@ -1356,6 +1382,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let db = selection_fixture(&root);
         let mut changes = db.subscribe_source_changes();
+        let before = db.source_epoch();
         db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?))
             .unwrap();
         db.transaction(|_| Ok(())).unwrap();
@@ -1373,11 +1400,18 @@ mod tests {
         })
         .unwrap();
         assert!(!changes.has_changed().unwrap());
+        assert_eq!(db.with_source_epoch(before, || "current"), Some("current"));
         db.transaction(|tx| {
             tx.execute("INSERT INTO messages VALUES ('committed')", [])?;
+            assert_eq!(db.with_source_epoch(before, || "stale"), None);
             Ok(())
         })
         .unwrap();
+        assert_eq!(db.with_source_epoch(before, || "stale"), None);
+        assert_eq!(
+            db.with_source_epoch(db.source_epoch(), || "current"),
+            Some("current")
+        );
         assert!(changes.has_changed().unwrap());
         let _ = *changes.borrow_and_update();
         db.read(|c| {
