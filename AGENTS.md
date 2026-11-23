@@ -1,5 +1,12 @@
 # Repository Guidelines
 
+## Project decisions
+
+Consult the [decision log](docs/decisions.md) when a task touches a prior design
+choice or revisits a recurring question. Add or update a concise entry when
+discussion, implementation or verification settles something that will affect
+future work.
+
 ## Reliability before implementation
 
 - For new events, subscriptions, timers and polling changes, consult the

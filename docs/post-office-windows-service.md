@@ -8,8 +8,10 @@ file, `relay.log`, and `node.lock` are in the `data` subdirectory. TCP 47479
 serves peers; its dedicated signed-query UDP port is 47478 (the managed post-office port on every platform) and it announces
 to clients on the shared LAN port 47474. The optional legacy gateway listens
 on TCP 47476. The equal-relay federation uses the same trusted seed list as
-mac2015 and mac-mini. Firewall rules allow the relay listener ports from
-`LocalSubnet` on all network profiles.
+mac2015 and mac-mini. The installer allows inbound TCP 47479, UDP 47478 and
+the optional gateway TCP port from `LocalSubnet` on all network profiles.
+Shared-port LAN announcements on UDP 47474 depend on the host's existing
+firewall policy.
 
 The task passes `--password-file`, never a password argument. The installer
 creates a random password on the Windows host only on first installation and
@@ -37,7 +39,9 @@ scp scripts/install-post-office-windows.ps1 \
 scp relays.conf windows10:'D:/mesh-talk-relays.conf'
 ```
 
-Then run this in a PowerShell session on Windows (working directory D:):
+Then run this in an elevated PowerShell session on Windows (working directory
+D:). For updates, stop the previous relay and verify it exited using the
+procedure below before running the installer.
 
 ```powershell
 & 'D:\install-post-office-windows.ps1' `
@@ -100,7 +104,6 @@ for the required quiescent upgrade and mixed-version limits.
 ```bash
 ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).State; (Get-ScheduledTaskInfo -TaskName MeshTalk-PostOffice).LastTaskResult; Get-NetTCPConnection -State Listen -LocalPort 47479,47476 | Select-Object LocalAddress,LocalPort,OwningProcess"'
 ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).Principal.UserId; icacls D:\ProgramData\MeshTalk\PostOffice\data\password; icacls D:\ProgramData\MeshTalk\PostOffice\data\identity.keystore"'
-ssh windows10 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice"'
 ```
 
 The task state should be `Running`, and TCP 47479 should have a listener.
@@ -114,12 +117,33 @@ reports the relay device ID; signed discovery can also verify that ID from a
 different LAN node. If a task fails, inspect Task Scheduler history and the
 data directory's access permissions before changing the keystore or password.
 
-After an abrupt task stop, the OS releases the terminated process's lock while
-`node.lock` remains. Check Task Scheduler and the listener/process inventory
-to confirm the owner has actually exited, then start the task again without
-removing the file. If it is still running, stop it before restarting; do not
-remove the lock or start a second node against the same data directory.
-Restarting with the existing data preserves queued events and the relay identity.
+### Stop or restart the installed relay
+
+Run this from elevated PowerShell. Stop the task first and give its process up
+to 30 seconds to exit. A timeout stops the procedure before a restart or binary
+replacement.
+
+```powershell
+$task = 'MeshTalk-PostOffice'
+$binary = 'D:\ProgramData\MeshTalk\PostOffice\mesh-talk-node.exe'
+Stop-ScheduledTask -TaskName $task -ErrorAction Stop
+$deadline = (Get-Date).AddSeconds(30)
+while (Get-CimInstance Win32_Process -Filter "Name = 'mesh-talk-node.exe'" -ErrorAction Stop |
+    Where-Object { $_.ExecutablePath -eq $binary }) {
+    if ((Get-Date) -ge $deadline) { throw "Previous relay process did not exit" }
+    Start-Sleep -Milliseconds 500
+}
+```
+
+For a standalone restart, run `Start-ScheduledTask -TaskName $task` after the stop
+check. For an update, run the installer from the preceding section. Wait for the
+task to be `Running` and verify that the TCP 47479 listener belongs to the
+installed executable. Confirm the same signed relay device ID from another LAN
+node.
+
+After an abrupt stop, the OS releases the terminated process's lock while
+`node.lock` remains. Keep the file and reuse the existing data directory,
+password and keystore to preserve queued events and relay identity.
 
 ## Cross-machine tests
 
@@ -140,21 +164,30 @@ going offline, as required for automatic relay recovery.
 The first command separately asserts receipt of the offline DM and the private
 channel event after the sender stops and the relay restarts. The second checks
 an offline file offer, then an exact byte roundtrip after the sender returns.
-The ignored Rust test separately proves that encrypted file chunks themselves
-survive on the installed Windows relay while both peers are offline, then
-arrive intact after a relay restart with the sender stopped. These older
-harnesses obtain consent during a brief direct sender-recipient connection;
-that overlap is their test sequence, not a current protocol requirement. The
-third command checks election against a disposable second relay.
+The third command checks election against a disposable second relay. The
+LAN script uses relay-log growth as a historical pre-drain signal.
+Treat that signal as a fixture prerequisite and use the recipient's history
+or saved file as delivery evidence. Indexed storage can keep active state
+outside the legacy log, so a log-growth timeout alone cannot diagnose custody.
+
+The ignored Rust test requires custody evidence for every encrypted chunk
+while both peers are offline, then compares recovered bytes and the saved file
+hash with the sender stopped. Its task stop/start command uses a fixed delay.
+To establish that a replacement service served the bytes, record the old
+listener process exiting and the new listener's executable and signed relay
+identity using the stop and restart procedure above. The file fixtures obtain
+consent during brief direct sender-recipient overlap as part of their setup.
 
 Current bridge clients return signed, exact-offer consent and verified-save
 completion through version-3 encrypted federated opaque mailboxes. Those
 controls need no direct sender-recipient route or simultaneous online overlap.
-Each client must eventually reach an eligible relay, and file chunks are
-uploaded only after the sender learns authenticated consent. Reachable trusted
-federation and retained bytes remain necessary. Installed-federation mode in
-`scripts/e2e-four-machine-tailnet.py` separately checks cross-relay bytes and
-SHA-256.
+An eligible relay can take custody of encrypted chunks before consent.
+Recipient approval authorizes retrieval for the exact offer, and a verified
+save produces a separate signed completion. Delivery depends on accessible
+trusted federation and retained data. The installed-federation mode in
+`scripts/e2e-four-machine-tailnet.py` verifies the saved bytes and SHA-256
+with the mac2015 and mac-mini relays. Windows indexed federation needs its
+own installed-path evidence.
 
 Routing metadata remains exposed to the relay, including authenticated device
 connections, mailbox activity, timing, and size buckets. See

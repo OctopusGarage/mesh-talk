@@ -259,38 +259,39 @@ procedure, not evidence that it has been run against a particular installation.
 The current protocol carries signed, exact-offer consent and verified-save
 completion through version-3 encrypted federated opaque mailboxes. Sender and
 recipient need no direct route or simultaneous online overlap for those
-controls; each must eventually reach an eligible relay, and the sender uploads
-chunks after learning authenticated consent. Delivery still depends on
-reachable federation and retained data. With the debug binaries and SSH
-fixtures prepared as described in `scripts/e2e-four-machine-tailnet.py`, the
-installed-federation mode verifies cross-relay file bytes and SHA-256:
+controls. Each must eventually reach an eligible relay. An eligible relay can
+take custody of encrypted chunks while consent is pending. Recipient approval
+authorizes retrieval for the exact offer, and a verified save produces a
+separate signed completion. Delivery depends on reachable federation and
+retained data. With the debug binaries and SSH fixtures prepared as described
+in `scripts/e2e-four-machine-tailnet.py`, installed-federation mode verifies the
+saved file's SHA-256 in the federated setup:
 
 ```bash
 MESH_TALK_E2E_INSTALLED_RELAYS=1 python3 scripts/e2e-four-machine-tailnet.py
 ```
 
-For an executable check of authenticated federated consent and sender-observed
-completion, build the `network-acceptance` and `mesh-talk-node` debug binaries
+For a recovery check covering recipient approval and sender delivery status, build the `network-acceptance` and `mesh-talk-node` debug binaries
 for the hosts listed in the recovery script's header, then run:
 
 ```bash
 python3 scripts/e2e-federation-recovery.py
 ```
 
-This rig uses disposable relays, leaving installed services untouched. It stops
-the preferred relay, queues a 130,000-byte attachment through the surviving
-R→Q→S route, restarts the sender before recipient approval, waits for verified
-file readiness, saves the recipient's file, compares SHA-256, and requires the
-sender's `file-sent <card-id>` query to return `file-sent true`. That last check
-observes authenticated recipient completion; a successful relay upload alone
-cannot satisfy it. The rig subsequently stops and restarts the intermediary
-relay to test recovery of a separate queued DM.
+This rig uses disposable relays. It stops the preferred relay, verifies the
+Windows relay cannot dial the far relay directly, and exercises the surviving
+R→Q→S topology. It queues a 130,000-byte attachment, restarts the sender before
+recipient approval, waits for file readiness, saves the file and checks its
+SHA-256. It also requires the sender's `file-sent <card-id>` query to return
+`file-sent true`. This query reports the sender's delivery state. The fixture
+does not isolate the file's transport path or independently observe a signed
+verified-save control crossing federation. The intermediary restart exercises
+a separate queued DM after the file checks.
 
-The installed-federation rig does not restart the system service or assert
-sender-observed completion. The recovery rig checks sender completion, but its
-intermediary restart occurs after that file completes and uses a disposable
-process. Keep these evidence boundaries separate from the system-service Rust
-procedure above; combining results does not prove an unobserved lifecycle.
+The installed-federation rig verifies the saved bytes and does not restart
+the system service or check sender delivery status. The recovery rig uses
+disposable processes. Use the system-service Rust procedure above for
+installed relay restart and recipient completion evidence.
 
 The multi-relay variant starts a disposable second post office on the test Mac,
 checks that both peers discover it and mac2015, and confirms that an offline DM

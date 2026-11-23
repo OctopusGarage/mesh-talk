@@ -5,6 +5,9 @@ validation guidance. Start with the path that matches your task. The
 [documentation guidelines](DOCUMENTATION_GUIDELINES.md) explain where new information
 belongs and how to keep the site, README, and guides aligned.
 
+Use the [project decision log](decisions.md) to find or record conclusions
+that affect future work.
+
 For feature changes or a maintenance sweep, use the
 [change alignment checklist](maintenance-checklist.md). It maps maintained
 surfaces to their owners, change triggers, evidence and follow-up records.
