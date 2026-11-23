@@ -1,0 +1,3 @@
+Act as the research sub-agent for this task.
+
+Audit current committed Mesh Talk baseline and historical requirement ownership for comprehensive candidate backlog: calls (voice/video/screen), files, group/anonymous lifecycle, identity, offline transport, Web/PWA, clipboard/translation, deployment. Work in /Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-029; no code edits/builds/commits, no delegation. Give local references and concrete current boundaries, save English notes at tmp/req-029-product-baseline.md.
