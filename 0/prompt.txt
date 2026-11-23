@@ -1,0 +1,9 @@
+verify and do some AI evals to all the changes
+
+---
+
+use codex to do AI evals
+
+---
+
+if all finish, and verify, commit all changes ,if not , continue without stopping
