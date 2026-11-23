@@ -9,6 +9,7 @@
 pub mod auth;
 pub mod ble;
 pub mod channel;
+pub mod diagnostics;
 pub mod handshake;
 /// Low-level socket plumbing (UDP discovery socket, multicast joins, dual-stack
 /// TCP listener) shared by discovery and the node runtime. Dependency-free of the

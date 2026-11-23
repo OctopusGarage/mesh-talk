@@ -20,6 +20,7 @@ type TestFrameObserver = dyn Fn(bool, &[u8]) + Send + Sync;
 
 /// An established, authenticated, encrypted channel to one peer.
 pub struct SecureChannel<S> {
+    _diagnostics: super::diagnostics::ChannelLifetime,
     stream: S,
     session: Session,
     peer: VerifiedPeer,
@@ -154,6 +155,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             return Err(TransportError::UnexpectedPeer);
         }
         Ok(Self {
+            _diagnostics: super::diagnostics::ChannelLifetime::new(),
             stream,
             session,
             peer,
@@ -266,6 +268,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
         .await?;
 
         Ok(Self {
+            _diagnostics: super::diagnostics::ChannelLifetime::new(),
             stream,
             session,
             peer,
@@ -370,7 +373,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             })
             .await
             .map_err(|_| TransportError::Noise("policy-gated send timed out".into()))?;
-            self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(bytes?);
+            let bytes = bytes?;
+            self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(bytes);
+            super::diagnostics::frame(true, bytes as usize);
             #[cfg(test)]
             self.observe_test_frame(true, plaintext);
             return Ok(());
@@ -378,6 +383,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
         let ct = self.encrypt_if(plaintext, &mut authorize)?;
         write_frame(&mut self.stream, &ct).await?;
         self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(ct.len() as u64 + 4);
+        super::diagnostics::frame(true, ct.len() + 4);
         #[cfg(test)]
         self.observe_test_frame(true, plaintext);
         Ok(())
@@ -411,6 +417,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             return Err(TransportError::AdmissionDenied);
         }
         let plaintext = self.session.decrypt(&ct)?;
+        super::diagnostics::frame(false, ct.len() + 4);
         #[cfg(test)]
         self.observe_test_frame(false, &plaintext);
         Ok(plaintext)

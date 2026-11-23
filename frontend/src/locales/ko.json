@@ -901,13 +901,22 @@
   "diagnostics": {
     "resources": {
       "title": "프로세스 리소스",
-      "description": "활성화되어 있고 화면에 표시될 때만 Mesh Talk 호스트 프로세스를 측정합니다.",
+      "description": "활성화되어 표시되는 동안 Mesh Talk와 식별 가능한 하위 프로세스를 측정합니다.",
       "start": "측정 시작",
       "stop": "측정 중지",
       "unavailable": "프로세스 카운터를 사용할 수 없습니다. 측정을 중지한 뒤 다시 시작하세요.",
       "cpu": "CPU (논리 코어 1개 기준)",
       "memory": "상주 메모리",
-      "writes": "시작 이후 디스크 쓰기 바이트"
+      "writes": "관측 프로세스의 디스크 쓰기 바이트",
+      "startup": "데스크톱 호스트 준비까지 {{ms}}ms",
+      "processes": "관측된 프로세스",
+      "connections": "인증된 채널",
+      "sent": "보낸 암호화 프레임 바이트",
+      "received": "받은 암호화 프레임 바이트",
+      "ioWrites": "프로세스 I/O 쓰기 바이트",
+      "bounded": "일부 프로세스만 측정되었습니다.",
+      "routedLatency": "검색 RTT {{ms}} ms · {{age}}초 전",
+      "noLatency": "최근 검색 RTT 없음"
     },
     "trigger": "진단 / 기기 검색",
     "title": "진단",

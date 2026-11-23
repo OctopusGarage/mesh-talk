@@ -901,13 +901,22 @@
   "diagnostics": {
     "resources": {
       "title": "Process resources",
-      "description": "Samples the Mesh Talk host process only. Sampling runs while enabled and visible.",
+      "description": "Samples the Mesh Talk host and identifiable child processes while enabled and visible.",
       "start": "Start sampling",
       "stop": "Stop sampling",
       "unavailable": "Process counters unavailable. Stop and restart sampling to retry.",
       "cpu": "CPU (one logical core)",
       "memory": "Resident memory",
-      "writes": "Disk bytes written since launch"
+      "writes": "Disk bytes written by observed processes",
+      "startup": "Desktop host ready in {{ms}} ms",
+      "processes": "Observed processes",
+      "connections": "Authenticated channels",
+      "sent": "Encrypted frame bytes sent",
+      "received": "Encrypted frame bytes received",
+      "ioWrites": "Process I/O bytes written",
+      "bounded": "Process coverage is partial.",
+      "routedLatency": "Discovery RTT {{ms}} ms · {{age}} s ago",
+      "noLatency": "No recent discovery RTT"
     },
     "trigger": "Diagnostics / discovery",
     "title": "Diagnostics",

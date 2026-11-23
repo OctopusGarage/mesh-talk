@@ -66,3 +66,75 @@ test("About remains reachable through the sidebar menu", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("about-dialog")).not.toBeVisible();
 });
+
+test("tray diagnostics releases resource sampling when closed", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const win = window as unknown as {
+      __mockEmit: (event: string, payload: unknown) => void;
+      __resourceLeaseCalls: string[];
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const invoke = win.__TAURI_INTERNALS__.invoke.bind(win.__TAURI_INTERNALS__);
+    win.__resourceLeaseCalls = [];
+    win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "env_info") {
+        const env = await invoke(cmd, args);
+        return { ...(env as Record<string, unknown>), desktop_ready_ms: 125 };
+      }
+      if (cmd === "start_host_resource_sampling") {
+        win.__resourceLeaseCalls.push("start");
+        return 7;
+      }
+      if (cmd === "host_resource_sample") {
+        win.__resourceLeaseCalls.push(`sample:${args.ticket}`);
+        return {
+          processes: [
+            {
+              pid: 1,
+              birth: "host",
+              cpu_ms: 0,
+              resident_bytes: 20_000_000,
+              disk_write_bytes: null,
+              io_write_bytes: null,
+            },
+          ],
+          bounded: false,
+          authenticated_channels: 2,
+          sent_frame_bytes: 120,
+          received_frame_bytes: 64,
+        };
+      }
+      if (cmd === "stop_host_resource_sampling") {
+        win.__resourceLeaseCalls.push(`stop:${args.ticket}`);
+        return;
+      }
+      return invoke(cmd, args);
+    };
+    win.__mockEmit("tray-navigate", "diagnostics");
+  });
+  const dialog = page.getByTestId("diagnostics-dialog");
+  const start = dialog.getByRole("button", { name: "Start sampling" });
+  await expect(start).toBeVisible();
+  await expect(dialog.getByText("Desktop host ready in 125 ms")).toBeVisible();
+  const calls = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __resourceLeaseCalls: string[] })
+          .__resourceLeaseCalls,
+    );
+  expect(await calls()).toEqual([]);
+  await start.click();
+  await expect(dialog.getByText("20 MB")).toBeVisible();
+  await expect(dialog.getByText("120 byte")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect.poll(calls).toEqual(["start", "sample:7", "stop:7"]);
+});

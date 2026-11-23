@@ -533,6 +533,8 @@ pub fn run_tauri_configured(
                 crate::logger::save_log_tail,
                 crate::diagnostics::env_info,
                 crate::diagnostics::host_resource_sample,
+                crate::diagnostics::start_host_resource_sampling,
+                crate::diagnostics::stop_host_resource_sampling,
                 crate::updates::check_for_update,
                 crate::updates::download_update,
                 crate::updates::native::prepare_update,
@@ -601,11 +603,7 @@ pub fn run_tauri_configured(
             if matches!(event, tauri::RunEvent::Ready)
                 && let Some(started) = desktop_start.take()
             {
-                log::info!(
-                    target: crate::logger::STARTUP_LOG_TARGET,
-                    "desktop_host_ready_ms={}",
-                    started.elapsed().as_millis()
-                );
+                crate::diagnostics::record_desktop_ready(started.elapsed());
             }
             #[cfg(target_os = "macos")]
             if matches!(event, tauri::RunEvent::Reopen { .. })

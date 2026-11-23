@@ -901,13 +901,22 @@
   "diagnostics": {
     "resources": {
       "title": "プロセスのリソース",
-      "description": "Mesh Talk のホストプロセスのみを、計測が有効で画面を表示している間に計測します。",
+      "description": "有効かつ表示中に Mesh Talk 本体と識別できる子プロセスを計測します。",
       "start": "計測を開始",
       "stop": "計測を停止",
       "unavailable": "プロセスの情報を取得できません。計測を停止してから再開してください。",
       "cpu": "CPU（論理コア 1 個基準）",
       "memory": "常駐メモリ",
-      "writes": "起動後のディスク書き込み量"
+      "writes": "観測プロセスのディスク書き込み量",
+      "startup": "デスクトップホスト起動完了まで {{ms}} ms",
+      "processes": "観測プロセス数",
+      "connections": "認証済みチャネル",
+      "sent": "暗号化フレーム送信量",
+      "received": "暗号化フレーム受信量",
+      "ioWrites": "プロセス I/O 書き込み量",
+      "bounded": "一部のプロセスのみ計測されています。",
+      "routedLatency": "検出 RTT {{ms}} ms · {{age}} 秒前",
+      "noLatency": "最近の検出 RTT なし"
     },
     "trigger": "診断 / 検出",
     "title": "診断",

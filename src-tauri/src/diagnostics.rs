@@ -5,79 +5,50 @@
 use crate::commands::CommandError;
 use serde::Serialize;
 
-/// Cumulative OS counters for the current host process. Never starts a collector.
+mod process_resources;
+
+static DESKTOP_READY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+pub(crate) fn record_desktop_ready(elapsed: std::time::Duration) {
+    let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let _ = DESKTOP_READY_MS.set(millis);
+    log::info!(target: crate::logger::STARTUP_LOG_TARGET, "desktop_host_ready_ms={millis}");
+}
+
 #[derive(Serialize)]
 pub struct HostResourceSample {
-    cpu_ms: f64,
-    resident_bytes: Option<u64>,
-    disk_write_bytes: Option<u64>,
+    #[serde(flatten)]
+    resources: process_resources::ProcessResources,
+    authenticated_channels: u64,
+    sent_frame_bytes: u64,
+    received_frame_bytes: u64,
 }
 
 #[tauri::command]
-pub async fn host_resource_sample() -> Result<Option<HostResourceSample>, CommandError> {
-    tauri::async_runtime::spawn_blocking(read_host_resources)
-        .await
-        .map_err(|error| CommandError::Io(error.to_string()))
+pub fn start_host_resource_sampling() -> u64 {
+    mesh_talk_core::transport::diagnostics::begin()
 }
 
-#[cfg(target_os = "macos")]
-fn read_host_resources() -> Option<HostResourceSample> {
-    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::uninit();
-    // The flavor specifies the size and layout written to the output pointer.
-    let result = unsafe {
-        libc::proc_pid_rusage(
-            libc::getpid(),
-            libc::RUSAGE_INFO_V2,
-            info.as_mut_ptr().cast(),
-        )
+#[tauri::command]
+pub fn stop_host_resource_sampling(ticket: u64) {
+    mesh_talk_core::transport::diagnostics::stop(ticket);
+}
+
+#[tauri::command]
+pub async fn host_resource_sample(ticket: u64) -> Result<Option<HostResourceSample>, CommandError> {
+    let Some(transport) = mesh_talk_core::transport::diagnostics::sample(ticket) else {
+        return Ok(None);
     };
-    if result != 0 {
-        return None;
-    }
-    // The OS initialized the complete V2 record on success.
-    let info = unsafe { info.assume_init() };
-    Some(HostResourceSample {
-        cpu_ms: (info.ri_user_time as f64 + info.ri_system_time as f64) / 1_000_000.0,
-        resident_bytes: Some(info.ri_resident_size),
-        disk_write_bytes: Some(info.ri_diskio_byteswritten),
+    tauri::async_runtime::spawn_blocking(move || {
+        process_resources::read_resources().map(|resources| HostResourceSample {
+            resources,
+            authenticated_channels: transport.authenticated_channels,
+            sent_frame_bytes: transport.sent_frame_bytes,
+            received_frame_bytes: transport.received_frame_bytes,
+        })
     })
-}
-
-#[cfg(target_os = "linux")]
-fn read_host_resources() -> Option<HostResourceSample> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    // RUSAGE_SELF is process-wide and leaves the output uninitialized on failure.
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    let usage = unsafe { usage.assume_init() };
-    let millis = |time: libc::timeval| time.tv_sec as f64 * 1000.0 + time.tv_usec as f64 / 1000.0;
-    let read_counter = |path, field| {
-        let text = std::fs::read_to_string(path).ok()?;
-        let value = text.lines().find_map(|line| line.strip_prefix(field))?;
-        value.split_whitespace().next()?.parse::<u64>().ok()
-    };
-    Some(HostResourceSample {
-        cpu_ms: millis(usage.ru_utime) + millis(usage.ru_stime),
-        resident_bytes: read_counter("/proc/self/status", "VmRSS:")
-            .and_then(|kib| kib.checked_mul(1024)),
-        disk_write_bytes: read_counter("/proc/self/io", "write_bytes:"),
-    })
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn read_host_resources() -> Option<HostResourceSample> {
-    None
-}
-
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-#[test]
-fn host_resource_sample_reads_cumulative_cpu_and_resident_memory() {
-    let first = read_host_resources().expect("host process counters");
-    let next = read_host_resources().expect("host process counters");
-    assert!(first.cpu_ms.is_finite() && first.cpu_ms >= 0.0);
-    assert!(next.cpu_ms >= first.cpu_ms);
-    assert!(next.resident_bytes.is_some_and(|bytes| bytes > 0));
+    .await
+    .map_err(|error| CommandError::Io(error.to_string()))
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -127,6 +98,7 @@ pub struct EnvInfo {
     pub target: String,
     /// Debug vs release build.
     pub build_profile: String,
+    pub desktop_ready_ms: Option<u64>,
 }
 
 /// Snapshot the logical build identity and environment facts. `TARGET` is resolved at
@@ -144,6 +116,7 @@ pub fn env_info(app_handle: tauri::AppHandle) -> Result<EnvInfo, CommandError> {
         arch: std::env::consts::ARCH.to_string(),
         // `TARGET` is exported to the build by tauri-build; fall back to a derived triple.
         target: option_env!("TARGET").unwrap_or("unknown").to_string(),
+        desktop_ready_ms: DESKTOP_READY_MS.get().copied(),
         build_profile: if cfg!(debug_assertions) {
             "debug".to_string()
         } else {

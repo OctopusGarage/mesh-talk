@@ -901,13 +901,22 @@
   "diagnostics": {
     "resources": {
       "title": "程序資源",
-      "description": "只取樣 Mesh Talk 主程序，啟用且可見時取樣。",
+      "description": "啟用且面板可見時，採樣 Mesh Talk 主程序與可識別的子程序。",
       "start": "開始取樣",
       "stop": "停止取樣",
       "unavailable": "無法讀取程序計數。可停止後重新取樣。",
       "cpu": "CPU（以單一邏輯核心計）",
       "memory": "常駐記憶體",
-      "writes": "啟動以來的磁碟寫入量"
+      "writes": "已觀測程序的磁碟寫入位元組",
+      "startup": "桌面主程序就緒耗時 {{ms}} 毫秒",
+      "processes": "已觀測程序",
+      "connections": "已驗證通道",
+      "sent": "已傳送加密訊框位元組",
+      "received": "已接收加密訊框位元組",
+      "ioWrites": "程序 I/O 寫入位元組",
+      "bounded": "僅涵蓋部分程序。",
+      "routedLatency": "探索往返 {{ms}} 毫秒 · {{age}} 秒前",
+      "noLatency": "暫無近期探索延遲"
     },
     "trigger": "診斷 / 探索",
     "title": "診斷",

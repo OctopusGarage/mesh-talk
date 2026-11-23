@@ -267,6 +267,13 @@ export function DiagnosticsDialog({
                 icon={<Activity className="h-4 w-4" />}
                 title={t("diagnostics.resources.title")}
               >
+                {env?.desktop_ready_ms != null && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("diagnostics.resources.startup", {
+                      ms: env.desktop_ready_ms,
+                    })}
+                  </p>
+                )}
                 {open && <HostResourceMonitor />}
               </Panel>
               <Panel
@@ -697,6 +704,14 @@ export function PeerRow({ p }: { p: DiagPeerInfo }) {
             <CopyValue value={p.user_id} label={shortId(p.user_id, 12)} />
             {p.via_gateway && <span>{t("diagnostics.viaGateway")}</span>}
             <CopyValue value={`${p.ip}:${p.tcp_port}`} />
+            <span>
+              {p.routed_latency
+                ? t("diagnostics.resources.routedLatency", {
+                    ms: p.routed_latency.round_trip_ms,
+                    age: p.routed_latency.age_secs,
+                  })
+                : t("diagnostics.resources.noLatency")}
+            </span>
           </div>
         </div>
       </div>

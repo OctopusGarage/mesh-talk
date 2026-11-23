@@ -901,13 +901,22 @@
   "diagnostics": {
     "resources": {
       "title": "Recursos del proceso",
-      "description": "Solo se mide el proceso principal de Mesh Talk mientras el muestreo está activo y visible.",
+      "description": "Muestrea el proceso de Mesh Talk y sus procesos secundarios identificables mientras está activado y visible.",
       "start": "Iniciar muestreo",
       "stop": "Detener muestreo",
       "unavailable": "Contadores no disponibles. Detén y reinicia el muestreo para reintentar.",
       "cpu": "CPU (un núcleo lógico)",
       "memory": "Memoria residente",
-      "writes": "Bytes escritos en disco desde el inicio"
+      "writes": "Bytes escritos en disco por los procesos observados",
+      "startup": "Proceso de escritorio listo en {{ms}} ms",
+      "processes": "Procesos observados",
+      "connections": "Canales autenticados",
+      "sent": "Bytes de tramas cifradas enviados",
+      "received": "Bytes de tramas cifradas recibidos",
+      "ioWrites": "Bytes escritos por E/S de procesos",
+      "bounded": "La cobertura de procesos es parcial.",
+      "routedLatency": "RTT de descubrimiento {{ms}} ms · hace {{age}} s",
+      "noLatency": "Sin RTT de descubrimiento reciente"
     },
     "trigger": "Diagnóstico / descubrimiento",
     "title": "Diagnóstico",

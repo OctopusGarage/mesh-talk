@@ -320,6 +320,7 @@ export interface DiagPeerInfo {
   post_office: boolean;
   account_id: string | null;
   last_seen_secs: number;
+  routed_latency?: { round_trip_ms: number; age_secs: number } | null;
 }
 
 export interface DiagNetworkInfo {
@@ -432,6 +433,7 @@ export interface EnvInfo {
   arch: string;
   target: string;
   build_profile: string;
+  desktop_ready_ms?: number | null;
 }
 
 export type UpdateChannel = "stable" | "nightly";

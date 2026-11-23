@@ -386,24 +386,32 @@ reproduction; never describe a passing correctness test as performance acceptanc
 
 ## Desktop resource monitor
 
-Open Diagnostics from the tray or sidebar and enable sampling in the overview.
-The first version reads cumulative CPU time, resident memory and attributed
-disk-write bytes for the desktop host process on macOS and Linux. CPU is the
-change in CPU time divided by wall time and is expressed relative to one logical
-core. The first sample supplies a baseline. A long sample gap discards that
-baseline. Disk writes are cumulative from process start. Missing counters are
-displayed as unavailable.
+Open Diagnostics from the tray or sidebar and enable sampling in the Overview
+tab. Sampling uses the visible serial refresh owner at three-second intervals.
+Closing or hiding the panel, minimizing the window or turning sampling off
+releases its lease. An abandoned lease expires after five seconds without a
+refresh. The feature adds no collector, persistence or probe traffic. Sample
+baselines and traffic totals reset with each observation. The Overview also
+shows the existing desktop host readiness duration from the current launch.
+This startup milestone is available without enabling sampling. Live CPU and
+traffic observations begin when the user enables sampling.
 
-The monitor reuses the visible serial refresh owner. It retains one prior CPU
-reading and the latest sample in the open panel. Closing, hiding or disabling
-the panel stops new requests. Each IPC performs one bounded snapshot with no
-background collector, persistence, network traffic or account data.
-
-Process-family accounting, Windows counters, connection counts, per-peer
-latency and network bytes remain separate from the host sample. The existing
-discovery list counts observed peers and cannot establish live connections.
-Discovery latency currently tunes routed presence leases. Expose a peer
-measurement only with its actual request semantics and sample freshness.
+- **CPU and memory** cover the desktop host and up to 31 descendants identified
+  by platform process data on macOS, Linux and Windows. CPU shows the change
+  in summed CPU time relative to one logical core. It needs two readings of
+  the same process identities within six seconds. Resident memory sums process
+  residency and can count shared pages more than once. OS-owned WebKit helpers
+  outside the process tree are outside this attribution.
+- **Writes** are cumulative for the currently observed processes. macOS and
+  Linux expose attributed disk-write bytes. Windows exposes logical process I/O
+  writes, which include other I/O. Missing counters display as unavailable.
+- **Connections** count live authenticated channel objects owned by the app.
+  Multiple channels can belong to a single peer. **Traffic** counts successful
+  encrypted application frames and their length prefixes during the sampling
+  lease. It excludes handshake bytes, discovery packets, media and TCP overhead.
+- **Peer latency** uses the last successful signed routed-discovery
+  request/reply measurement within its presence lifetime. The Peers tab
+  displays the sample age, or indicates that no recent RTT is available.
 
 ## Evidence and maintenance
 

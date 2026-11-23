@@ -422,6 +422,7 @@ mod recovery_accounts_tests {
                 source: RouteSource::Lan,
                 last_seen: now,
                 last_authenticated: None,
+                routed_rtt: None,
                 presence_expires_at: None,
                 presence_origin_expires_at: None,
                 registration_origin: None,

@@ -901,13 +901,22 @@
   "diagnostics": {
     "resources": {
       "title": "进程资源",
-      "description": "只采样 Mesh Talk 主进程，启用且可见时采样。",
+      "description": "启用且面板可见时，采集 Mesh Talk 主进程和可识别的子进程。",
       "start": "开始采样",
       "stop": "停止采样",
       "unavailable": "无法读取进程计数。可停止后重新采样。",
       "cpu": "CPU（以单个逻辑核心计）",
       "memory": "常驻内存",
-      "writes": "启动以来的磁盘写入量"
+      "writes": "已观测进程的磁盘写入字节数",
+      "startup": "桌面主进程就绪耗时 {{ms}} 毫秒",
+      "processes": "已观测进程",
+      "connections": "已认证通道",
+      "sent": "加密帧发送字节数",
+      "received": "加密帧接收字节数",
+      "ioWrites": "进程 I/O 写入字节数",
+      "bounded": "仅覆盖部分进程。",
+      "routedLatency": "发现往返 {{ms}} 毫秒 · {{age}} 秒前",
+      "noLatency": "暂无近期发现延迟"
     },
     "trigger": "诊断 / 发现",
     "title": "诊断",

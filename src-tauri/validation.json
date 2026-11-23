@@ -1051,6 +1051,7 @@
       "id": "desktop-diagnostics",
       "paths": [
         "src-tauri/src/diagnostics.rs",
+        "src-tauri/src/diagnostics/process_resources.rs",
         "src-tauri/src/perf.rs",
         "src-tauri/src/logger/",
         "src-tauri/src/lib.rs"
@@ -1070,7 +1071,7 @@
             "reference": "docs/performance-requirements.md#evidence-and-maintenance"
           },
           {
-            "name": "The desktop resource IPC reads one bounded snapshot of current host process counters without creating a collector, making network requests or touching account state.",
+            "name": "The desktop resource IPC reads one bounded snapshot of the host and identifiable descendant processes under a visible sampling lease without creating a collector, making network requests or touching account state.",
             "reference": "docs/performance-requirements.md#desktop-resource-monitor"
           },
           {

@@ -12,10 +12,21 @@ import type {
   DownloadProgress,
 } from "../types";
 
-export interface HostResourceSample {
+export interface ProcessResourceReading {
+  pid: number;
+  birth: string;
   cpu_ms: number;
   resident_bytes: number | null;
   disk_write_bytes: number | null;
+  io_write_bytes: number | null;
+}
+
+export interface HostResourceSample {
+  processes: ProcessResourceReading[];
+  bounded: boolean;
+  authenticated_channels: number;
+  sent_frame_bytes: number;
+  received_frame_bytes: number;
 }
 
 export const diag = {
@@ -54,8 +65,12 @@ export const presence = {
 /** Observability: logs + static environment facts for the Diagnostics dialog. */
 export const obs = {
   envInfo: () => invoke<EnvInfo>("env_info"),
-  hostResources: () =>
-    invoke<HostResourceSample | null>("host_resource_sample"),
+  startHostResourceSampling: () =>
+    invoke<number>("start_host_resource_sampling"),
+  hostResources: (ticket: number) =>
+    invoke<HostResourceSample | null>("host_resource_sample", { ticket }),
+  stopHostResourceSampling: (ticket: number) =>
+    invoke<void>("stop_host_resource_sampling", { ticket }),
   logsDir: () => invoke<string>("get_logs_dir"),
   logFile: () => invoke<string>("get_log_file"),
   logTail: () => invoke<string>("read_log_tail"),
