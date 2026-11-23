@@ -3,7 +3,7 @@
   "checkpoint_id": "01M83ZHZW7VGV9X437H3P8KKA2",
   "strategy": "manual-commit",
   "branch": "requirements-work",
-  "checkpoints_count": 10,
+  "checkpoints_count": 32,
   "files_touched": [
     "AGENTS.md",
     "Cargo.lock",
@@ -113,25 +113,32 @@
       "compact_transcript": "/1/transcript.jsonl",
       "content_hash": "/1/content_hash.txt",
       "prompt": "/1/prompt.txt"
+    },
+    {
+      "metadata": "/2/metadata.json",
+      "transcript": "/2/full.jsonl",
+      "compact_transcript": "/2/transcript.jsonl",
+      "content_hash": "/2/content_hash.txt",
+      "prompt": "/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 260325,
+    "input_tokens": 1042353,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 50111360,
-    "output_tokens": 32095,
-    "api_call_count": 216,
+    "cache_read_tokens": 208910080,
+    "output_tokens": 188015,
+    "api_call_count": 814,
     "subagent_tokens_complete": true
   },
   "redaction": {
-    "replacements": 3137,
+    "replacements": 3205,
     "layers": {
-      "betterleaks": 160,
+      "betterleaks": 170,
       "connection_string": 0,
       "credential_key": 0,
       "credential_value": 0,
       "credentialed_uri": 0,
-      "entropy": 2992,
+      "entropy": 3063,
       "key_context": 0,
       "provider_token": 0,
       "shell_stdin": 0

@@ -1,0 +1,287 @@
+基于requirements-work分支，我们开个新的worktree分支，做一下REQ-029这个任务，先一起调研清楚，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+Delegated task node:delegated-task:command%3Amcp%3Ae9b2340c-ffbe-4da9-8288-98a992d7123d%3Adelegate-task%3A4a5c16df-798d-475e-a3fe-37e598ac9452 (REQ-029 peer tool evidence) [completed]:
+Completed the REQ-029 desk review and saved the [peer evidence](/Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-029/tmp/req-029-peer-evidence.md). The comparison uses committed Mesh Talk HEAD `0ae1a692`.
+
+**Mesh Talk already supports the core workflow** on a reachable LAN through invited channels, attachment approval and saving, and recovery from authorized peers or configured post offices. The strongest gaps to investigate are first-use setup, whether the sender can tell who actually saved the file, and what remains after the temporary group finishes.
+
+- **LAN Messenger** documents serverless LAN chat, selected broadcasts, direct file transfer, and a group mode that sends a leave event when its window closes. Room-wide file delivery remains unverified. [Official repository](https://github.com/lanmessenger/lanmessenger) · [Chat-room source](https://github.com/lanmessenger/lanmessenger/blob/master/src/gui/chat/chatroomwindow.cpp#L460)
+- **BeeBEEP 6 beta** provides the closest comparison for file handoff. It documents separate progress, acceptance, and resumable transfers for each group recipient. Recipients still need direct reachability to the sender for the bytes. [BeeBEEP site](https://www.beebeep.net/) · [File transfer guide](https://www.beebeep.net/docs/files)
+- **Squiggle** historically documented portable startup and group chat. Current upstream sources confirm multicast discovery, peer-to-peer file transfer, and cross-subnet bridging. Current group-wide file delivery remains unverified. [Historical upstream README](https://github.com/hasankhan/Squiggle/blob/ef61dcc6169af47eb10e275e672d2114c43fdf7c/Readme.md) · [Current upstream README](https://github.com/hasankhan/Squiggle)
+- **Bitchat** addresses the separate case where there is no usable LAN. Its Apple whitepaper documents public BLE mesh chat and accepted mesh files up to 1 MiB. Android documents optional password-protected topic channels. Private group file delivery across both clients remains unverified. [Apple whitepaper](https://github.com/permissionlesstech/bitchat/blob/main/WHITEPAPER.md) · [Android repository](https://github.com/permissionlesstech/bitchat-android)
+
+User demand remains a hypothesis. The report includes concrete scenarios for testing it. No builds, runtime tests, code edits, or commits were made.
+
+---
+
+先根据这些所有的参考项目全面仔细调研和分析清楚，给出全面全局性的值得做的需求列表，不要遗漏，充分专业分析清楚，给出需求建议，不要偷懒急着给一些片面的答案：
+
+“
+
+开源项目 Columba 解决的就是这个问题——无互联网、无基站、无中心服务器，照样能发消息和语音通话。
+
+基于 Reticulum 网状网络协议，设备通过蓝牙、WiFi、LoRa 无线电或 TCP 互相连接，只要能建立链路就能组网。
+
+端到端加密，不需要手机号，身份直接在设备上生成。
+
+https://github.com/torlando-tech/columba
+
+
+https://github.com/permissionlesstech/bitchat
+
+
+当然。下面我整理成一版可以直接转发的简洁版，保留项目地址和核心特点。
+开源局域网聊天软件推荐
+如果想找 不依赖云服务器、可在局域网内直接通信、开源 的聊天软件，下面几个比较值得关注：
+项目	核心特点	适合场景
+LAN Messenger ⭐⭐⭐⭐⭐	无服务器、完全离线、AES-256/RSA-2048、文件传输、群聊；支持 Windows/macOS/Linux	最推荐，直接拿来用
+LANChat ⭐⭐⭐⭐⭐	Rust + Tauri，支持 Windows/Linux/Android/Web，聊天、文件传输、SQLite、本地发现	跨平台、适合二次开发
+Mesh-Talk ⭐⭐⭐⭐⭐	真正 P2P、端到端加密、Noise Protocol、无账号/云服务，支持离线网络	安全、隐私要求高
+Squiggle ⭐⭐⭐⭐	P2P 局域网聊天、文件、语音、屏幕共享、聊天记录、跨子网	功能比较全面
+BeeBEEP ⭐⭐⭐⭐	老牌 LAN Messenger，无服务器、群聊、文件传输、消息记录	传统办公室内网聊天
+BLIP ⭐⭐⭐⭐	P2P 聊天、语音/视频、屏幕共享、大文件、群聊，无服务器无账号	功能丰富、喜欢新玩法
+Technitium Mesh ⭐⭐⭐	P2P、DHT、强加密，可在 LAN/Internet/Tor 环境使用	隐私/P2P 爱好者
+HostTalk ⭐⭐⭐	局域网自建服务，浏览器/PWA 使用	不想给每个人安装客户端
+1. LAN Messenger —— 最推荐
+真正的 Serverless LAN Messenger：
+* Windows / macOS / Linux
+* 不需要服务器、账号、互联网
+* AES-256 + RSA-2048
+* 文件传输
+* 群组/联系人
+* 消息历史
+* 完全离线可用
+目前官网提供 v1.3.9，适合直接部署使用。
+项目： https://github.com/lanmessenger/lanmessenger
+官网： https://lanmessenger.github.io/
+
+2. LANChat —— 跨平台/开发者首选
+技术栈比较现代：
+Rust + Tauri + SQLite + WebSocket
+支持：
+* Windows
+* Linux
+* Android
+* Web
+* LAN 自动发现
+* 文件传输
+* 图片预览
+* 消息记录
+* 跨 VLAN / WireGuard 手动发现
+如果以后想自己二次开发，这个项目很值得研究。
+项目： https://github.com/cap153/LANChat
+
+3. Mesh-Talk —— 安全性首选
+核心理念是：
+P2P + E2E 加密 + 无服务器
+采用 Noise 加密通信、签名 LAN 发现、端到端加密消息，并支持离线消息转发。
+支持：
+* Windows
+* macOS
+* Linux
+* 一对一聊天
+* 群组
+* 文件
+* 完全离线 LAN
+* 无云服务、无账号依赖
+如果是实验室、企业内网、隔离网络等场景，我会重点考虑它。
+项目： https://github.com/OctopusGarage/mesh-talk
+官网： https://octopusgarage.github.io/mesh-talk/
+
+4. Squiggle —— 功能最全面之一
+除了普通聊天，还支持：
+* 文件传输
+* 语音聊天
+* 屏幕共享
+* 截图
+* 聊天记录
+* 消息翻译
+* 跨子网通信
+完全 P2P，没有中央服务器。
+支持 Windows / Linux / macOS。
+项目： https://github.com/hasankhan/Squiggle
+目前 GitHub 有约 127 Stars、973 次提交，项目活跃度不错。
+
+5. BeeBEEP —— 老牌经典
+老牌的局域网即时通讯软件：
+* 无服务器
+* Windows / macOS / Linux
+* 一对一聊天
+* 群聊
+* 文件/文件夹传输
+* 消息记录
+* AES 加密
+优点是成熟、简单；缺点是整体技术和 UI 相对传统。
+官网： https://www.beebeep.net/
+
+6. BLIP —— 聊天 + 音视频 + 屏幕共享
+比较“现代”的 P2P LAN Messenger：
+* 文字聊天
+* 群聊
+* 语音
+* 视频
+* 屏幕共享
+* 文件传输
+* LAN Clipboard
+* WebRTC
+* 无服务器
+* 无账号
+* 支持 LAN / VPN
+目前 2.0 仍在开发，适合尝鲜和关注后续发展。
+项目： https://github.com/krwg/blip
+
+最终怎么选？
+想装完就用：
+🥇 LAN Messenger
+想 Windows + Linux + Android + Web：
+🥈 LANChat
+最看重安全和端到端加密：
+🥇 Mesh-Talk
+需要语音/屏幕共享：
+🥇 Squiggle
+喜欢老牌稳定方案：
+BeeBEEP
+想要音视频 + P2P + 很多新功能：
+BLIP
+我的最终推荐
+如果只让我留下 3 个：
+① LAN Messenger —— 成熟、简单、开箱即用 ② LANChat —— 跨平台、现代、适合二次开发 ③ Mesh-Talk —— 架构先进、安全性最高
+如果是我自己搭一个局域网聊天系统，会优先从这三个开始实际测试。
+如果你要直接发给技术群，上面这版基本可以原样转发；如果是发给非技术人员，我也可以再压缩成一版 “一张表 + 3 个推荐” 的超短版。
+
+”
+
+analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+Delegated task node:delegated-task:command%3Amcp%3Ae9b2340c-ffbe-4da9-8288-98a992d7123d%3Adelegate-task%3A01a0ef23-a384-4df1-9c3f-191b9244e923 (REQ-029 Mesh Talk baseline audit) [completed]:
+Saved the [REQ-029 product baseline and candidate backlog](/Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-029/tmp/req-029-product-baseline.md). It covers all eight requested areas at commit `0ae1a692`, with 73 verified local source links and historical requirement ownership.
+
+- Desktop already has experimental 1:1 voice and video, recoverable file transfers, and manual QR recognition in image previews. Group voice and live screen sharing remain candidates.
+- Offline delivery depends on a reachable, authorized source that still holds the data. The BLE path is a two-host macOS rehearsal, and the mobile PWA lives on a separate prototype branch.
+- The notes identify an internet-disconnected LAN file handoff as a bounded first scenario for REQ-029. It can show where existing behavior meets the need and where users struggle to recover a transfer.
+
+This was a source audit. No builds, runtime tests, code edits, or commits. The tracked worktree is clean.
+
+**English note**
+
+Original — “Audit current committed Mesh Talk baseline and historical requirement ownership for comprehensive candidate backlog.”  
+Better — “Audit the current Mesh Talk baseline and trace historical requirement ownership to inform a comprehensive backlog of candidate work.”  
+Why — “To inform” makes the purpose of the audit explicit.  
+Useful pattern — “Trace X to inform Y.”  
+Collocations — audit the baseline, trace requirement ownership, build a backlog.
+
+---
+
+Delegated task node:delegated-task:command%3Amcp%3Ae9b2340c-ffbe-4da9-8288-98a992d7123d%3Adelegate-task%3Aa793304e-9d22-489b-b79e-78fefc815855 (REQ-029 source verification for LAN and Web) [completed]:
+Saved the first-party research in [req-029-lan-sources.md](/Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-029/tmp/req-029-lan-sources.md). It covers all five products, with source URLs, release status, product gaps, and implications for Mesh Talk.
+
+- **LANChat v0.1.5** ships a host-dependent browser client with image and file workflows. PWA installation, independent browser discovery, and live media remain unverified. [Release](https://github.com/cap153/LANChat/releases/tag/v0.1.5) · [Web server source](https://github.com/cap153/LANChat/blob/v0.1.5/src-tauri/src/web_server.rs)
+- **BLIP** ships desktop WebRTC calling and screen sharing. Group voice channels use a host-centered topology. GitHub marks 2.0.3 as Latest and 3.0.0 as a prerelease. Its public website is a static showcase. [Architecture](https://github.com/krwg/blip/blob/v2.0.3/docs/ARCHITECTURE.md) · [Releases](https://github.com/krwg/blip/releases) · [Website](https://krwg.github.io/blip/)
+- **LAN Messenger** lists 1.3.27 on both its official site and GitHub. **Squiggle** publishes macOS and Linux packages, with media plugin parity still unverified. **BeeBEEP** lists 5.8.6 as stable, while its v6 beta download page marks packages as coming soon. [LAN Messenger](https://lanmessenger.github.io/) · [Squiggle](https://github.com/hasankhan/Squiggle/releases/tag/v4.0.1) · [BeeBEEP stable](https://www.beebeep.net/legacy/download) · [BeeBEEP beta](https://www.beebeep.net/download)
+
+The review used public sources and tagged code. Runtime behavior, interoperability, and performance remain untested.
+
+**English note**
+
+- **Original** “Give URLs, product gaps, applicability.”
+- **Better** “Include source links, identify product gaps, and explain what applies to Mesh Talk.”
+- **Why** Parallel verbs make each deliverable clear, and naming Mesh Talk gives “applicability” a concrete target.
+- **Useful pattern** “For each product, cite the evidence and explain how it applies to our use case.”
+- **Collocations** cite primary sources, identify product gaps, assess applicability.
+
+---
+
+Delegated task node:delegated-task:command%3Amcp%3Ae9b2340c-ffbe-4da9-8288-98a992d7123d%3Adelegate-task%3Ae004a4f4-c33f-4a85-ad24-90710eab236a (REQ-029 source verification for mesh and radio) [completed]:
+Saved the [REQ-029 research notes](/Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-029/tmp/req-029-mesh-sources.md) with 55 source links and seven candidate requirements, each with an evidence gate.
+
+- **Columba** implements live encrypted voice over LXST and sends photos, files, and recorded voice over LXMF. LoRa requires external RNode hardware. Call quality over a specific radio path remains unverified. [Columba source](https://github.com/torlando-tech/columba) · [Reticulum hardware manual](https://reticulum.network/manual/hardware.html#rnode)
+- **Bitchat** supports live push-to-talk, recorded voice notes, and small files over nearby BLE without an infrastructure LAN. Nostr fallback requires internet access. [Apple voice protocol](https://github.com/permissionlesstech/bitchat/blob/v1.8.0/bitchat/Protocols/VoiceBurstPacket.swift#L21) · [Bitchat whitepaper](https://github.com/permissionlesstech/bitchat/blob/main/WHITEPAPER.md)
+- **Technitium Mesh** is confirmed as the Windows P2P messenger that supports chat and file transfer over a reachable LAN without internet. **tromoSM/HostTalk** is a plausible match for the original lead. It uses a reachable local web host, and the original reference remains unconfirmed. [Technitium Mesh](https://mesh.im/) · [HostTalk upstream](https://github.com/tromoSM/HostTalk)
+
+This was a source review. Runtime reliability, platform parity, and user demand remain unmeasured. No builds or commits were made.
+
+**English note**  
+Original — “identify possible HostTalk source without conflation”  
+Better — “Identify a possible source for HostTalk and distinguish it from similarly named products.”  
+Why — “Distinguish it from” makes the comparison explicit.  
+Useful pattern — “This is a plausible match, but the original reference is still unconfirmed.”
+
+---
+
+具体有价值可以做的需求，在这里全部列出来啊，analyze；analyze；analyze；analyze；analyze；
+
+---
+
+复核一下所有的需求，哪些是乱说的，不适合这个项目的，哪些没说清楚的等等，重新仔细符合和修正优化，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+再重新全部仔细复核一次清楚，不合适当前项目的删除，错误的修正，analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+重新列一下具体有价值可以做的需求，在这里全部列出来啊，analyze；analyze；analyze；analyze；analyze；
+
+---
+
+那开始一个个仔细实现吧
+
+---
+
+那开始一个个仔细实现吧，continue；continue；continue；continue；
+
+---
+
+做完了吗，做完和验证完就做下一个，continue；continue；continue；continue；continue；continue；
+
+---
+
+按需要和我确认什么？还是决策讨论啥吗，才进行下一个？？continue；continue；continue；continue；continue；
+
+---
+
+那继续做完第四项吧，continue；continue；continue；continue；continue；
+
+---
+
+四项改动做下verify 和 AI evals，以及覆盖单元测试，都通过后就提交一下，continue；continue；continue；continue；continue；continue；continue；
+
+---
+
+除了REQ-029，还有哪个需求可并行切出来做的，analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+都通过就提交啊草，为啥不提交！！continue; continue; continue; continue; continue; continue;
+
+---
+
+REQ-029 还有哪些需求没完成，analyze； analyze； analyze； analyze； analyze；
+
+---
+
+continue to complete
+
+---
+
+so all REQ-029 complete now???
+
+---
+
+why not complete all of them
+
+---
+
+需要我配合做啥，你才能完成啊，analyze；analyze；analyze；analyze；
+
+---
+
+那你继续做完啊草，别停啊草，analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+所以REQ-029整个是不是做完了？analyze；analyze；analyze；analyze；analyze；analyze；
