@@ -1102,7 +1102,8 @@
             "updates::",
             "perf::",
             "logger::",
-            "app_lock::tests::diagnostics_authority_rejects_completed_work_after_lock_or_session_replacement"
+            "app_lock::tests::diagnostics_authority_rejects_completed_work_after_lock_or_session_replacement",
+            "app_lock::tests::diagnostics_worker_cannot_publish_after_lock_or_logout"
           ]
         }
       ],

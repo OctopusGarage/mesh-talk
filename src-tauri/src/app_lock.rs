@@ -515,6 +515,49 @@ mod tests {
         assert!(current.checked(|| Ok(7)).is_err());
     }
 
+    #[tokio::test]
+    async fn diagnostics_worker_cannot_publish_after_lock_or_logout() {
+        use crate::diagnostics::DiagnosticsAuthority;
+        use mesh_talk_core::transport::diagnostics as counters;
+
+        for logout in [false, true] {
+            let (_root, app, lease) = sensitive_fixture();
+            let authority = DiagnosticsAuthority::capture(&app).unwrap();
+            let ticket = authority.checked(|| Ok(counters::begin())).unwrap();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let work = tokio::spawn(async move {
+                authority
+                    .blocking(move || {
+                        let snapshot = counters::sample(ticket).expect("admitted sampling lease");
+                        entered.send(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                        snapshot.authenticated_channels
+                    })
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), started)
+                .await
+                .unwrap()
+                .unwrap();
+
+            if logout {
+                app.session()
+                    .logout("token")
+                    .unwrap_or_else(|_| panic!("fixture logout failed"));
+            } else {
+                app.app_lock().lock(lease.clone()).unwrap();
+            }
+            counters::stop_current();
+            assert!(counters::sample(ticket).is_none());
+            release.send(()).unwrap();
+            assert!(matches!(
+                work.await.unwrap(),
+                Err(CommandError::Authorization(_))
+            ));
+        }
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn sensitive_password_challenge_is_distinct_from_invalid_credentials() {
