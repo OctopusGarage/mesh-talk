@@ -5,6 +5,81 @@
 use crate::commands::CommandError;
 use serde::Serialize;
 
+/// Cumulative OS counters for the current host process. Never starts a collector.
+#[derive(Serialize)]
+pub struct HostResourceSample {
+    cpu_ms: f64,
+    resident_bytes: Option<u64>,
+    disk_write_bytes: Option<u64>,
+}
+
+#[tauri::command]
+pub async fn host_resource_sample() -> Result<Option<HostResourceSample>, CommandError> {
+    tauri::async_runtime::spawn_blocking(read_host_resources)
+        .await
+        .map_err(|error| CommandError::Io(error.to_string()))
+}
+
+#[cfg(target_os = "macos")]
+fn read_host_resources() -> Option<HostResourceSample> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::uninit();
+    // The flavor specifies the size and layout written to the output pointer.
+    let result = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V2,
+            info.as_mut_ptr().cast(),
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    // The OS initialized the complete V2 record on success.
+    let info = unsafe { info.assume_init() };
+    Some(HostResourceSample {
+        cpu_ms: (info.ri_user_time as f64 + info.ri_system_time as f64) / 1_000_000.0,
+        resident_bytes: Some(info.ri_resident_size),
+        disk_write_bytes: Some(info.ri_diskio_byteswritten),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn read_host_resources() -> Option<HostResourceSample> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // RUSAGE_SELF is process-wide and leaves the output uninitialized on failure.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+    let millis = |time: libc::timeval| time.tv_sec as f64 * 1000.0 + time.tv_usec as f64 / 1000.0;
+    let read_counter = |path, field| {
+        let text = std::fs::read_to_string(path).ok()?;
+        let value = text.lines().find_map(|line| line.strip_prefix(field))?;
+        value.split_whitespace().next()?.parse::<u64>().ok()
+    };
+    Some(HostResourceSample {
+        cpu_ms: millis(usage.ru_utime) + millis(usage.ru_stime),
+        resident_bytes: read_counter("/proc/self/status", "VmRSS:")
+            .and_then(|kib| kib.checked_mul(1024)),
+        disk_write_bytes: read_counter("/proc/self/io", "write_bytes:"),
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn read_host_resources() -> Option<HostResourceSample> {
+    None
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn host_resource_sample_reads_cumulative_cpu_and_resident_memory() {
+    let first = read_host_resources().expect("host process counters");
+    let next = read_host_resources().expect("host process counters");
+    assert!(first.cpu_ms.is_finite() && first.cpu_ms >= 0.0);
+    assert!(next.cpu_ms >= first.cpu_ms);
+    assert!(next.resident_bytes.is_some_and(|bytes| bytes > 0));
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn graphics_env_value(value: Option<&std::ffi::OsStr>) -> &'static str {
     let Some(value) = value else { return "unset" };

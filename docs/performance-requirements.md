@@ -384,6 +384,27 @@ reproduction; never describe a passing correctness test as performance acceptanc
    work. Use the [presence browser scenario](../frontend/e2e/person-presence.spec.ts)
    and native renderer sampling when the state is shown by a desktop WebView.
 
+## Desktop resource monitor
+
+Open Diagnostics from the tray or sidebar and enable sampling in the overview.
+The first version reads cumulative CPU time, resident memory and attributed
+disk-write bytes for the desktop host process on macOS and Linux. CPU is the
+change in CPU time divided by wall time and is expressed relative to one logical
+core. The first sample supplies a baseline. A long sample gap discards that
+baseline. Disk writes are cumulative from process start. Missing counters are
+displayed as unavailable.
+
+The monitor reuses the visible serial refresh owner. It retains one prior CPU
+reading and the latest sample in the open panel. Closing, hiding or disabling
+the panel stops new requests. Each IPC performs one bounded snapshot with no
+background collector, persistence, network traffic or account data.
+
+Process-family accounting, Windows counters, connection counts, per-peer
+latency and network bytes remain separate from the host sample. The existing
+discovery list counts observed peers and cannot establish live connections.
+Discovery latency currently tunes routed presence leases. Expose a peer
+measurement only with its actual request semantics and sample freshness.
+
 ## Evidence and maintenance
 
 Before optimizing, identify the owner and capture the offending operation count

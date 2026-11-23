@@ -899,6 +899,16 @@
     }
   },
   "diagnostics": {
+    "resources": {
+      "title": "程序資源",
+      "description": "只取樣 Mesh Talk 主程序，啟用同顯示時先會取樣。",
+      "start": "開始取樣",
+      "stop": "停止取樣",
+      "unavailable": "讀唔到程序計數。可以停止再重新取樣。",
+      "cpu": "CPU（以一個邏輯核心計）",
+      "memory": "常駐記憶體",
+      "writes": "啟動以嚟嘅磁碟寫入量"
+    },
     "trigger": "診斷 / 尋人",
     "title": "診斷",
     "description": "查看區域網絡發現功能的運作情形：找到的對象、你的身份以及網絡狀態。",

@@ -1070,6 +1070,10 @@
             "reference": "docs/performance-requirements.md#evidence-and-maintenance"
           },
           {
+            "name": "The desktop resource IPC reads one bounded snapshot of current host process counters without creating a collector, making network requests or touching account state.",
+            "reference": "docs/performance-requirements.md#desktop-resource-monitor"
+          },
+          {
             "name": "IPC work summaries are disabled by default, record only bounded registered command names after handled dispatch, exclude lock rejection and unhandled inputs, and emit outside nonblocking observation guards without a background timer. Counts do not establish completion, success or CPU attribution; arguments, results and private state never enter the observer.",
             "reference": "docs/performance-requirements.md#evidence-and-maintenance"
           }

@@ -899,6 +899,16 @@
     }
   },
   "diagnostics": {
+    "resources": {
+      "title": "进程资源",
+      "description": "只采样 Mesh Talk 主进程，启用且可见时采样。",
+      "start": "开始采样",
+      "stop": "停止采样",
+      "unavailable": "无法读取进程计数。可停止后重新采样。",
+      "cpu": "CPU（以单个逻辑核心计）",
+      "memory": "常驻内存",
+      "writes": "启动以来的磁盘写入量"
+    },
     "trigger": "诊断 / 发现",
     "title": "诊断",
     "description": "查看局域网发现的运行情况：发现了谁、你的身份以及网络信息。",

@@ -532,6 +532,7 @@ pub fn run_tauri_configured(
                 crate::logger::read_log_tail,
                 crate::logger::save_log_tail,
                 crate::diagnostics::env_info,
+                crate::diagnostics::host_resource_sample,
                 crate::updates::check_for_update,
                 crate::updates::download_update,
                 crate::updates::native::prepare_update,

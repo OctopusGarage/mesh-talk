@@ -899,6 +899,16 @@
     }
   },
   "diagnostics": {
+    "resources": {
+      "title": "程序資源",
+      "description": "只取樣 Mesh Talk 主程序，啟用且可見時取樣。",
+      "start": "開始取樣",
+      "stop": "停止取樣",
+      "unavailable": "無法讀取程序計數。可停止後重新取樣。",
+      "cpu": "CPU（以單一邏輯核心計）",
+      "memory": "常駐記憶體",
+      "writes": "啟動以來的磁碟寫入量"
+    },
     "trigger": "診斷 / 探索",
     "title": "診斷",
     "description": "檢視區域網路探索的運作情形：探索到誰、你的身分以及網路資訊。",

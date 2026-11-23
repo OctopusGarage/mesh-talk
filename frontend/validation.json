@@ -1327,6 +1327,28 @@
       ]
     },
     {
+      "id": "frontend-resource-monitor",
+      "paths": [
+        "frontend/src/features/chat/DiagnosticsDialog.tsx",
+        "frontend/src/features/chat/diagnostics/HostResourceMonitor.tsx",
+        "frontend/src/features/chat/diagnostics/HostResourceMonitor.test.ts"
+      ],
+      "frontend": [
+        "src/features/chat/diagnostics/HostResourceMonitor.test.ts",
+        "src/features/chat/useSerialPoll.test.ts"
+      ],
+      "capability": {
+        "summary": "Show opt-in host process resource samples in the desktop diagnostics overview.",
+        "guide": "docs/performance-requirements.md#desktop-resource-monitor",
+        "invariants": [
+          {
+            "name": "Sampling runs only for an enabled visible panel and stops on disable or retirement. A missing or interrupted observation never becomes a fabricated zero.",
+            "reference": "docs/performance-requirements.md#desktop-resource-monitor"
+          }
+        ]
+      }
+    },
+    {
       "id": "frontend-updates",
       "paths": [
         "frontend/src/store/updates.ts",

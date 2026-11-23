@@ -899,6 +899,16 @@
     }
   },
   "diagnostics": {
+    "resources": {
+      "title": "Recursos do processo",
+      "description": "Amostra somente o processo principal do Mesh Talk enquanto a amostragem está ativa e visível.",
+      "start": "Iniciar amostragem",
+      "stop": "Parar amostragem",
+      "unavailable": "Contadores indisponíveis. Pare e reinicie a amostragem para tentar novamente.",
+      "cpu": "CPU (um núcleo lógico)",
+      "memory": "Memória residente",
+      "writes": "Bytes gravados em disco desde o início"
+    },
     "trigger": "Diagnóstico e descoberta",
     "title": "Diagnóstico",
     "description": "Veja a descoberta na rede local em ação: quem foi encontrado, sua identidade e a rede.",

@@ -35,6 +35,7 @@ import { useChat } from "@/store/chat";
 import { CONNECTION_LABEL, connectionState } from "./connectionState";
 import { useCopyFeedback } from "./useCopyFeedback";
 import { useDiagnosticsController } from "./diagnostics/useDiagnosticsController";
+import { HostResourceMonitor } from "./diagnostics/HostResourceMonitor";
 import type { DiagNetworkInfo, DiagPeerInfo } from "@/lib/types";
 
 /** A peer seen within this window reads as "online" (breathing teal). */
@@ -262,6 +263,12 @@ export function DiagnosticsDialog({
           <div className="max-h-[60vh] overflow-y-auto pr-0.5">
             {/* Overview: this device + environment */}
             <TabsContent value="overview" className="space-y-4">
+              <Panel
+                icon={<Activity className="h-4 w-4" />}
+                title={t("diagnostics.resources.title")}
+              >
+                {open && <HostResourceMonitor />}
+              </Panel>
               <Panel
                 icon={<Wifi className="h-4 w-4" />}
                 title={t("diagnostics.thisDevice")}

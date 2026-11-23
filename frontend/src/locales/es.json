@@ -899,6 +899,16 @@
     }
   },
   "diagnostics": {
+    "resources": {
+      "title": "Recursos del proceso",
+      "description": "Solo se mide el proceso principal de Mesh Talk mientras el muestreo está activo y visible.",
+      "start": "Iniciar muestreo",
+      "stop": "Detener muestreo",
+      "unavailable": "Contadores no disponibles. Detén y reinicia el muestreo para reintentar.",
+      "cpu": "CPU (un núcleo lógico)",
+      "memory": "Memoria residente",
+      "writes": "Bytes escritos en disco desde el inicio"
+    },
     "trigger": "Diagnóstico / descubrimiento",
     "title": "Diagnóstico",
     "description": "Comprueba el descubrimiento en la red local: a quién se encuentra, tu identidad y la red.",

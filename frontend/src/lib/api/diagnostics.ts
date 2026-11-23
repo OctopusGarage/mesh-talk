@@ -12,6 +12,12 @@ import type {
   DownloadProgress,
 } from "../types";
 
+export interface HostResourceSample {
+  cpu_ms: number;
+  resident_bytes: number | null;
+  disk_write_bytes: number | null;
+}
+
 export const diag = {
   getPeers: () => invoke<DiagPeerInfo[]>("diag_get_peers"),
   networkInfo: () => invoke<DiagNetworkInfo>("diag_network_info"),
@@ -48,6 +54,8 @@ export const presence = {
 /** Observability: logs + static environment facts for the Diagnostics dialog. */
 export const obs = {
   envInfo: () => invoke<EnvInfo>("env_info"),
+  hostResources: () =>
+    invoke<HostResourceSample | null>("host_resource_sample"),
   logsDir: () => invoke<string>("get_logs_dir"),
   logFile: () => invoke<string>("get_log_file"),
   logTail: () => invoke<string>("read_log_tail"),
