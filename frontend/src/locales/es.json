@@ -928,6 +928,16 @@
       "scope": "La memoria residente puede contar páginas compartidas y omite procesos fuera del árbol. Los contadores cubren tramas cifradas de la aplicación. La E/S de Windows incluye escrituras ajenas al disco.",
       "perSecond": "{{size}}/s",
       "presentation": "Interfaz inicial preparada en {{ms}} ms",
+      "sections": {
+        "compute": "CPU y memoria",
+        "storage": "E/S de almacenamiento",
+        "traffic": "Tráfico de red",
+        "delivery": "Entrega y latencia",
+        "recovery": "Fallos y reintentos",
+        "sync": "Recuperación y sincronización",
+        "attachments": "Transferencia de adjuntos",
+        "startup": "Fases del inicio"
+      },
       "messages": {
         "verifiedRate": "Bytes verificados por segundo",
         "duplicateDirect": "Eventos directos duplicados descartados",

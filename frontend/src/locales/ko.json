@@ -928,6 +928,16 @@
       "scope": "상주 메모리에는 공유 페이지가 포함될 수 있으며 트리 외부의 보조 프로세스는 제외됩니다. 암호화 앱 프레임을 계산합니다. Windows I/O에는 디스크 외 쓰기도 포함됩니다.",
       "perSecond": "{{size}}/초",
       "presentation": "초기 화면 준비 {{ms}}ms",
+      "sections": {
+        "compute": "CPU 및 메모리",
+        "storage": "저장소 I/O",
+        "traffic": "네트워크 트래픽",
+        "delivery": "전달 및 지연",
+        "recovery": "실패 및 재시도",
+        "sync": "따라잡기 및 동기화",
+        "attachments": "첨부 파일 전송",
+        "startup": "시작 단계"
+      },
       "messages": {
         "verifiedRate": "초당 검증 완료 바이트",
         "duplicateDirect": "제외된 중복 개인 이벤트",

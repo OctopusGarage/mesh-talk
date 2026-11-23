@@ -928,6 +928,16 @@
       "scope": "常駐記憶體可能計入共用頁面，程序樹之外嘅輔助程序唔計。幀計數只涵蓋加密應用流量。Windows 程序 I/O 包含非磁碟寫入。",
       "perSecond": "{{size}}/秒",
       "presentation": "起始介面準備用咗 {{ms}} 毫秒",
+      "sections": {
+        "compute": "CPU 同記憶體",
+        "storage": "儲存 I/O",
+        "traffic": "網絡流量",
+        "delivery": "送達同延遲",
+        "recovery": "失敗同重試",
+        "sync": "追補同同步",
+        "attachments": "附件傳輸",
+        "startup": "啟動階段"
+      },
       "messages": {
         "verifiedRate": "每秒完成驗證位元組",
         "duplicateDirect": "已過濾嘅重複私聊事件",

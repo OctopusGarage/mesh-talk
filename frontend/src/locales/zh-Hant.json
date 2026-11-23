@@ -928,6 +928,16 @@
       "scope": "常駐記憶體可能重複計入共用頁面，程序樹之外的輔助程序不計入。訊框計數僅涵蓋加密應用流量。Windows 程序 I/O 包括非磁碟寫入。",
       "perSecond": "{{size}}/秒",
       "presentation": "初始介面準備耗時 {{ms}} 毫秒",
+      "sections": {
+        "compute": "CPU 與記憶體",
+        "storage": "儲存 I/O",
+        "traffic": "網路流量",
+        "delivery": "送達與延遲",
+        "recovery": "失敗與重試",
+        "sync": "追補與同步",
+        "attachments": "附件傳輸",
+        "startup": "啟動階段"
+      },
       "messages": {
         "verifiedRate": "每秒完成驗證位元組",
         "duplicateDirect": "已篩除的重複私聊事件",

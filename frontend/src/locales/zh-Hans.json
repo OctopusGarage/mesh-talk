@@ -928,6 +928,16 @@
       "scope": "驻留内存可能重复计入共享页，进程树之外的辅助进程不计入。帧计数仅覆盖加密应用流量。Windows 进程 I/O 包括非磁盘写入。",
       "perSecond": "{{size}}/秒",
       "presentation": "初始界面准备耗时 {{ms}} 毫秒",
+      "sections": {
+        "compute": "CPU 与内存",
+        "storage": "存储 I/O",
+        "traffic": "网络流量",
+        "delivery": "送达与延迟",
+        "recovery": "失败与重试",
+        "sync": "追赶与同步",
+        "attachments": "附件传输",
+        "startup": "启动阶段"
+      },
       "messages": {
         "verifiedRate": "每秒完成校验字节",
         "duplicateDirect": "已过滤的重复私聊事件",

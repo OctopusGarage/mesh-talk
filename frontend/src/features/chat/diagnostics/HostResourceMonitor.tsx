@@ -20,21 +20,23 @@ export function HostResourceMonitor() {
   const [enabled, setEnabled] = useState(false);
   return (
     <>
-      <p className="text-xs text-muted-foreground">
-        {t("diagnostics.resources.description")}
-      </p>
-      <Button
-        size="sm"
-        variant="outline"
-        aria-pressed={enabled}
-        onClick={() => setEnabled((active) => !active)}
-      >
-        {t(
-          enabled
-            ? "diagnostics.resources.stop"
-            : "diagnostics.resources.start",
-        )}
-      </Button>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="min-w-0 flex-1 basis-52 text-xs leading-relaxed text-muted-foreground">
+          {t("diagnostics.resources.description")}
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          aria-pressed={enabled}
+          onClick={() => setEnabled((active) => !active)}
+        >
+          {t(
+            enabled
+              ? "diagnostics.resources.stop"
+              : "diagnostics.resources.start",
+          )}
+        </Button>
+      </div>
       {enabled && <HostResourceReadings />}
     </>
   );
@@ -133,40 +135,58 @@ function HostResourceReadings() {
       : t("diagnostics.resources.perSecond", { size: size(bytes) });
   const percentValue = (value: number | null | undefined) =>
     value == null ? "—" : percent.format(value);
-  const rows = [
+  const system = [
     ["cpu", percentValue(interval?.cpu)],
     ["memory", size(total(sample.processes, "resident_bytes"))],
     ["memoryPeak", size(memoryPeak)],
-    ["writes", size(total(sample.processes, "disk_write_bytes"))],
-    ["diskRate", rate(interval?.disk)],
+  ];
+  const ioAvailable = sample.processes.some(
+    (process) => process.io_write_bytes !== null,
+  );
+  const disk = ioAvailable
+    ? [
+        ["ioWrites", size(total(sample.processes, "io_write_bytes"))],
+        ["ioRate", rate(interval?.io)],
+      ]
+    : [
+        ["writes", size(total(sample.processes, "disk_write_bytes"))],
+        ["diskRate", rate(interval?.disk)],
+      ];
+  const network = [
     ["connections", count.format(sample.authenticated_channels)],
-    ["sent", size(sample.sent_frame_bytes)],
-    ["received", size(sample.received_frame_bytes)],
     ["sendRate", rate(interval?.sent)],
     ["receiveRate", rate(interval?.received)],
+    ["sent", size(sample.sent_frame_bytes)],
+    ["received", size(sample.received_frame_bytes)],
   ];
-  if (sample.processes.some((process) => process.io_write_bytes !== null))
-    rows.push(
-      ["ioWrites", size(total(sample.processes, "io_write_bytes"))],
-      ["ioRate", rate(interval?.io)],
-    );
+  const labels = (rows: string[][]) =>
+    rows.map(([label, value]) => ({
+      label: t(`diagnostics.resources.${label}`),
+      value,
+    }));
   return (
-    <>
-      <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 text-xs tabular-nums">
-        {rows.map(([label, value]) => (
-          <div key={label} className="contents">
-            <dt>{t(`diagnostics.resources.${label}`)}</dt>
-            <dd>{value}</dd>
-          </div>
-        ))}
-      </dl>
-      <details className="text-xs">
-        <summary className="cursor-pointer rounded-sm focus-visible:outline-2">
+    <div className="grid gap-2.5">
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        <MetricGroup
+          title={t("diagnostics.resources.sections.compute")}
+          metrics={labels(system)}
+        />
+        <MetricGroup
+          title={t("diagnostics.resources.sections.storage")}
+          metrics={labels(disk)}
+        />
+      </div>
+      <MetricGroup
+        title={t("diagnostics.resources.sections.traffic")}
+        metrics={labels(network)}
+      />
+      <details className="rounded-lg border border-border/65 text-xs">
+        <summary className="cursor-pointer rounded-lg px-3 py-2 font-medium marker:text-muted-foreground hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-ring motion-safe:transition-colors">
           {t("diagnostics.resources.processDetails", {
             count: sample.processes.length,
           })}
         </summary>
-        <ul className="mt-2 grid gap-1 tabular-nums">
+        <ul className="grid gap-1.5 border-t border-border/65 px-3 py-2 tabular-nums">
           {sample.processes.map((process, index) => (
             <li
               key={process.birth + ":" + process.pid}
@@ -188,9 +208,6 @@ function HostResourceReadings() {
           ))}
         </ul>
       </details>
-      <p className="text-xs text-muted-foreground">
-        {t("diagnostics.resources.scope")}
-      </p>
       {sample.messages && (
         <MessageReadings
           metrics={sample.messages}
@@ -199,12 +216,15 @@ function HostResourceReadings() {
           verifiedRate={rate(interval?.verifiedBytes)}
         />
       )}
-      {sample.bounded && (
-        <p className="text-xs text-muted-foreground">
-          {t("diagnostics.resources.bounded")}
-        </p>
-      )}
-    </>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        {sample.bounded && (
+          <strong className="mr-1 font-medium text-foreground">
+            {t("diagnostics.resources.bounded")}
+          </strong>
+        )}
+        {t("diagnostics.resources.scope")}
+      </p>
+    </div>
   );
 }
 
@@ -248,79 +268,120 @@ function MessageReadings({
     }
     return "—";
   };
-  const rows = [
-    ["accepted", formatCount(metrics.accepted)],
-    ["delivered", formatCount(metrics.delivered)],
-    ["rejected", formatCount(metrics.rejected)],
-    ["requestErrors", formatCount(metrics.send_request_errors)],
-    ["timeouts", formatCount(metrics.attempt_timeouts)],
-    ["retries", formatCount(metrics.retries_scheduled)],
-    ["routeRestarts", formatCount(metrics.route_restarts)],
-    ["directStorage", formatCount(metrics.direct_storage_holds)],
-    ["relayStorage", formatCount(metrics.relay_storage_holds)],
-    ["awaiting", formatCount(backlog?.[0])],
-    ["oldest", backlog?.[1] == null ? "—" : milliseconds(backlog[1])],
-    ["p50", percentile(0.5)],
-    ["p95", percentile(0.95)],
-    ["latencySamples", formatCount(samples)],
-    ["catchUp", formatCount(metrics.catch_up)],
-    ["historySync", formatCount(metrics.history_sync)],
-    ["ownDevice", formatCount(metrics.own_device_sync)],
-    ["duplicateDirect", formatCount(metrics.duplicate_direct_events)],
-    ["attachmentAccepted", formatCount(metrics.attachments_accepted)],
-    ["attachmentDeclined", formatCount(metrics.attachments_declined)],
-    ["verified", formatCount(metrics.attachments_verified)],
-    ["verifiedBytes", formatSize(metrics.verified_attachment_bytes)],
-    ["verifiedRate", verifiedRate],
-  ];
+  const groups = {
+    delivery: [
+      ["accepted", formatCount(metrics.accepted)],
+      ["delivered", formatCount(metrics.delivered)],
+      ["awaiting", formatCount(backlog?.[0])],
+      ["oldest", backlog?.[1] == null ? "—" : milliseconds(backlog[1])],
+      ["p50", percentile(0.5)],
+      ["p95", percentile(0.95)],
+      ["latencySamples", formatCount(samples)],
+    ],
+    recovery: [
+      ["requestErrors", formatCount(metrics.send_request_errors)],
+      ["rejected", formatCount(metrics.rejected)],
+      ["timeouts", formatCount(metrics.attempt_timeouts)],
+      ["retries", formatCount(metrics.retries_scheduled)],
+      ["routeRestarts", formatCount(metrics.route_restarts)],
+      ["directStorage", formatCount(metrics.direct_storage_holds)],
+      ["relayStorage", formatCount(metrics.relay_storage_holds)],
+    ],
+    sync: [
+      ["catchUp", formatCount(metrics.catch_up)],
+      ["historySync", formatCount(metrics.history_sync)],
+      ["ownDevice", formatCount(metrics.own_device_sync)],
+      ["duplicateDirect", formatCount(metrics.duplicate_direct_events)],
+    ],
+    attachments: [
+      ["attachmentAccepted", formatCount(metrics.attachments_accepted)],
+      ["attachmentDeclined", formatCount(metrics.attachments_declined)],
+      ["verified", formatCount(metrics.attachments_verified)],
+      ["verifiedBytes", formatSize(metrics.verified_attachment_bytes)],
+      ["verifiedRate", verifiedRate],
+    ],
+  };
+  const group = (key: keyof typeof groups) => (
+    <MetricGroup
+      title={t(`diagnostics.resources.sections.${key}`)}
+      metrics={groups[key].map(([label, value]) => ({
+        label: t(`diagnostics.resources.messages.${label}`),
+        value,
+      }))}
+    />
+  );
   return (
-    <details className="text-xs">
-      <summary className="cursor-pointer rounded-sm focus-visible:outline-2">
+    <details className="rounded-lg border border-border/65 text-xs">
+      <summary className="cursor-pointer rounded-lg px-3 py-2 font-medium marker:text-muted-foreground hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-ring motion-safe:transition-colors">
         {t("diagnostics.resources.messages.title")}
       </summary>
-      <dl className="mt-2 grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 tabular-nums">
-        {rows.map(([label, value]) => (
+      <div className="grid gap-2.5 border-t border-border/65 bg-muted/20 p-2.5">
+        {group("delivery")}
+        <div className="overflow-x-auto rounded-lg border border-border/65 bg-background/50 px-3 py-2">
+          <table className="w-full text-left tabular-nums [&_td]:py-1 [&_th]:pr-2 [&_tbody_tr]:border-t [&_tbody_tr]:border-border/55">
+            <caption className="mb-1.5 text-left font-medium">
+              {t("diagnostics.resources.messages.received")}
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">{t("diagnostics.resources.messages.type")}</th>
+                <th scope="col">
+                  {t("diagnostics.resources.messages.direct")}
+                </th>
+                <th scope="col">{t("diagnostics.resources.messages.group")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {RECEIVED_TYPES.map((kind, index) => (
+                <tr key={kind}>
+                  <th scope="row" className="font-normal">
+                    {t(`diagnostics.resources.messages.${kind}`)}
+                  </th>
+                  {[
+                    metrics.received_direct[index],
+                    metrics.received_group[index],
+                  ].map((bucket, scope) => (
+                    <td key={scope}>
+                      {bucket
+                        ? `${formatCount(bucket.count)} · ${formatSize(bucket.bytes)}`
+                        : "—"}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {group("recovery")}
+        {group("sync")}
+        {group("attachments")}
+        <p className="leading-relaxed text-muted-foreground">
+          {t("diagnostics.resources.messages.scope")}
+        </p>
+      </div>
+    </details>
+  );
+}
+
+function MetricGroup({
+  title,
+  metrics,
+}: {
+  title: string;
+  metrics: Array<{ label: string; value: string }>;
+}) {
+  return (
+    <section className="min-w-0 rounded-lg border border-border/65 bg-background/50 px-3 py-2 text-xs">
+      <h4 className="mb-1.5 font-medium">{title}</h4>
+      <dl className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1 tabular-nums">
+        {metrics.map(({ label, value }) => (
           <div key={label} className="contents">
-            <dt>{t(`diagnostics.resources.messages.${label}`)}</dt>
-            <dd>{value}</dd>
+            <dt className="break-words text-muted-foreground">{label}</dt>
+            <dd className="text-right font-medium">{value}</dd>
           </div>
         ))}
       </dl>
-      <table className="mt-3 w-full text-left tabular-nums">
-        <caption className="text-left">
-          {t("diagnostics.resources.messages.received")}
-        </caption>
-        <thead>
-          <tr>
-            <th scope="col">{t("diagnostics.resources.messages.type")}</th>
-            <th scope="col">{t("diagnostics.resources.messages.direct")}</th>
-            <th scope="col">{t("diagnostics.resources.messages.group")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {RECEIVED_TYPES.map((kind, index) => (
-            <tr key={kind}>
-              <th scope="row" className="font-normal">
-                {t(`diagnostics.resources.messages.${kind}`)}
-              </th>
-              {[
-                metrics.received_direct[index],
-                metrics.received_group[index],
-              ].map((bucket, scope) => (
-                <td key={scope}>
-                  {bucket
-                    ? `${formatCount(bucket.count)} · ${formatSize(bucket.bytes)}`
-                    : "—"}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="mt-2 text-muted-foreground">
-        {t("diagnostics.resources.messages.scope")}
-      </p>
-    </details>
+    </section>
   );
 }
 

@@ -85,10 +85,10 @@ function Panel({
   return (
     <section className="space-y-2 rounded-lg border bg-card/40 p-3">
       <div className="flex items-center justify-between gap-2">
-        <p className="flex items-center gap-2 font-display text-sm font-semibold tracking-tight">
+        <h3 className="flex items-center gap-2 font-display text-sm font-semibold tracking-tight">
           <span className="text-signal">{icon}</span>
           {title}
-        </p>
+        </h3>
         {action}
       </div>
       {children}
@@ -267,21 +267,29 @@ export function DiagnosticsDialog({
                 icon={<Activity className="h-4 w-4" />}
                 title={t("diagnostics.resources.title")}
               >
-                {env?.desktop_ready_ms != null && (
-                  <p className="text-xs text-muted-foreground">
-                    {t("diagnostics.resources.startup", {
-                      ms: env.desktop_ready_ms,
-                    })}
-                  </p>
-                )}
-                {env?.initial_interface_ms != null && (
-                  <p className="text-xs text-muted-foreground">
-                    {t("diagnostics.resources.presentation", {
-                      ms: env.initial_interface_ms,
-                    })}
-                  </p>
-                )}
                 {open && <HostResourceMonitor />}
+                {(env?.desktop_ready_ms != null ||
+                  env?.initial_interface_ms != null) && (
+                  <section className="grid gap-1 border-t border-border/65 pt-2">
+                    <h4 className="text-xs font-medium">
+                      {t("diagnostics.resources.sections.startup")}
+                    </h4>
+                    {env?.desktop_ready_ms != null && (
+                      <p className="text-xs text-muted-foreground tabular-nums">
+                        {t("diagnostics.resources.startup", {
+                          ms: env.desktop_ready_ms,
+                        })}
+                      </p>
+                    )}
+                    {env?.initial_interface_ms != null && (
+                      <p className="text-xs text-muted-foreground tabular-nums">
+                        {t("diagnostics.resources.presentation", {
+                          ms: env.initial_interface_ms,
+                        })}
+                      </p>
+                    )}
+                  </section>
+                )}
               </Panel>
               <Panel
                 icon={<Wifi className="h-4 w-4" />}

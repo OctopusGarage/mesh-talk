@@ -928,6 +928,16 @@
       "scope": "常駐メモリには共有ページが含まれ、プロセスツリー外の補助プロセスは含まれません。フレームは暗号化アプリ通信を計測します。Windows の I/O にはディスク以外も含まれます。",
       "perSecond": "{{size}}/秒",
       "presentation": "初期画面の準備 {{ms}} ms",
+      "sections": {
+        "compute": "CPU とメモリ",
+        "storage": "ストレージ I/O",
+        "traffic": "ネットワーク通信",
+        "delivery": "配信と遅延",
+        "recovery": "失敗と再試行",
+        "sync": "キャッチアップと同期",
+        "attachments": "添付ファイル転送",
+        "startup": "起動の計測点"
+      },
       "messages": {
         "verifiedRate": "毎秒の検証済みバイト",
         "duplicateDirect": "抑制した重複個別イベント",

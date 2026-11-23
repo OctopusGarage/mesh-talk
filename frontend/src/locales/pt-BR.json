@@ -928,6 +928,16 @@
       "scope": "A memória residente pode contar páginas compartilhadas e exclui auxiliares fora da árvore de processos. Os contadores cobrem quadros criptografados do app. A E/S do Windows inclui gravações fora do disco.",
       "perSecond": "{{size}}/s",
       "presentation": "Interface inicial preparada em {{ms}} ms",
+      "sections": {
+        "compute": "CPU e memória",
+        "storage": "E/S de armazenamento",
+        "traffic": "Tráfego de rede",
+        "delivery": "Entrega e latência",
+        "recovery": "Falhas e novas tentativas",
+        "sync": "Recuperação e sincronização",
+        "attachments": "Transferência de anexos",
+        "startup": "Etapas da inicialização"
+      },
       "messages": {
         "verifiedRate": "Bytes verificados por segundo",
         "duplicateDirect": "Eventos diretos duplicados descartados",

@@ -169,8 +169,23 @@ test("tray diagnostics releases resource sampling when closed", async ({
   await expect(dialog.getByText("120 byte", { exact: true })).toBeVisible();
   await dialog.getByText("Message activity", { exact: true }).click();
   await expect(dialog.getByText("Confirmed direct deliveries")).toBeVisible();
+  await expect(
+    dialog.getByRole("heading", { name: "Delivery and latency" }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("heading", { name: "Failures and retries" }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("heading", { name: "CPU and memory" }),
+  ).toBeVisible();
   await expect(dialog.getByText("≤ 250 ms")).toBeVisible();
   await expect(dialog.getByText("4 · 120 byte")).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 720 });
+  await expect
+    .poll(() =>
+      dialog.evaluate((element) => element.scrollWidth <= element.clientWidth),
+    )
+    .toBe(true);
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect.poll(calls).toEqual(["start", "sample:7", "stop:7"]);

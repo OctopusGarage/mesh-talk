@@ -928,6 +928,16 @@
       "scope": "Resident memory can include shared pages and excludes helpers outside the process tree. Frame counters cover encrypted application traffic. Windows process I/O includes non-disk writes.",
       "perSecond": "{{size}}/s",
       "presentation": "Initial interface prepared in {{ms}} ms",
+      "sections": {
+        "compute": "CPU and memory",
+        "storage": "Storage I/O",
+        "traffic": "Network traffic",
+        "delivery": "Delivery and latency",
+        "recovery": "Failures and retries",
+        "sync": "Catch-up and sync",
+        "attachments": "Attachment transfer",
+        "startup": "Startup milestones"
+      },
       "messages": {
         "verifiedRate": "Verified bytes completed per second",
         "duplicateDirect": "Duplicate direct events suppressed",
