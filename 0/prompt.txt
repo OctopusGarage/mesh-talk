@@ -1,0 +1,9 @@
+if all finish , commit all changes
+
+---
+
+REQ-002 已经完成了，同样合并一下这个分支req-002，continue；continue；continue；continue；continue；
+
+---
+
+记得都是合并到当前分支，continue；continue；continue；continue；continue；
