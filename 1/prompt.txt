@@ -1,0 +1,47 @@
+基于本地最新的requirements-work分支，安装最新版本的mesh talk app 到当前机器
+
+---
+
+不用备份直接替换，continue；continue；continue；
+
+---
+
+基于这个分支分析：
+现在的群消息同步是怎样的机制，怎么判断是否有新消息需要同步，怎么避免全量更新和高性能的等；
+analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+我觉得整个消息通信的通道部分，应该单独拆一个sdk包，后续在上面的业务应该只需要直接使用合适的相应的通信通道就行了，不用把通信的底层逻辑和上层的业务直接耦合，另外在这个sdk之上应该再拆一个去中心的群消息同步的机制的sdk包，这个去中心同步数据的sdk包，既可以用于群聊天通信，也可以后续用于去中心的论坛等其他业务，比如我后续想单独做一个去中心的轻量级的论坛帖子系统，就可以接入这个sdk直接来实现。所以我的想法是应该至少有两个sdk可以拆出来，一个是纯通信sdk（局域网，跨LAN等），另一个是基于通信sdk的去中心组消息同步sdk（可以仔细考虑起其他更合适的名字，而且应该底层第一版使用这个通信sdk，但实际上应该是定义接口之类的，支持接入其他的通信通道的，解耦）
+
+充分理解我的意思，并分析一下是否可行。
+
+research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze； research and analyze；
+
+---
+
+你可以现在开始做的吧，拆清楚测试清楚之后，我希望是拆一个monorepo 仓库, 来防这个两个sdk包，mesh-connect 和 mesh-replication 然后这个monorepo, 叫啥名字好呢，你建议下，然后再新增仓库mesh-论坛帖子之类的，叫啥名字好呢，你也建议下，然后在OctopusGarage 组织创建这两个仓库， analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+mesh-sdk 这个名字是不是太普通了。。。有没有更优雅专业的名字，analyze；analyze；analyze；analyze；analyze；
+
+---
+
+你新开单独的worktree分支来改，基于requirements-work ，不要影响现在的分支，因为有其他任务在做，analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+可以在组织创建mesh-foundation和mesh-forum，两个仓库来测试，analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+那你继续仔细分析和完成任务吧，continue；continue；continue；continue；continue；continue；
+
+---
+
+继续分析一下还有哪些东西可以放进sdk的，比如加密层之类的，可以先全局分析清楚，以及每个sdk之间的关系，analyze; analyze; analyze; analyze; analyze; analyze; analyze; analyze; analyze;
+
+---
+
+感觉你说的这些都需要吧，因为论坛系统也是需要的啊，都拆到sdk里吧，analyze; analyze; analyze; analyze; analyze; analyze; analyze; analyze; analyze;
