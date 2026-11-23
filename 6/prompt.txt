@@ -1,0 +1,3 @@
+Act as the research sub-agent for this task.
+
+Verify all cited first-party claims about LAN Messenger (official site and releases), LANChat, Squiggle, BeeBEEP stable vs beta, and BLIP, prioritizing LANChat and BLIP architecture, media and Web/PWA; distinguish source, beta, releases and unverifiable claims. Give URLs, product gaps, applicability. No delegation/builds/commits. Save English notes in /Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-029/tmp/req-029-lan-sources.md.
