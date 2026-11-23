@@ -52,6 +52,7 @@ it("samples only when enabled and visible, and discards readings when stopped", 
         io_write_bytes: null,
       },
     ],
+    sampled_at_ms: 1_000,
     bounded: false,
     authenticated_channels: 2,
     sent_frame_bytes: 1_500,
@@ -75,6 +76,7 @@ it("samples only when enabled and visible, and discards readings when stopped", 
     expect(container.textContent).toContain("1.5 kB");
     read.mockResolvedValue({
       ...sample(115),
+      sampled_at_ms: 3_000,
       sent_frame_bytes: 7_500,
       processes: sample(115).processes.map((entry) => ({
         ...entry,
@@ -84,17 +86,18 @@ it("samples only when enabled and visible, and discards readings when stopped", 
     });
     await advance();
     expect(read).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain("1%");
-    expect(container.textContent).toContain("2 kB/s");
+    expect(container.textContent).toContain("1.5%");
+    expect(container.textContent).toContain("4.5 kB/s");
     expect(container.textContent).toContain("3 kB/s");
+    expect(container.textContent).not.toContain("2 kB/s");
     expect(container.textContent).toContain("40 MB");
     expect(container.querySelector("details")?.textContent).toContain("10");
 
     read.mockResolvedValue(sample(130, "replacement"));
     await advance();
     expect(read).toHaveBeenCalledTimes(3);
-    expect(container.textContent).not.toContain("1%");
-    expect(container.textContent).not.toContain("2 kB/s");
+    expect(container.textContent).not.toContain("1.5%");
+    expect(container.textContent).not.toContain("4.5 kB/s");
     expect(container.textContent).not.toContain("3 kB/s");
     expect(container.textContent).toContain("40 MB");
 
@@ -111,7 +114,7 @@ it("samples only when enabled and visible, and discards readings when stopped", 
       document.dispatchEvent(new Event("visibilitychange")),
     );
     expect(read).toHaveBeenLastCalledWith(2);
-    expect(container.textContent).not.toContain("1%");
+    expect(container.textContent).not.toContain("1.5%");
     await act(async () => container.querySelector("button")!.click());
     expect(stop).toHaveBeenCalledWith(2);
     await advance();

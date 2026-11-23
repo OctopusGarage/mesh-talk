@@ -36,6 +36,7 @@ pub(crate) fn record_desktop_ready(elapsed: std::time::Duration) {
 pub struct HostResourceSample {
     #[serde(flatten)]
     resources: process_resources::ProcessResources,
+    sampled_at_ms: f64,
     authenticated_channels: u64,
     sent_frame_bytes: u64,
     received_frame_bytes: u64,
@@ -53,12 +54,19 @@ pub fn stop_host_resource_sampling(ticket: u64) {
 
 #[tauri::command]
 pub async fn host_resource_sample(ticket: u64) -> Result<Option<HostResourceSample>, CommandError> {
-    let Some(transport) = mesh_talk_core::transport::diagnostics::sample(ticket) else {
-        return Ok(None);
-    };
     tauri::async_runtime::spawn_blocking(move || {
+        use std::{sync::OnceLock, time::Instant};
+        static SAMPLE_ORIGIN: OnceLock<Instant> = OnceLock::new();
+        let transport = mesh_talk_core::transport::diagnostics::sample(ticket)?;
+        // Capture the interval in the sampling worker after blocking-pool admission.
+        let sampled_at_ms = SAMPLE_ORIGIN
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_secs_f64()
+            * 1000.0;
         process_resources::read_resources().map(|resources| HostResourceSample {
             resources,
+            sampled_at_ms,
             authenticated_channels: transport.authenticated_channels,
             sent_frame_bytes: transport.sent_frame_bytes,
             received_frame_bytes: transport.received_frame_bytes,

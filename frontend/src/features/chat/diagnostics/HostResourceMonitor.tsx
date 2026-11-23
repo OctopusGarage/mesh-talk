@@ -42,9 +42,7 @@ export function HostResourceMonitor() {
 function HostResourceReadings() {
   const { t, i18n } = useTranslation();
   const lease = useRef<Promise<number | null> | null>(null);
-  const previous = useRef<{ at: number; reading: HostResourceSample } | null>(
-    null,
-  );
+  const previous = useRef<HostResourceSample | null>(null);
   const [sample, setSample] = useState<HostResourceSample>();
   const [interval, setIntervalReading] = useState<IntervalReading>();
   const [memoryPeak, setMemoryPeak] = useState<number | null>(null);
@@ -85,24 +83,23 @@ function HostResourceReadings() {
         ));
       const id = await ticket;
       if (id === null || lease.current !== ticket) return null;
-      const at = performance.now();
       const reading = await obs.hostResources(id);
-      return { at, reading, ticket };
+      return { reading, ticket };
     },
     (result) => {
       if (!result || result.ticket !== lease.current) return;
-      const { at, reading } = result;
+      const { reading } = result;
       if (!reading) {
         reset();
         return;
       }
-      setIntervalReading(compareReadings(previous.current, { at, reading }));
+      setIntervalReading(compareReadings(previous.current, reading));
       if (!reading.bounded) {
         const resident = total(reading.processes, "resident_bytes");
         if (resident !== null)
           setMemoryPeak((peak) => Math.max(peak ?? 0, resident));
       }
-      previous.current = { at, reading };
+      previous.current = reading;
       setSample(reading);
     },
     reset,
@@ -213,8 +210,6 @@ function release(lease: { current: Promise<number | null> | null }) {
       .catch(() => {});
 }
 
-type TimedReading = { at: number; reading: HostResourceSample };
-
 type ProcessMetric = "resident_bytes" | "disk_write_bytes" | "io_write_bytes";
 
 function total(processes: ProcessResourceReading[], metric: ProcessMetric) {
@@ -237,14 +232,12 @@ interface IntervalReading {
 }
 
 function compareReadings(
-  before: TimedReading | null,
-  after: TimedReading,
+  older: HostResourceSample | null,
+  latest: HostResourceSample,
 ): IntervalReading | undefined {
-  if (!before) return;
-  const elapsed = after.at - before.at;
-  if (elapsed <= 0 || elapsed > 2 * SAMPLE_INTERVAL_MS) return;
-  const older = before.reading;
-  const latest = after.reading;
+  if (!older) return;
+  const elapsed = latest.sampled_at_ms - older.sampled_at_ms;
+  if (!(elapsed > 0 && elapsed <= 2 * SAMPLE_INTERVAL_MS)) return;
   const delta = (first: number | null, next: number | null) =>
     first === null || next === null || next < first ? null : next - first;
   const perSecond = (amount: number | null) =>

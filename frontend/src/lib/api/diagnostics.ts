@@ -22,6 +22,7 @@ export interface ProcessResourceReading {
 }
 
 export interface HostResourceSample {
+  sampled_at_ms: number;
   processes: ProcessResourceReading[];
   bounded: boolean;
   authenticated_channels: number;

@@ -110,6 +110,7 @@ test("tray diagnostics releases resource sampling when closed", async ({
               io_write_bytes: null,
             },
           ],
+          sampled_at_ms: 100,
           bounded: false,
           authenticated_channels: 2,
           sent_frame_bytes: 120,

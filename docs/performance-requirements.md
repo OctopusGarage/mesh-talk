@@ -414,7 +414,8 @@ startup acceptance. These startup milestones are available without sampling.
   Multiple channels can belong to a single peer. **Traffic** counts successful
   encrypted application frames and their length prefixes during the sampling
   lease. It excludes handshake bytes, discovery packets, media and TCP overhead.
-- **Rates** use two existing samples and their elapsed interval. Process write
+- **Rates** use two existing samples and their monotonic native timestamps,
+  captured after the sampler enters the blocking pool. Process write
   rates require matching process identities and monotonic counters. Transport
   rates require monotonic byte counters from the current observation. A
   missing baseline, counter reset or interrupted interval leaves the rate
