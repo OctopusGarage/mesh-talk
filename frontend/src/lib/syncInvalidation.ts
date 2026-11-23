@@ -7,7 +7,7 @@ export type RosterTicket = ReturnType<
 export type SyncInvalidation = {
   owner: string;
   rosterObservation?: RosterTicket;
-  scope?: "documents" | "sync_status";
+  scope?: "documents" | "sync_status" | "read_receipts";
   kind: "state" | "roster" | "delivery" | "files" | "contacts";
 };
 const listeners = new Set<(change: SyncInvalidation) => void>();
@@ -19,10 +19,14 @@ export function subscribeSyncInvalidation(
     listeners.delete(listener);
   };
 }
-/** Only a known sync-status scope excludes saved-data readers. Legacy, unknown
+/** Qualified status and receipt scopes exclude generic saved-data readers. Legacy, unknown
  * and missing scopes retain conservative document/preference recovery. */
 export function isDocumentInvalidation(change: SyncInvalidation): boolean {
-  return change.kind === "state" && change.scope !== "sync_status";
+  return (
+    change.kind === "state" &&
+    change.scope !== "sync_status" &&
+    change.scope !== "read_receipts"
+  );
 }
 
 /** One lifecycle-owned subscription for saved documents and preferences. */

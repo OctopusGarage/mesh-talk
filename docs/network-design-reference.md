@@ -38,9 +38,11 @@ A client connected to a remote post office can **join that post office's Mesh Ta
 
 ### Network handoff
 
-Discovery observes interface identities/addresses every two seconds and wakes
-existing gated producers after changes, while retaining the 30-second multicast
-join retry. Queue replay and authenticated receipts remain owned by the delivery
+Discovery observes interface identities and addresses on Linux, macOS and Windows system
+notifications and retains a 30-second inventory and multicast join repair. Other
+platforms and failed subscriptions check every two seconds. Windows callbacks
+coalesce into one pending wake for the existing discovery task. An inventory change wakes
+the existing gated producers. Queue replay and authenticated receipts remain owned by the delivery
 runtime. Network-namespace handoff acceptance and its limits are maintained in
 [routed discovery](routed-network-discovery.md#network-changes-and-recovery).
 Physical Wi-Fi/hotspot latency remains a separate hardware acceptance boundary.
@@ -377,8 +379,10 @@ Transport-only authentication cannot renew the public observation deadline.
 Historical-route authentication probes run once per device, with its addresses
 sharing the existing bounded route race. Their five-second schedule starts at
 the beginning of each round, without overlapping rounds or appending another
-sleep after slow authentication. A cached address must not allocate a separate
-probe lane for the same device. Only permitted fresh public authentication can
+sleep after slow authentication. When the cache has no endpoints, roster
+changes, the first durably recorded endpoint and network changes own probe
+wakeup. Empty discovery snapshots do not dispatch blocking persistence work.
+A cached address must not allocate a separate probe lane for the same device. Only permitted fresh public authentication can
 renew presence; the fifteen-second observation lease is unchanged.
 Periodic probes reuse sufficiently fresh direct signed discovery for the same
 full device, account, role and exact endpoint. The existing worker schedules the
@@ -3121,6 +3125,11 @@ Local mutations, remote replacement or revision changes immediately restore
 normal preparation and current send checks. Hints contain no event bodies and
 never skip the rotating offer selector, so later unseen offers retain their turn.
 Legacy exchanges and the three-second receive cadence remain unchanged.
+A broad source invalidation wakes an already owned mailbox scope. An empty
+receive turn retains its next eligible deadline even if that invalidation
+arrives during the turn. Group mailbox candidates need an exact historical
+device proof before canonical membership is checked, and each identity is
+qualified once per selection turn.
 
 Completed upload qualifications are kept in the existing bounded signed
 checkpoint store independently of those four heavyweight views. Rotating through
@@ -3931,7 +3940,11 @@ Account-channel and custody schedulers observe this storage-backed hint through
 the existing single local-repair slot. The actual blocking worker owns its slot
 and retirement admission through cancellation; observation returns only after
 releasing them, before any network exchange. The synchronous projection remains
-available to existing storage workers and direct readers.
+available to existing storage workers and direct readers. Completed account-group
+maintenance without inherited devices can reuse a matching input at the sparse
+repair deadline. Inherited-device repair, distribution refresh, legacy checks and
+incomplete work retain their deadlines. Current authority and exact-source fences
+remain mandatory when publishing an effect.
 The lifetime-owned maintenance cursor retains its pre-work input across bounded
 pages; newer inputs retain a follow-up. Failed publication stays dirty with its
 own five-second retry deadline; a settled pass keeps a five-minute integrity

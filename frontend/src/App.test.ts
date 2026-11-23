@@ -21,7 +21,10 @@ const probes = vi.hoisted(() => ({
   }>,
   invoke: vi.fn(),
 }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: probes.invoke }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: probes.invoke,
+  isTauri: () => false,
+}));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => {}),
 }));

@@ -134,12 +134,13 @@ impl Node {
     pub(in crate::node) fn historical_dm_peers(&self) -> Vec<crate::discovery::Announce> {
         self.historical_peer_proofs()
             .into_iter()
-            .filter(|p| {
-                !p.post_office
-                    && p.public() != self.identity.public()
-                    && self.known_account_allowed(&p.public())
-            })
+            .filter(|proof| self.historical_dm_peer_allowed(proof))
             .collect()
+    }
+
+    pub(super) fn historical_dm_peer_allowed(&self, proof: &crate::discovery::Announce) -> bool {
+        let peer = proof.public();
+        !proof.post_office && peer != self.identity.public() && self.known_account_allowed(&peer)
     }
 
     pub(in crate::node) fn cached_routing_peers(&self) -> Vec<PeerRecord> {
@@ -250,24 +251,42 @@ impl Node {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut network = self.network_changes.subscribe();
-        let mut repair = None;
+        let mut roster = self.subscribe_roster_changes();
+        let mut forced = false;
         loop {
-            // Schedule from the start of a round. Sleeping after a slow ten-
-            // second handshake used to leave a twenty-second refresh gap for
-            // fifteen-second public evidence, even on a reachable path.
-            let forced = tokio::select! {
-                _ = tick.tick() => false,
+            // Preserve start-to-start pacing for a populated cache. With no
+            // endpoints, roster changes or the first durable private route own
+            // the next turn. Neither a steady empty roster nor a sleeping
+            // timer should queue discovery persistence work.
+            tick.reset();
+            let repair = self
+                .probe_private_routes_round(super::transport::HANDSHAKE_TIMEOUT, forced)
+                .await;
+            let active = self
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned")
+                .as_ref()
+                .is_some_and(|state| !state.routes.is_empty());
+            forced = tokio::select! {
+                _ = tick.tick(), if active => false,
+                _ = self.privacy.route_probe_work.notified(), if !active => false,
+                changed = roster.changed(), if !active => {
+                    if changed.is_err() { return; }
+                    false
+                }
                 _ = async {
                     match repair {
                         Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
                         None => std::future::pending::<()>().await,
                     }
                 } => false,
-                _ = network.changed() => true,
+                changed = network.changed() => {
+                    if changed.is_err() { return; }
+                    true
+                },
             };
-            repair = self
-                .probe_private_routes_round(super::transport::HANDSHAKE_TIMEOUT, forced)
-                .await;
         }
     }
 
@@ -284,6 +303,10 @@ impl Node {
         budget: Duration,
         forced: bool,
     ) -> Option<Instant> {
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "private_route_probe_round".into()
+        });
         let mut repair: Option<Instant> = None;
         if self.cached_peer_snapshot_async().await.is_err() {
             log::warn!("verified discovery cache update failed");
@@ -470,6 +493,39 @@ impl Node {
 mod tests {
     use super::*;
     use crate::transport::TransportError;
+
+    #[tokio::test(start_paused = true)]
+    async fn private_route_worker_parks_empty_and_wakes_for_first_cached_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = routing_point_node(dir.path());
+        let (round, mut rounds) = tokio::sync::mpsc::unbounded_channel();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, event| {
+            if event == "private_route_probe_round" {
+                let _ = round.send(());
+            }
+        }));
+        let worker = tokio::spawn(node.clone().run_private_route_probes());
+        rounds.recv().await.unwrap();
+        tokio::time::advance(Duration::from_secs(35)).await;
+        tokio::task::yield_now().await;
+        assert!(rounds.try_recv().is_err());
+        let peer = crate::identity::device::DeviceIdentity::generate();
+        node.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .routes
+            .record(&peer.public(), "127.0.0.1".parse().unwrap())
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(10), rounds.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+    }
 
     fn routing_point_node(path: &std::path::Path) -> Arc<Node> {
         use crate::{

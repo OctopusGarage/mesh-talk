@@ -4,7 +4,7 @@ import { useGroupControlOperation } from "./useGroupControlOperation";
 import { canManageChannel } from "./channelPermissions";
 import { FavoritesDialog } from "./favorites/FavoritesDialog";
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, Network, Wifi, WifiOff, X } from "lucide-react";
+import { Network, Radar, Wifi, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -146,16 +146,17 @@ export function Sidebar() {
     onlinePeople,
     reconnecting,
   });
-  // Share the same non-overlapping polling lifecycle as other live views.
+  // Optional diagnostics start after the runtime is ready, so OS inventory
+  // and SSID subprocesses do not compete with opening the profile.
   useSerialPoll(
-    true,
+    ready,
     60_000,
     () => chat.networkName(),
     setSsid,
     () => {},
   );
   useSerialPoll(
-    true,
+    ready,
     60_000,
     () => diag.networkInfo(),
     (info) => setNoNetwork(info.interfaces.length === 0),
@@ -486,9 +487,9 @@ export function Sidebar() {
         </button>
         <div className="flex items-center gap-2 font-medium text-foreground">
           {connection === "starting" || connection === "searching" ? (
-            <Loader2
+            <Radar
               aria-hidden="true"
-              className="h-3.5 w-3.5 shrink-0 animate-spin text-signal motion-reduce:animate-none"
+              className="h-3.5 w-3.5 shrink-0 text-signal"
             />
           ) : (
             <PresenceDot

@@ -144,12 +144,18 @@ pub(super) struct ChannelAccountMaintenance {
     input: Option<[u8; 32]>,
     observed_input: Option<[u8; 32]>,
     run_at: Option<Instant>,
-    settled: BTreeMap<[u8; 32], ([u8; 32], Instant)>,
+    settled: BTreeMap<[u8; 32], ([u8; 32], Option<Instant>)>,
     peers: BTreeMap<String, Capability>,
     peer_cursor: usize,
     channel_cursor: usize,
     refresh_after: BTreeMap<([u8; 32], [u8; 32]), Instant>,
 }
+#[derive(Default)]
+struct MaintenanceCommit {
+    fanout: Option<Vec<PublicIdentity>>,
+    settled_on_input: bool,
+}
+
 impl ChannelAccountMaintenance {
     pub(super) fn deadline(&self) -> Instant {
         self.run_at.unwrap_or_else(Instant::now)
@@ -245,7 +251,9 @@ impl ChannelAccountMaintenance {
             }
         }
         for (_, at) in self.settled.values() {
-            deadline = deadline.min(*at);
+            if let Some(at) = at {
+                deadline = deadline.min(*at);
+            }
         }
         deadline.max(now + Duration::from_secs(3))
     }
@@ -569,7 +577,8 @@ impl Node {
                         work.settled
                             .get(row.id.as_bytes())
                             .is_some_and(|(input, until)| {
-                                Some(*input) == completed_input && *until > now
+                                Some(*input) == completed_input
+                                    && until.is_none_or(|until| until > now)
                             })
                     });
             }
@@ -703,7 +712,9 @@ impl Node {
             && work
                 .settled
                 .get(channel.as_bytes())
-                .is_some_and(|(previous, until)| *previous == input && Instant::now() < *until)
+                .is_some_and(|(previous, until)| {
+                    *previous == input && until.is_none_or(|until| Instant::now() < until)
+                })
         {
             return true;
         }
@@ -713,10 +724,14 @@ impl Node {
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
-            self.commit_account_maintenance(channel, work)
+            self.commit_account_maintenance_with_budget(
+                channel,
+                work,
+                &mut crate::eventlog::sync::network::PreparationBudget::default(),
+            )
         };
         drop(policy);
-        if result.is_ok()
+        if let Ok(commit) = &result
             && let Some(input) = selected_input
         {
             let now = Instant::now();
@@ -726,7 +741,7 @@ impl Node {
                 .filter(|((id, _), at)| *id == *channel.as_bytes() && **at > now)
                 .map(|(_, at)| *at)
                 .min()
-                .unwrap_or(now + REFRESH);
+                .or_else(|| (!commit.settled_on_input).then_some(now + REFRESH));
             if work.settled.len() >= MAX_MIGRATIONS
                 && !work.settled.contains_key(channel.as_bytes())
             {
@@ -734,7 +749,7 @@ impl Node {
             }
             work.settled.insert(*channel.as_bytes(), (input, until));
         }
-        match result {
+        match result.map(|commit| commit.fanout) {
             Ok(Some(members)) => {
                 self.distribute_channel(channel, &members).await;
                 true
@@ -747,6 +762,7 @@ impl Node {
             }
         }
     }
+    #[cfg(test)]
     fn commit_account_maintenance(
         &self,
         channel: ConversationId,
@@ -757,13 +773,14 @@ impl Node {
             work,
             &mut crate::eventlog::sync::network::PreparationBudget::default(),
         )
+        .map(|commit| commit.fanout)
     }
     fn commit_account_maintenance_with_budget(
         &self,
         channel: ConversationId,
         work: &mut ChannelAccountMaintenance,
         preparation: &mut crate::eventlog::sync::network::PreparationBudget,
-    ) -> Result<Option<Vec<PublicIdentity>>, NodeError> {
+    ) -> Result<MaintenanceCommit, NodeError> {
         // Reuse one bounded admission allowance for the selected channel and
         // every locally appended control tail. Pending before any append remains
         // retryable; an accepted control retains its explicit fanout outcome.
@@ -776,15 +793,15 @@ impl Node {
         }
         let mut projection = self.account_group_projection(channel)?;
         let Some(state) = projection.state.as_ref() else {
-            return Ok(None);
+            return Ok(MaintenanceCommit::default());
         };
         if state.is_dissolved() {
-            return Ok(None);
+            return Ok(MaintenanceCommit::default());
         }
         let mut changed = false;
         if projection.authority.current_event().is_none() {
             if state.owner() != self.user_id() || !projection.invited.is_empty() {
-                return Ok(None);
+                return Ok(MaintenanceCommit::default());
             }
             let Some(root) = projection
                 .accepted
@@ -792,7 +809,7 @@ impl Node {
                 .find(|member| member.public == me)
                 .map(|member| member.membership_event)
             else {
-                return Ok(None);
+                return Ok(MaintenanceCommit::default());
             };
             if !self
                 .channel_migration
@@ -800,7 +817,7 @@ impl Node {
                 .expect("channel migration lock")
                 .permits(channel, root)
             {
-                return Ok(None);
+                return Ok(MaintenanceCommit::default());
             }
             let routing = self.routing_peers();
             let mut bindings = Vec::new();
@@ -821,17 +838,17 @@ impl Node {
                     ) || peer.is_some_and(|peer| {
                         cached.is_none_or(|cached| cached.account_hint != peer.account_id)
                     }) {
-                        return Ok(None);
+                        return Ok(MaintenanceCommit::default());
                     }
                     cached.and_then(|cached| cached.proof.clone())
                 };
                 let Some(proof) = proof.filter(|proof| {
                     proof.valid_presence() && !proof.post_office && proof.public() == member.public
                 }) else {
-                    return Ok(None);
+                    return Ok(MaintenanceCommit::default());
                 };
                 let Some(cert) = proof.account_cert.as_ref() else {
-                    return Ok(None);
+                    return Ok(MaintenanceCommit::default());
                 };
                 grants
                     .entry(cert.account_ed25519_pub)
@@ -860,7 +877,7 @@ impl Node {
             };
             let payload = control.signed_encode(channel, &self.account);
             if payload.len() > MAX_AUTHORITY_BYTES {
-                return Ok(None);
+                return Ok(MaintenanceCommit::default());
             }
             self.append_event(channel, EventKind::ChannelAccountAuthority, payload)?;
             match self.prepare_channel_admission(channel, preparation) {
@@ -869,10 +886,13 @@ impl Node {
                     // The control is already durable. Hand its recipients to
                     // the existing async fanout, which finishes selected
                     // preparation after releasing membership/privacy guards.
-                    return Ok(projection
-                        .state
-                        .as_ref()
-                        .map(|state| state.members().to_vec()));
+                    return Ok(MaintenanceCommit {
+                        fanout: projection
+                            .state
+                            .as_ref()
+                            .map(|state| state.members().to_vec()),
+                        ..Default::default()
+                    });
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -880,7 +900,7 @@ impl Node {
             changed = true;
         }
         let Some(authority) = projection.authority.current_event() else {
-            return Ok(None);
+            return Ok(MaintenanceCommit::default());
         };
         let state = projection
             .state
@@ -892,7 +912,7 @@ impl Node {
                 .account_grant(&self.account.public().ed25519_pub)
                 .and_then(AccountGrant::id)
             else {
-                return Ok(None);
+                return Ok(MaintenanceCommit::default());
             };
             let control = DeviceControl::Inherit {
                 authority,
@@ -914,10 +934,13 @@ impl Node {
                     // The control is already durable. Hand its recipients to
                     // the existing async fanout, which finishes selected
                     // preparation after releasing membership/privacy guards.
-                    return Ok(projection
-                        .state
-                        .as_ref()
-                        .map(|state| state.members().to_vec()));
+                    return Ok(MaintenanceCommit {
+                        fanout: projection
+                            .state
+                            .as_ref()
+                            .map(|state| state.members().to_vec()),
+                        ..Default::default()
+                    });
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -927,7 +950,7 @@ impl Node {
                 .as_ref()
                 .is_some_and(|state| state.is_member(&self.user_id()))
             {
-                return Ok(None);
+                return Ok(MaintenanceCommit::default());
             }
             changed = true;
         }
@@ -958,10 +981,13 @@ impl Node {
                     // The control is already durable. Hand its recipients to
                     // the existing async fanout, which finishes selected
                     // preparation after releasing membership/privacy guards.
-                    return Ok(projection
-                        .state
-                        .as_ref()
-                        .map(|state| state.members().to_vec()));
+                    return Ok(MaintenanceCommit {
+                        fanout: projection
+                            .state
+                            .as_ref()
+                            .map(|state| state.members().to_vec()),
+                        ..Default::default()
+                    });
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -971,10 +997,16 @@ impl Node {
         if self.share_account_receive_keys(channel, &projection, work, preparation)? {
             changed = true;
         }
-        Ok(if changed {
-            projection.state.map(|state| state.members().to_vec())
-        } else {
-            None
+        // A current account group without inherited devices has no sender
+        // repair or key-sharing deadline. Its stamped inputs still expire on
+        // source, policy or device changes, including during sparse repair.
+        let settled_on_input =
+            !changed && projection.authority.inherited_device_proofs().is_empty();
+        Ok(MaintenanceCommit {
+            fanout: changed
+                .then(|| projection.state.map(|state| state.members().to_vec()))
+                .flatten(),
+            settled_on_input,
         })
     }
     fn share_account_receive_keys(
@@ -2302,7 +2334,7 @@ mod tests {
         let fanout = node
             .commit_account_maintenance_with_budget(channel, &mut work, &mut budget)
             .unwrap();
-        assert_eq!(fanout, Some(members));
+        assert_eq!(fanout.fanout, Some(members));
         assert!(
             matches!(
                 node.account_group_projection(channel),
@@ -2461,12 +2493,21 @@ mod tests {
     async fn unchanged_channel_maintenance_does_not_rehydrate_projection_or_distributions() {
         let group = Group::new().await;
         let node = &group.nodes[0];
-        let channel = node.create_channel("idle producer", vec![]).await.unwrap();
+        let channel = node
+            .create_account_channel_invited_if("idle producer", vec![], |commit| commit())
+            .await
+            .unwrap();
         let mut work = ChannelAccountMaintenance::default();
         for _ in 0..4 {
             node.maintain_account_channels(&mut work).await;
             node.await_channel_metadata(channel).await.unwrap();
         }
+        let (_, deadline) = work.settled[channel.as_bytes()];
+        assert!(
+            deadline.is_none(),
+            "a settled group with no inherited sender repair or sibling recipient has no key deadline"
+        );
+        work.run_at = Some(Instant::now());
         let hydrations = node.channel_checkpoints.projection_hydrations();
         let before = (work.projection_reads, work.distribution_reads);
         assert!(

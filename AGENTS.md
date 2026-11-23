@@ -20,6 +20,9 @@ future work.
   gaps. Apply its [startup, idle and active-business checklist](docs/performance-requirements.md#apply-to-every-feature)
   to every affected phase, including return to idle after use. Extend its general
   rules when a confirmed defect reveals a new pattern.
+  Apply the [headless post-office checklist](docs/performance-requirements.md#headless-post-office-nodes)
+  to relay changes and register background work with the
+  [existing event or scheduling owner](docs/event-driven-design.md#register-relay-work-with-its-owner).
 
 - Before implementing, refactoring, fixing or reviewing code, read the
   [AI coding reliability guide](docs/ai-coding-reliability.md), select the rules

@@ -123,6 +123,7 @@ export async function refreshDeliveryStatuses(
             .map((m) => m.id!),
         ),
       ];
+      if (!ids.length) return;
       const requestedIds = new Set(ids);
       const replicas = new Map<
         string,
@@ -179,46 +180,39 @@ export async function refreshDeliveryStatuses(
       await get().reload();
       if (!lease.current()) return;
     }
-    const ids = [
-      ...new Set(
-        [
-          ...(get().messages[key] ?? []),
-          ...Object.values(get().intents)
-            .filter((i) => convKey(i.conversation) === key)
-            .map((i) => i.message),
-        ]
-          .filter(
-            (m) =>
-              m.fromMe &&
-              m.id &&
-              (m.delivery !== "delivered" ||
-                (m.file &&
-                  !useTransfers.getState().transfers[m.id]?.delivered)),
-          )
-          .map((m) => m.id!),
-      ),
+    const state = get();
+    const transfers = useTransfers.getState().transfers;
+    const messages = [
+      ...(state.messages[key] ?? []),
+      ...Object.values(state.intents)
+        .filter((intent) => convKey(intent.conversation) === key)
+        .map((intent) => intent.message),
     ];
-    const fileIds = new Set(
-      [
-        ...(get().messages[key] ?? []),
-        ...Object.values(get().intents)
-          .filter((i) => convKey(i.conversation) === key)
-          .map((i) => i.message),
-      ]
-        .filter((m) => m.fromMe && m.id && m.file)
-        .map((m) => m.id!),
-    );
+    const requested = new Set<string>();
+    const fileIds = new Set<string>();
+    for (const message of messages) {
+      if (!message.fromMe || !message.id) continue;
+      if (message.file) fileIds.add(message.id);
+      if (
+        message.delivery !== "delivered" ||
+        (message.file && !transfers[message.id]?.delivered)
+      )
+        requested.add(message.id);
+    }
+    const ids = [...requested];
     const projection = new Map<string, "awaiting" | "delivered">();
     const observations = new Map<string, ChatMessage["deliveryObservation"]>();
     for (let i = 0; i < ids.length; i += 256) {
       if (!lease.current()) return;
+      const batch = ids.slice(i, i + 256);
+      const requestedBatch = new Set(batch);
       const rows = await readWithDeadline(() =>
-        chat.deliveryStatuses(lease.owner!, c.id, ids.slice(i, i + 256)),
+        chat.deliveryStatuses(lease.owner!, c.id, batch),
       );
       if (!lease.current()) return;
       const sampledAt = performance.now();
       for (const row of rows) {
-        if (!ids.slice(i, i + 256).includes(row.id)) continue;
+        if (!requestedBatch.has(row.id)) continue;
         projection.set(row.id, row.status);
         const fact = row.observation;
         if (
@@ -254,31 +248,35 @@ export async function refreshDeliveryStatuses(
         }
       }
     }
-    set((s) => ({
-      messages: s.messages[key]
-        ? {
-            ...s.messages,
-            [key]: s.messages[key].map((m) =>
-              applyProjection(m, projection, observations),
-            ),
-          }
-        : s.messages,
-      intents: Object.fromEntries(
-        Object.entries(s.intents).map(([id, intent]) => [
-          id,
-          convKey(intent.conversation) === key
-            ? {
-                ...intent,
-                message: applyProjection(
-                  intent.message,
-                  projection,
-                  observations,
-                ),
-              }
-            : intent,
-        ]),
-      ),
-    }));
+    set((state) => {
+      const currentMessages = state.messages[key] ?? [];
+      let messages: ChatMessage[] | undefined;
+      for (const [index, message] of currentMessages.entries()) {
+        const next = applyProjection(message, projection, observations);
+        if (next === message) continue;
+        messages ??= currentMessages.slice();
+        messages[index] = next;
+      }
+      let intents: typeof state.intents | undefined;
+      for (const [id, intent] of Object.entries(state.intents)) {
+        if (convKey(intent.conversation) !== key) continue;
+        const message = applyProjection(
+          intent.message,
+          projection,
+          observations,
+        );
+        if (message === intent.message) continue;
+        intents ??= { ...state.intents };
+        intents[id] = { ...intent, message };
+      }
+      if (!messages && !intents) return state;
+      return {
+        messages: messages
+          ? { ...state.messages, [key]: messages }
+          : state.messages,
+        intents: intents ?? state.intents,
+      };
+    });
   } catch {
     /* A missing projection response is not a delivery claim or send failure. */
   } finally {

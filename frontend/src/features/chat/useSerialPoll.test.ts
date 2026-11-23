@@ -9,6 +9,19 @@ import {
 } from "@/lib/syncInvalidation";
 import { readWithDeadline } from "@/lib/readDeadline";
 
+const native = vi.hoisted(() => ({
+  minimized: false,
+  observers: new Set<() => void>(),
+}));
+
+vi.mock("@/lib/nativeWindowVisibility", () => ({
+  isNativeWindowMinimized: () => native.minimized,
+  subscribeNativeWindowMinimized: (observer: () => void) => {
+    native.observers.add(observer);
+    return () => native.observers.delete(observer);
+  },
+}));
+
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.spyOn(document, "hidden", "get").mockReturnValue(false);
@@ -259,5 +272,38 @@ it("drains a post-timeout invalidation after its global admission slot is releas
     releases.forEach((release) => release());
     await Promise.all(held);
     await act(async () => root.unmount());
+  }
+});
+
+it("pauses optional reads on native minimize even if the document stays visible", async () => {
+  vi.useFakeTimers();
+  const request = vi.fn().mockResolvedValue(1);
+  const root = createRoot(document.createElement("div"));
+  function Probe() {
+    useSerialPoll(
+      true,
+      1000,
+      request,
+      () => {},
+      () => {},
+    );
+    return null;
+  }
+  const setMinimized = (value: boolean) => {
+    native.minimized = value;
+    for (const observer of native.observers) observer();
+  };
+  try {
+    await act(async () => root.render(createElement(Probe)));
+    expect(request).toHaveBeenCalledTimes(1);
+    setMinimized(true);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(request).toHaveBeenCalledTimes(1);
+    setMinimized(false);
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(request).toHaveBeenCalledTimes(2);
+  } finally {
+    await act(async () => root.unmount());
+    setMinimized(false);
   }
 });

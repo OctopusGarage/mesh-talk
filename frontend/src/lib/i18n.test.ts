@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n, {
   applyAccountLanguage,
+  i18nReady,
+  prepareAccountLanguage,
   savedLanguage,
   subscribeLanguageChanges,
   resolveLanguage,
@@ -9,6 +11,7 @@ import i18n, {
 } from "./i18n";
 
 afterEach(async () => {
+  await i18nReady;
   await i18n.changeLanguage("en");
   vi.unstubAllGlobals();
 });
@@ -43,8 +46,7 @@ describe("interface language resolution", () => {
       expect(SUPPORTED_LANGUAGES).toContain(language);
       // Use the public setter as the settings menu does.
       setLanguage(language as Parameters<typeof setLanguage>[0]);
-      await i18n.changeLanguage(language);
-      expect(i18n.resolvedLanguage).toBe(language);
+      await vi.waitFor(() => expect(i18n.resolvedLanguage).toBe(language));
       for (const key of [
         "settings.language",
         "settings.categories.general",
@@ -60,7 +62,7 @@ describe("interface language resolution", () => {
   );
 });
 
-it("switches the interface and document language when preference storage is denied", () => {
+it("switches the interface and document language when preference storage is denied", async () => {
   vi.stubGlobal("localStorage", {
     setItem() {
       throw new Error("Storage denied");
@@ -68,7 +70,7 @@ it("switches the interface and document language when preference storage is deni
   });
   vi.stubGlobal("document", { documentElement: { lang: "en" } });
   setLanguage("ko");
-  expect(i18n.resolvedLanguage).toBe("ko");
+  await vi.waitFor(() => expect(i18n.resolvedLanguage).toBe("ko"));
   expect(document.documentElement.lang).toBe("ko");
 });
 
@@ -80,8 +82,7 @@ it("notifies local language subscribers once and never echoes account imports", 
     await Promise.resolve();
     expect(changed).toHaveBeenCalledExactlyOnceWith("pt-BR");
     expect(applyAccountLanguage("ko")).toBe(true);
-    await Promise.resolve();
-    expect(i18n.resolvedLanguage).toBe("ko");
+    await vi.waitFor(() => expect(i18n.resolvedLanguage).toBe("ko"));
     expect(changed).toHaveBeenCalledTimes(1);
     expect(applyAccountLanguage("ko-KR")).toBe(false);
     expect(changed).toHaveBeenCalledTimes(1);
@@ -104,7 +105,7 @@ it("does not treat a browser default as an explicit saved language", () => {
   expect(savedLanguage()).toBe("pt-BR");
 });
 
-it("reads denied storage safely and applies account languages without local echoes", () => {
+it("reads denied storage safely and applies account languages without local echoes", async () => {
   vi.stubGlobal("localStorage", {
     getItem() {
       throw new Error("Storage denied");
@@ -119,7 +120,7 @@ it("reads denied storage safely and applies account languages without local echo
     expect(savedLanguage()).toBeNull();
     for (const language of SUPPORTED_LANGUAGES) {
       expect(applyAccountLanguage(language)).toBe(true);
-      expect(i18n.resolvedLanguage).toBe(language);
+      await vi.waitFor(() => expect(i18n.resolvedLanguage).toBe(language));
     }
     expect(changed).not.toHaveBeenCalled();
   } finally {
@@ -137,9 +138,28 @@ it.each([
     vi.stubGlobal("localStorage", { getItem: () => stored });
     vi.stubGlobal("navigator", { languages, language: "en" });
     vi.resetModules();
-    const { default: initialized, savedLanguage: saved } =
-      await import("./i18n");
+    const {
+      default: initialized,
+      i18nReady: ready,
+      savedLanguage: saved,
+    } = await import("./i18n");
+    await ready;
     expect(initialized.resolvedLanguage).toBe(expected);
     expect(saved()).toBe(stored === "PT-br" ? "pt-BR" : null);
   },
 );
+
+it("prepares a linked catalog without applying the linked preference", async () => {
+  await i18nReady;
+  await i18n.changeLanguage("en");
+  const changed = vi.fn();
+  const unsubscribe = subscribeLanguageChanges(changed);
+  try {
+    expect(await prepareAccountLanguage("ja")).toBe(true);
+    expect(i18n.hasResourceBundle("ja", "translation")).toBe(true);
+    expect(i18n.resolvedLanguage).toBe("en");
+    expect(changed).not.toHaveBeenCalled();
+  } finally {
+    unsubscribe();
+  }
+});

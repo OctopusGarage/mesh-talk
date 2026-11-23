@@ -760,6 +760,7 @@ impl Node {
             sent_path,
             password,
         } = request;
+        let observe_phase = super::work_observation::startup_phase_clock("business_node");
         let legacy_delivery = targets.is_some();
         let ui_changes = super::ui_state::UiChanges::default();
         let (incoming, channel_incoming, file_incoming) = match targets {
@@ -888,6 +889,7 @@ impl Node {
                 h_recovered_ids.join(),
             )
         });
+        observe_phase("parallel_legacy_opened");
         // A join() error means the opening thread panicked; re-raise the panic so it
         // is not silently swallowed. A normal open failure surfaces as the inner Err.
         sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -917,15 +919,26 @@ impl Node {
             .collect();
         let recovery_contacts = contacts_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         recovered_ids_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        observe_phase("legacy_owner_records_authenticated");
         let mut dm_ratchet = DmRatchet::new(sessions);
+        // The group operation journal and delivery pair own distinct files.
+        // Join local recovery before using either result to bind the profile.
+        let (group_operations, delivery) = std::thread::scope(|scope| {
+            let operations = scope.spawn(|| {
+                super::account_group::operations::journal::OperationJournal::open(
+                    dir,
+                    password,
+                    account.public().ed25519_pub,
+                    identity.public(),
+                )
+            });
+            let delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password);
+            (operations.join(), delivery)
+        });
         let mut group_operations =
-            super::account_group::operations::journal::OperationJournal::open(
-                dir,
-                password,
-                account.public().ed25519_pub,
-                identity.public(),
-            )?;
-        let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
+            group_operations.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+        let mut delivery = delivery?;
+        observe_phase("group_operations_and_delivery_journals_opened");
         let previous_account = storage
             .participant_database()
             .map(|database| {
@@ -945,15 +958,39 @@ impl Node {
         storage.validate_legacy_events(password)?;
         // Authenticate every remaining legacy owner before first SQL source
         // publication. Keep these handles for recovery instead of opening twice.
-        let mut account_devices = super::account_devices::AccountDevices::open(
-            &super::account_devices::file_path(dir, &account.account_id()),
-            password,
-            &account.account_id(),
-        )?;
-        account_devices.insert(super::account_devices::AccountDevice {
-            public: identity.public(),
-            certificate: account.certify(&identity.public().ed25519_pub),
-        })?;
+        observe_phase("delivery_and_legacy_source_authority_validated");
+        let account_id = account.account_id();
+        let forwarding_path = dir.join(format!("forwarding-{account_id}.log"));
+        let open_membership = || {
+            let mut devices = super::account_devices::AccountDevices::open(
+                &super::account_devices::file_path(dir, &account_id),
+                password,
+                &account_id,
+            )?;
+            devices.insert(super::account_devices::AccountDevice {
+                public: identity.public(),
+                certificate: account.certify(&identity.public().ed25519_pub),
+            })?;
+            Ok::<_, LogError>(devices)
+        };
+        let open_forwarding = || super::forwarding::ForwardStore::open(&forwarding_path, password);
+        // Existing forwarding state belongs to a separate journal. Join both
+        // owners before accepting their results. First creation still waits for
+        // the legacy-source validation barrier below.
+        let (account_devices, prior_forwarding) = if storage.participant_database().is_some()
+            && forwarding_path.is_file()
+        {
+            let (devices, forwarding) = std::thread::scope(|scope| {
+                let forwarding = scope.spawn(open_forwarding);
+                let devices = open_membership();
+                (devices, forwarding.join())
+            });
+            let forwarding = forwarding.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (devices?, Some(forwarding))
+        } else {
+            (open_membership()?, None)
+        };
+        observe_phase("account_device_membership_opened");
         super::account_suppression::IndexedAccountSuppression::authenticate_legacy(
             &storage,
             &dir.join("account-suppression.log"),
@@ -974,29 +1011,45 @@ impl Node {
             &dir.join("sent-manifest-scopes.log"),
             password,
         )?;
-        let forwarding = super::forwarding::ForwardStore::open(
-            &dir.join(format!("forwarding-{}.log", account.account_id())),
-            password,
-        )?;
-        let favorites = super::favorites::FavoriteStore::open(
-            &dir.join(format!("favorites-{}.log", account.account_id())),
-            password,
-        )?;
-        let account_sync_policy = super::account_sync_policy::DeviceSyncPolicyStore::open(
-            &dir.join(format!("account-sync-policy-{}.log", account.account_id())),
-            password,
-        )?;
-        let account_preferences = super::account_preferences::AccountPreferences::open_for_account(
-            dir,
-            password,
-            &account.account_id(),
-        )?;
-        let account_access = super::account_access::AccountAccessStore::open(
-            &dir.join("account-access.log"),
-            password,
-        )?;
+        let forwarding = match prior_forwarding {
+            Some(result) => result?,
+            None => open_forwarding()?,
+        };
+        observe_phase("account_proofs_and_forwarding_opened");
+        // These are separate participant-owned journals. Their own torn-tail
+        // repair may run during open, but no account state is published until
+        // all of the scoped openers finish and their results are accepted.
+        let (favorites, sync_policy, preferences, access) = std::thread::scope(|scope| {
+            let favorites = scope.spawn(|| {
+                super::favorites::FavoriteStore::open(
+                    &dir.join(format!("favorites-{account_id}.log")),
+                    password,
+                )
+            });
+            let access = scope.spawn(|| {
+                super::account_access::AccountAccessStore::open(
+                    &dir.join("account-access.log"),
+                    password,
+                )
+            });
+            let sync_policy = super::account_sync_policy::DeviceSyncPolicyStore::open(
+                &dir.join(format!("account-sync-policy-{account_id}.log")),
+                password,
+            );
+            let preferences = super::account_preferences::AccountPreferences::open_for_account(
+                dir,
+                password,
+                &account_id,
+            );
+            (favorites.join(), sync_policy, preferences, access.join())
+        });
+        let favorites = favorites.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+        let account_sync_policy = sync_policy?;
+        let account_preferences = preferences?;
+        let account_access = access.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
         let account_access_updates =
             tokio::sync::watch::channel(account_access.current(&account.account_id())).0;
+        observe_phase("independent_account_journals_opened");
         let reaction_path =
             log_path.with_extension(format!("{}-reactions.log", account.account_id()));
         super::reaction_store::IndexedReactionStore::authenticate_legacy(
@@ -1032,30 +1085,52 @@ impl Node {
             password,
             &account.public().ed25519_pub,
         )?;
+        observe_phase("account_stores_opened");
+        let published_profile = storage.participant_database().is_some();
         storage.complete_participant(password, legacy_previous.as_deref())?;
-        let media = super::media_store::MediaStore::open_profile(
-            storage.clone(),
-            dir,
-            password,
-            &identity.user_id(),
-            None,
-        )
-        .map_err(LogError::Io)?;
-        let favorite_media = super::media_store::MediaStore::open_profile(
-            storage.clone(),
-            &dir.join(format!("favorites-{}", account.account_id())),
-            password,
-            &account.account_id(),
-            None,
-        )
-        .map_err(LogError::Io)?;
-        let account_documents =
+        let open_documents = || {
             super::account_documents::store::AccountDocumentStore::open_profile(
                 storage.clone(),
                 dir,
                 password,
                 &account.public().ed25519_pub,
-            )?;
+            )
+        };
+        // Media and documents have separate journals, directories and salts.
+        // A new publication keeps its original initialization order.
+        // Their shared database still serializes namespace transactions.
+        let (media, favorite_media, documents) = std::thread::scope(|scope| {
+            let documents = published_profile.then(|| scope.spawn(open_documents));
+            let favorite_media = scope.spawn(|| {
+                super::media_store::MediaStore::open_profile(
+                    storage.clone(),
+                    &dir.join(format!("favorites-{account_id}")),
+                    password,
+                    &account_id,
+                    None,
+                )
+            });
+            let media = super::media_store::MediaStore::open_profile(
+                storage.clone(),
+                dir,
+                password,
+                &identity.user_id(),
+                None,
+            );
+            (
+                media,
+                favorite_media.join(),
+                documents.map(|task| task.join()),
+            )
+        });
+        let media = media.map_err(LogError::Io)?;
+        let favorite_media = favorite_media
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .map_err(LogError::Io)?;
+        let account_documents = match documents {
+            Some(result) => result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
+            None => open_documents()?,
+        };
 
         let channel_custody = ChannelCustodyStore::from_profile(
             storage.clone(),
@@ -1087,6 +1162,7 @@ impl Node {
             )?,
         );
 
+        observe_phase("transcript_owners_opened");
         let profile_receive_work =
             super::profile_receive_work::ProfileReceiveWork::open(storage.clone())?;
         let reception_effects = super::reception_effects::ReceptionEffects::open(storage.clone())?;
@@ -1539,6 +1615,7 @@ impl Node {
         node.bootstrap_private_dm_controls().map_err(|error| {
             LogError::CorruptFile(format!("account control projection: {error}"))
         })?;
+        observe_phase("business_node_ready");
         Ok(Arc::new(node))
     }
 

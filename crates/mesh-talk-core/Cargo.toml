@@ -39,7 +39,7 @@ hex = { workspace = true }
 bincode = { workspace = true }
 uuid = { workspace = true }
 aes-gcm = { workspace = true }
-pbkdf2 = { workspace = true }
+ring = "0.17.14"
 sha2 = { workspace = true }
 hkdf = { workspace = true }
 ed25519-dalek = { workspace = true }
@@ -64,9 +64,10 @@ libc = "0.2"
 
 # Probe the PID recorded by the CLI data-dir lock after a Windows service restart.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+pbkdf2 = { workspace = true } # Independent reference for production-format fixtures.
 tokio = { workspace = true, features = ["test-util"] }
 rand_chacha = "0.10" # seeded CSPRNG for deterministic property tests (rand_core 0.10 traits)
 # Self-dev-dependency on our OWN crate, activating `fast-test-kdf`. This is the lever that

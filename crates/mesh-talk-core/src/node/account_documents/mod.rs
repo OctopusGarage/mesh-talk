@@ -488,13 +488,17 @@ impl Node {
         self.account_document_updates
             .send_modify(|r| *r = r.wrapping_add(1));
         self.account_sync_notify.notify_one();
-        let narrow = matches!(
-            domain,
-            Some(AccountDocumentDomain::Draft | AccountDocumentDomain::CustomizationPack)
-        );
+        use super::ui_state::DocumentUiScope;
+        let scope = match domain {
+            Some(AccountDocumentDomain::ReadReceipt) => DocumentUiScope::ReadReceipts,
+            Some(AccountDocumentDomain::Draft | AccountDocumentDomain::CustomizationPack) => {
+                DocumentUiScope::Documents
+            }
+            _ => DocumentUiScope::State,
+        };
         // One legacy wake and one cumulative desktop update; an actual phase
         // transition cannot be masked by the accompanying document invalidation.
-        self.ui_changes.documents(narrow, status_changed);
+        self.ui_changes.documents(scope, status_changed);
     }
     pub fn put_account_document_if(
         &self,
@@ -639,7 +643,7 @@ impl Node {
         })?;
         let result = result.ok_or_else(invalid)?;
         if changed {
-            self.documents_changed();
+            self.documents_changed_domain(Some(AccountDocumentDomain::ReadReceipt));
         }
         Ok(result)
     }

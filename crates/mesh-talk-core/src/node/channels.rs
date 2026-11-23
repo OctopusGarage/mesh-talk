@@ -1603,18 +1603,25 @@ impl Node {
                     if discovered && fallback_remaining != 0 {
                         fallback_resweep = true;
                     }
+                    // Resolve the bounded batch from one membership snapshot.
+                    // Each attempt still checks current membership before dialing.
+                    let channels = self.joined_channels_for_recovery();
                     if fallback_remaining == 0 {
-                        fallback_remaining = self.joined_channel_count();
+                        fallback_remaining = channels.len();
                     }
                     let batch = fallback_remaining.min(CHANNEL_RECOVERY_WAKE_BATCH);
                     fallback_remaining -= batch;
                     let start = cursor;
                     cursor = cursor.wrapping_add(batch);
-                    stream::iter(start..start.saturating_add(batch))
+                    let targets = (start..start.saturating_add(batch)).filter_map(|index| {
+                        let channel = channels.get(index % channels.len().max(1))?;
+                        Some((*channel, index / channels.len()))
+                    });
+                    stream::iter(targets)
                         .for_each_concurrent(
                             CHANNEL_RECOVERY_GROUP_CONCURRENCY,
-                            |index| async move {
-                                if node.pull_one_channel_from_member(index).await {
+                            |(channel, cycle)| async move {
+                                if node.pull_channel_from_members(channel, cycle, true).await {
                                     failed_ref.store(true, std::sync::atomic::Ordering::Relaxed);
                                 }
                             },
@@ -1687,13 +1694,21 @@ impl Node {
         }
     }
 
-    pub(in crate::node) fn joined_channel_count(&self) -> usize {
+    fn joined_channels_for_recovery(&self) -> Vec<ConversationId> {
         let me = self.user_id();
         let book = self.channels.lock().expect("channels mutex not poisoned");
-        book.channel_ids()
+        let mut channels: Vec<_> = book
+            .channel_ids()
             .into_iter()
             .filter(|id| book.state(id).is_some_and(|state| state.is_member(&me)))
-            .count()
+            .collect();
+        channels.sort_unstable_by_key(|id| *id.as_bytes());
+        channels
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn joined_channel_count(&self) -> usize {
+        self.joined_channels_for_recovery().len()
     }
 
     /// Publish this device's signed per-channel replica preference. Receiving
@@ -4186,23 +4201,12 @@ impl Node {
     /// every channel and member a turn without making the background loop dial the
     /// full group. Any member holding an event can serve it, even if its author is
     /// offline. The ordinary sync store enforces membership and validates events.
+    #[cfg(test)]
     pub(in crate::node) async fn pull_one_channel_from_member(
         self: &Arc<Self>,
         cursor: usize,
     ) -> bool {
-        let channels = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let mut channels: Vec<_> = book
-                .channel_ids()
-                .into_iter()
-                .filter(|id| {
-                    book.state(id)
-                        .is_some_and(|state| state.is_member(&self.user_id()))
-                })
-                .collect();
-            channels.sort_unstable_by_key(|id| *id.as_bytes());
-            channels
-        };
+        let channels = self.joined_channels_for_recovery();
         if let Some(channel) = channels.get(cursor % channels.len().max(1)) {
             return self
                 .pull_channel_from_members(*channel, cursor / channels.len(), true)

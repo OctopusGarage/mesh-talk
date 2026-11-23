@@ -9,6 +9,63 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::mpsc};
 
+#[tokio::test]
+async fn empty_delivery_worker_parks_until_new_durable_demand() {
+    use std::time::Duration;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let sender = Node::open_with_account(
+        DeviceIdentity::generate(),
+        Account::generate(),
+        Arc::new(Mutex::new(crate::discovery::Roster::default())),
+        dm,
+        channel,
+        file,
+        &directory.path().join("messages.log"),
+        &directory.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    fn observe_snapshot(node: &Node) -> tokio::sync::oneshot::Receiver<()> {
+        let (observed, snapshot) = tokio::sync::oneshot::channel();
+        *node.delivery_snapshot_hook.lock().unwrap() = Some(Box::new(move || {
+            let _ = observed.send(());
+        }));
+        snapshot
+    }
+
+    let initial = observe_snapshot(&sender);
+    let worker = tokio::spawn(sender.clone().run_delivery_loop());
+    tokio::time::timeout(Duration::from_secs(2), initial)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut next = observe_snapshot(&sender);
+    let parked = tokio::time::timeout(Duration::from_millis(750), &mut next).await;
+
+    // Publish through the exact edge used by new durable delivery intents.
+    let woke = if parked.is_err() {
+        sender.note_delivery_demand();
+        Some(tokio::time::timeout(Duration::from_secs(2), next).await)
+    } else {
+        None
+    };
+    worker.abort();
+    let _ = worker.await;
+    sender.runtime_work.close();
+    sender.runtime_work.drain().await;
+    sender.close_profile().unwrap();
+
+    assert!(parked.is_err(), "empty worker must not run the 500ms scan");
+    woke.unwrap()
+        .expect("new work wakes delivery without waiting for idle repair")
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_manifest_requester_dispatches_the_remote_dm_and_queues_its_receipt() {
     file_manifest_requester_reception(false).await;

@@ -223,6 +223,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         authority.clone(),
                         runtime.account_id().to_owned(),
                         runtime.user_id().to_owned(),
+                        handle.bounded_delivery().then(|| reception_scope.clone()),
                         observed,
                         ui_changes,
                     ),
@@ -517,6 +518,7 @@ async fn forward_ui_changes<R: tauri::Runtime>(
     authority: RuntimeAuthority,
     account: String,
     device: String,
+    reception_scope: Option<crate::reception_host::Scope>,
     mut observed: mesh_talk_core::node::DesktopUiRevisions,
     mut changes: tokio::sync::watch::Receiver<mesh_talk_core::node::DesktopUiRevisions>,
 ) {
@@ -525,20 +527,22 @@ async fn forward_ui_changes<R: tauri::Runtime>(
         let current = *changes.borrow_and_update();
         let documents = current.documents != observed.documents;
         let status = current.sync_status != observed.sync_status;
-        let kinds: &[&'static str] = if current.state != observed.state {
-            &["state"]
+        let receipts = current.read_receipts != observed.read_receipts;
+        let received = current.reception != observed.reception;
+        let kinds = if current.state != observed.state || (received && reception_scope.is_none()) {
+            [Some("state"), None, None]
         } else {
-            match (documents, status) {
-                (true, true) => &["documents", "sync_status"],
-                (true, false) => &["documents"],
-                (false, true) => &["sync_status"],
-                (false, false) => &[],
-            }
+            [
+                documents.then_some("documents"),
+                status.then_some("sync_status"),
+                (receipts && !documents).then_some("read_receipts"),
+            ]
         };
         // A later revision during emission remains ready on the next changed().
         // Broad state covers both narrow domains in this captured batch only.
         observed = current;
-        for &kind in kinds {
+        let has_state_change = kinds.iter().any(Option::is_some);
+        for kind in kinds.into_iter().flatten() {
             if authority
                 .current(|_| {
                     crate::events::emit_node_state_changed(
@@ -555,6 +559,15 @@ async fn forward_ui_changes<R: tauri::Runtime>(
             {
                 return;
             }
+        }
+        if received
+            && !has_state_change
+            && let Some(scope) = reception_scope.as_ref()
+            && authority
+                .current(|_| crate::reception_host::wake(&app, scope))
+                .is_err()
+        {
+            return;
         }
     }
 }
@@ -1402,14 +1415,17 @@ mod tests {
                 authority.clone(),
                 "account".into(),
                 "device".into(),
+                None,
                 observed,
                 receiver,
             ),
         ));
         changes.send_replace(DesktopUiRevisions {
             state: 1,
+            reception: 0,
             documents: 1,
             sync_status: 1,
+            read_receipts: 1,
         });
         tokio::task::yield_now().await;
         assert!(received.try_recv().is_err());
@@ -1421,10 +1437,10 @@ mod tests {
         assert_eq!(event, "state");
         assert!(received.try_recv().is_err());
         changes.send_modify(|current| {
-            current.documents += 1;
+            current.read_receipts += 1;
             current.sync_status += 1;
         });
-        for expected in ["documents", "sync_status"] {
+        for expected in ["sync_status", "read_receipts"] {
             assert_eq!(
                 tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
                     .await

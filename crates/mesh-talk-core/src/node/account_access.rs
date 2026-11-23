@@ -401,6 +401,63 @@ mod tests {
                 .unwrap();
         }
     }
+    #[tokio::test(start_paused = true)]
+    async fn access_worker_parks_until_an_observed_sibling_is_certified() {
+        use std::{
+            future::Future,
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+            task::{Context, Wake, Waker},
+            time::Duration,
+        };
+
+        #[derive(Default)]
+        struct Wakes(AtomicUsize);
+        impl Wake for Wakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let source = open_node(&dir.path().join("source"), &account);
+        let target = open_node(&dir.path().join("target"), &account);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let announce = source.signed_announce("source", address.port());
+        target
+            .roster
+            .lock()
+            .unwrap()
+            .update(&announce, address.ip(), &target.user_id());
+
+        let mut worker = Box::pin(target.clone().run_account_access_loop());
+        let wakes = Arc::new(Wakes::default());
+        let waker = Waker::from(wakes.clone());
+        assert!(
+            worker
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+
+        certify_pair(&target, &source, &account);
+        assert!(wakes.0.load(Ordering::Relaxed) > 0);
+        tokio::time::resume();
+        let worker = tokio::spawn(worker);
+        tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .expect("certification wakes access work without a new roster announcement")
+            .unwrap();
+        worker.abort();
+        let _ = worker.await;
+    }
+
     #[tokio::test]
     async fn essential_exchange_keeps_valid_twelve_second_control_response() {
         use crate::transport::SecureChannel;
@@ -962,26 +1019,26 @@ impl Node {
             .lock()
             .expect("roster mutex")
             .subscribe_changes();
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut membership = self
+            .account_devices
+            .lock()
+            .expect("account devices mutex")
+            .subscribe_membership_changes();
+        let account = self.account_id();
+        let mut reconcile = None;
         loop {
-            tokio::select! {_=tick.tick()=>{},result=observations.changed()=>{if result.is_err(){return;}}}
             if self.runtime_work.is_closed() {
                 return;
             }
-            let peers = self.roster.lock().expect("roster mutex").peers();
-            attempts.retain(|_, state| {
-                peers.iter().any(|peer| peer.public == state.peer.public)
-                    && self.certified_sibling(&state.peer.public)
+            let mut peers = self.roster.lock().expect("roster mutex").peers();
+            peers.retain(|peer| {
+                peer.account_id.as_deref() == Some(account.as_str())
+                    && self.certified_sibling(&peer.public)
             });
+            attempts.retain(|_, state| peers.iter().any(|peer| peer.public == state.peer.public));
             for peer in peers {
                 if self.runtime_work.is_closed() {
                     return;
-                }
-                if peer.account_id.as_deref() != Some(self.account_id().as_str())
-                    || !self.certified_sibling(&peer.public)
-                {
-                    continue;
                 }
                 let id = peer.public.user_id();
                 let binding = AccessPeerBinding::new(
@@ -1070,6 +1127,26 @@ impl Node {
                     attempts: state.failures,
                     retry_delay_ms: delay * 1000,
                 });
+            }
+            // Preserve short policy-generation reconciliation while a sibling
+            // is reachable. With no eligible sibling, only roster or persisted
+            // membership changes can add a target, so leave no timer armed.
+            if attempts.is_empty() {
+                reconcile = None;
+            } else {
+                reconcile.get_or_insert_with(|| {
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+                });
+            }
+            tokio::select! {
+                result = observations.changed() => { if result.is_err() { return; } }
+                result = membership.changed() => { if result.is_err() { return; } }
+                _ = async {
+                    match reconcile {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => { reconcile = None; }
             }
         }
     }

@@ -26,6 +26,7 @@ import {
 import { createLinkedPreferencePublisher } from "./linkedPreferencePublisher";
 import {
   applyAccountLanguage,
+  prepareAccountLanguage,
   savedLanguage,
   subscribeLanguageChanges,
 } from "./i18n";
@@ -195,6 +196,12 @@ export function startLinkedAppearance(owner: string): () => void {
               .getState()
               .prepareTheme(record.value);
             if (!prepared) continue;
+          }
+          if (
+            record.key === "language" &&
+            !(await prepareAccountLanguage(record.value))
+          ) {
+            continue;
           }
           if (!current()) return;
           if (

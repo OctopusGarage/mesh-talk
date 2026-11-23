@@ -1017,7 +1017,11 @@ impl Roster {
     }
 
     pub fn peers(&self) -> Vec<PeerRecord> {
-        self.peers.values().cloned().collect()
+        self.peer_records().cloned().collect()
+    }
+
+    pub(super) fn peer_records(&self) -> impl Iterator<Item = &PeerRecord> {
+        self.peers.values()
     }
 
     /// The known peers that advertise the post-office role.

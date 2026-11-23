@@ -6,8 +6,16 @@ use tokio::sync::watch;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DesktopUiRevisions {
     pub state: u64,
+    pub reception: u64,
     pub documents: u64,
     pub sync_status: u64,
+    pub read_receipts: u64,
+}
+
+pub(in crate::node) enum DocumentUiScope {
+    State,
+    Documents,
+    ReadReceipts,
 }
 
 #[derive(Clone)]
@@ -47,16 +55,20 @@ impl UiChanges {
             .send_modify(|revision| *revision = revision.wrapping_add(1));
         self.desktop.send_modify(update);
     }
+    fn reception(&self) {
+        self.notify(|revision| revision.reception = revision.reception.wrapping_add(1));
+    }
     pub(in crate::node) fn sync_status(&self) {
         self.notify(|revision| revision.sync_status = revision.sync_status.wrapping_add(1));
     }
-    pub(in crate::node) fn documents(&self, narrow: bool, status_changed: bool) {
+    pub(in crate::node) fn documents(&self, scope: DocumentUiScope, status_changed: bool) {
         self.notify(|revision| {
-            if narrow {
-                revision.documents = revision.documents.wrapping_add(1);
-            } else {
-                revision.state = revision.state.wrapping_add(1);
-            }
+            let counter = match scope {
+                DocumentUiScope::State => &mut revision.state,
+                DocumentUiScope::Documents => &mut revision.documents,
+                DocumentUiScope::ReadReceipts => &mut revision.read_receipts,
+            };
+            *counter = counter.wrapping_add(1);
             if status_changed {
                 revision.sync_status = revision.sync_status.wrapping_add(1);
             }
@@ -67,7 +79,7 @@ impl UiChanges {
 impl Node {
     /// Durable receipt producers publish only a coalesced observation wake.
     pub(in crate::node) fn note_reception_change(&self) {
-        self.note_ui_change();
+        self.ui_changes.reception();
     }
     /// True when this instance has no legacy message/profile payload queues.
     pub fn bounded_delivery(&self) -> bool {
@@ -121,48 +133,66 @@ mod tests {
         let legacy = changes.subscribe();
         let desktop = changes.subscribe_desktop();
         changes.sync_status();
-        changes.documents(true, true);
+        changes.documents(DocumentUiScope::Documents, true);
+        changes.documents(DocumentUiScope::ReadReceipts, false);
         changes.send_modify(|revision| *revision = revision.wrapping_add(1));
         assert_eq!(
             *legacy.borrow(),
-            3,
+            4,
             "one legacy wake per committed publication"
         );
         assert_eq!(
             *desktop.borrow(),
             DesktopUiRevisions {
                 state: 1,
+                reception: 0,
                 documents: 1,
                 sync_status: 2,
+                read_receipts: 1,
             },
             "a later broad event must retain both narrow domains"
         );
-        changes.documents(false, false);
+        changes.documents(DocumentUiScope::State, false);
         assert_eq!(
             *desktop.borrow(),
             DesktopUiRevisions {
                 state: 2,
+                reception: 0,
                 documents: 1,
                 sync_status: 2,
+                read_receipts: 1,
             },
             "unclassified documents stay broad without manufacturing status work"
         );
-        assert_eq!(*legacy.borrow(), 4);
+        assert_eq!(*legacy.borrow(), 5);
+    }
+
+    #[test]
+    fn committed_reception_wakes_legacy_and_desktop_without_dirtying_projections() {
+        let changes = UiChanges::default();
+        let legacy = changes.subscribe();
+        let desktop = changes.subscribe_desktop();
+        changes.reception();
+        assert_eq!(*legacy.borrow(), 1);
+        assert_eq!(desktop.borrow().state, 0);
+        assert_eq!(desktop.borrow().reception, 1);
     }
 
     #[test]
     fn legacy_sender_conversion_and_late_desktop_subscription_retain_revisions() {
         let (legacy, observer) = watch::channel(7u64);
         let changes = UiChanges::from(legacy);
-        changes.documents(true, false);
+        changes.documents(DocumentUiScope::Documents, false);
         changes.sync_status();
         assert_eq!(*observer.borrow(), 9);
         assert_eq!(
             *changes.subscribe_desktop().borrow(),
             DesktopUiRevisions {
                 state: 0,
+                reception: 0,
                 documents: 1,
                 sync_status: 1,
+                read_receipts: 0,
             },
             "a slow or not-yet-installed desktop loses no coalesced domain"
         );

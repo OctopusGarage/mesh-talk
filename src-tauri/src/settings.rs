@@ -418,6 +418,10 @@ impl SettingsState {
         operation()
     }
 
+    pub(crate) fn app_lock_policy(&self) -> crate::app_lock::AppLockPolicy {
+        crate::app_lock::AppLockPolicy::from(&self.0.lock().unwrap().current)
+    }
+
     pub fn get(&self) -> AppSettings {
         self.0.lock().unwrap().current.clone()
     }

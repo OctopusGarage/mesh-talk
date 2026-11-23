@@ -80,6 +80,7 @@ core-foundation = "0.10"
 # Inspect the real display backend; do not infer X11 from environment variables.
 [target.'cfg(target_os = "linux")'.dependencies]
 raw-window-handle = "0.6"
+global-hotkey = "0.8.0"
 ashpd = { version = "0.14.0", default-features = false, features = ["tokio", "screenshot"] }
 url = "2.5"
 zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "service"] }

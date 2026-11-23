@@ -38,10 +38,47 @@ I/O; OS disk events also do not measure physical NAND write amplification. CPU a
 network and actual energy where supported. Keep metrics collected in different
 windows separate. Store measurements in PR/CI artifacts, not this guide.
 
-An existing target miss requires recorded baseline and an owned follow-up; it is
-not permission to worsen the path or silently raise its budget. A target change
-requires comparable evidence and review. Migrations, catch-up and active media have
-separate bounded work budgets and progress evidence, not an unlimited exception.
+### Desktop acceptance
+
+Use the desktop CPU, retained-memory and startup figures above as optimization
+targets. A desktop change can be accepted above those figures when affected
+functional and recovery checks pass, there is no known blocking defect, and
+comparable measurements show no material regression against the platform's
+established baseline. Record the build, measurement conditions, observed gaps
+and any missing platform evidence in the PR or CI evidence.
+
+Treat reproducible freezes, data loss, broken recovery, unbounded growth and
+repeated work on unchanged inputs as defects. Investigate a sustained resource
+regression and attribute it before accepting a baseline change. Keep headless
+and post-office budgets in force. Migrations, catch-up and active media have
+their own bounded work budgets and progress evidence.
+
+## Headless post-office nodes
+
+Apply the headless CPU and private-memory targets to the dedicated post-office
+process, including its attributable helpers. A relay stays available to receive
+connections, serve mailbox requests and maintain required protocol leases while
+quiescent. Its steady idle work must remain bounded as retained ciphertext,
+offline participants and configured federation peers grow. An empty store alone
+cannot establish the retained-workload result.
+
+- At startup, restore only the indexes, authority and bounded cursors needed to
+  accept traffic. Keep migrations, backlog catch-up and recovery measurable
+  separately. Report time to accepting requests, peak memory and I/O.
+- In steady idle, wait for ingress, committed mailbox or topology changes and
+  the next real expiry, lease or retry deadline. Unchanged federation inventories,
+  empty drains and repeated unreachable peers must settle or back off. Sample
+  both an empty relay and a populated relay after warmup, including CPU, memory,
+  wakeups and disk writes. Observe the full hour to claim the write target.
+- Under traffic, measure delivery and custody latency, queue depth, memory,
+  CPU and I/O. Verify bounded batches, overload handling, restart recovery,
+  federation convergence and return to idle. Keep receipt meanings, retention,
+  authenticated scope and convergence guarantees intact.
+
+Use the existing [relay resource contracts](post-office-federation.md#indexed-relay-runtime-and-resource-bounds)
+and [event and scheduling owners](event-driven-design.md#schedule-work-by-purpose).
+Record platform, binary, topology, load, sampling window and missing evidence
+alongside every result.
 
 ## Apply to every feature
 
@@ -288,8 +325,11 @@ reproduction; never describe a passing correctness test as performance acceptanc
    to their own current expiry checks.
    Compressed file size is not decoded image memory. Avoid keeping archives,
    base64 strings, Blobs and decoded originals together without a measured need.
-   Reuse expensive unchanged presentation work with bounded semantic keys. Locale
-   and fresh local calendar fields must still qualify date/time results; a cached
+   Reuse expensive unchanged presentation work with bounded semantic keys. Keep
+   renderer collection and row references when a refresh yields the same facts,
+   so store subscribers can skip rendering. Delivery projections still clear
+   obsolete observations and preserve terminal receipts.
+   Locale and fresh local calendar fields must still qualify date/time results; a cached
    formatter's original timezone must not pin later output. Cache display strings
    without retaining message identity or adding another timer.
 5. **Write only durable changes.** No-op reads/heartbeats must not rewrite logs,
@@ -336,12 +376,29 @@ reproduction; never describe a passing correctness test as performance acceptanc
    and stopped states. Release unused media and subscriptions. Prove reception,
    persistence and notifications survive before suspending a page. Actual work
    retains its permit until completion; stale owners cannot publish late results.
+   On Windows, page visibility can remain visible after native minimization.
+   Visible-only renderer polling observes the native window state and resumes
+   on restoration. Durable reception retains its own lifecycle.
+   Keep indefinite idle states such as discovery without peers visually static.
+   Verify that they do not schedule continuous animation frames or compositor
+   work. Use the [presence browser scenario](../frontend/e2e/person-presence.spec.ts)
+   and native renderer sampling when the state is shown by a desktop WebView.
 
 ## Evidence and maintenance
 
 Before optimizing, identify the owner and capture the offending operation count
 or allocation/CPU/write trace. Add a regression that fails on that mechanism,
 then validate empty/no-change, growth, failure/retry, cancellation and recovery.
+Isolate the native profile and the renderer's persistent storage together for
+each desktop fixture. On Windows, select a task-owned WebView2 user-data folder
+explicitly. Reusing browser storage with a copied or rolled-back native profile
+can carry a saved reception cursor from a different run. Check that the
+fixture's durable reception is healthy before classifying its work as idle.
+For Linux desktop measurements in a VM or container, place the writable
+profile and WebKit cache on a guest-native filesystem with free space.
+Keep host-shared mounts for read-only fixture inputs and exported evidence.
+Record the filesystem and cache conditions when comparing resource results.
+
 Compare the same device/build/runtime/profile; include whole-family resource
 measurements and a correctness witness. SQL affected-row counts do not measure
 write amplification: attribute pager flushes separately when they cannot explain

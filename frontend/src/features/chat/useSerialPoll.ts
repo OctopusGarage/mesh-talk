@@ -1,4 +1,8 @@
 import {
+  isNativeWindowMinimized,
+  subscribeNativeWindowMinimized,
+} from "@/lib/nativeWindowVisibility";
+import {
   subscribeSyncInvalidation,
   supportsPushState,
   type SyncInvalidation,
@@ -29,15 +33,16 @@ export function useSerialPoll<T>(
     let busy = false;
     let dirty = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const hidden = () => document.hidden || isNativeWindowMinimized();
     const schedule = () => {
       clearTimeout(timer);
-      if (!active || busy || document.hidden) return;
+      if (!active || busy || hidden()) return;
       const delay = wakeOn && supportsPushState() ? pushRecoveryMs : intervalMs;
       timer = setTimeout(() => poll(), delay);
     };
     const poll = (invalidate = false) => {
       if (!active) return;
-      if (busy || document.hidden) {
+      if (busy || hidden()) {
         dirty ||= invalidate;
         return;
       }
@@ -65,7 +70,7 @@ export function useSerialPoll<T>(
           const release = () => {
             busy = false;
             if (!active) return;
-            if (dirty && !document.hidden) poll();
+            if (dirty && !hidden()) poll();
             else schedule();
           };
           // A UI timeout cannot cancel native work. Drain after actual settlement
@@ -82,17 +87,19 @@ export function useSerialPoll<T>(
         poll(true);
     });
     const foreground = () => {
-      if (!document.hidden) poll(true);
+      if (!hidden()) poll(true);
       else clearTimeout(timer);
     };
     window.addEventListener("focus", foreground);
     document.addEventListener("visibilitychange", foreground);
+    const stopNative = subscribeNativeWindowMinimized(foreground);
     poll();
     return () => {
       active = false;
       clearTimeout(timer);
       window.removeEventListener("focus", foreground);
       document.removeEventListener("visibilitychange", foreground);
+      stopNative();
       unlisten();
     };
   }, [enabled, intervalMs, wakeOn, pushRecoveryMs]);

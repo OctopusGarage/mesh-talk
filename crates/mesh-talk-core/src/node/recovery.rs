@@ -402,7 +402,35 @@ impl Node {
             // are retained in recovered_sent_ids for history and later exports.
             let mut next_restored_legacy_seq = u64::MAX;
             let mut identity_bundles = Vec::new();
+            const SENT_PAGE_ROWS: usize = 128;
+            const SENT_PAGE_BYTES: usize = 1024 * 1024;
+            let mut sent = Vec::with_capacity(SENT_PAGE_ROWS);
+            let mut sent_bytes = 0;
+            let flush_sent = |entries: &mut Vec<_>| -> Result<(), SnapshotError> {
+                if entries.is_empty() {
+                    return Ok(());
+                }
+                // Match ordinary history's sent-log before recovered-ID lock order.
+                let mut store = node.sentlog.lock().expect("sentlog mutex not poisoned");
+                let ids = node
+                    .recovered_sent_ids
+                    .lock()
+                    .expect("recovered sent ids mutex not poisoned");
+                store
+                    .record_recovered_page(
+                        ids.as_ref()
+                            .expect("recovery id store created before node open"),
+                        entries,
+                    )
+                    .map_err(|_| SnapshotError::Io)?;
+                entries.clear();
+                Ok(())
+            };
             let installed_header = read_snapshot(&mut source, |record| {
+                if !matches!(&record, SnapshotRecordV1::SentDm { .. }) {
+                    flush_sent(&mut sent)?;
+                    sent_bytes = 0;
+                }
                 match record {
                     SnapshotRecordV1::SentDm {
                         conversation,
@@ -435,23 +463,14 @@ impl Node {
                             wall_clock,
                             plaintext,
                         };
-                        node.sentlog
-                            .lock()
-                            .expect("sentlog mutex not poisoned")
-                            .record(
-                                entry.conversation,
-                                entry.seq,
-                                entry.wall_clock,
-                                &entry.plaintext,
-                            )
-                            .map_err(|_| SnapshotError::Io)?;
-                        node.recovered_sent_ids
-                            .lock()
-                            .expect("recovered sent ids mutex not poisoned")
-                            .as_mut()
-                            .expect("recovery id store created before node open")
-                            .record(&entry, EventId::new(message_id))
-                            .map_err(|_| SnapshotError::Io)?;
+                        let next_bytes = entry.plaintext.len();
+                        if sent.len() == SENT_PAGE_ROWS || sent_bytes + next_bytes > SENT_PAGE_BYTES
+                        {
+                            flush_sent(&mut sent)?;
+                            sent_bytes = 0;
+                        }
+                        sent_bytes += next_bytes;
+                        sent.push((entry, EventId::new(message_id)));
                     }
                     SnapshotRecordV1::ReceivedDm {
                         conversation,
@@ -646,6 +665,7 @@ impl Node {
             if installed_header != header {
                 return Err(SnapshotError::InvalidAccount);
             }
+            flush_sent(&mut sent)?;
             for ((favorite, file_conv), path) in media_temp {
                 std::fs::OpenOptions::new()
                     .write(true)
@@ -1504,6 +1524,46 @@ mod suppression_recovery_tests {
             restored.account_suppression.lock().unwrap().len().unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn recovered_sent_page_rolls_back_body_and_alias_on_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let node = open(root.path());
+        let mut sent = node.sentlog.lock().unwrap();
+        let recovered = node.recovered_sent_ids.lock().unwrap();
+        let recovered = recovered.as_ref().unwrap();
+        let entry = super::super::sentlog::SentEntry {
+            conversation: ConversationId::new([11; 32]),
+            seq: 1,
+            wall_clock: 100,
+            plaintext: b"restored body".to_vec(),
+        };
+        let accepted_id = EventId::new([1; 32]);
+        let conflicting_id = EventId::new([2; 32]);
+        let revision = sent.revision();
+        assert!(
+            sent.record_recovered_page(
+                recovered,
+                &[
+                    (entry.clone(), accepted_id),
+                    (entry.clone(), conflicting_id)
+                ],
+            )
+            .is_err()
+        );
+        assert_eq!(sent.revision(), revision);
+        assert!(
+            sent.entry(&entry.conversation, entry.seq)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(recovered.id_for(&entry).unwrap(), None);
+
+        sent.record_recovered_page(recovered, &[(entry.clone(), accepted_id)])
+            .unwrap();
+        assert_eq!(sent.revision(), revision + 1);
+        assert_eq!(recovered.id_for(&entry).unwrap(), Some(accepted_id));
     }
 
     fn open(root: &Path) -> Arc<Node> {

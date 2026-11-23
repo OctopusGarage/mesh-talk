@@ -12,7 +12,10 @@ import {
   type ReceptionLedger,
 } from "@/store/reception";
 import { captureRuntimeOwner } from "@/store/ownership";
-import { subscribeDocumentInvalidation } from "./syncInvalidation";
+import {
+  isDocumentInvalidation,
+  subscribeSyncInvalidation,
+} from "./syncInvalidation";
 import { readWithDeadline } from "./readDeadline";
 
 interface ReceiptPorts {
@@ -47,6 +50,21 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
   const known = new Set<string>();
   const current = () => active && ports.current();
   const identity = (key: string, id: string) => JSON.stringify([key, id]);
+  const applyPending = (pending: Map<string, string[]>) => {
+    for (const [key, ids] of pending) {
+      if (!current()) return;
+      ports.apply(key, ids);
+    }
+  };
+  const queueApplied = (
+    pending: Map<string, string[]>,
+    key: string,
+    id: string,
+  ) => {
+    const ids = pending.get(key);
+    if (ids) ids.push(id);
+    else pending.set(key, [id]);
+  };
   const flush = async () => {
     if (!current() || !enabled) return;
     if (writing) {
@@ -59,6 +77,7 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
     writeContinuation = undefined;
     let exhausted = false;
     let failed = false;
+    const pending = new Map<string, string[]>();
     try {
       let budget = 64;
       for (const [key, entries] of Object.entries(ports.ledger())) {
@@ -77,7 +96,7 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
           await ports.mark(target, id);
           if (!current()) return;
           known.add(token);
-          ports.apply(key, [id]);
+          queueApplied(pending, key, id);
           if (--budget === 0) {
             exhausted = true;
             return;
@@ -88,7 +107,11 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
       failed = true;
       /* Retain local seen evidence for the next policy-enabled retry. */
     } finally {
-      writing = false;
+      try {
+        applyPending(pending);
+      } finally {
+        writing = false;
+      }
       if (!failed && (exhausted || writeDirty) && current() && enabled)
         writeContinuation = setTimeout(() => void flush(), 0);
     }
@@ -118,6 +141,7 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
         const cursor = after;
         const page = await readWithDeadline(() => ports.list(cursor));
         if (!current() || !enabled) return;
+        const pending = new Map<string, string[]>();
         for (const meta of page.items) {
           if (meta.key.kind !== "read_receipt" || meta.tombstone) continue;
           const { conversation, message_id } = meta.key;
@@ -125,8 +149,9 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
           const token = identity(key, message_id);
           if (known.has(token)) continue;
           known.add(token);
-          ports.apply(key, [message_id]);
+          queueApplied(pending, key, message_id);
         }
+        applyPending(pending);
         if (
           page.next !== null &&
           JSON.stringify(page.next) === JSON.stringify(cursor)
@@ -185,8 +210,12 @@ export function startLinkedReadReceipts(owner: string): () => void {
       accountDocuments.markSeen(owner, accountId, conversation, id),
   });
   const stopRecovery = startRecoveryRefresh(() => void sync.poll());
-  const unsubscribe = subscribeDocumentInvalidation(owner, () => {
-    void sync.poll();
+  const unsubscribe = subscribeSyncInvalidation((change) => {
+    if (
+      change.owner === owner &&
+      (change.scope === "read_receipts" || isDocumentInvalidation(change))
+    )
+      void sync.poll();
   });
   void sync.poll();
   return () => {

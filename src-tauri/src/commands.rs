@@ -254,7 +254,14 @@ pub async fn login<R: tauri::Runtime>(
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
     settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<LoginResult, CommandError> {
+    let clock = crate::logger::work_trace_enabled().then(std::time::Instant::now);
     let outcome = login_impl(username, password.clone(), app_state.inner()).await?;
+    if let Some(clock) = clock {
+        log::info!(
+            target: crate::logger::STARTUP_LOG_TARGET,
+            "desktop_login_auth_ms={}", clock.elapsed().as_millis()
+        );
+    }
     let mut result = outcome.result;
 
     if result.success {
@@ -274,6 +281,8 @@ pub async fn login<R: tauri::Runtime>(
             })
             .map_err(CommandError::Authorization)?;
         {
+            let saved_session_clock =
+                crate::logger::work_trace_enabled().then(std::time::Instant::now);
             result.saved_session = Some(
                 remember_login_owned(
                     app_handle.clone(),
@@ -284,6 +293,12 @@ pub async fn login<R: tauri::Runtime>(
                 )
                 .await?,
             );
+            if let Some(clock) = saved_session_clock {
+                log::info!(
+                    target: crate::logger::STARTUP_LOG_TARGET,
+                    "desktop_login_saved_session_ms={}", clock.elapsed().as_millis()
+                );
+            }
             spawn_node_runtime(
                 app_handle.clone(),
                 outcome.lease,

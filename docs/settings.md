@@ -145,8 +145,10 @@ user's device preferences, survive restart, and never propagate to linked device
 work while Mesh-Talk is focused, including from the composer. Opting in uses the
 same bindings while another application is active or Mesh-Talk is in the tray.
 The app must be running, signed in and unlocked. Linux global registration
-requires a native X11 session; Wayland retains application shortcuts. Native OS
-registration failures are reported with Retry; a failed replacement preserves
+requires a native X11 session; Wayland retains application shortcuts. The X11
+listener starts with the first registered global binding and retires when the
+last binding is released, including on lock, logout or disabling global capture.
+Native OS registration failures are reported with Retry; a failed replacement preserves
 the previous saved bindings and restores registrations where the OS permits.
 Unexpected rollback failures report degraded global availability instead of
 claiming that a partially restored set is active.

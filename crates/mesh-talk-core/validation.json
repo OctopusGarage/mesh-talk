@@ -789,6 +789,10 @@
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
         "invariants": [
           {
+            "name": "Exact read-receipt writes and imports wake document consumers without advancing broad chat presentation. Duplicate local receipts produce no notification.",
+            "reference": "docs/event-driven-design.md"
+          },
+          {
             "name": "Local channel erasure uses retained signed identity, shared references or legacy channel state independently of display publication, preserves ordinary and unknown conversation boundaries, propagates suppression failure and retains durable suppression without changing ciphertext.",
             "reference": "docs/ARCHITECTURE.md"
           },
@@ -1030,7 +1034,7 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route. Ordinary unchanged wakes respect retained retry deadlines even for incomplete cycles; scheduling observation never acknowledges success, while fresh semantics, failed observations, explicit drivers and timer-disabled recovery remain live.",
+            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route. Ordinary unchanged wakes respect retained retry deadlines even for incomplete cycles; scheduling observation never acknowledges success, while fresh semantics, failed observations, explicit drivers and timer-disabled recovery remain live. Completed account groups without inherited devices preserve a matching input across sparse repair without reopening group bodies; real deadlines and errors still recheck.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -1373,6 +1377,10 @@
         "guide": "docs/network-design-reference.md#person-presence-contract",
         "invariants": [
           {
+            "name": "Linux, macOS and Windows link and address notifications invalidate the authoritative interface snapshot. Subscription failure retains the two-second polling fallback, Linux and macOS receive overflow reconciles immediately, and the 30-second repair preserves multicast membership and missed-signal recovery. Windows callbacks coalesce into one pending wake and retire with the discovery task. Known-endpoint keepalives park without a destination and wake on roster observation; active leases retain their cadence.",
+            "reference": "docs/routed-network-discovery.md#network-changes-and-recovery"
+          },
+          {
             "name": "Exact complete successful announcement proofs, including both signatures, may reuse intrinsic verification in a process-local 128-entry, 256-KiB metadata owner. Invalid results are not retained; changed fields reverify. Oversized inputs, contention, poison and eviction preserve original verification semantics without waiting or crypto under a guard. Current presence, account binding, revocation, visibility, discovery challenges and Noise authorization remain fresh; wire, SDK and storage formats are unchanged. Relayed name-only updates publish the existing roster observation while same-name route renewals remain quiet; descriptive-name invalidation grants no presence or account authority.",
             "reference": "docs/ai-coding-reliability.md#r08-durable-state-and-failure-semantics"
           }
@@ -1703,6 +1711,10 @@
         "invariants": [
           {
             "name": "Snapshot extensions preserve prior positional tags and archive authentication; schema 6 installs exact local deletion facts before history reconstruction",
+            "reference": "docs/backup-recovery.md#snapshot-compatibility"
+          },
+          {
+            "name": "Portable restore commits bounded sent-body pages and their original event identities together. A conflicting body or alias rolls back the page before staged profile publication.",
             "reference": "docs/backup-recovery.md#snapshot-compatibility"
           },
           {
@@ -2296,7 +2308,7 @@
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
-            "name": "A single runtime-owned essential worker uses the shared adaptive control budget, retries transient failures promptly and resets cooldown on verified route or identity changes",
+            "name": "A single runtime-owned essential worker uses the shared adaptive control budget, retries transient failures promptly and resets cooldown on verified route or identity changes. Without eligible peers it waits for roster or committed linked-device membership changes without a periodic wake. Certifying an already-observed sibling starts work without a new announcement. Failed or duplicate inserts publish no membership change.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
@@ -2763,6 +2775,7 @@
             "node::delivery_store::tests::",
             "node::delivery_retry::tests::",
             "node::delivery_runtime::diagnostic_tests::",
+            "node::delivery_runtime_tests::empty_delivery_worker_parks_until_new_durable_demand",
             "node::delivery_runtime_tests::relay_held_",
             "private_file_restart_advances_twenty_four_pending_scopes_fairly",
             "queued_private_file_work_stops_on_permission_revoke_and_exact_account_rebind",
@@ -3368,6 +3381,7 @@
             "empty_selection_cleanup_preserves_cached_read_plans",
             "node::session::mailbox_watch::",
             "node::serving::mailbox_watch::",
+            "node::serving::post_office_drain_schedule_tests::",
             "modern_relay_receive_",
             "source_notifications_exclude_reads_rollbacks_and_derived_work",
             "parked_mailbox_watches_preserve_normal_capacity_and_release_on_drop",
@@ -3381,6 +3395,10 @@
         "summary": "Reconcile opaque mailboxes through finite indexed deltas and bounded on-demand participant exports, preserving current authority and durable retry evidence.",
         "guide": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization",
         "invariants": [
+          {
+            "name": "A broad source invalidation keeps the next eligible deadline of an empty relay receive turn. An owned drain or watch retains a coalesced follow-up, and group mailbox selection checks exact historical identity before canonical membership.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
           {
             "name": "Ordinary Guarded outbound pull-only zero-wire reconciliation can reuse a proved unique remote subset under exact current local source and authority, empty pending work, a fresh existing wire fingerprint probe and a nonrenewing five-minute maximum deadline. It preserves the remote intersection count and the shared 128-entry metadata quota, never grants equality, custody or delivery, and leaves unsupported, changed, failed and duplex requests on ordinary reconciliation.",
             "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"

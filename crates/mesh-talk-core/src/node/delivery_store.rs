@@ -1027,8 +1027,22 @@ impl DeliveryStore {
         preflight(&journal_path, limits.journal_bytes, limits.transactions)?;
         let max_records = limits.max_outbox_records();
         preflight(&outbox_path, limits.outbox_bytes, max_records)?;
-        let (journal, pending) = EncryptedRecordLog::open(&journal_path, password, JOURNAL_MAGIC)?;
-        let (outbox, records) = EncryptedRecordLog::open(&outbox_path, password, OUTBOX_MAGIC)?;
+        // The journal and outbox have separate file ownership. Complete
+        // both opens under the startup owner before cross-file replay.
+        let open_journal = || EncryptedRecordLog::open(&journal_path, password, JOURNAL_MAGIC);
+        let open_outbox = || EncryptedRecordLog::open(&outbox_path, password, OUTBOX_MAGIC);
+        let ((journal, pending), (outbox, records)) =
+            if journal_path.is_file() && outbox_path.is_file() {
+                let (journal, outbox) = std::thread::scope(|scope| {
+                    let outbox = scope.spawn(open_outbox);
+                    let journal = open_journal();
+                    (journal, outbox.join())
+                });
+                let outbox = outbox.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                (journal?, outbox?)
+            } else {
+                (open_journal()?, open_outbox()?)
+            };
         let mut store = Self {
             profile: None,
             journal,

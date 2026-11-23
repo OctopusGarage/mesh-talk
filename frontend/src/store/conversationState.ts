@@ -267,18 +267,21 @@ export function applyProjection(
 ): ChatMessage {
   if (!message.fromMe || !message.id) return message;
   const projected = statuses.get(message.id);
-  return {
-    ...message,
-    delivery: message.delivery === "delivered" ? "delivered" : projected,
-    deliveryObservation:
-      message.delivery !== "delivered" &&
-      projected === "awaiting" &&
-      !message.recalled &&
-      !message.pending &&
-      !message.failed
-        ? observations.get(message.id)
-        : undefined,
-  };
+  const delivery = message.delivery === "delivered" ? "delivered" : projected;
+  const deliveryObservation =
+    message.delivery !== "delivered" &&
+    projected === "awaiting" &&
+    !message.recalled &&
+    !message.pending &&
+    !message.failed
+      ? observations.get(message.id)
+      : undefined;
+  if (
+    message.delivery === delivery &&
+    message.deliveryObservation === deliveryObservation
+  )
+    return message;
+  return { ...message, delivery, deliveryObservation };
 }
 
 /** Keep the active Conversation while bounding message and reaction caches. */

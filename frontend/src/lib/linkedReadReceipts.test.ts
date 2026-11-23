@@ -72,6 +72,71 @@ it("applies exact remote reads without echo and publishes only locally seen iden
   await sync.poll();
   expect(ports.apply).toHaveBeenCalledTimes(2);
 });
+it("applies a page once per conversation and deduplicates repeated receipts", async () => {
+  const { ports, sync } = fixture();
+  const page = await ports.list();
+  ports.list.mockClear();
+  const original = page.items[0];
+  const otherAccount = "c".repeat(32);
+  ports.list.mockResolvedValue({
+    ...page,
+    items: [
+      original,
+      {
+        ...original,
+        key: {
+          kind: "read_receipt",
+          conversation: { kind: "account", id: otherAccount },
+          message_id: "other",
+        },
+      },
+      { ...original, key: { ...original.key, message_id: "second" } },
+      original,
+    ] as AccountDocumentPage["items"],
+  });
+
+  await sync.poll();
+
+  expect(ports.apply.mock.calls.slice(0, 2)).toEqual([
+    [key, ["remote", "second"]],
+    [`account:${otherAccount}`, ["other"]],
+  ]);
+  expect(ports.mark.mock.calls).toEqual([
+    [{ kind: "account", id: accountId }, "local"],
+  ]);
+  sync.stop();
+});
+
+it("applies completed local marks before retrying a failed mark", async () => {
+  const { ports, sync } = fixture();
+  Object.assign(ports.ledger()[key], {
+    second: { seen: true, late: false },
+    third: { seen: true, late: false },
+  });
+  ports.mark
+    .mockResolvedValueOnce(undefined)
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValueOnce(new Error("write failed"));
+
+  await sync.poll();
+  await vi.waitFor(() =>
+    expect(ports.apply).toHaveBeenCalledWith(key, ["local", "second"]),
+  );
+  expect(ports.apply).not.toHaveBeenCalledWith(key, ["third"]);
+
+  await sync.poll();
+  await vi.waitFor(() =>
+    expect(ports.apply).toHaveBeenCalledWith(key, ["third"]),
+  );
+  expect(ports.mark.mock.calls.map(([, id]) => id)).toEqual([
+    "local",
+    "second",
+    "third",
+    "third",
+  ]);
+  sync.stop();
+});
+
 it("history opt-out neither imports nor publishes receipts", async () => {
   const { ports, sync } = fixture();
   ports.policy.mockResolvedValue({ history: false });

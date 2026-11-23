@@ -97,7 +97,8 @@
       },
       "consumers": ["frontend-screenshot-shortcuts"],
       "escalation": [
-        "Verify native packaged-app foreground/background/tray capture, OS shortcut conflicts and screen-recording permission on macOS, Windows and Linux; browser mocks do not prove native global shortcut registration."
+        "Verify native packaged-app foreground/background/tray capture, OS shortcut conflicts and screen-recording permission on macOS, Windows and Linux; browser mocks do not prove native global shortcut registration.",
+        "On real X11, verify that the global shortcut worker is absent at default startup, appears with the first registered key, and retires on disable, lock and logout. Re-enable and actuate the binding after retirement; record idle process wakeups with no global bindings."
       ]
     },
     {
@@ -1451,7 +1452,7 @@
             "reference": "docs/performance-requirements.md#design-and-review-rules"
           },
           {
-            "name": "ACK-qualified fixed invalidation domains preserve newer pending changes; empty/progress pages do not create global state, roster-only pages avoid unrelated payload reloads and legacy receipts retain full repair.",
+            "name": "ACK-qualified fixed invalidation domains preserve newer pending changes; committed receipt-only wakes do not create global state, roster-only hints avoid unrelated payload reloads and legacy consumers retain full repair.",
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           },
           {

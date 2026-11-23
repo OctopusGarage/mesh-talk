@@ -28,6 +28,7 @@ pub struct AccountDevices {
     by_user: HashMap<String, AccountDevice>,
     own_account_id: String,
     metadata_digest: Option<[u8; 32]>,
+    membership_changes: tokio::sync::watch::Sender<()>,
     #[cfg(test)]
     pub(crate) metadata_rebuilds: usize,
 }
@@ -56,6 +57,7 @@ impl AccountDevices {
             by_user,
             own_account_id: own_account_id.to_string(),
             metadata_digest: None,
+            membership_changes: tokio::sync::watch::channel(()).0,
             #[cfg(test)]
             metadata_rebuilds: 0,
         })
@@ -91,7 +93,12 @@ impl AccountDevices {
         self.file.append(&device)?;
         self.by_user.insert(id, device);
         self.metadata_digest = None;
+        self.membership_changes.send_replace(());
         Ok(true)
+    }
+
+    pub(super) fn subscribe_membership_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.membership_changes.subscribe()
     }
 
     /// Query the immutable binding already verified on open/insert. This is
@@ -158,8 +165,11 @@ mod tests {
         let account = Account::generate();
         let owner = account.account_id();
         let mut devices = AccountDevices::open(&path, "pw", &owner).unwrap();
+        let mut membership = devices.subscribe_membership_changes();
         let first = certified(&account, &DeviceIdentity::generate());
         devices.insert(first.clone()).unwrap();
+        assert!(membership.has_changed().unwrap());
+        membership.borrow_and_update();
         let original = devices.metadata_digest().unwrap();
         for _ in 0..8 {
             assert!(!devices.insert(first.clone()).unwrap());
@@ -172,6 +182,7 @@ mod tests {
         assert_eq!(devices.devices(), vec![first.clone()]);
         assert_eq!(devices.metadata_digest().unwrap(), original);
         assert_eq!(devices.metadata_rebuilds, 1);
+        assert!(!membership.has_changed().unwrap());
         devices.file.fail_appends_for_test(false).unwrap();
         let mut invalid = next.clone();
         invalid.certificate.signature[0] ^= 1;

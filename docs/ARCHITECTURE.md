@@ -156,6 +156,8 @@ SHA-256("mesh-talk-account-v1" ‖ pub)[:16]`. A **DeviceCertificate** is the ac
 - **At rest** (`storage/encryption.rs`) — `salt(16) ‖ nonce(12) ‖ AES-256-GCM(secret)`,
   key via **PBKDF2-HMAC-SHA256, 600k rounds**. Used by every store (device/account
   keystore, event log, sent/received logs, ratchet sessions, channel senders, post office).
+  The record-store derivation uses ring and preserves the existing password bytes,
+  salt, iteration count and key bytes. SQLCipher owns its separate database KDF.
 - **Transport** (`transport/`, snow) — **Noise_XX_25519_ChaChaPoly_BLAKE2s** with a
   post-handshake identity exchange: each side signs `"mesh-talk-transport-auth-v1" ‖
 handshake_hash` and verifies the advertised X25519 == the Noise-authenticated static key
@@ -1470,6 +1472,11 @@ Dock and menu bar clicks in a packaged build; delegate dispatch does not certify
 those system input paths. Preserve locked-entry behavior and hidden autostart.
 
 ### Recent search references
+
+The search dialog admits one native query at a time. While it runs, a
+new debounced query replaces the pending query. Closing the dialog or
+retiring its owner discards pending work. A completed query can publish
+results only while its exact input and owner remain current.
 
 The opt-in core `Node::search_recent` query returns `RecentSearchResults`: matches
 with a `SearchReference` and an explicit `per_conversation_limit` of 2,000.

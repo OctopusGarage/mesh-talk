@@ -104,6 +104,46 @@ pub(super) fn node_with_identity(
 pub(super) use super::super::test_support::settle_group_metadata;
 
 #[test]
+fn read_receipt_publication_only_invalidates_receipt_observers() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = node(dir.path(), &account);
+    let mut desktop = node.subscribe_desktop_ui_changes();
+    let mut documents = node.subscribe_account_documents();
+    let before = *desktop.borrow_and_update();
+    let conversation = DocumentConversation::Account("a".repeat(32));
+    let message = "b".repeat(64);
+
+    let meta = node
+        .mark_account_message_seen_if(conversation.clone(), message.clone(), |commit| commit())
+        .unwrap();
+    let after = *desktop.borrow_and_update();
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.documents, before.documents);
+    assert_eq!(after.read_receipts, before.read_receipts + 1);
+    assert!(documents.has_changed().unwrap());
+    documents.borrow_and_update();
+    let page = node
+        .account_documents(AccountDocumentDomain::ReadReceipt, None, 1)
+        .unwrap();
+    assert_eq!(page.items, vec![meta.clone()]);
+
+    let duplicate = node
+        .mark_account_message_seen_if(conversation, message, |commit| commit())
+        .unwrap();
+    assert_eq!(duplicate, meta);
+    assert!(!desktop.has_changed().unwrap());
+    assert!(!documents.has_changed().unwrap());
+
+    node.documents_imported_domain(Some(AccountDocumentDomain::ReadReceipt));
+    let imported = *desktop.borrow_and_update();
+    assert_eq!(imported.state, after.state);
+    assert_eq!(imported.documents, after.documents);
+    assert_eq!(imported.read_receipts, after.read_receipts + 1);
+    assert!(documents.has_changed().unwrap());
+}
+
+#[test]
 fn completed_channel_metadata_wakes_deferred_inventory_without_an_idle_loop() {
     use crate::{
         channel::{ChannelMeta, new_channel_id},

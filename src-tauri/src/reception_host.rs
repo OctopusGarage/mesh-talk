@@ -83,6 +83,10 @@ impl ReceptionHostState {
 pub(crate) fn invalidate<R: tauri::Runtime>(app: &tauri::AppHandle<R>, scope: &Scope) {
     invalidate_kind(app, scope, Some("state"));
 }
+pub(crate) fn wake<R: tauri::Runtime>(app: &tauri::AppHandle<R>, scope: &Scope) {
+    invalidate_kind(app, scope, None);
+}
+
 fn invalidate_kind<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     scope: &Scope,
@@ -343,7 +347,7 @@ pub(crate) async fn owner_reception_page(
         receipts.extend(handle.take_call_signals(16,256*1024)?.into_iter().map(|signal|Receipt::Call(crate::events::CallSignalEvent{from:signal.from,payload:String::from_utf8_lossy(&signal.payload).into_owned()})));
         receipts.extend(delivery.progress.values().map(|(_,event)|Receipt::Progress(event.clone())));
         let domains = delivery.gate.domains;
-        let kinds = ["state", "roster", "delivery", "files", "documents", "sync_status"].into_iter().zip(domains).filter_map(|(kind, version)| (version != 0).then_some(kind)).collect::<Vec<_>>();
+        let kinds = ["state", "roster", "delivery", "files", "documents", "sync_status", "read_receipts"].into_iter().zip(domains).filter_map(|(kind, version)| (version != 0).then_some(kind)).collect::<Vec<_>>();
         if !kinds.is_empty() { receipts.push(Receipt::State { kinds }); }
         let token=format!("{:032x}",rand::random::<u128>());
         let after:Cursor=page.after.into();let next:Cursor=page.next.into();
@@ -475,6 +479,35 @@ mod tests {
     }
 
     #[test]
+    fn committed_reception_wake_advances_gate_without_dirtying_state() {
+        let app = tauri::test::mock_app();
+        let state = ReceptionHostState::default();
+        let scope = scope();
+        state.install(scope.clone());
+        app.manage(state.clone());
+        {
+            let mut guard = state.0.lock().unwrap();
+            guard.as_mut().unwrap().gate.domains.fill(0);
+        }
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let observed = wakes.clone();
+        app.listen("node-reception-wake", move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut replaced = scope.clone();
+        replaced.runtime_id.push_str("-retired");
+        wake(app.handle(), &replaced);
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+        wake(app.handle(), &scope);
+        wake(app.handle(), &scope);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        let guard = state.0.lock().unwrap();
+        let gate = &guard.as_ref().unwrap().gate;
+        assert_eq!(gate.domains, [0; 7]);
+        assert_eq!(gate.generation, 3);
+    }
+
+    #[test]
     fn qualified_non_group_emitter_preserves_domains_and_unknown_fallback() {
         let app = tauri::test::mock_app();
         let state = ReceptionHostState::default();
@@ -490,7 +523,7 @@ mod tests {
             .gate
             .domains
             .fill(0);
-        for kind in ["documents", "sync_status"] {
+        for kind in ["documents", "sync_status", "read_receipts"] {
             crate::events::emit_node_state_changed(
                 app.handle(),
                 crate::events::NodeStateChangedEvent {
@@ -509,6 +542,7 @@ mod tests {
         );
         assert!(domains.get(4).is_some_and(|revision| *revision != 0));
         assert!(domains.get(5).is_some_and(|revision| *revision != 0));
+        assert!(domains.get(6).is_some_and(|revision| *revision != 0));
         crate::events::emit_node_state_changed(
             app.handle(),
             crate::events::NodeStateChangedEvent {
@@ -541,7 +575,7 @@ mod tests {
         }
         {
             let mut guard = state.0.lock().unwrap();
-            guard.as_mut().unwrap().gate.domains = [0; 6];
+            guard.as_mut().unwrap().gate.domains = [0; 7];
         }
         for n in 0..10_000 {
             crate::events::emit_node_state_changed(
@@ -567,7 +601,7 @@ mod tests {
         let domains = state.0.lock().unwrap().as_ref().unwrap().gate.domains;
         assert_eq!(domains[0], 0);
         assert_ne!(domains[1], 0);
-        assert_eq!(domains[2..], [0, 0, 0, 0]);
+        assert_eq!(domains[2..], [0, 0, 0, 0, 0]);
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
         assert_eq!(old_pushes.load(Ordering::Relaxed), 0);
         assert_eq!(state.0.lock().unwrap().as_ref().unwrap().progress.len(), 64);

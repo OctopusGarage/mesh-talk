@@ -185,7 +185,7 @@ pub fn run_tauri_configured(
             }
         }));
     // Extensions come after single-instance, which must remain the first plugin.
-    extend(builder)
+    let builder = extend(builder)
         // Restore window size/position across launches (clamps off-screen geometry).
         .plugin(
             tauri_plugin_window_state::Builder::default()
@@ -194,12 +194,14 @@ pub fn run_tauri_configured(
                         & !tauri_plugin_window_state::StateFlags::VISIBLE,
                 )
                 .build(),
-        )
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(crate::screenshot_shortcuts::handle_shortcut)
-                .build(),
-        )
+        );
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(crate::screenshot_shortcuts::handle_shortcut)
+            .build(),
+    );
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -211,6 +213,8 @@ pub fn run_tauri_configured(
             Some(vec!["--hidden"]),
         ))
         .setup(move |app| {
+            #[cfg(target_os = "windows")]
+            app.manage(crate::window_visibility::ObservedMinimized::default());
             #[cfg(target_os = "linux")]
             app.manage(crate::window_visibility::HiddenPositions::default());
             if let Err(e) = crate::logger::init_logging(app.handle()) {
@@ -312,6 +316,10 @@ pub fn run_tauri_configured(
         // node runtime stays alive and keeps receiving. Quit (tray menu) is the real exit.
         .on_window_event(|window, event| {
             crate::window_visibility::observe_window_event(window, event);
+            #[cfg(target_os = "windows")]
+            if matches!(event, WindowEvent::Resized(_) | WindowEvent::Focused(_)) {
+                crate::window_visibility::publish_minimized(window);
+            }
             if let WindowEvent::CloseRequested { api, .. } = event
                 && window.label() == "main"
             {

@@ -7,7 +7,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./lib/theme"; // apply the persisted theme before first paint
 import { useTheme } from "./lib/theme";
 import { usePacks } from "./store/packs";
-import "./lib/i18n"; // initialize i18next before first paint
+import { i18nReady } from "./lib/i18n";
 import { applyPlatformClass } from "./lib/platform";
 import "./index.css";
 
@@ -33,10 +33,12 @@ if (import.meta.env.PROD) {
   });
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  </React.StrictMode>,
-);
+void i18nReady.then(() => {
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </React.StrictMode>,
+  );
+});

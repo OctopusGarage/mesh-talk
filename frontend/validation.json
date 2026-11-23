@@ -637,6 +637,10 @@
         "guide": "docs/ARCHITECTURE.md#recent-search-references",
         "invariants": [
           {
+            "name": "One admitted native search owns its full lifetime. Only the latest debounced query can wait, and closing or retiring the dialog discards the pending query and rejects stale results.",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
             "name": "Duplicate text and timestamps never substitute for an exact selected message ID; unresolved or unavailable references never fall back to approximate matching",
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
           },
@@ -1191,7 +1195,7 @@
         "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
         "invariants": [
           {
-            "name": "Group metadata refresh preserves session ownership and last successful members on transient failure",
+            "name": "Group metadata refresh preserves session ownership and the last successful members on transient failure. Hidden roster repair defers optional group fan-out until presentation resumes; explicit changes still refresh.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           }
         ]
@@ -1223,6 +1227,7 @@
         "frontend/src/store/presence.test.ts",
         "frontend/src/store/contactPolicy.ts",
         "frontend/src/store/contactPolicy.test.ts",
+        "frontend/src/lib/nativeWindowVisibility.ts",
         "frontend/src/features/chat/useSerialPoll.ts",
         "frontend/src/features/chat/useSerialPoll.test.ts",
         "frontend/src/features/chat/PersonalDevices.tsx",
@@ -1284,6 +1289,10 @@
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           },
           {
+            "name": "Linked read receipt pages and bounded local publication turns apply exact identities together per conversation. Replay cannot echo remote receipts, and successful local writes are applied before a failed write is retried.",
+            "reference": "docs/event-driven-design.md#event-catalog-and-registration"
+          },
+          {
             "name": "Preference projection uses the same revision and author ordering as the core; imported complete contact records publish after bounded batch persistence.",
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           },
@@ -1296,7 +1305,7 @@
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
-            "name": "Semantic invalidations and coalesced activation remain prompt; modern quiet projections use sparse recovery, presentation-only hidden owners park timers, and legacy reads preserve bounded progress.",
+            "name": "Semantic invalidations and coalesced activation remain prompt; modern quiet projections use sparse recovery, presentation-only owners park timers when the page is hidden or the native window is minimized, durable background recovery keeps its deadline, and legacy reads preserve bounded progress.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
@@ -2709,7 +2718,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Cursor and unread/mention/batch state persist atomically before ACK; quota failures retry without replaying applied effects. UI-only recovery observations and clean empty pages at the committed prefix do not rewrite the snapshot.",
+            "name": "Cursor and unread/mention/batch state persist atomically before ACK; quota failures retry without replaying applied effects. Consecutive automatic retries use bounded backoff, reset after an ACK and stop with the owner. UI-only recovery observations and clean empty pages at the committed prefix do not rewrite the snapshot.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

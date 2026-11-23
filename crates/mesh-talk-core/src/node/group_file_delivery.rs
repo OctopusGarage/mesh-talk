@@ -9,7 +9,7 @@ use crate::{
     postoffice::opaque::RelayMailbox,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, atomic::Ordering},
 };
 
@@ -265,27 +265,44 @@ impl Node {
         Ok(Some(offer))
     }
 
-    pub(super) fn group_mailbox_peers(&self) -> Vec<Announce> {
+    pub(super) fn group_mailbox_peers(&self, proofs: &[Announce]) -> Vec<Announce> {
         let selected = (|| -> Result<Vec<Announce>, LogError> {
+            let me = self.identity.public();
+            // Capture cheap candidate evidence before inspecting any group.
+            // The later exact proof lookup and canonical checks retain authority.
+            let known_devices: BTreeSet<_> = proofs
+                .iter()
+                .map(Announce::public)
+                .filter(|peer| *peer != me)
+                .map(|peer| (peer.ed25519_pub, peer.x25519_pub))
+                .collect();
             let members = {
                 let book = self.channels.lock().expect("channels lock");
                 let mut members = Vec::new();
                 for id in book.channel_ids() {
-                    if let Some(state) = book.state(&id)
-                        && self.channel_identity_is_current(state)?
-                    {
-                        members.extend(state.recipient_members());
+                    let Some(state) = book.state(&id) else {
+                        continue;
+                    };
+                    let candidates = state
+                        .recipient_members()
+                        .into_iter()
+                        .filter(|peer| known_devices.contains(&(peer.ed25519_pub, peer.x25519_pub)))
+                        .collect::<Vec<_>>();
+                    if !candidates.is_empty() && self.channel_identity_is_current(state)? {
+                        members.extend(candidates);
                     }
                 }
                 members
             };
+            let mut checked = BTreeSet::new();
             let mut peers = Vec::new();
             for peer in members {
-                if peer != self.identity.public()
-                    && self.group_member(&peer)?
+                if peer != me
+                    && checked.insert((peer.ed25519_pub, peer.x25519_pub))
                     && let Some(proof) = self
                         .historical_author(&peer.ed25519_pub)
                         .filter(|proof| proof.public() == peer)
+                    && self.group_member(&peer)?
                 {
                     peers.push(proof);
                 }

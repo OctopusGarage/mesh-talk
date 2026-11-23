@@ -4,6 +4,49 @@ use super::*;
 
 struct FixedCandidates(std::net::SocketAddr);
 
+#[tokio::test]
+async fn keystore_startup_preserves_sources_on_failure_and_releases_profile_lease() {
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("accounts/owner");
+    std::fs::create_dir_all(&directory).unwrap();
+    let identity_path = directory.join("identity.keystore");
+    let account_path = directory.join("account.keystore");
+    let start = |password| {
+        NodeRuntime::start(
+            root.path(),
+            "owner",
+            "Owner",
+            password,
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+    };
+    std::fs::write(&identity_path, b"bad header").unwrap();
+    assert!(matches!(start("pw").await, Err(RuntimeError::Open(_))));
+    assert!(!account_path.exists());
+
+    let identity = DeviceIdentity::generate();
+    keystore::save(&identity_path, "pw", &identity).unwrap();
+    let account = Account::generate();
+    account_keystore::save(&account_path, "pw", &account).unwrap();
+    let original_identity = std::fs::read(&identity_path).unwrap();
+    let original_account = std::fs::read(&account_path).unwrap();
+    assert!(matches!(start("wrong").await, Err(RuntimeError::Open(_))));
+    assert_eq!(std::fs::read(&identity_path).unwrap(), original_identity);
+    assert_eq!(std::fs::read(&account_path).unwrap(), original_account);
+
+    let runtime = start("pw").await.unwrap();
+    assert_eq!(runtime.user_id(), identity.user_id());
+    assert_eq!(runtime.account_id(), account.account_id());
+    runtime.stop().await;
+}
+
 impl crate::discovery::candidates::CandidateSource for FixedCandidates {
     fn snapshot(&self) -> futures_util::future::BoxFuture<'_, Vec<std::net::SocketAddr>> {
         Box::pin(async move { vec![self.0] })

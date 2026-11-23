@@ -1,13 +1,6 @@
-import i18n from "i18next";
+import i18n, { type BackendModule } from "i18next";
 import { initReactI18next } from "react-i18next";
 import en from "@/locales/en.json";
-import es from "@/locales/es.json";
-import ja from "@/locales/ja.json";
-import zhHans from "@/locales/zh-Hans.json";
-import zhHant from "@/locales/zh-Hant.json";
-import yue from "@/locales/yue.json";
-import ptBR from "@/locales/pt-BR.json";
-import ko from "@/locales/ko.json";
 
 export const SUPPORTED_LANGUAGES = [
   "en",
@@ -85,27 +78,60 @@ i18n.on("languageChanged", (language) => {
     document.documentElement.lang = resolveLanguage(language) ?? "en";
 });
 
-void i18n.use(initReactI18next).init({
-  resources: {
-    en: { translation: en },
-    es: { translation: es },
-    ja: { translation: ja },
-    "zh-Hans": { translation: zhHans },
-    "zh-Hant": { translation: zhHant },
-    yue: { translation: yue },
-    "pt-BR": { translation: ptBR },
-    ko: { translation: ko },
+const catalogs = {
+  es: () => import("@/locales/es.json"),
+  ja: () => import("@/locales/ja.json"),
+  "zh-Hans": () => import("@/locales/zh-Hans.json"),
+  "zh-Hant": () => import("@/locales/zh-Hant.json"),
+  yue: () => import("@/locales/yue.json"),
+  "pt-BR": () => import("@/locales/pt-BR.json"),
+  ko: () => import("@/locales/ko.json"),
+} satisfies Record<Exclude<Language, "en">, () => Promise<{ default: object }>>;
+
+const bundledCatalogs: BackendModule = {
+  type: "backend",
+  init() {},
+  read(language, _namespace, callback) {
+    if (!isLanguage(language) || language === "en") {
+      callback(null, {});
+      return;
+    }
+    void catalogs[language]().then(
+      (catalog) => callback(null, catalog.default),
+      (error: Error) => callback(error, false),
+    );
   },
-  lng: initialLanguage(),
-  fallbackLng: "en",
-  interpolation: { escapeValue: false }, // React already escapes
-});
+};
+
+export const i18nReady = i18n
+  .use(bundledCatalogs)
+  .use(initReactI18next)
+  .init({
+    resources: { en: { translation: en } },
+    lng: initialLanguage(),
+    fallbackLng: "en",
+    supportedLngs: [...SUPPORTED_LANGUAGES],
+    load: "currentOnly",
+    partialBundledLanguages: true,
+    interpolation: { escapeValue: false },
+  });
 
 /** Switch and persist the active language. */
 export function setLanguage(lng: Language) {
   if (!isLanguage(lng)) return;
   applyAccountLanguage(lng);
   for (const listener of localLanguageListeners) listener(lng);
+}
+
+/** Load a linked catalog before its owner rechecks authority and commits the preference. */
+export async function prepareAccountLanguage(
+  value: string | null,
+): Promise<boolean> {
+  if (value !== null && !isLanguage(value)) return false;
+  const language = value ?? "en";
+  await i18nReady;
+  await i18n.loadLanguages(language);
+  return i18n.hasResourceBundle(language, "translation");
 }
 
 /** Account imports never emit local edits, including asynchronous i18next events. */

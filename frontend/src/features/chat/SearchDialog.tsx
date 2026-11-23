@@ -58,7 +58,8 @@ export function SearchDialog() {
   const [retryTick, setRetryTick] = useState(0);
   const [activeIdx, setActiveIdx] = useState(0);
   const selectedIdx = Math.min(activeIdx, Math.max(0, hits.length - 1));
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const searchInFlight = useRef(false);
+  const pendingSearch = useRef<(() => Promise<void>) | null>(null);
   const resultsScroll = useRef<HTMLDivElement>(null);
   const resultRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -94,11 +95,16 @@ export function SearchDialog() {
     }
     setSearching(true);
     setSearchError(false);
-    clearTimeout(timer.current);
-    // `active` guards against a stale resolution: if the query changes (or the dialog
-    // closes) while a search is in flight, its result must not overwrite the newer one.
+    // The native scan retains admission until it settles. While it runs,
+    // only the latest debounced query from the current dialog may wait.
     let active = true;
-    timer.current = setTimeout(async () => {
+    const runSearch = async () => {
+      if (!active || !lease.current()) return;
+      if (searchInFlight.current) {
+        pendingSearch.current = runSearch;
+        return;
+      }
+      searchInFlight.current = true;
       try {
         const results = await chat.searchRecent(lease.owner!, query.trim());
         if (active && lease.current()) {
@@ -113,11 +119,17 @@ export function SearchDialog() {
         }
       } finally {
         if (active && lease.current()) setSearching(false);
+        searchInFlight.current = false;
+        const next = pendingSearch.current;
+        pendingSearch.current = null;
+        void next?.();
       }
-    }, 250);
+    };
+    const debounce = setTimeout(runSearch, 250);
     return () => {
       active = false;
-      clearTimeout(timer.current);
+      clearTimeout(debounce);
+      if (pendingSearch.current === runSearch) pendingSearch.current = null;
     };
   }, [
     query,

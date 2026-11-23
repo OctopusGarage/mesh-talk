@@ -638,7 +638,14 @@ export interface NodeStateChangedEvent {
   owner: string;
   account_id: string;
   device_id: string;
-  kind: "state" | "roster" | "delivery" | "files" | "documents" | "sync_status";
+  kind:
+    | "state"
+    | "roster"
+    | "delivery"
+    | "files"
+    | "documents"
+    | "sync_status"
+    | "read_receipts";
 }
 
 export interface PresenceDelta {

@@ -22,7 +22,7 @@ const IPC_WORK_WINDOW: Duration = Duration::from_secs(5);
 static IPC_WORK_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static IPC_WORK: std::sync::OnceLock<IpcWorkObserver> = std::sync::OnceLock::new();
 
-fn ipc_work_enabled() -> bool {
+pub(crate) fn work_trace_enabled() -> bool {
     *IPC_WORK_ENABLED.get_or_init(|| {
         std::env::var_os("MESH_TALK_TRACE_WORK").as_deref() == Some(std::ffi::OsStr::new("1"))
     })
@@ -40,7 +40,7 @@ fn ipc_command_name(enabled: bool, command: &str) -> Option<String> {
 
 /// Capture only a bounded name before Invoke is consumed. Disabled mode allocates nothing.
 pub(crate) fn capture_ipc_work_name(command: &str) -> Option<String> {
-    ipc_command_name(ipc_work_enabled(), command)
+    ipc_command_name(work_trace_enabled(), command)
 }
 
 struct IpcWorkState {
@@ -168,13 +168,14 @@ pub fn init_logging(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::er
         .level_for(STARTUP_LOG_TARGET, LogLevelFilter::Info)
         .level_for(
             IPC_WORK_TARGET,
-            if ipc_work_enabled() {
+            if work_trace_enabled() {
                 LogLevelFilter::Info
             } else {
                 LogLevelFilter::Warn
             },
         )
         .level_for("mesh_talk_core::node::node", LogLevelFilter::Info)
+        .level_for("mesh_talk_core::runtime_startup", LogLevelFilter::Info)
         .timezone_strategy(TimezoneStrategy::UseLocal)
         .build();
 

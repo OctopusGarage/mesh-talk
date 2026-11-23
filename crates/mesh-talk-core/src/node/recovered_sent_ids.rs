@@ -208,6 +208,25 @@ impl IndexedRecoveredSentIds {
         c.execute("UPDATE transcript_sources SET record_count=record_count+1,revision=revision+1 WHERE kind=?1",[super::transcript_repository::RECOVERED_IDS])?;
         Ok(())
     }
+    pub(super) fn check_recovery_write(
+        &self,
+        profile: &std::sync::Arc<crate::storage::profile::context::ProfileStorage>,
+    ) -> Result<(), LogError> {
+        if !std::sync::Arc::ptr_eq(self.source.profile(), profile) {
+            return Err(LogError::CorruptFile(
+                "recovery transcript owners disagree".into(),
+            ));
+        }
+        self.source.check_write()
+    }
+    pub(super) fn write_recovered_on(
+        connection: &rusqlite::Connection,
+        entry: &SentEntry,
+        id: EventId,
+    ) -> Result<(), LogError> {
+        Self::insert_on(connection, &SentFingerprint::of(entry), id, false)
+    }
+    #[cfg(test)]
     pub(crate) fn record(&mut self, entry: &SentEntry, id: EventId) -> Result<(), LogError> {
         self.source.check_write()?;
         let fingerprint = SentFingerprint::of(entry);

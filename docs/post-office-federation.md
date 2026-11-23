@@ -235,6 +235,10 @@ round.
 
 ## Indexed relay runtime and resource bounds
 
+Use the [headless post-office performance requirements](performance-requirements.md#headless-post-office-nodes)
+for startup, steady idle, active traffic and return-to-idle verification. Register
+new reception, custody and federation work with its [event or scheduling owner](event-driven-design.md#register-relay-work-with-its-owner).
+
 The dedicated CLI serves plain mailboxes, named bridges/gateways, pinned
 federation and approved-network federation through one encrypted indexed store
 and shared endpoint. Normal reopen does not load retained ciphertext bodies or

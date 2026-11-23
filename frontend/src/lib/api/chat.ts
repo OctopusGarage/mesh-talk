@@ -602,8 +602,10 @@ export const chat = {
     }),
   createChannel: (name: string, memberAccountIds: string[]) =>
     invoke<string>("create_channel", { name, memberAccountIds }),
-  channelMembers: (channelId: string) =>
-    invoke<ChannelMembersInfo>("channel_members", { channelId }),
+  channelMembers: (
+    channelId: string,
+    options?: { includeAccountAccess: boolean },
+  ) => invoke<ChannelMembersInfo>("channel_members", { channelId, ...options }),
   setChannelHistoryPolicy: (channelId: string, policy: ChannelHistoryPolicy) =>
     invoke<void>("set_channel_history_policy", { channelId, policy }),
   setChannelReplicaEnabled: (channelId: string, enabled: boolean) =>

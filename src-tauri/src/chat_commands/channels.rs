@@ -174,6 +174,7 @@ pub async fn channel_members(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
+    include_account_access: Option<bool>,
 ) -> Result<ChannelMembersInfo, CommandError> {
     let admission = RuntimeAdmission::capture_current(&app, &state)?;
     admission
@@ -280,7 +281,9 @@ pub async fn channel_members(
                     .and_then(|r| r.owner_account_id.clone())
                     .or_else(|| node.channel_owner_account_id(channel)),
                 can_manage: reference.is_none() && node.channel_can_manage(channel)?,
-                account_access: Some(AccountGroupAccessInfo::read(&node, channel)),
+                account_access: include_account_access
+                    .unwrap_or(true)
+                    .then(|| AccountGroupAccessInfo::read(&node, channel)),
                 members,
             })
         })

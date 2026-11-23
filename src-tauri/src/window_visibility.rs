@@ -117,6 +117,25 @@ pub(crate) fn retire_initial_presentation<R: tauri::Runtime>(window: &Window<R>)
     }
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+pub(crate) struct ObservedMinimized(std::sync::atomic::AtomicBool);
+
+#[cfg(target_os = "windows")]
+pub(crate) fn publish_minimized<R: tauri::Runtime>(window: &Window<R>) {
+    use std::sync::atomic::Ordering;
+    use tauri::{Emitter, Manager};
+    if window.label() != "main" {
+        return;
+    }
+    if let Ok(value) = window.is_minimized()
+        && let Some(state) = window.try_state::<ObservedMinimized>()
+        && state.0.swap(value, Ordering::AcqRel) != value
+    {
+        let _ = window.emit("main-window-minimized", value);
+    }
+}
+
 pub(crate) fn observe_window_event<R: tauri::Runtime>(
     window: &Window<R>,
     event: &tauri::WindowEvent,

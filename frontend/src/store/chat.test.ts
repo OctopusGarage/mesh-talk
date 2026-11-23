@@ -441,7 +441,7 @@ it("keeps repeated roster pages out of document and full group refreshes", async
       "roster",
       ["unknown"],
       { roster: true },
-      Array(7).fill("roster"),
+      Array(8).fill("roster"),
     ]) {
       kinds = malformed;
       invoke.mockClear();
@@ -1644,6 +1644,36 @@ it("refreshes channel member snapshots for group avatars", async () => {
   const first = useChat.getState().channelMembersById;
   await useChat.getState().refreshRoster();
   expect(useChat.getState().channelMembersById).toBe(first);
+});
+
+it("defers hidden roster repair of group members while preserving explicit refresh", async () => {
+  vi.stubGlobal("document", { visibilityState: "hidden" });
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "owner_node_identity")
+      return { owner: "host", device_id: "me", account_id: "myacct" };
+    if (command === "list_channels")
+      return [
+        { channel_id: "team", name: "Team", owner: "me", member_count: 1 },
+      ];
+    if (command === "channel_members")
+      return { owner: "me", members: [{ user_id: "peer", name: "Alice" }] };
+    return [];
+  });
+  try {
+    await useChat.getState().refreshRoster();
+    expect(
+      invoke.mock.calls.some(([command]) => command === "list_accounts"),
+    ).toBe(true);
+    expect(
+      invoke.mock.calls.some(([command]) => command === "channel_members"),
+    ).toBe(false);
+    await useChat.getState().refreshChannels("team");
+    expect(useChat.getState().channelMembersById.team).toEqual([
+      { user_id: "peer", name: "Alice" },
+    ]);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 it("reports a failed member removal to the dialog", async () => {
@@ -6092,6 +6122,45 @@ it("hydrates verified startup identity and persisted reception before full runti
   }
 });
 
+it("observes installed runtime readiness on a matching reception wake before the repair timer", async () => {
+  vi.useFakeTimers();
+  let available = false;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return available
+        ? Promise.resolve({
+            owner: "host",
+            device_id: "me",
+            account_id: "myacct",
+          })
+        : Promise.reject(new Error("node not started"));
+    if (command === "owner_startup_identity") return Promise.resolve(null);
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  const hint = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "one",
+  };
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(false);
+    available = true;
+    captured.current!.onReceptionWake({ ...hint, owner: "other-host" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(false);
+
+    captured.current!.onReceptionWake(hint);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(true);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
 it("revokes staged appearance identity on a new pending or failed startup ticket", async () => {
   vi.useFakeTimers();
   let snapshot = {
@@ -7776,7 +7845,7 @@ it("keeps roster reconciliation quiet with native push after startup", async () 
   }
 });
 
-it.each(["documents", "sync_status"])(
+it.each(["documents", "sync_status", "read_receipts"])(
   "keeps qualified %s reception changes out of settled group and personal queries",
   async (domain) => {
     vi.useFakeTimers();

@@ -3,9 +3,9 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
 };
-use pbkdf2::pbkdf2_hmac;
 use rand_core::RngCore;
-use sha2::Sha256;
+use ring::pbkdf2;
+use std::num::NonZeroU32;
 use zeroize::Zeroize;
 
 pub const SALT_SIZE: usize = 16;
@@ -37,9 +37,20 @@ impl Drop for EncryptionKey {
 
 impl EncryptionKey {
     pub fn from_password(password: &str, salt: &[u8; SALT_SIZE]) -> Result<Self, StorageError> {
-        let mut key = [0u8; KEY_SIZE];
-        pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, PBKDF2_ROUNDS, &mut key);
-        Ok(EncryptionKey(key))
+        Ok(Self::derive(password, salt, PBKDF2_ROUNDS))
+    }
+
+    fn derive(password: &str, salt: &[u8; SALT_SIZE], rounds: u32) -> Self {
+        let iterations = NonZeroU32::new(rounds).expect("PBKDF2 requires a positive round count");
+        let mut key = Self([0; KEY_SIZE]);
+        pbkdf2::derive(
+            pbkdf2::PBKDF2_HMAC_SHA256,
+            iterations,
+            salt,
+            password.as_bytes(),
+            &mut key.0,
+        );
+        key
     }
 
     pub fn as_bytes(&self) -> &[u8; KEY_SIZE] {
@@ -97,6 +108,19 @@ mod tests {
 
     fn key(pw: &str, salt: &[u8; SALT_SIZE]) -> EncryptionKey {
         EncryptionKey::from_password(pw, salt).unwrap()
+    }
+
+    #[test]
+    fn production_derivation_matches_existing_profile_format() {
+        let salt = [0xA5; SALT_SIZE];
+        let password = "existing profile 密码";
+        let rounds = 600_000;
+        let mut previous = EncryptionKey([0; KEY_SIZE]);
+        ::pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), &salt, rounds, &mut previous.0);
+        assert_eq!(
+            EncryptionKey::derive(password, &salt, rounds).as_bytes(),
+            previous.as_bytes()
+        );
     }
 
     #[test]

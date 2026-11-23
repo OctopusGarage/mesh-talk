@@ -29,7 +29,22 @@ impl Default for LockInner {
     }
 }
 
-fn due(inner: &LockInner, settings: &crate::settings::AppSettings, hidden: bool) -> bool {
+#[derive(Clone, Copy)]
+pub(crate) struct AppLockPolicy {
+    auto_lock_seconds: u32,
+    lock_when_hidden: bool,
+}
+
+impl From<&crate::settings::AppSettings> for AppLockPolicy {
+    fn from(settings: &crate::settings::AppSettings) -> Self {
+        Self {
+            auto_lock_seconds: settings.auto_lock_seconds,
+            lock_when_hidden: settings.lock_when_hidden,
+        }
+    }
+}
+
+fn due(inner: &LockInner, settings: AppLockPolicy, hidden: bool) -> bool {
     inner.lease.is_none()
         && !inner.call_active
         && ((settings.lock_when_hidden && hidden)
@@ -131,13 +146,18 @@ impl AppLock {
 
     pub fn tick<R: tauri::Runtime>(&self, handle: &tauri::AppHandle<R>) {
         let app = handle.state::<AppState>();
-        let settings = handle.state::<crate::settings::SettingsState>().get();
+        let settings = handle
+            .state::<crate::settings::SettingsState>()
+            .app_lock_policy();
         let Ok(lease) = app.session().capture() else {
             return;
         };
-        let hidden = handle
-            .get_webview_window("main")
-            .is_some_and(|window| !window.is_visible().unwrap_or(true));
+        // The visibility query dispatches to the native window thread.
+        // Idle-time locking and the default disabled policy do not need it.
+        let hidden = settings.lock_when_hidden
+            && handle
+                .get_webview_window("main")
+                .is_some_and(|window| !window.is_visible().unwrap_or(true));
         let should_lock = {
             let Ok(mut inner) = self.0.lock() else {
                 return;
@@ -148,7 +168,7 @@ impl AppLock {
                 inner.call_active = false;
                 return;
             }
-            due(&inner, &settings, hidden)
+            due(&inner, settings, hidden)
         };
         if !should_lock {
             return;
@@ -160,7 +180,7 @@ impl AppLock {
                     return false;
                 };
                 let still_due =
-                    inner.generation == lease.generation() && due(&inner, &settings, hidden);
+                    inner.generation == lease.generation() && due(&inner, settings, hidden);
                 if still_due {
                     inner.authorization_revision = inner.authorization_revision.wrapping_add(1);
                     inner.lease = Some(lease.clone());
@@ -598,14 +618,15 @@ mod tests {
     fn native_idle_policy_suspends_during_calls_and_locks_when_hidden() {
         let strict = crate::settings::AppSettings::default()
             .with_privacy_level(crate::settings::PrivacyLevel::Strict);
+        let strict = AppLockPolicy::from(&strict);
         let mut inner = LockInner::default();
-        assert!(!due(&inner, &strict, false));
-        assert!(due(&inner, &strict, true));
+        assert!(!due(&inner, strict, false));
+        assert!(due(&inner, strict, true));
         inner.call_active = true;
         inner.last_activity = Instant::now() - Duration::from_secs(120);
-        assert!(!due(&inner, &strict, true));
+        assert!(!due(&inner, strict, true));
         inner.call_active = false;
-        assert!(due(&inner, &strict, false));
+        assert!(due(&inner, strict, false));
     }
 
     #[test]

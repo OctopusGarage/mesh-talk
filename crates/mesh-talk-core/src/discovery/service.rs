@@ -378,6 +378,11 @@ async fn run_listen_with_routed(
                 if let Some(routed) = &routed {
                     routed.witness("received", source, None, || "datagram".into());
                 }
+                // Matching the bytes we just published is sufficient to discard
+                // local multicast loopback before scope checks or signature work.
+                if buf[..n] == *current_announce(&self_announce).as_slice() {
+                    continue;
+                }
                 if !visibility.accepts_source(source) {
                     #[cfg(test)]
                     if let Some(routed) = &routed {
@@ -679,19 +684,29 @@ async fn run_scan_with_roster(
     }
     if let Some(roster) = roster {
         let mut full_at = tokio::time::Instant::now() + SCAN_QUIET_INTERVAL;
-        let mut known_at = tokio::time::Instant::now();
+        let mut known_at = Some(tokio::time::Instant::now());
         let mut known_cursor = 0usize;
         let mut known_remaining = 0usize;
+        let mut roster_changes = roster.lock().expect("roster mutex").subscribe_changes();
         loop {
-            let triggered = match &trigger {
-                Some(notify) => tokio::select! {
-                    _ = tokio::time::sleep_until(full_at.min(known_at)) => false,
-                    _ = notify.notified() => true,
-                    changed = visibility_changes.changed() => { if changed.is_err() { return; } true },
+            let deadline = known_at.map_or(full_at, |known| full_at.min(known));
+            let triggered = tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => false,
+                _ = async {
+                    match &trigger {
+                        Some(notify) => notify.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => true,
+                changed = visibility_changes.changed() => {
+                    if changed.is_err() { return; }
+                    known_at.get_or_insert_with(tokio::time::Instant::now);
+                    true
                 },
-                None => tokio::select! {
-                    _ = tokio::time::sleep_until(full_at.min(known_at)) => false,
-                    changed = visibility_changes.changed() => { if changed.is_err() { return; } true },
+                changed = roster_changes.changed(), if known_at.is_none() => {
+                    if changed.is_err() { return; }
+                    known_at = Some(tokio::time::Instant::now());
+                    false
                 },
             };
             if triggered || tokio::time::Instant::now() >= full_at {
@@ -706,33 +721,41 @@ async fn run_scan_with_roster(
                 .await;
                 full_at = tokio::time::Instant::now() + SCAN_QUIET_INTERVAL;
             }
-            if tokio::time::Instant::now() >= known_at {
-                let complete = if visibility.is_public().await {
-                    let targets = known_discovery_targets(
-                        &roster.lock().expect("roster mutex"),
-                        discovery_port,
-                    );
-                    let bytes = current_announce(&announce);
-                    send_known_keepalives(
-                        &socket,
-                        &bytes,
-                        &targets,
-                        &visibility,
-                        &mut known_cursor,
-                        &mut known_remaining,
-                    )
-                    .await
+            if known_at.is_some_and(|at| tokio::time::Instant::now() >= at) {
+                // Mark the wake before reading the roster so a concurrent
+                // publication cannot be lost when the keepalive parks.
+                roster_changes.borrow_and_update();
+                let targets = if visibility.is_public().await {
+                    known_discovery_targets(&roster.lock().expect("roster mutex"), discovery_port)
                 } else {
-                    true
+                    Vec::new()
                 };
+                if targets.is_empty() {
+                    known_at = None;
+                    known_cursor = 0;
+                    known_remaining = 0;
+                    continue;
+                }
+                let bytes = current_announce(&announce);
+                let complete = send_known_keepalives(
+                    &socket,
+                    &bytes,
+                    &targets,
+                    &visibility,
+                    &mut known_cursor,
+                    &mut known_remaining,
+                )
+                .await;
                 // A timed-out batch retains its fair cursor and resumes without
                 // another five-second delay. No child outlives this producer.
-                known_at = tokio::time::Instant::now()
-                    + if complete {
-                        KNOWN_KEEPALIVE_INTERVAL
-                    } else {
-                        Duration::from_millis(10)
-                    };
+                known_at = Some(
+                    tokio::time::Instant::now()
+                        + if complete {
+                            KNOWN_KEEPALIVE_INTERVAL
+                        } else {
+                            Duration::from_millis(10)
+                        },
+                );
             }
         }
     }
@@ -773,9 +796,8 @@ async fn run_scan_with_roster(
 // post-office introductions, private authenticated routes or arbitrary history.
 fn known_discovery_targets(roster: &Roster, port: u16) -> Vec<SocketAddr> {
     roster
-        .peers()
-        .into_iter()
-        .flat_map(|peer| peer.routes)
+        .peer_records()
+        .flat_map(|peer| &peer.routes)
         .filter(|route| {
             matches!(
                 route.source,
@@ -982,13 +1004,29 @@ async fn run_rejoin(
     trigger: Arc<Notify>,
     network_changes: Option<tokio::sync::watch::Sender<u64>>,
 ) {
+    // Subscribe before the first inventory so a concurrent handoff remains
+    // observable. Failure falls back to the existing short poll.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    let mut events = super::interface_events::InterfaceEvents::subscribe().ok();
     let mut previous = interface_snapshot();
     let mut last_rejoin = Instant::now();
-    let mut tick = tokio::time::interval(INTERFACE_POLL_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    tick.tick().await;
     loop {
-        tick.tick().await;
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        if let Some(watcher) = &mut events {
+            let remaining = REJOIN_INTERVAL.saturating_sub(last_rejoin.elapsed());
+            tokio::select! {
+                result = watcher.next() => {
+                    if result.is_err() {
+                        events = None;
+                    }
+                }
+                _ = tokio::time::sleep(remaining) => {}
+            }
+        } else {
+            tokio::time::sleep(INTERFACE_POLL_INTERVAL).await;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        tokio::time::sleep(INTERFACE_POLL_INTERVAL).await;
         let changed = update_interface_snapshot(&mut previous, interface_snapshot());
         if changed || last_rejoin.elapsed() >= REJOIN_INTERVAL {
             join_discovery_group_all_ifaces(&socket);
@@ -1508,6 +1546,47 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn idle_discovery_first_known_endpoint_wakes_parked_keepalive() {
+        let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visibility = Arc::new(DiscoveryVisibility::with_inventory(true, || {
+            vec![crate::discovery::scope::LanInterface {
+                address: Ipv4Addr::LOCALHOST.into(),
+                prefix: 32,
+                index: None,
+            }]
+        }));
+        visibility.set_physical_lan_only(true).await;
+        let own = Announce::new(&DeviceIdentity::generate(), "sender", 54321);
+        let peer = Announce::new(&DeviceIdentity::generate(), "receiver", 54322);
+        let roster = Arc::new(Mutex::new(Roster::default()));
+        let worker = tokio::spawn(run_scan_with_roster(
+            sender,
+            shared_announce(&own),
+            receiver.local_addr().unwrap().port(),
+            None,
+            visibility,
+            Some(roster.clone()),
+        ));
+        tokio::task::yield_now().await;
+        for _ in 0..9 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        roster
+            .lock()
+            .unwrap()
+            .update(&peer, Ipv4Addr::LOCALHOST.into(), &own.user_id);
+        let mut bytes = [0; 2048];
+        let observed =
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut bytes)).await;
+        worker.abort();
+        let _ = worker.await;
+        let (len, _) = observed.expect("first route must wake keepalive").unwrap();
+        assert_eq!(decode(&bytes[..len]), Some(own));
+    }
+
     #[tokio::test]
     async fn idle_discovery_known_ready_batches_reach_tail_beyond_subnet_budget() {
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1592,6 +1671,61 @@ mod tests {
             started.elapsed() >= Duration::from_millis(50),
             "fallback probes must be paced"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_local_announce_bypasses_scope_inventory_but_peer_still_discovers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = receiver.local_addr().unwrap();
+        let own = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let own_announce = Announce::new(&own, "self", 43210);
+        let peer_announce = Announce::new(&peer, "peer", 43211);
+        let inventories = Arc::new(AtomicUsize::new(0));
+        let visibility = Arc::new(DiscoveryVisibility::with_inventory(true, {
+            let inventories = inventories.clone();
+            move || {
+                inventories.fetch_add(1, Ordering::SeqCst);
+                vec![crate::discovery::scope::LanInterface {
+                    address: "127.0.0.2".parse().unwrap(),
+                    prefix: 24,
+                    index: None,
+                }]
+            }
+        }));
+        visibility.set_physical_lan_only(true).await;
+        let roster = Arc::new(Mutex::new(Roster::default()));
+        let worker = tokio::spawn(run_listen_with_visibility(
+            receiver,
+            roster.clone(),
+            own.user_id(),
+            shared_announce(&own_announce),
+            sender.local_addr().unwrap().port(),
+            visibility,
+        ));
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            sender
+                .send_to(&encode(&own_announce), target)
+                .await
+                .unwrap();
+            sender
+                .send_to(&encode(&peer_announce), target)
+                .await
+                .unwrap();
+            let mut reply = [0; 2048];
+            let (bytes, _) = sender.recv_from(&mut reply).await.unwrap();
+            assert_eq!(reply[..bytes], encode(&own_announce));
+        })
+        .await;
+        worker.abort();
+        let _ = worker.await;
+        result.expect("the peer should receive a first-contact reply");
+        assert_eq!(roster.lock().unwrap().peers().len(), 1);
+        // Initial scope, incoming peer admission and outbound reply admission.
+        assert_eq!(inventories.load(Ordering::SeqCst), 3);
     }
 
     #[test]

@@ -21,6 +21,21 @@ fn emit_info(logger: &dyn log::Log, args: std::fmt::Arguments<'_>) {
     }
 }
 
+pub(super) fn startup_phase_clock(scope: &'static str) -> impl Fn(&'static str) + Copy {
+    let clock = (std::env::var_os("MESH_TALK_TRACE_WORK").as_deref()
+        == Some(std::ffi::OsStr::new("1")))
+    .then(Instant::now);
+    move |phase| {
+        if let Some(clock) = clock {
+            log::info!(
+                target: "mesh_talk_core::runtime_startup",
+                "runtime_startup phase={phase} elapsed_ms={} scope={scope}",
+                clock.elapsed().as_millis()
+            );
+        }
+    }
+}
+
 const INTERVAL: Duration = Duration::from_secs(30);
 const ROWS: usize = 64;
 

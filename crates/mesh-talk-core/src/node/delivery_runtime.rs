@@ -2677,6 +2677,7 @@ impl Node {
         let _observation_scope = ObservationScope(self.clone());
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut idle_repair = None;
         let mut destination_cursor = None;
         let mut receipt_cursor = None;
         let mut peer_cursor = None;
@@ -2706,10 +2707,18 @@ impl Node {
                 },
                 changed = roster_changes.changed(), if roster_open => {
                     if changed.is_ok() {
-                        if !file_scheduler.refresh_held(&self, std::time::Instant::now()) { continue; }
+                        if !file_scheduler.refresh_held(&self, std::time::Instant::now()) && idle_repair.is_none() {
+                            continue;
+                        }
                     } else { roster_open = false; continue; }
                 },
-                _ = interval.tick() => {},
+                _ = interval.tick(), if idle_repair.is_none() => {},
+                _ = async {
+                    match idle_repair {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {},
                 _ = self.delivery_notify.notified() => {},
                 _ = network.changed() => {
                     self.clear_delivery_observations();
@@ -2730,7 +2739,9 @@ impl Node {
                     self.channel_recovery_notify.notify_one();
                     self.account_sync_notify.notify_one();
                     self.bridge_notify.notify_one();
-                    continue;
+                    if idle_repair.is_none() {
+                        continue;
+                    }
                 },
                 result = controls.join_next_with_id(), if !controls.is_empty() => {
                     match result {
@@ -2778,6 +2789,9 @@ impl Node {
                     continue;
                 },
             }
+            // Only a successful empty turn may park. Errors fall back to
+            // the existing active pace and preserve repair progress.
+            idle_repair = None;
             // A new route for an active peer/eligible relay must not wait behind
             // an exchange still blocked on its old endpoint. Refresh timestamps
             // and unrelated peers do not invalidate the bounded control batch.
@@ -2849,6 +2863,7 @@ impl Node {
                     continue;
                 }
             };
+            let has_durable_work = destination.is_some() || receipt.is_some() || !files.is_empty();
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
                 let key = ControlWork::Destination(destination.event_id);
@@ -3036,7 +3051,21 @@ impl Node {
             file_scheduler.advance(&self);
             // Historical identity authorizes a control pull even with its sender
             // offline. The cursor advances before any bounded network await.
-            let peer = if active.keys().any(|key| matches!(key, ControlWork::Pull(_))) {
+            let explicitly_verified = !self
+                .verified_dm_pull_peers
+                .lock()
+                .expect("verified DM pull mutex not poisoned")
+                .is_empty();
+            let has_pull_demand = explicitly_verified
+                || (self.bridge_directory_allowed()
+                    && !self
+                        .bridge_dm_pull_peers
+                        .lock()
+                        .expect("bridge peers mutex not poisoned")
+                        .is_empty());
+            let peer = if !has_pull_demand
+                || active.keys().any(|key| matches!(key, ControlWork::Pull(_)))
+            {
                 None
             } else {
                 let state = self
@@ -3053,6 +3082,20 @@ impl Node {
                         .next_historical_after(peer_cursor.as_deref())
                 }
             };
+            // Preserve the circular reconciliation scan and pacing whenever
+            // a verified-device or bridge policy can authorize proactive pulls.
+            // Check real worker ownership before parking on an empty snapshot.
+            if !has_durable_work
+                && controls.is_empty()
+                && file_scheduler.workers.is_empty()
+                && file_scheduler.transfers.is_empty()
+                && !has_pull_demand
+            {
+                // Sparse repair covers a missed local notification or an
+                // externally replaced journal. Accepted work and route
+                // changes still wake the existing owner immediately.
+                idle_repair = Some(tokio::time::Instant::now() + Duration::from_secs(300));
+            }
             if let Some(peer) = peer {
                 peer_cursor = Some(peer.user_id.clone());
                 if peer.post_office

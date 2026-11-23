@@ -204,13 +204,24 @@ impl PostOfficeDrainSchedule {
         None
     }
 
-    fn completed(&mut self, key: DrainKey, result: Option<bool>, now: tokio::time::Instant) {
+    fn completed(
+        &mut self,
+        key: DrainKey,
+        result: Option<bool>,
+        source_changed: bool,
+        now: tokio::time::Instant,
+    ) {
         if result == Some(true) && self.primary.is_none() {
             self.primary = Some(key.clone());
         } else if result != Some(true) && self.primary.as_ref() == Some(&key) {
             self.primary = None;
         }
         self.due.retain(|(candidate, _)| candidate != &key);
+        // A dirty active exchange needs an immediate follow-up. A turn
+        // without any attributable scope keeps its ordinary retry deadline.
+        if source_changed && result.is_some() {
+            return;
+        }
         if self.due.len() >= MAX_DRAIN_DUE_ENTRIES {
             self.due.pop_front();
         }
@@ -2446,12 +2457,16 @@ impl Node {
     }
 
     fn post_office_drain_peers(&self) -> Vec<crate::discovery::Announce> {
-        let mut peers = self
-            .historical_dm_peers()
-            .into_iter()
-            .filter(|peer| self.verified_dm_pull_peer(&peer.public().user_id()))
-            .collect::<Vec<_>>();
-        peers.extend(self.group_mailbox_peers());
+        let proofs = self.historical_peer_proofs();
+        let mut peers: Vec<_> = proofs
+            .iter()
+            .filter(|proof| {
+                self.historical_dm_peer_allowed(proof)
+                    && self.verified_dm_pull_peer(&proof.public().user_id())
+            })
+            .cloned()
+            .collect();
+        peers.extend(self.group_mailbox_peers(&proofs));
         peers.sort_unstable_by_key(|peer| peer.public().user_id());
         peers.dedup_by_key(|peer| peer.public().user_id());
         peers
@@ -3154,6 +3169,26 @@ mod post_office_drain_schedule_tests {
     }
 
     #[test]
+    fn empty_dirty_drain_retains_deadline_while_active_scope_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = node(dir.path());
+        let candidates = candidates(&node, 1);
+        let mut schedule = PostOfficeDrainSchedule::default();
+        let key = candidates[0].0.clone();
+        let now = tokio::time::Instant::now();
+
+        schedule.completed(key.clone(), None, true, now);
+        assert!(schedule.select(&candidates, &[], now).is_none());
+        assert_eq!(
+            schedule.select(&candidates, &[], now + POST_OFFICE_DRAIN_INTERVAL),
+            Some(0)
+        );
+
+        schedule.completed(key, Some(true), true, now);
+        assert_eq!(schedule.select(&candidates, &[], now), Some(0));
+    }
+
+    #[test]
     fn drain_work_identity_ignores_preference_but_preserves_endpoint_and_authority_changes() {
         let dir = tempfile::tempdir().unwrap();
         let node = node(dir.path());
@@ -3206,7 +3241,7 @@ mod post_office_drain_schedule_tests {
         active.push(candidates[1].0.clone());
         assert_eq!(schedule.select(&candidates, &active, now), None);
         active.pop();
-        schedule.completed(candidates[1].0.clone(), Some(true), now);
+        schedule.completed(candidates[1].0.clone(), Some(true), false, now);
         assert_eq!(
             schedule.select(&candidates, &active, now),
             None,
@@ -3219,12 +3254,12 @@ mod post_office_drain_schedule_tests {
         let next = now + POST_OFFICE_DRAIN_INTERVAL;
         assert_eq!(schedule.select(&candidates, &active, next), Some(1));
         active.clear();
-        schedule.completed(candidates[0].0.clone(), Some(true), next);
-        schedule.completed(candidates[1].0.clone(), Some(true), next);
+        schedule.completed(candidates[0].0.clone(), Some(true), false, next);
+        schedule.completed(candidates[1].0.clone(), Some(true), false, next);
         assert_eq!(schedule.select(&candidates, &active, next), Some(2));
-        schedule.completed(candidates[2].0.clone(), Some(true), next);
+        schedule.completed(candidates[2].0.clone(), Some(true), false, next);
         assert_eq!(schedule.select(&candidates, &active, next), Some(3));
-        schedule.completed(candidates[1].0.clone(), Some(false), next);
+        schedule.completed(candidates[1].0.clone(), Some(false), false, next);
         assert!(
             schedule.primary.is_none(),
             "an actual failure yields the primary role"
@@ -3239,7 +3274,7 @@ mod post_office_drain_schedule_tests {
         let now = tokio::time::Instant::now();
         let mut schedule = PostOfficeDrainSchedule::default();
         for (key, _) in &candidates[..MAX_DRAIN_DUE_ENTRIES] {
-            schedule.completed(key.clone(), None, now);
+            schedule.completed(key.clone(), None, false, now);
         }
         assert_eq!(schedule.due.len(), MAX_DRAIN_DUE_ENTRIES);
         assert_eq!(schedule.select(&candidates, &[], now), None);
