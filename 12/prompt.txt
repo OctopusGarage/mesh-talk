@@ -1,0 +1,3 @@
+Act as the research sub-agent for this task.
+
+Read-only apart from ignored research note. Research REQ-023 small LAN group voice media: full mesh, local playback mixing, codecs, metrics, desktop WebKit risks, tradeoffs vs SFU/MCU. Use primary RFC/W3C and existing calls code at /Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-023. Write ignored tmp/req-023-media-sources.md there. No code or tests.
