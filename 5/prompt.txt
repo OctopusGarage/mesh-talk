@@ -1,0 +1,3 @@
+Act as the research sub-agent for this task.
+
+Independently verify first-party Columba, Reticulum/LXMF, Bitchat, Technitium Mesh, and identify possible HostTalk source without conflation. Verify original claims (calls/media vs links, physical transport/hardware, encryption/identity, routing, no-internet vs no-LAN, runtime unknown). Provide all source URLs, candidate requirements and gates. No delegation/builds/commits. Save English notes in /Users/kingsonwu/programming/OctopusGarage/mesh-talk/.worktrees/req-029/tmp/req-029-mesh-sources.md.
