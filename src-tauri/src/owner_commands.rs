@@ -3334,10 +3334,27 @@ mod tests {
         release_session.send(()).unwrap();
         authority.join().unwrap();
 
-        let (mut control, _) = request(&fresh);
-        let mut expected = String::new();
-        control.read_to_string(&mut expected).unwrap();
-        assert!(expected.starts_with("HTTP/1.1 200"));
+        // Releasing desktop authority does not join the earlier projection or
+        // quiesce other source users. A read can fail closed while they drain.
+        let recovery_deadline = Instant::now() + Duration::from_secs(3);
+        let expected = loop {
+            let (mut control, _) = request(&fresh);
+            let mut response = String::new();
+            control.read_to_string(&mut response).unwrap();
+            if response.starts_with("HTTP/1.1 200") {
+                break response;
+            }
+            assert!(
+                response.starts_with("HTTP/1.1 404")
+                    && response
+                        .split_once("\r\n\r\n")
+                        .is_some_and(|(_, body)| body.is_empty())
+                    && Instant::now() < recovery_deadline,
+                "control response status: {:?}",
+                response.lines().next()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
         assert!(expected.ends_with(text));
 
         // A request that expires before it can acquire desktop authority

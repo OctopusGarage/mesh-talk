@@ -248,10 +248,15 @@ pub fn get_log_file(app_handle: tauri::AppHandle) -> Result<String, crate::comma
 #[tauri::command]
 pub async fn read_log_tail(
     app_handle: tauri::AppHandle,
+    app: tauri::State<'_, crate::state::AppState>,
 ) -> Result<String, crate::commands::CommandError> {
-    tokio::task::spawn_blocking(move || read_log_tail_blocking(&app_handle))
+    let authority = crate::diagnostics::DiagnosticsAuthority::capture(&app)?;
+    let tail = tokio::task::spawn_blocking(move || read_log_tail_blocking(&app_handle))
         .await
-        .map_err(|e| crate::commands::CommandError::Internal(format!("log worker failed: {e}")))?
+        .map_err(|e| {
+            crate::commands::CommandError::Internal(format!("log worker failed: {e}"))
+        })??;
+    authority.checked(|| Ok(tail))
 }
 
 fn read_log_tail_blocking(
@@ -283,9 +288,12 @@ fn read_log_tail_blocking(
 pub async fn save_log_tail(
     app_handle: tauri::AppHandle,
     dest: String,
+    app: tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), crate::commands::CommandError> {
+    let authority = crate::diagnostics::DiagnosticsAuthority::capture(&app)?;
     tokio::task::spawn_blocking(move || {
         let tail = read_log_tail_blocking(&app_handle)?;
+        authority.checked(|| Ok(()))?;
         fs::write(&dest, tail).map_err(|e| e.to_string())?;
         Ok(())
     })

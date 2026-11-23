@@ -807,6 +807,7 @@ pub async fn logout<R: tauri::Runtime>(
             .map_err(CommandError::Authentication)?;
         let result = logout_impl(app_state.inner())?;
         app_state.lan_review.stop(&lease);
+        mesh_talk_core::transport::diagnostics::stop_current();
         *app_state.drafts.lock().unwrap() = None;
         settings_state.deactivate();
         app_state.app_lock().clear();

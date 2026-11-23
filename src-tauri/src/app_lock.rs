@@ -185,6 +185,7 @@ impl AppLock {
                     inner.authorization_revision = inner.authorization_revision.wrapping_add(1);
                     inner.lease = Some(lease.clone());
                     app.lan_review.stop(&lease);
+                    mesh_talk_core::transport::diagnostics::stop_current();
                 }
                 still_due
             })
@@ -236,6 +237,7 @@ pub fn lock_app(
         .matching(&lease, |_| {
             state.lock(lease.clone())?;
             app.lan_review.stop(&lease);
+            mesh_talk_core::transport::diagnostics::stop_current();
             Ok::<(), CommandError>(())
         })
         .map_err(CommandError::Authorization)??;
@@ -491,6 +493,26 @@ mod tests {
         };
         let lease = app.session().publish("token".into(), user, "pw".into());
         (root, app, lease)
+    }
+
+    #[test]
+    fn diagnostics_authority_rejects_completed_work_after_lock_or_session_replacement() {
+        let (_root, app, lease) = sensitive_fixture();
+        let authority = crate::diagnostics::DiagnosticsAuthority::capture(&app).unwrap();
+        assert_eq!(authority.checked(|| Ok(7)).unwrap(), 7);
+        app.app_lock().lock(lease.clone()).unwrap();
+        assert!(crate::diagnostics::DiagnosticsAuthority::capture(&app).is_err());
+        app.app_lock().unlock(&lease).unwrap();
+        assert!(authority.checked(|| Ok(7)).is_err());
+
+        let current = crate::diagnostics::DiagnosticsAuthority::capture(&app).unwrap();
+        let user = app
+            .session()
+            .matching(&lease, |info| info.user.clone())
+            .unwrap();
+        app.session()
+            .publish("replacement".into(), user, "pw".into());
+        assert!(current.checked(|| Ok(7)).is_err());
     }
 
     #[cfg(not(target_os = "macos"))]

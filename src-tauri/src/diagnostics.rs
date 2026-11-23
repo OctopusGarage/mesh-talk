@@ -5,7 +5,45 @@
 use crate::commands::CommandError;
 use serde::Serialize;
 
+use crate::state::{AppState, SessionLease};
+
 mod process_resources;
+
+/// Authority for diagnostics work that can finish after the IPC entry check.
+pub(crate) struct DiagnosticsAuthority {
+    app: AppState,
+    lease: SessionLease,
+    lock_revision: u64,
+}
+
+impl DiagnosticsAuthority {
+    pub(crate) fn capture(app: &AppState) -> Result<Self, CommandError> {
+        let authority = Self {
+            app: app.clone(),
+            lease: app
+                .session()
+                .capture()
+                .map_err(CommandError::Authorization)?,
+            lock_revision: app.app_lock().authorization_revision()?,
+        };
+        authority.checked(|| Ok(()))?;
+        Ok(authority)
+    }
+
+    pub(crate) fn checked<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        self.app
+            .session()
+            .matching(&self.lease, |_| {
+                self.app
+                    .app_lock()
+                    .with_unchanged_revision(self.lock_revision, operation)
+            })
+            .map_err(CommandError::Authorization)?
+    }
+}
 
 static DESKTOP_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static INITIAL_INTERFACE_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -45,8 +83,9 @@ pub struct HostResourceSample {
 }
 
 #[tauri::command]
-pub fn start_host_resource_sampling() -> u64 {
-    mesh_talk_core::transport::diagnostics::begin()
+pub fn start_host_resource_sampling(app: tauri::State<'_, AppState>) -> Result<u64, CommandError> {
+    DiagnosticsAuthority::capture(&app)?
+        .checked(|| Ok(mesh_talk_core::transport::diagnostics::begin()))
 }
 
 #[tauri::command]
@@ -56,10 +95,12 @@ pub fn stop_host_resource_sampling(ticket: u64) {
 
 #[tauri::command]
 pub async fn host_resource_sample(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, crate::chat_commands::NodeState>,
     ticket: u64,
     include_backlog: Option<bool>,
 ) -> Result<Option<HostResourceSample>, CommandError> {
+    let authority = DiagnosticsAuthority::capture(&app)?;
     let node = include_backlog
         .unwrap_or(false)
         .then(|| {
@@ -70,7 +111,7 @@ pub async fn host_resource_sample(
                 .and_then(|slot| slot.as_ref().map(|runtime| runtime.handle()))
         })
         .flatten();
-    tauri::async_runtime::spawn_blocking(move || {
+    let reading = tauri::async_runtime::spawn_blocking(move || {
         use std::{sync::OnceLock, time::Instant};
         static SAMPLE_ORIGIN: OnceLock<Instant> = OnceLock::new();
         let transport = mesh_talk_core::transport::diagnostics::sample(ticket)?;
@@ -91,7 +132,8 @@ pub async fn host_resource_sample(
         })
     })
     .await
-    .map_err(|error| CommandError::Io(error.to_string()))
+    .map_err(|error| CommandError::Io(error.to_string()))?;
+    authority.checked(|| Ok(reading))
 }
 
 #[cfg(any(target_os = "linux", test))]

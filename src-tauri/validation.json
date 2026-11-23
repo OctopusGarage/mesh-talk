@@ -1097,7 +1097,13 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["diagnostics::", "updates::", "perf::", "logger::"]
+          "filters": [
+            "diagnostics::",
+            "updates::",
+            "perf::",
+            "logger::",
+            "app_lock::tests::diagnostics_authority_rejects_completed_work_after_lock_or_session_replacement"
+          ]
         }
       ],
       "capability": {
@@ -1111,6 +1117,10 @@
           {
             "name": "The desktop resource IPC reads one bounded snapshot of the host and identifiable descendant processes under a visible sampling lease without creating a collector, making network requests or touching account state.",
             "reference": "docs/performance-requirements.md#desktop-resource-monitor"
+          },
+          {
+            "name": "Lock and logout retire the live sampler. A delayed resource snapshot or log-tail read can publish only under the originating desktop session and unchanged app-lock revision.",
+            "reference": "docs/privacy-controls.md#exposure-by-observer"
           },
           {
             "name": "IPC work summaries are disabled by default, record only bounded registered command names after handled dispatch, exclude lock rejection and unhandled inputs, and emit outside nonblocking observation guards without a background timer. Counts do not establish completion, success or CPU attribution; arguments, results and private state never enter the observer.",

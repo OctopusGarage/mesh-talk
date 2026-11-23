@@ -226,6 +226,40 @@ message from a distinct device still triggers prompt eligibility checking; an
 in-flight read can publish while same-device receipts continue. Drained work
 leaves no timer. Device hints never establish account identity or history.
 
+## Exposure by observer
+
+Evaluate confidentiality and linkability separately. Passive observers,
+authenticated peers, authorized recipients and optional relay operators have
+different views. An administrator with access to a local endpoint or an
+exported file is a separate threat.
+
+| Surface | Protection and residual exposure |
+| --- | --- |
+| Local sign-in and profile | Local credentials, encrypted profile storage and account/device signing keys protect different assets. The authenticated runtime handles live key material. App lock controls app access but does not evict live keys. See [startup verification](#startup-verification) and the [storage architecture](ARCHITECTURE.md). |
+| Physical LAN discovery | A passive observer on a reachable discovery segment can see source addresses and readable [signed announcements](../crates/mesh-talk-core/src/discovery/announce.rs), including identity keys, display name, listener port and the account certificate when present. Signatures authenticate those facts. Stable fields and timing permit correlation. |
+| Direct chat, history and files | [Noise and signed reconciliation](network-design-reference.md) protect authenticated application traffic. Network observers can see socket endpoints, packet sizes and timing. The direct endpoint knows its authenticated counterpart and gains only the content authorized by membership, history and file policy. |
+| Post-office custody and federation | [Opaque mailbox protection](post-office-metadata-privacy.md) keeps inner content encrypted for the recipient under its documented key assumptions. Relays retain visibility of the connecting address, mailbox pseudonyms, sizes and timing. Trusted federation participants may correlate the mailbox pseudonyms they share. |
+| Calls and screen sharing | [Call signaling and media](network-design-reference.md#f-calls-live-signaling-and-separate-media) use separate paths. Authorized participants receive the media. ICE and the established media route have their own address exposure. Post-office mailbox delivery does not provide a call media relay. |
+| Temporary browser review | [LAN review](lan-review.md) sends selected text and the link using HTTP. A recipient or LAN observer may retain an authorized response. Lock, logout, expiry and revocation stop future admissions; an already authorized response may finish within its deadline. |
+| Diagnostics and exports | A desktop session must still hold its original session and lock revision when a background sample or log read is released. Lock and logout retire monitoring. The log tail comes from an app-wide file and may include earlier sessions, identifiers, paths, addresses or errors. Copy and save export raw text. Review the output before sharing. An explicitly admitted file export may finish after lock. |
+| Backup and integrations | [Recovery-key encryption](backup-recovery.md) protects archives under its documented key assumptions. A storage provider can still see archive metadata and service activity. [Integration grants](bot-integrations.md) restrict approved access. Recipients and external consumers may retain data already disclosed. |
+
+### Reducing address and identity exposure
+
+Restricting public discovery and optional origin disclosure can reduce
+application-level identifiers visible outside the permitted audience. An
+indirect data path can avoid giving the other endpoint a direct connection
+address for that path. The intermediary still observes connection endpoints
+and traffic patterns. A separate direct, discovery or media path can expose
+additional addresses.
+
+Requiring indirect delivery everywhere would add a dependency on relay
+availability and capacity, change latency and energy costs, and require
+separate acceptance for discovery, calls and offline recovery. Stable
+account and device proofs currently support contact trust, key transitions
+and synchronization. Any change to those proofs, default discovery or route
+policy requires an agreed observer model and compatibility evidence.
+
 ## Limits
 
 Files exported outside the encrypted app store and text copied to the clipboard

@@ -49,6 +49,13 @@ pub fn stop(id: u64) {
     }
 }
 
+/// Retire the desktop observation at the owner or app-lock boundary.
+pub fn stop_current() {
+    let mut observation = OBSERVATION.lock().unwrap();
+    *observation = None;
+    ENABLED.store(false, Relaxed);
+}
+
 pub fn sample(id: u64) -> Option<TransportCounters> {
     let mut observation = OBSERVATION.lock().unwrap();
     let value = observation.as_mut().filter(|value| value.id == id)?;
