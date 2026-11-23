@@ -10876,6 +10876,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     }
     let history = incoming_sibling_history;
     assert_eq!(history.len(), 1, "A2 must recover the DM from A1");
+    assert_eq!(history[0].id, incoming_source_history[0].id);
     assert_eq!(history[0].text, b"while A2 was offline");
     assert!(!history[0].from_me);
     assert!(

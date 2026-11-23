@@ -691,11 +691,6 @@ impl ReceivedStore {
     }
 }
 
-#[cfg(test)]
-pub(in crate::node) mod deadline_observations {
-    std::thread_local! { pub static ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
-}
-
 pub(in crate::node) fn note_message_reception(
     entry: &ReceivedEntry,
     metadata: &super::reception_effects::ReceptionMetadata,
@@ -749,4 +744,9 @@ pub(in crate::node) fn note_message_reception(
         }
         metrics.received(group, kind, size);
     });
+}
+
+#[cfg(test)]
+pub(in crate::node) mod deadline_observations {
+    std::thread_local! { pub static ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 }
