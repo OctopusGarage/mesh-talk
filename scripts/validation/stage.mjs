@@ -6,6 +6,7 @@ import { createWriteStream, existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { Writable } from "node:stream";
+import { finished } from "node:stream/promises";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -323,10 +324,13 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
       retireAfterExit();
       finalizingOutput = true;
       if (signal?.aborted) cancelLog();
-      await new Promise(done => output.end(failure => {
-        if (failure) { error ||= failure.message; failureKind ||= "failed"; abort(); }
-        done();
-      }));
+      const outputSettled = finished(output, { cleanup: true }).catch(failure => {
+        error ||= failure.message;
+        failureKind ||= "failed";
+        abort();
+      });
+      if (!output.destroyed) output.end();
+      await outputSettled;
       await cleanup;
       signal?.removeEventListener("abort", cancel);
       resolve({ code: signal?.aborted ? 130 : error ? 1 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind, cleanupUnverified, forcedRetirement, exitCode: code, signal: childSignal });

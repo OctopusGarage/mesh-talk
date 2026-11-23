@@ -9,7 +9,7 @@ import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
 
 const signalReadyWorker = "process.on('SIGTERM',()=>{});const fs=require('node:fs');const ready=process.argv[1];fs.writeFileSync(ready+'.pending',String(process.pid));fs.renameSync(ready+'.pending',ready);setInterval(()=>{},1000)";
 
-for (const phase of ["write", "final"]) for (const cancelled of [true, false]) test(`${cancelled ? "cancellation settles held" : "failure rejects"} log ${phase} after actual command retirement`, { skip: process.platform === "win32", timeout: 12000 }, async () => {
+for (const [phase, cancelled] of [["write", true], ["write", false], ["final", true], ["final", false], ["before-final", true]]) test(`${cancelled ? "cancellation settles held" : "failure rejects"} log ${phase} after actual command retirement`, { skip: process.platform === "win32", timeout: 12000 }, async () => {
   const { execute } = await import("../validation/stage.mjs");
   const { Writable } = await import("node:stream");
   const controller = new AbortController();
@@ -17,7 +17,7 @@ for (const phase of ["write", "final"]) for (const cancelled of [true, false]) t
   const originalKill = process.kill;
   let groupAbsenceVerified = false;
   const lateGroupSignals = [];
-  if (phase === "final") process.kill = function (target, signal) {
+  if (phase !== "write") process.kill = function (target, signal) {
     if (target !== -pid) return originalKill.call(this, target, signal);
     if (groupAbsenceVerified) {
       // Never actually signal a PGID after the kernel proved it absent.
@@ -26,7 +26,13 @@ for (const phase of ["write", "final"]) for (const cancelled of [true, false]) t
     }
     try { return originalKill.call(this, target, signal); }
     catch (error) {
-      if (signal === 0 && error.code === "ESRCH") groupAbsenceVerified = true;
+      if (signal === 0 && error.code === "ESRCH") {
+        groupAbsenceVerified = true;
+        if (phase === "before-final") {
+          entered = true;
+          queueMicrotask(() => controller.abort());
+        }
+      }
       throw error;
     }
   };
@@ -39,6 +45,12 @@ for (const phase of ["write", "final"]) for (const cancelled of [true, false]) t
     write(_chunk, _encoding, done) { if (phase === "write") hold(done); else done(); },
     final(done) { if (phase === "final") hold(done); else done(); },
   });
+  let endedAfterDestroy = false;
+  const endOutput = output.end;
+  output.end = function (...args) {
+    endedAfterDestroy ||= this.destroyed;
+    return endOutput.apply(this, args);
+  };
   try {
     completion = execute([process.execPath, "-e", "console.log('actual owned output')"], {
       env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, signal: controller.signal,
@@ -50,10 +62,11 @@ for (const phase of ["write", "final"]) for (const cancelled of [true, false]) t
     assert.equal(result.code, cancelled ? 130 : 1);
     assert.equal(result.failureKind, "failed");
     assert.match(result.error, cancelled ? /log.*cancel/i : /Controlled log .* failure/);
-    if (phase === "final") assert.equal(result.exitCode, 0);
+    if (phase !== "write") assert.equal(result.exitCode, 0);
     assert.equal(result.cleanupUnverified, false);
     assert.equal(output.destroyed, true);
-    if (phase === "final") {
+    assert.equal(endedAfterDestroy, false, "a destroyed log must only be observed, never ended again");
+    if (phase !== "write") {
       assert.equal(groupAbsenceVerified, true, "the real kernel must establish retirement before finalization");
       assert.deepEqual(lateGroupSignals, [], "log failure must not signal a retired process-group identity");
     }

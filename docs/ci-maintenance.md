@@ -970,6 +970,12 @@ do not depend on developer-installed tools or add scanner setup to every runner
 just to exercise scheduling. Keep real scanner acceptance in its existing job.
 Exercise interrupted log finalization as well as child retirement through the
 existing [process-owner controls](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
+Observe stream settlement even if cancellation has already destroyed the log.
+End only a live stream so a second close attempt cannot mask the cause of
+cancellation or the command's exit status.
+When a test asserts localized output or resource keys, await the production
+catalog loader or language switch before reading them. Keep each fixture
+independent of catalogs loaded by other tests.
 Compare nested budgets before adding an outer subprocess timeout: several valid
 inner probes can exhaust it before the behavior under test starts. A passing PR
 run cannot qualify an unbounded environmental dependency for later main runs.

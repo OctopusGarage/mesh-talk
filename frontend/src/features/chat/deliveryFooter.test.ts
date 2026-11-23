@@ -188,6 +188,7 @@ describe("automatic delivery footer", () => {
       "zh-Hans",
       "zh-Hant",
     ]) {
+      await i18n.changeLanguage(language);
       for (const key of [
         "awaiting",
         "delivered",
@@ -210,7 +211,6 @@ describe("automatic delivery footer", () => {
         expect(
           i18n.getResource(language, "translation", `message.custody.${key}`),
         ).toBeTruthy();
-      await i18n.changeLanguage(language);
       const markup = render({
         ...base,
         metadataPending: true,

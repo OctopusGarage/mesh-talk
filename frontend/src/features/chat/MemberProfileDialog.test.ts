@@ -3,7 +3,7 @@ import { act, createElement, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
-import { setLanguage } from "@/lib/i18n";
+import i18n, { setLanguage } from "@/lib/i18n";
 import type { PresenceInfo } from "@/lib/types";
 
 const { peers, identityState } = vi.hoisted(() => ({
@@ -174,8 +174,8 @@ it("keeps messaging available for members with a known account", async () => {
   }
 });
 
-it("renders one freshly observed device with overlapping localized sources and offline explanation", () => {
-  setLanguage("zh-Hans");
+it("renders one freshly observed device with overlapping localized sources and offline explanation", async () => {
+  await i18n.changeLanguage("zh-Hans");
   presenceState.value = {
     online: true,
     last_seen_secs: 0,
@@ -210,8 +210,8 @@ it("renders one freshly observed device with overlapping localized sources and o
     expect(html).toContain(label);
   expect(html).not.toContain("已连接");
 });
-it("renders Offline as the primary state with local observation history", () => {
-  setLanguage("zh-Hans");
+it("renders Offline as the primary state with local observation history", async () => {
+  await i18n.changeLanguage("zh-Hans");
   presenceState.value = { online: false, last_seen_secs: 180, devices: [] };
   const html = renderToStaticMarkup(
     createElement(MemberProfileDialog, {
