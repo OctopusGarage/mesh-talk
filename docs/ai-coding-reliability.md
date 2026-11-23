@@ -270,6 +270,12 @@ its single signed loopback probe and original deadline, and a real cache-path
 failure must preserve the cache API's error chain rather than time out. This
 control proves error visibility, not the cause of an earlier hosted timeout.
 
+An empty discovery snapshot admits no blocking cache task. A relay drain with
+no relay candidates must return before consulting historical peer proofs. A
+retirement fixture that holds the cache writer must seed a signed peer so it
+exercises real owned work. The relay discovery and runtime retirement tests
+cover these two paths separately.
+
 Sharing a read must not join unrelated latency dependencies. The roster owner
 shares only peers and people; conditional group metadata runs outside session
 and runtime-slot guards through participant-owned work. The held-metadata and

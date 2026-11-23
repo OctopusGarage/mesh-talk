@@ -455,6 +455,17 @@ async fn retirement_waits_for_peer_cache_closure_after_its_caller_is_cancelled()
         entered_tx.send(()).unwrap();
         release_rx.lock().unwrap().recv().unwrap();
     }));
+    // An empty roster never admits a blocking cache write.
+    let peer = crate::discovery::Announce::new_with_account(
+        &crate::identity::device::DeviceIdentity::generate(),
+        &crate::identity::account::Account::generate(),
+        "Peer cache fixture",
+        1,
+    );
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&peer, "127.0.0.1".parse().unwrap(), &node.user_id());
     let caller = node.clone();
     runtime.participant.tasks.push(tokio::spawn(async move {
         caller.cached_peer_snapshot_async().await.unwrap();

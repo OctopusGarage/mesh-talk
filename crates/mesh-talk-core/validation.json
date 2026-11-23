@@ -661,7 +661,8 @@
             "node::privacy_runtime::tests::joined_group_member_can_sync_group_but_not_dm_or_call",
             "node::privacy_runtime::tests::joined_group_protocol_snapshot_is_stable_before_single_shot_sync",
             "node::privacy_runtime::tests::failed_presence_cache_write_is_not_a_successful_empty_snapshot",
-            "node::privacy_runtime::tests::cached_peer_snapshot_excludes_arrivals_after_its_capture"
+            "node::privacy_runtime::tests::cached_peer_snapshot_excludes_arrivals_after_its_capture",
+            "node::privacy_runtime::tests::relay_discovery_cache_does_not_block_async_executor"
           ]
         }
       ],

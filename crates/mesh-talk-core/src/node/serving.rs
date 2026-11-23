@@ -2440,6 +2440,9 @@ impl Node {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
             self.post_office_candidates(&roster)
         };
+        if post_offices.is_empty() {
+            return;
+        }
         use futures_util::stream::{self, StreamExt};
         let peers = self.post_office_drain_peers();
         if peers.is_empty() {
