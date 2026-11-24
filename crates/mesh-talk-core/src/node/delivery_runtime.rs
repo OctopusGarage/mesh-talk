@@ -2455,6 +2455,10 @@ impl Node {
         use futures_util::StreamExt;
         let scope = format!("upload:{}", destination.device.user_id());
         let candidates = self.relay_candidate_batch(&scope, candidates);
+        let generation = self
+            .privacy
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst);
         let attempts = futures_util::stream::iter(candidates)
             .map(|po| async move {
                 if po.public == self.identity.public()
@@ -2495,36 +2499,14 @@ impl Node {
                             {
                                 return false;
                             }
-                            let exchange = async {
-                                let uploaded = self
-                                    .opaque_history_publication_round_for(
-                                        &mut channel,
-                                        &destination.device,
-                                        destination.event.conversation_id,
-                                        Some(destination.event.id),
-                                    )
-                                    .await?;
-                                let Some((_, outer_id)) = uploaded
-                                    .iter()
-                                    .find(|(inner_id, _)| *inner_id == destination.event.id)
-                                else {
-                                    return Ok(false);
-                                };
-                                let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
-                                    &self.identity,
-                                    &destination.device,
-                                    &po.public,
-                                ) else {
-                                    return Ok(false);
-                                };
-                                super::session::request_durable_have(
+                            let exchange = self
+                                .confirm_history_relay_custody(
                                     &mut channel,
-                                    mailbox.id(),
-                                    *outer_id,
+                                    &destination.device,
+                                    destination.event.conversation_id,
+                                    destination.event.id,
                                 )
-                                .await
-                            }
-                            .await;
+                                .await;
                             match exchange {
                                 Ok(held) => {
                                     self.observe_control_exchange(&channel, started);
@@ -2545,6 +2527,9 @@ impl Node {
                     })
                     .await
                     .unwrap_or(false);
+                if success {
+                    self.observe_exact_relay_custody(destination, &po.public, generation);
+                }
                 self.record_relay_attempt(&po.public, success);
                 success
             })

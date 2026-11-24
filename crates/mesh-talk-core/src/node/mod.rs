@@ -173,7 +173,7 @@ pub use channel::checkpoint::activity::{
 };
 pub use channel::{ChannelActivity, ReceivedChannelMessage};
 pub use delivery_observation::{
-    DeliveryObservation, DeliveryObservationKind, DeliveryRecoveryReason,
+    DeliveryCustody, DeliveryObservation, DeliveryObservationKind, DeliveryRecoveryReason,
 };
 pub use delivery_store::DeliveryStatus;
 pub use discovery_origin::{OriginConsent, RegistrationOrigin};

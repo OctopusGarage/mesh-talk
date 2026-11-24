@@ -364,6 +364,7 @@
     "custody": {
       "postOfficeHelp": "La oficina de correos confirmó el almacenamiento duradero de este mensaje cifrado. La entrega al destinatario, las descargas y la lectura son independientes.",
       "fileRecordHelp": "Estos recuentos solo incluyen el registro del mensaje del archivo. No confirman que se hayan guardado todos los datos de la imagen o del archivo.",
+      "recipientRegisteredOffice": "La oficina de correos registrada del destinatario confirmó que guardó una copia",
       "postOffice": "La oficina de correos confirmó una copia almacenada",
       "local": "Ninguna copia de miembro confirmada",
       "one": "Última confirmación: 1 copia de un miembro",

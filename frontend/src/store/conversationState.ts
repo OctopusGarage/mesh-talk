@@ -249,6 +249,8 @@ export function reconcileMessages(
         delivery: old?.delivery,
         deliveryObservation:
           old?.delivery === "awaiting" ? old.deliveryObservation : undefined,
+        deliveryCustody:
+          old?.delivery === "awaiting" ? old.deliveryCustody : undefined,
         pending: false,
         metadataPending: false,
       };
@@ -264,6 +266,7 @@ export function applyProjection(
   message: ChatMessage,
   statuses: Map<string, "awaiting" | "delivered">,
   observations = new Map<string, ChatMessage["deliveryObservation"]>(),
+  custody = new Map<string, ChatMessage["deliveryCustody"]>(),
 ): ChatMessage {
   if (!message.fromMe || !message.id) return message;
   const projected = statuses.get(message.id);
@@ -276,12 +279,20 @@ export function applyProjection(
     !message.failed
       ? observations.get(message.id)
       : undefined;
+  const deliveryCustody =
+    delivery === "awaiting" &&
+    !message.pending &&
+    !message.failed &&
+    !message.recalled
+      ? custody.get(message.id)
+      : undefined;
   if (
+    message.deliveryCustody === deliveryCustody &&
     message.delivery === delivery &&
     message.deliveryObservation === deliveryObservation
   )
     return message;
-  return { ...message, delivery, deliveryObservation };
+  return { ...message, delivery, deliveryObservation, deliveryCustody };
 }
 
 /** Keep the active Conversation while bounding message and reaction caches. */

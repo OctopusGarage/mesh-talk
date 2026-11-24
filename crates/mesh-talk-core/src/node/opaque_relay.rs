@@ -200,6 +200,7 @@ pub(in crate::node) struct PublicationProof {
     federated: bool,
 }
 struct PublicationRound {
+    confirmation_targets: Vec<(ConversationId, EventId)>,
     selected: Vec<(EventId, EventId)>,
     quiet: bool,
     proofs: Vec<PublicationProof>,
@@ -401,6 +402,38 @@ impl Node {
         .await
     }
 
+    /// Confirm the selected envelope in the scope that actually produced it.
+    pub(super) async fn confirm_history_relay_custody<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+        event: EventId,
+    ) -> Result<bool, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        if !self.relay_send_allowed(channel.peer_identity()) {
+            return Ok(false);
+        }
+        let publication = self
+            .opaque_relay_round_with_intent_observing(
+                channel,
+                recipient,
+                Some(conversation),
+                Some(event),
+                MailboxIntent::HistoryPublication,
+                false,
+            )
+            .await?;
+        for (scope, envelope) in publication.confirmation_targets {
+            if super::session::request_durable_have(channel, scope, envelope).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(in crate::node) fn publication_proofs_current(
         &self,
         proofs: &[PublicationProof],
@@ -505,6 +538,7 @@ impl Node {
         {
             return Ok(PublicationRound {
                 selected: Vec::new(),
+                confirmation_targets: Vec::new(),
                 quiet: false,
                 proofs: Vec::new(),
             });
@@ -538,6 +572,9 @@ impl Node {
                 .await?;
             uploaded.quiet &= next.quiet;
             uploaded.selected.extend(next.selected);
+            uploaded
+                .confirmation_targets
+                .extend(next.confirmation_targets);
             uploaded.proofs.extend(next.proofs);
         }
         Ok(uploaded)
@@ -628,6 +665,7 @@ impl Node {
             ),
         };
         while !self.advance_opaque_mailbox(channel, &mut progress).await? {}
+        let mut confirmation_targets = Vec::new();
         if let Some(inner) = confirm {
             if !channel.io_admitted() {
                 return Err(super::session::SessionError::UnexpectedMessage);
@@ -683,13 +721,14 @@ impl Node {
             if !current() || !channel.io_admitted() {
                 return Err(super::session::SessionError::UnexpectedMessage);
             }
-            if let Some(outer) = outer
-                && !progress.uploaded.contains(&(inner, outer))
-            {
-                if progress.uploaded.len() >= 64 {
-                    progress.uploaded.remove(0);
+            if let Some(outer) = outer {
+                confirmation_targets.push((progress.mailbox.id(), outer));
+                if !progress.uploaded.contains(&(inner, outer)) {
+                    if progress.uploaded.len() >= 64 {
+                        progress.uploaded.remove(0);
+                    }
+                    progress.uploaded.push((inner, outer));
                 }
-                progress.uploaded.push((inner, outer));
             }
         }
         let local = if observe
@@ -717,6 +756,7 @@ impl Node {
         let quiet = !proofs.is_empty() && self.publication_proofs_current(&proofs)?;
         Ok(PublicationRound {
             selected: progress.uploaded,
+            confirmation_targets,
             quiet,
             proofs,
         })

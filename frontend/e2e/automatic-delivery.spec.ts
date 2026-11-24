@@ -589,6 +589,83 @@ for (const accepted of [true, false]) {
   });
 }
 
+test("private message shows a mailbox only for its confirmed custody", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate(() => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __mockEmit(event: string, payload: unknown): void;
+      __setCustody: (custody?: string, delivered?: boolean) => Promise<void>;
+    };
+    const original = host.__TAURI_INTERNALS__.invoke.bind(
+      host.__TAURI_INTERNALS__,
+    );
+    let id: unknown;
+    let custody: string | undefined;
+    let delivered = false;
+    host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (
+        command === "owner_delivery_statuses" &&
+        (args.ids as unknown[]).includes(id)
+      ) {
+        return [{ id, status: delivered ? "delivered" : "awaiting", custody }];
+      }
+      const result = await original(command, args);
+      if (command === "owner_enqueue_text") id = result;
+      return result;
+    };
+    host.__setCustody = async (next, confirmed = false) => {
+      custody = next;
+      delivered = confirmed;
+      const identity = (await original("owner_node_identity", {
+        owner: "u_self",
+      })) as Record<string, unknown>;
+      host.__mockEmit("node-state-changed", { ...identity, kind: "delivery" });
+    };
+  });
+  await page.getByTestId("composer-input").fill("exact mailbox confirmation");
+  await page.getByTestId("composer-send").click();
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "exact mailbox confirmation" });
+  await expect(bubble.locator('[data-delivery="awaiting"]')).toBeVisible();
+  await expect(bubble.locator("[data-delivery-custody]")).toHaveCount(0);
+  for (const custody of [
+    "post_office",
+    "recipient_registered_office",
+    "post_office",
+  ]) {
+    await page.evaluate(
+      (value) =>
+        (
+          window as unknown as { __setCustody(value: string): Promise<void> }
+        ).__setCustody(value),
+      custody,
+    );
+    await expect(
+      bubble.locator(`[data-delivery-custody="${custody}"]`),
+    ).toBeVisible();
+    await expect(bubble.locator('[data-delivery="delivered"]')).toHaveCount(0);
+  }
+  await page.evaluate(() =>
+    (
+      window as unknown as {
+        __setCustody(value: string, delivered: boolean): Promise<void>;
+      }
+    ).__setCustody("recipient_registered_office", true),
+  );
+  await expect(bubble.locator('[data-delivery="delivered"]')).toBeVisible();
+  await expect(bubble.locator("[data-delivery-custody]")).toHaveCount(0);
+});
+
 test("a scoped native delivery invalidation refreshes status without a polling response", async ({
   page,
 }) => {

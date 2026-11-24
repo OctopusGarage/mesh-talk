@@ -1,4 +1,4 @@
-import { Clock } from "lucide-react";
+import { Clock, Inbox, Mailbox } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { MessageStatus } from "./MessageStatus";
 import { useDeliveryRecovery } from "./deliveryRecovery";
@@ -38,17 +38,31 @@ function observationAge(
 export function DeliveryDetails({ message }: { message: ChatMessage }) {
   const { t, i18n } = useTranslation();
   const recover = useDeliveryRecovery();
+  const custody = message.deliveryCustody;
+  const label =
+    custody === "recipient_registered_office"
+      ? t("message.custody.recipientRegisteredOffice")
+      : custody === "post_office"
+        ? t("message.custody.postOffice")
+        : t(
+            message.file
+              ? "message.delivery.fileAwaiting"
+              : "message.delivery.awaiting",
+          );
+  const Icon =
+    custody === "recipient_registered_office"
+      ? Mailbox
+      : custody === "post_office"
+        ? Inbox
+        : Clock;
   return (
     <MessageStatus
-      label={t(
-        message.file
-          ? "message.delivery.fileAwaiting"
-          : "message.delivery.awaiting",
-      )}
+      label={label}
       heading={t("message.delivery.detailsTitle")}
       delivery="awaiting"
+      deliveryCustody={custody}
       testId="delivery-details"
-      icon={<Clock className="h-3 w-3" aria-hidden="true" />}
+      icon={<Icon className="h-3 w-3" aria-hidden="true" />}
     >
       {({ close, trigger }) => {
         const age = observationAge(message.deliveryObservation, i18n.language);
@@ -63,7 +77,7 @@ export function DeliveryDetails({ message }: { message: ChatMessage }) {
                 : undefined;
         return (
           <>
-            <p>{t("message.delivery.awaiting")}</p>
+            <p>{label}</p>
             <p>
               {age
                 ? t(
@@ -76,7 +90,9 @@ export function DeliveryDetails({ message }: { message: ChatMessage }) {
             <p>{t("message.delivery.automaticRetry")}</p>
             <p>
               {t(
-                `message.delivery.${message.file ? "awaitingFileHelp" : "help"}`,
+                custody
+                  ? "message.custody.postOfficeHelp"
+                  : `message.delivery.${message.file ? "awaitingFileHelp" : "help"}`,
               )}
             </p>
             {recover && (

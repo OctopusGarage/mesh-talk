@@ -637,6 +637,8 @@ pub struct MessageStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     observation: Option<mesh_talk_core::node::DeliveryObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    custody: Option<mesh_talk_core::node::DeliveryCustody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     file_progress: Option<OutgoingFileStatus>,
 }
 
@@ -670,6 +672,7 @@ pub async fn owner_delivery_statuses(
         .collect::<Result<Vec<_>, _>>()?;
     admission
         .with_runtime(|runtime| {
+            let custody = runtime.handle().account_delivery_custody(&account, &ids);
             Ok(runtime
                 .handle()
                 .account_delivery_observations(&account, &ids)
@@ -678,6 +681,9 @@ pub async fn owner_delivery_statuses(
                     id: hex::encode(id.as_bytes()),
                     status,
                     observation,
+                    custody: (status == mesh_talk_core::node::DeliveryStatus::Awaiting)
+                        .then(|| custody.get(&id).copied())
+                        .flatten(),
                     file_progress: runtime.handle().outgoing_file_progress(id).map(|progress| {
                         OutgoingFileStatus {
                             done: progress.done,
@@ -6369,6 +6375,7 @@ mod tests {
             id: "message".into(),
             status: mesh_talk_core::node::DeliveryStatus::Awaiting,
             observation: None,
+            custody: None,
             file_progress: None,
         };
         assert_eq!(
@@ -6388,6 +6395,7 @@ mod tests {
             serde_json::json!({"id":"message", "status":"awaiting", "observation":{"kind":"retry_scheduled", "age_ms":42}})
         );
         let explained = super::MessageStatus {
+            custody: Some(mesh_talk_core::node::DeliveryCustody::PostOffice),
             observation: Some(mesh_talk_core::node::DeliveryObservation {
                 kind: mesh_talk_core::node::DeliveryObservationKind::RetryScheduled,
                 age_ms: 42,
@@ -6395,6 +6403,10 @@ mod tests {
             }),
             ..observed
         };
+        assert_eq!(
+            serde_json::to_value(&explained).unwrap()["custody"],
+            "post_office"
+        );
         assert_eq!(
             serde_json::to_value(&explained).unwrap()["observation"]["reason"],
             "no_known_route"

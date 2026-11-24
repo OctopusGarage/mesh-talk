@@ -6648,6 +6648,50 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
     );
     assert!(!relay.lock().unwrap().has(&original.id));
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    let account = bob_account.account_id();
+    assert_eq!(
+        a.account_delivery_custody(&account, &[id]).get(&id),
+        Some(&super::DeliveryCustody::PostOffice)
+    );
+    assert!(
+        a.account_delivery_custody(&"11".repeat(16), &[id])
+            .is_empty()
+    );
+    let office = DeviceIdentity::from_secret_bytes(po_secret.0, po_secret.1);
+    let origin = super::RegistrationOrigin::new(
+        &office,
+        "Relay",
+        super::OriginConsent::new(
+            &bob,
+            &office.public(),
+            super::discovery_origin::unix_now() + 10,
+        ),
+    )
+    .unwrap();
+    let endpoint = (Ipv4Addr::LOCALHOST, proof.tcp_port).into();
+    {
+        let mut roster = a.roster.lock().unwrap();
+        roster.update_relayed(&bp, endpoint, &a.user_id());
+        roster.set_directory_expiry(
+            &bp.user_id,
+            endpoint,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+            origin.expires_at_secs(),
+        );
+        roster.set_registration_origin(&bp.user_id, endpoint, Some(origin));
+    }
+    assert_eq!(
+        a.account_delivery_custody(&account, &[id]).get(&id),
+        Some(&super::DeliveryCustody::RecipientRegisteredOffice)
+    );
+    a.roster
+        .lock()
+        .unwrap()
+        .set_registration_origin(&bp.user_id, endpoint, None);
+    assert_eq!(
+        a.account_delivery_custody(&account, &[id]).get(&id),
+        Some(&super::DeliveryCustody::PostOffice)
+    );
     task.abort();
     let _ = task.await;
 }

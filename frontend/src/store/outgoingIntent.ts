@@ -202,6 +202,7 @@ export async function refreshDeliveryStatuses(
     const ids = [...requested];
     const projection = new Map<string, "awaiting" | "delivered">();
     const observations = new Map<string, ChatMessage["deliveryObservation"]>();
+    const custody = new Map<string, ChatMessage["deliveryCustody"]>();
     for (let i = 0; i < ids.length; i += 256) {
       if (!lease.current()) return;
       const batch = ids.slice(i, i + 256);
@@ -214,6 +215,13 @@ export async function refreshDeliveryStatuses(
       for (const row of rows) {
         if (!requestedBatch.has(row.id)) continue;
         projection.set(row.id, row.status);
+        if (
+          row.status === "awaiting" &&
+          (row.custody === "post_office" ||
+            row.custody === "recipient_registered_office")
+        ) {
+          custody.set(row.id, row.custody);
+        }
         const fact = row.observation;
         if (
           c.id !== get().myAccountId &&
@@ -252,7 +260,12 @@ export async function refreshDeliveryStatuses(
       const currentMessages = state.messages[key] ?? [];
       let messages: ChatMessage[] | undefined;
       for (const [index, message] of currentMessages.entries()) {
-        const next = applyProjection(message, projection, observations);
+        const next = applyProjection(
+          message,
+          projection,
+          observations,
+          custody,
+        );
         if (next === message) continue;
         messages ??= currentMessages.slice();
         messages[index] = next;
@@ -264,6 +277,7 @@ export async function refreshDeliveryStatuses(
           intent.message,
           projection,
           observations,
+          custody,
         );
         if (message === intent.message) continue;
         intents ??= { ...state.intents };

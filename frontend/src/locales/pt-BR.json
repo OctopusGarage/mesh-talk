@@ -364,6 +364,7 @@
     "custody": {
       "postOfficeHelp": "O posto de correio confirmou o armazenamento persistente desta mensagem criptografada. A entrega ao destinatário, os downloads e a leitura são etapas separadas.",
       "fileRecordHelp": "Estas contagens incluem apenas o registro da mensagem do arquivo. Não confirmam que todos os dados da imagem ou do arquivo foram armazenados.",
+      "recipientRegisteredOffice": "O posto de correio registrado pelo destinatário confirmou o armazenamento de uma cópia",
       "postOffice": "O posto de correio confirmou uma cópia armazenada",
       "local": "Nenhuma cópia confirmada em dispositivos de membros",
       "one": "Última confirmação: cópia em 1 membro",

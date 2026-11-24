@@ -31,6 +31,7 @@ export interface ChatMessage {
   receivedVia?: import("@/lib/types").ReceivedVia;
   arrivalKind?: import("@/lib/types").ArrivalKind;
   delivery?: "awaiting" | "delivered";
+  deliveryCustody?: import("@/lib/api/chat").DeliveryCustody;
   /** Local runtime fact sampled at a monotonic response boundary; never persisted. */
   deliveryObservation?: {
     kind: "attempting" | "retry_scheduled";

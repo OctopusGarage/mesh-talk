@@ -364,6 +364,7 @@
     "custody": {
       "postOfficeHelp": "郵局已確認持久保存呢則加密訊息。收件人收到、下載同已讀係獨立狀態。",
       "fileRecordHelp": "呢度統計檔案訊息記錄嘅副本，唔代表完整圖片或者檔案資料已經儲存。",
+      "recipientRegisteredOffice": "對方登記嘅郵局已確認收存",
       "postOffice": "郵局已確認儲存副本",
       "local": "未確認有成員副本",
       "one": "最後確認：1 位成員有副本",

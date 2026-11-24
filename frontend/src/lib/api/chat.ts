@@ -9,6 +9,8 @@ import type {
 import { invokeSensitive } from "./sensitiveInvoke";
 
 /** Local scheduling facts only; absence means unknown. */
+export type DeliveryCustody = "post_office" | "recipient_registered_office";
+
 export interface DeliveryObservation {
   kind: "attempting" | "retry_scheduled";
   age_ms: number;
@@ -451,6 +453,7 @@ export const chat = {
         id: string;
         status: "awaiting" | "delivered";
         observation?: DeliveryObservation;
+        custody?: DeliveryCustody;
         file_progress?: OutgoingFileStatus;
       }>
     >("owner_delivery_statuses", { owner, account, ids }),

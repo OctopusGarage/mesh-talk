@@ -791,6 +791,16 @@ sequenceDiagram
 
 The useful conceptual states are **accepted locally**, **held somewhere**, **recipient confirmed** and **read**. These are distinct evidence types; they are not a requirement that the UI expose four enum values or that every message pass through a relay-held state. Read status requires its own supported user/protocol action.
 
+An awaiting private message can show a post-office icon when an authenticated
+office confirms the exact outer envelope. The sender associates the stronger
+registered-office icon with a current, non-conflicting registration for the same
+recipient device and the same office. Registration describes an office association
+and carries no physical location assertion. Confirmation from a transit office
+does not establish a copy at a different office. The observations are bounded to
+the sender runtime and follow the existing delivery invalidation path. The same
+bounded publication attempt checks the actual envelope scope, including the
+federated scope when the legacy copy cannot be confirmed. A recipient receipt replaces either mailbox icon.
+
 ### B. Cross-site discovery and opaque federation
 
 ```mermaid
