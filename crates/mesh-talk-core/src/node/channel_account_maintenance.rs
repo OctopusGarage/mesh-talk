@@ -1909,7 +1909,12 @@ mod tests {
         );
         let keys_arrived = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
-                source.maintain_account_channels(&mut source_work).await;
+                // This fixture starts only account history/wake workers. Drive
+                // the separate group recovery owner's bounded continuation;
+                // account maintenance settles the local signed-key publication.
+                source
+                    .distribute_channel(channel, &[target.identity.public()])
+                    .await;
                 crate::node::test_support::settle_group_metadata(target, channel);
                 let selected = (|| -> Result<bool, LogError> {
                     let Some(binding) = target.channel_checkpoints.source_binding(channel)? else {
