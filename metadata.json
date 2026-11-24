@@ -3,9 +3,29 @@
   "checkpoint_id": "01M86H0881FKZG8EHDC8HJRMA4",
   "strategy": "manual-commit",
   "branch": "requirements-work",
-  "checkpoints_count": 3,
+  "checkpoints_count": 6,
   "files_touched": [
-    "crates/mesh-talk-core/src/node/session/paged_tests.rs"
+    "crates/mesh-talk-core/src/eventlog/repository/network.rs",
+    "crates/mesh-talk-core/src/eventlog/repository/network/tests.rs",
+    "crates/mesh-talk-core/src/eventlog/sync.rs",
+    "crates/mesh-talk-core/src/eventlog/sync/network.rs",
+    "crates/mesh-talk-core/src/eventlog/sync/range.rs",
+    "crates/mesh-talk-core/src/eventlog/sync/range/index.rs",
+    "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
+    "crates/mesh-talk-core/src/node/channels.rs",
+    "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+    "crates/mesh-talk-core/src/node/privacy_sync/network.rs",
+    "crates/mesh-talk-core/src/node/privacy_sync/prepared_views.rs",
+    "crates/mesh-talk-core/src/node/privacy_sync/principal.rs",
+    "crates/mesh-talk-core/src/node/serving.rs",
+    "crates/mesh-talk-core/src/node/session.rs",
+    "crates/mesh-talk-core/src/node/session/backend.rs",
+    "crates/mesh-talk-core/src/node/session/mailbox.rs",
+    "crates/mesh-talk-core/src/node/session/paged_tests.rs",
+    "crates/mesh-talk-core/src/node/session/range_sync.rs",
+    "docs/bounded-sync-verification.md",
+    "docs/decisions.md",
+    "docs/performance-requirements.md"
   ],
   "sessions": [
     {
@@ -14,25 +34,31 @@
       "compact_transcript": "/0/transcript.jsonl",
       "content_hash": "/0/content_hash.txt",
       "prompt": "/0/prompt.txt"
+    },
+    {
+      "metadata": "/1/metadata.json",
+      "transcript": "/1/full.jsonl",
+      "compact_transcript": "/1/transcript.jsonl",
+      "content_hash": "/1/content_hash.txt",
+      "prompt": "/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 486327,
+    "input_tokens": 492797,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 73657856,
-    "output_tokens": 19024,
-    "api_call_count": 193,
-    "subagent_tokens_complete": true
+    "cache_read_tokens": 74785536,
+    "output_tokens": 20293,
+    "api_call_count": 203
   },
   "redaction": {
-    "replacements": 3230,
+    "replacements": 3983,
     "layers": {
-      "betterleaks": 167,
+      "betterleaks": 220,
       "connection_string": 0,
       "credential_key": 0,
-      "credential_value": 0,
+      "credential_value": 75,
       "credentialed_uri": 0,
-      "entropy": 3078,
+      "entropy": 3705,
       "key_context": 0,
       "provider_token": 1,
       "shell_stdin": 0
