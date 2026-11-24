@@ -1572,6 +1572,30 @@ the raw device ID is never substituted for an account ID. Search results expose
 their recent-window coverage and truncation. Owner/runtime replacement and
 superseded requests invalidate pending results and context.
 
+#### Search implementation and review
+
+[SearchDialog](../frontend/src/features/chat/SearchDialog.tsx) calls
+[owner-scoped IPC](../src-tauri/src/owner_commands/search.rs), which dispatches
+blocking work through runtime admission to [core search](../crates/mesh-talk-core/src/node/search.rs).
+The [history dialog](../frontend/src/features/chat/ConversationHistoryDialog.tsx)
+has a separate per-conversation path. Its
+[explicit remote-history paging](channel-history-paging-ui.md) does not expand
+the global search query's coverage by itself.
+
+Global search normalizes the query and compares lowercased substrings in the
+existing history projection. It maintains no separate full-text index or
+index rebuild job. The host rejects an overlong query before scheduling and
+serializes a bounded newest-first result prefix. The UI discards an obsolete
+response, but that discard does not cancel a core scan already admitted.
+
+Keep canonical identities and visibility checks in the history owner. Before
+changing the implementation, measure metadata traversal, body reads and query
+latency with short and long retained histories and rapid query replacement.
+If metadata traversal dominates, first test bounded history selection with
+the same coverage and ordering. A separate full-text index would require
+evidence of user need and tests for protected content, recall, expiry,
+deletion, rebuild and write amplification.
+
 ### Storage replay and query budgets
 
 The indexed-storage connection owner in `storage/database.rs` uses SQLCipher
@@ -2865,6 +2889,49 @@ bot devices through ordinary signed group invitation acceptance. A send-only
 client grant does not remove the hosting member's decryption capability. Bot
 badges and authenticated delegated-send attribution are later wire extensions;
 existing participants see an ordinary signed account/device author.
+
+## Operational logging and diagnostic exports
+
+The [desktop logger](../src-tauri/src/logger/mod.rs) is installed during
+[Tauri setup](../src-tauri/src/lib.rs). Rust producers use the `log` facade.
+The desktop writes local-time records to `logs/mesh-talk.log` under its
+configured data root, normally `~/.mesh-talk`. Debug builds also write to
+stdout. Debug builds admit Debug and higher by default, release builds Warn
+and higher. Graphics, startup and selected core targets also admit Info.
+The log stream is process-wide and can contain earlier session context.
+
+The application uses the file defaults of `tauri-plugin-log` 2.10.2, pinned
+in [Cargo.lock](../Cargo.lock). The plugin opens the active file in append
+mode and rotates around its 40,000-byte threshold with `KeepOne`, replacing
+the active file rather than preserving an archive at each rollover. The
+application also attempts to delete `.log` files older than seven days during
+logger initialization. This sweep is best effort and startup-driven. Seven
+days therefore describes the cleanup cutoff, not available diagnostic history.
+
+Diagnostics uses [typed commands](../frontend/src/lib/api/diagnostics.ts)
+to read or export up to the last 64 KiB of the current file. The host seeks
+and reads on a blocking worker. It returns an empty string if the active
+file is absent and decodes lossily if the byte boundary splits a character.
+[Diagnostics authority](../src-tauri/src/diagnostics.rs) checks the originating
+session and lock state before publishing a read or admitting a save. Copy
+and Save expose raw log text. Review it before sharing. See
+[diagnostic exposure and authority](privacy-controls.md#reducing-address-and-identity-exposure).
+
+With `MESH_TALK_TRACE_WORK=1`, the desktop also counts registered IPC dispatch
+attempts by command name, with at most 256 names per window and a drop counter.
+Handled requests drive emission after a five-second window. The observer
+starts no periodic worker and records no arguments. The
+[headless CLI](../crates/mesh-talk-core/src/bin/mesh-talk-node.rs) installs a
+separate opt-in sink for selected SQL work records. It does not share the
+desktop file sink. Operational logs and these counters serve diagnostics.
+The [signed event log](#3-event-log--sync-eventlog) serves durable protocol
+reconciliation, and the history projection serves chat views.
+
+Retain bounded on-demand log export. Verify rollover and failure behavior on
+packaged hosts before changing rotation, buffering or severity. If useful
+startup context is consistently lost, measure rollover frequency and
+idle writes before choosing a retention budget. If reports need sharing
+without manual review, define and test a separate redacted export mode.
 
 ## 6. Binaries
 

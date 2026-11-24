@@ -6,7 +6,8 @@ validation guidance. Start with the path that matches your task. The
 belongs and how to keep the site, README, and guides aligned.
 
 Use the [project decision log](decisions.md) to find or record conclusions
-that affect future work.
+that affect future work. Deferred product requirements are recorded in the
+[product roadmap](roadmap.md).
 
 For feature changes or a maintenance sweep, use the
 [change alignment checklist](maintenance-checklist.md). It maps maintained
@@ -31,6 +32,50 @@ surfaces to their owners, change triggers, evidence and follow-up records.
 For menu locations and everyday tasks, start with the [user guide](help/README.md).
 The [help system guide](help-system.md) explains offline reading, publication and
 the read-only [documentation MCP](../tools/help/README.md).
+
+## Technical component index
+
+Use this index to find the implementation boundary and its maintained design
+reference. The [module map](module-boundaries.md) describes ownership across
+features. The [quality gates](quality-gates.md) and
+[feedback loop](testing-feedback-loop.md) explain how to find applicable checks.
+
+| Component                                                  | Start in source                                                                                                                                                                                                                     | Design and review                                                                                                                                                                                       |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Wire formats and shared foundations                        | [Protocol crate](../crates/mesh-talk-protocol/src/lib.rs), [core crate](../crates/mesh-talk-core/Cargo.toml)                                                                                                                        | [SDK and business boundary](sdk-business-boundary.md)                                                                                                                                                   |
+| Account and device identity, encryption and trust          | [Identity core](../crates/mesh-talk-core/src/identity/mod.rs), [secure transport](../crates/mesh-talk-core/src/transport/channel.rs)                                                                                                | [Crypto architecture](ARCHITECTURE.md#2-crypto--identity-identity-transport-ratchet-dm-channel), [peer trust](peer-trust.md), [privacy](privacy-controls.md)                                            |
+| Discovery, routes and connection lifecycle                 | [Discovery service](../crates/mesh-talk-core/src/discovery/service.rs), [inbound serving](../crates/mesh-talk-core/src/node/serving.rs)                                                                                             | [Topology and route selection](network-topologies.md), [routed discovery](routed-network-discovery.md), [native Bluetooth](native-bluetooth.md)                                                         |
+| Direct and group communication, receipts and attachments   | [Delivery runtime](../crates/mesh-talk-core/src/node/delivery_runtime.rs), [file consent](../crates/mesh-talk-core/src/node/file_consent.rs)                                                                                        | [Communication contracts](network-design-reference.md), [group reception](group-conversation-reception.md), [forwarding](message-forwarding.md)                                                         |
+| Signed event history and linked-device synchronization     | [Account synchronization](../crates/mesh-talk-core/src/node/account_sync.rs), [account documents](../crates/mesh-talk-core/src/node/account_documents/mod.rs)                                                                       | [Multi-device sync](multi-device-sync-design.md), [bounded sync](bounded-sync-verification.md)                                                                                                          |
+| Post-office custody, federation and retention              | [Post-office core](../crates/mesh-talk-core/src/postoffice/mod.rs)                                                                                                                                                                  | [Federation](post-office-federation.md), [mailbox metadata privacy](post-office-metadata-privacy.md), [relay service](post-office-release.md)                                                           |
+| Encrypted profile storage, expiry and recovery             | [Profile storage](../crates/mesh-talk-core/src/storage/profile.rs), [expiry](../crates/mesh-talk-core/src/node/expiry_policy.rs), [recovery](../crates/mesh-talk-core/src/node/recovery.rs)                                         | [Storage replay](ARCHITECTURE.md#storage-replay-and-query-budgets), [backup and recovery](backup-recovery.md), [Favorites lifecycle](favorites.md)                                                      |
+| History projection and search                              | [Transcript repository](../crates/mesh-talk-core/src/node/transcript_repository/mod.rs), [search core](../crates/mesh-talk-core/src/node/search.rs), [explicit remote history](../crates/mesh-talk-core/src/node/remote_history.rs) | [Recent search and cost](ARCHITECTURE.md#recent-search-references), [remote history](channel-history-paging-ui.md)                                                                                      |
+| Desktop session, owner-scoped IPC and settings             | [Desktop app](../src-tauri/src/lib.rs), [runtime admission](../src-tauri/src/runtime_admission.rs), [app lock](../src-tauri/src/app_lock.rs), [settings](../src-tauri/src/settings.rs)                                              | [Process and layers](ARCHITECTURE.md#1-process--layers), [settings](settings.md), [privacy](privacy-controls.md)                                                                                        |
+| Renderer state, calling and screen sharing                 | [Chat store](../frontend/src/store/chat.ts), [call store](../frontend/src/store/calls.ts)                                                                                                                                           | [Frontend architecture](ARCHITECTURE.md#5-frontend-frontend), [call signaling and media](network-design-reference.md#f-calls-live-signaling-and-separate-media), [visual system](../frontend/DESIGN.md) |
+| Event subscriptions, scheduled work and runtime retirement | [Runtime work](../crates/mesh-talk-core/src/node/runtime_work.rs), [desktop runtime bootstrap](../src-tauri/src/runtime_bootstrap.rs)                                                                                               | [Events](event-driven-design.md), [scheduled work](scheduled-work.md), [performance limits](performance-requirements.md)                                                                                |
+| Operational logs and resource diagnostics                  | [Logger](../src-tauri/src/logger/mod.rs), [diagnostics](../src-tauri/src/diagnostics.rs), [headless CLI](../crates/mesh-talk-core/src/bin/mesh-talk-node.rs)                                                                        | [Logging and diagnostic exports](ARCHITECTURE.md#operational-logging-and-diagnostic-exports), [performance requirements](performance-requirements.md)                                                   |
+| Local agent access, bot hosts and MCP                      | [Desktop integration owner](../src-tauri/src/integrations.rs), [integration crate](../crates/mesh-talk-integrations/Cargo.toml), [MCP crate](../crates/mesh-talk-mcp/Cargo.toml)                                                    | [Bot integrations](bot-integrations.md)                                                                                                                                                                 |
+| Temporary LAN review                                       | [Review host](../src-tauri/src/lan_review.rs)                                                                                                                                                                                       | [LAN review lifecycle and admission](lan-review.md)                                                                                                                                                     |
+| Image QR, stickers and customization                       | [QR worker](../frontend/src/features/chat/imageQr.worker.ts), [sticker renderer](../frontend/src/features/chat/StickerThumb.tsx), [linked packs](../frontend/src/lib/linkedCustomizationPacks.ts)                                   | [Module ownership](module-boundaries.md), [pack format and distribution](CUSTOMIZATION_PACKS.md)                                                                                                        |
+| Desktop shortcuts, tray and visibility                     | [Screenshot shortcuts](../src-tauri/src/screenshot_shortcuts.rs), [tray](../src-tauri/src/tray.rs), [native visibility](../src-tauri/src/window_visibility.rs)                                                                      | [Settings](settings.md), [platform validation](platform-validation.md)                                                                                                                                  |
+| Validation, build, installers and updates                  | [Workspace manifest](../Cargo.toml), [build entry points](../Makefile), [release version tooling](../scripts/release/version.mjs)                                                                                                   | [CI maintenance](ci-maintenance.md), [native platform validation](platform-validation.md), [updates and installer budgets](updates.md), [build retention](build-retention.md)                           |
+
+### Review priorities
+
+- **Search and diagnostics:** Preserve the current ownership and measure the
+  specific costs identified in [search](ARCHITECTURE.md#search-implementation-and-review)
+  and [logging](ARCHITECTURE.md#operational-logging-and-diagnostic-exports)
+  before choosing changes.
+- **Protocol and shared foundations:** Keep compatibility and business policy
+  with their current owners. Use a real external consumer and compatibility
+  evidence to justify moving another responsibility across the
+  [SDK boundary](sdk-business-boundary.md).
+- **Delivery, retention and scheduled work:** Assess changes against the existing
+  recovery and admission contracts. Use a reproduced storage, idle-resource or
+  delivery regression before restructuring these paths.
+- **Desktop and renderer:** Check the owner and the affected lifecycle first.
+  Use native platform evidence for window, tray and media changes and measure
+  cross-platform resource use before evaluating a shell replacement.
 
 ## Current product and architecture
 
