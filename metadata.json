@@ -1,0 +1,53 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M86AXV4GE2W0AYKTKYSHPFMD",
+  "strategy": "manual-commit",
+  "branch": "fix/receipt-loss",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "frontend/e2e/automatic-delivery.spec.ts",
+    "frontend/src/features/chat/DeliveryDetails.tsx",
+    "frontend/src/features/chat/DeliveryFooter.tsx",
+    "frontend/src/features/chat/MessageStatus.tsx",
+    "frontend/src/features/chat/deliveryFooter.test.ts",
+    "frontend/src/locales/en.json",
+    "frontend/src/locales/es.json",
+    "frontend/src/locales/ja.json",
+    "frontend/src/locales/ko.json",
+    "frontend/src/locales/pt-BR.json",
+    "frontend/src/locales/yue.json",
+    "frontend/src/locales/zh-Hans.json",
+    "frontend/src/locales/zh-Hant.json",
+    "scripts/diagnostics/native-core-scenarios.mjs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 11398,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 4205568,
+    "output_tokens": 4290,
+    "api_call_count": 19
+  },
+  "redaction": {
+    "replacements": 737,
+    "layers": {
+      "betterleaks": 39,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 75,
+      "credentialed_uri": 0,
+      "entropy": 625,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
