@@ -3,7 +3,7 @@
   "checkpoint_id": "01M86S5QH1ZDXWMA470Z0HAZBD",
   "strategy": "manual-commit",
   "branch": "requirements-work",
-  "checkpoints_count": 6,
+  "checkpoints_count": 9,
   "files_touched": [
     "crates/mesh-talk-core/src/eventlog/repository.rs",
     "crates/mesh-talk-core/src/eventlog/repository/network.rs",
@@ -57,25 +57,39 @@
       "compact_transcript": "/0/transcript.jsonl",
       "content_hash": "/0/content_hash.txt",
       "prompt": "/0/prompt.txt"
+    },
+    {
+      "metadata": "/1/metadata.json",
+      "transcript": "/1/full.jsonl",
+      "compact_transcript": "/1/transcript.jsonl",
+      "content_hash": "/1/content_hash.txt",
+      "prompt": "/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 214349,
+    "input_tokens": 228015,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 22337664,
-    "output_tokens": 31121,
-    "api_call_count": 142,
+    "cache_read_tokens": 26257536,
+    "output_tokens": 34421,
+    "api_call_count": 156,
+    "subagent_tokens": {
+      "input_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 0,
+      "api_call_count": 0
+    },
     "subagent_tokens_complete": true
   },
   "redaction": {
-    "replacements": 10220,
+    "replacements": 10973,
     "layers": {
-      "betterleaks": 167,
+      "betterleaks": 220,
       "connection_string": 0,
       "credential_key": 0,
-      "credential_value": 0,
+      "credential_value": 75,
       "credentialed_uri": 0,
-      "entropy": 10068,
+      "entropy": 10695,
       "key_context": 0,
       "provider_token": 1,
       "shell_stdin": 0
