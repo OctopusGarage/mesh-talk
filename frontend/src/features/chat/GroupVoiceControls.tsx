@@ -1,3 +1,4 @@
+import { Phone, PhoneIncoming } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -28,19 +29,23 @@ export function GroupVoiceEntry({
   const active = useGroupVoice((state) => state.active);
   const directCall = useCalls((state) => state.phase !== "idle");
   if (!enabled || active || directCall) return null;
+  const canJoin = invite && invite.expires > Date.now();
+  const label = t(canJoin ? "groupVoice.join" : "groupVoice.start");
+  const Icon = canJoin ? PhoneIncoming : Phone;
   return (
     <Button
       type="button"
       variant="ghost"
+      size="icon"
+      aria-label={label}
+      title={label}
       onClick={() => {
         if (invite && invite.expires > Date.now())
           void joinGroupVoice(invite, self, owner);
         else void startGroupVoice(group, self, owner, memberDevices());
       }}
     >
-      {invite && invite.expires > Date.now()
-        ? t("groupVoice.join")
-        : t("groupVoice.start")}
+      <Icon aria-hidden="true" className="h-4 w-4" />
     </Button>
   );
 }
