@@ -48,6 +48,16 @@ unwind warning in the test binary.
 - `bounded_sync_retry_tests`: three passed. Verifies More/Limited scheduling does
   not claim delivery or increment transport failure backoff.
 
+The existing
+`late_initial_receive_keys_repair_an_already_present_message_through_history`
+regression also passed. Its fixture starts account history/wake workers, so it
+explicitly drives bounded group-distribution continuations to model the separate
+group recovery owner. The initial-key history gate stays closed while ciphertext
+and later signed key records arrive; authorization, later key position, absence
+of premature plaintext and eventual history repair assertions remain intact.
+Local account maintenance settling a signed publication is separate from network
+fanout completion: the existing group recovery queue retains that delivery work.
+
 The range primitive is adapted from Mesh Foundation commit
 `4bf8f92269d81b8f20e0f807e04d7a7cf6fe2588`; the application uses an imperative
 checkpoint adapter for Send-compatible network futures and blocked-frontier
