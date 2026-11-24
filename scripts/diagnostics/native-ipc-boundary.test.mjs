@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 const diagnostics = [
   "hidden-contacts.mjs",
@@ -24,4 +26,15 @@ test("native diagnostics work with the global Tauri API disabled", async () => {
       `${name} must use scoped Tauri IPC`,
     );
   }
+});
+
+test("local macOS contact acceptance stops before foreground work", { skip: process.platform !== "darwin" }, () => {
+  const env = { ...process.env };
+  delete env.GITHUB_ACTIONS;
+  delete env.NATIVE_CONTACT_ALLOW_FOREGROUND;
+  const runner = fileURLToPath(new URL("./hidden-contacts.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [runner], { env, encoding: "utf8", timeout: 5000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Native contact acceptance activates windows/);
 });

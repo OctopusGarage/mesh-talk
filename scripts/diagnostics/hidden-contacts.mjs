@@ -13,6 +13,14 @@ import { captureNativeEvidence, captureNativeFailure, collectNativeApplicationLo
 import { validateEvidence } from "./hidden-contacts-report.mjs";
 import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, cliListenerEndpoint, receiptPeerEndpointContext, signedPeerObservation, nativeWindowsKeyboardScript, nativeControlKeyName, sendNativeLinuxKey, settledSignedInSession, settledPrivacyMode, settledPrivacyConfirmationDismissal, startPrivacyDialogTrace } from "./native-core-scenarios.mjs";
 
+// This suite asserts actual native focus, keyboard handling and paint.
+if (process.platform === "darwin" && process.env.GITHUB_ACTIONS !== "true"
+    && process.env.NATIVE_CONTACT_ALLOW_FOREGROUND !== "1") {
+  throw new Error(
+    "Native contact acceptance activates windows. Run it on a dedicated desktop, or set NATIVE_CONTACT_ALLOW_FOREGROUND=1 for an intentional foreground run.",
+  );
+}
+
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const initialStatus = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();

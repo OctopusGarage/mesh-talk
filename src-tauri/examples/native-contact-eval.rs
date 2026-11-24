@@ -173,6 +173,11 @@ fn main() {
         .expect("isolated discovery port required")
         .parse()
         .expect("discovery port");
+    let _hidden = match args.next().as_deref() {
+        None => false,
+        Some("--hidden") => true,
+        Some(_) => panic!("unexpected arguments"),
+    };
     assert!(args.next().is_none(), "unexpected arguments");
     assert!(root.is_absolute(), "fixture root must be absolute");
     std::fs::create_dir_all(&root).expect("create fixture root");
@@ -205,7 +210,11 @@ fn main() {
         );
         let builder = builder.plugin(tauri_plugin_wdio_webdriver::init_with_port(port));
         #[cfg(target_os = "macos")]
-        let builder = builder.plugin(native_keyboard_plugin());
+        let builder = if _hidden {
+            builder
+        } else {
+            builder.plugin(native_keyboard_plugin())
+        };
         builder
     });
 }

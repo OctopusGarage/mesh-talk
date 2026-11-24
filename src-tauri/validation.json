@@ -1645,6 +1645,7 @@
     {
       "id": "native-acceptance-harness",
       "paths": [
+        "src-tauri/examples/native-contact-eval.rs",
         "scripts/diagnostics/hidden-contacts.mjs",
         "scripts/diagnostics/hidden-contacts-report.mjs",
         "scripts/diagnostics/native-core-scenarios.mjs",
