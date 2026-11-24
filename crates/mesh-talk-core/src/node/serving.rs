@@ -6,7 +6,7 @@ use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
 use crate::node::conversation::account_conversation_id;
 use crate::node::session::{
-    Served, SessionError, request_round_paged as request_round, serve_one_paged as serve_one,
+    Served, SessionError, request_range_round_paged as request_round,
     serve_wire_bytes_paged as serve_wire_bytes,
 };
 use crate::transport::SecureChannel;
@@ -1127,26 +1127,56 @@ impl Node {
         // The first frame may be a Request, which makes serve_wire_bytes await the peer's
         // streamed have-chunks — so it needs the same idle timeout as the loop, or a peer that
         // sends one Request then stalls would pin this task (and its connection permit) forever.
-        let result = tokio::time::timeout(
-            SERVE_IDLE_TIMEOUT,
-            serve_wire_bytes(&mut channel, &store, &first),
-        )
+        let mut range_state = super::session::range_sync::Service::default();
+        let result = tokio::time::timeout(SERVE_IDLE_TIMEOUT, async {
+            if let Some(result) = Box::pin(super::session::range_sync::serve(
+                &mut channel,
+                &store,
+                &mut range_state,
+                &first,
+            ))
+            .await?
+            {
+                Ok(result)
+            } else {
+                serve_wire_bytes(&mut channel, &store, &first).await
+            }
+        })
         .await;
         self.dispatch_received_sync_work(&store);
         if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
+            range_state.retire(&store);
             return;
         }
         for _ in 0..MAX_SERVE_ROUNDS {
             if is_relay && !self.relay_allowed(channel.peer_identity()) {
                 break;
             }
-            let result =
-                tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await;
+            let result = tokio::time::timeout(SERVE_IDLE_TIMEOUT, async {
+                let bytes = match channel.recv().await {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Ok(Served::Closed),
+                };
+                if let Some(result) = Box::pin(super::session::range_sync::serve(
+                    &mut channel,
+                    &store,
+                    &mut range_state,
+                    &bytes,
+                ))
+                .await?
+                {
+                    Ok(result)
+                } else {
+                    serve_wire_bytes(&mut channel, &store, &bytes).await
+                }
+            })
+            .await;
             self.dispatch_received_sync_work(&store);
             if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
                 break; // peer closed, error, or idle past the timeout
             }
         }
+        range_state.retire(&store);
     }
 
     pub(in crate::node) fn request_reception_scope<'a, 'node>(

@@ -52,13 +52,19 @@ enum DeliveryAttemptContext {
 pub(in crate::node) enum Reconciliation {
     Advanced,
     Quiet,
+    /// A clean bounded exchange has retained work; no storage/delivery claim.
+    More,
+    /// Source policy/capacity blocks progress; retain pending state for sparse repair.
+    Limited,
     Deferred,
 }
 impl Reconciliation {
     fn combine(self, other: Self) -> Self {
         match (self, other) {
             (Self::Advanced, _) | (_, Self::Advanced) => Self::Advanced,
+            (Self::More, _) | (_, Self::More) => Self::More,
             (Self::Deferred, _) | (_, Self::Deferred) => Self::Deferred,
+            (Self::Limited, _) | (_, Self::Limited) => Self::Limited,
             _ => Self::Quiet,
         }
     }
@@ -70,17 +76,40 @@ impl Reconciliation {
         now: std::time::Instant,
     ) {
         match self {
+            Self::More => retries.settled(key, routes, std::time::Duration::from_millis(500), now),
+            Self::Limited => retries.settled(key, routes, QUIET_REPAIR_INTERVAL, now),
             Self::Quiet => retries.settled(key, routes, QUIET_REPAIR_INTERVAL, now),
             other => retries.finished(key, routes, other == Self::Advanced, now),
         }
     }
-    fn from_progress(progress: bool) -> Self {
-        if progress {
+    fn receipt_result(custody: bool, failed: bool, continuation: TransferContinuation) -> Self {
+        if failed {
+            Self::Deferred
+        } else if custody {
             Self::Advanced
         } else {
-            Self::Deferred
+            match continuation {
+                TransferContinuation::None => Self::Deferred,
+                TransferContinuation::More => Self::More,
+                TransferContinuation::Limited => Self::Limited,
+            }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferOutcome {
+    Held,
+    More,
+    Limited,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferContinuation {
+    None,
+    More,
+    Limited,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -2319,7 +2348,7 @@ impl Node {
             None,
         )
         .await
-        .0
+        .0 == TransferOutcome::Held
     }
 
     async fn transfer_delivery_destination_with_admission(
@@ -2329,7 +2358,7 @@ impl Node {
         conversation: ConversationId,
         admission: super::session_pool::AuthenticationAdmission,
         receipt_ready: Option<&tokio::sync::Notify>,
-    ) -> (bool, bool) {
+    ) -> (TransferOutcome, bool) {
         for fresh in [false, true] {
             let started = std::time::Instant::now();
             let dial = if fresh {
@@ -2341,7 +2370,7 @@ impl Node {
                     .await
             };
             let Ok((mut channel, reused)) = dial else {
-                return (false, false);
+                return (TransferOutcome::Failed, false);
             };
             if !self.delivery_destination_allowed(destination)
                 || channel.peer_announcement().is_some_and(|p| {
@@ -2353,7 +2382,7 @@ impl Node {
                     .expect("delivery lock not poisoned")
                     .contains_work_event(destination.event.id)
             {
-                return (false, false);
+                return (TransferOutcome::Failed, false);
             }
             let exchange = async {
                 let store = self.sync_store(channel.peer_identity());
@@ -2364,11 +2393,13 @@ impl Node {
                     .request_reception_scope(&store, &channel)
                     .ok_or(SessionError::UnexpectedMessage)?;
                 let result =
-                    super::session::request_round_paged(&mut channel, &store, conversation).await;
+                    super::session::request_sync_turn_paged(&mut channel, &store, conversation)
+                        .await;
                 self.dispatch_received_sync_work(&store);
-                result?;
+                let outcome = result?;
+                let (complete, limited) = (outcome.complete, outcome.limited);
                 if conversation != destination.event.conversation_id {
-                    return Ok(false);
+                    return Ok((false, complete, limited));
                 }
                 super::session::request_durable_have(
                     &mut channel,
@@ -2376,10 +2407,11 @@ impl Node {
                     destination.event.id,
                 )
                 .await
+                .map(|held| (held, complete, limited))
             }
             .await;
             match exchange {
-                Ok(held) => {
+                Ok((held, complete, limited)) => {
                     self.observe_control_exchange(&channel, started);
                     let held = held && self.delivery_destination_allowed(destination);
                     if let Some(ready) = receipt_ready.filter(|_| held) {
@@ -2406,30 +2438,38 @@ impl Node {
                         let store = self.sync_store(channel.peer_identity());
                         let Some(_reception) = self.request_reception_scope(&store, &channel)
                         else {
-                            return (held, false);
+                            return (TransferOutcome::Held, false);
                         };
                         let result =
-                            super::session::request_round_paged(&mut channel, &store, control)
+                            super::session::request_sync_turn_paged(&mut channel, &store, control)
                                 .await;
                         self.dispatch_received_sync_work(&store);
                         self.emit_new_messages(control);
                         if result.is_err() {
-                            return (held, false);
+                            return (TransferOutcome::Held, false);
                         }
                     }
-                    if held || conversation != destination.event.conversation_id {
+                    if held || !complete || conversation != destination.event.conversation_id {
                         self.recycle_sync_channel(channel);
                     }
-                    return (
-                        held && self.delivery_destination_allowed(destination),
-                        follow_receipt,
-                    );
+                    let outcome = if !self.delivery_destination_allowed(destination) {
+                        TransferOutcome::Failed
+                    } else if held {
+                        TransferOutcome::Held
+                    } else if limited {
+                        TransferOutcome::Limited
+                    } else if !complete {
+                        TransferOutcome::More
+                    } else {
+                        TransferOutcome::Failed
+                    };
+                    return (outcome, follow_receipt);
                 }
                 Err(error) if reused && super::session_pool::retryable_sync_error(&error) => {}
-                Err(_) => return (false, false),
+                Err(_) => return (TransferOutcome::Failed, false),
             }
         }
-        (false, false)
+        (TransferOutcome::Failed, false)
     }
 
     pub(in crate::node) async fn replicate_delivery_destination(
@@ -2832,6 +2872,8 @@ impl Node {
                                     let reason = match progress {
                                         Reconciliation::Advanced => super::work_observation::reason::PULL_ADVANCED,
                                         Reconciliation::Quiet => super::work_observation::reason::PULL_QUIET,
+                                        Reconciliation::Limited => super::work_observation::reason::PULL_DEFERRED,
+                                        Reconciliation::More => super::work_observation::reason::PULL_DEFERRED,
                                         Reconciliation::Deferred => super::work_observation::reason::PULL_DEFERRED,
                                     };
                                     self.observe_mailbox_work(reason, None);
@@ -3041,14 +3083,14 @@ impl Node {
                             .lock()
                             .expect("delivery lock not poisoned")
                             .contains_destination(id, destination.event.id);
-                        let (progress, reason) = if live {
-                            node.retry_one_destination_with_reason(
+                        let (progress, reason, continuation) = if live {
+                            node.retry_one_destination_outcome(
                                 &destination,
                                 DeliveryAttemptContext::RetainedRecovery,
                             )
                             .await
                         } else {
-                            (false, None)
+                            (false, None, TransferContinuation::None)
                         };
                         let (failed, advanced) = if progress {
                             let mut store =
@@ -3068,6 +3110,10 @@ impl Node {
                             Reconciliation::Deferred
                         } else if advanced {
                             Reconciliation::Advanced
+                        } else if continuation == TransferContinuation::More {
+                            Reconciliation::More
+                        } else if continuation == TransferContinuation::Limited {
+                            Reconciliation::Limited
                         } else if progress {
                             // Positive custody with an unchanged queue is an
                             // observed success, not a failed delivery attempt.
@@ -3104,8 +3150,8 @@ impl Node {
                     active.insert(key.clone(), routes);
                     let owner = key.clone();
                     let task = controls.spawn(work.track(async move {
-                        let progress = node
-                            .retry_one_destination(
+                        let (progress, _, continuation) = node
+                            .retry_one_destination_outcome(
                                 &receipt.destination,
                                 DeliveryAttemptContext::ReceiptRecovery,
                             )
@@ -3120,7 +3166,7 @@ impl Node {
                         (
                             key,
                             failed,
-                            Reconciliation::from_progress(progress && !failed),
+                            Reconciliation::receipt_result(progress, failed, continuation),
                             None,
                         )
                     }));
@@ -3313,7 +3359,7 @@ impl Node {
                     {
                         return Err(SessionError::UnexpectedMessage);
                     }
-                    let (advanced, dispatched) = if relay {
+                    let (advanced, dispatched, complete, limited) = if relay {
                         // Upload confirmations are not incoming progress. A bounded
                         // scalar source observation also sees accepted relay controls.
                         let before = self
@@ -3330,16 +3376,25 @@ impl Node {
                             .expect("log lock")
                             .repository()?
                             .source_revision()?;
-                        (before != after, false)
+                        (before != after, false, true, false)
                     } else {
                         let store = self.pull_sync_store(channel.peer_identity());
                         let _reception = self
                             .request_reception_scope(&store, &channel)
                             .ok_or(SessionError::UnexpectedMessage)?;
                         let result =
-                            super::session::request_round_paged(&mut channel, &store, conv).await;
+                            super::session::request_sync_turn_paged(&mut channel, &store, conv)
+                                .await;
                         let dispatched = self.dispatch_received_sync_work(&store);
-                        (result?.applied > 0, dispatched)
+                        {
+                            let outcome = result?;
+                            (
+                                outcome.report.applied > 0,
+                                dispatched,
+                                outcome.complete,
+                                outcome.limited,
+                            )
+                        }
                     };
                     // A quiet success still retires the framed exchange and retries
                     // local projections. It never certifies new data or custody.
@@ -3349,7 +3404,7 @@ impl Node {
                         self.emit_new_messages(conv);
                         self.process_file_events(conv);
                     }
-                    Ok::<_, SessionError>(advanced)
+                    Ok::<_, SessionError>((advanced, complete, limited))
                 })
                 .await;
             if relay {
@@ -3361,8 +3416,10 @@ impl Node {
                 );
             }
             completed = completed.combine(match result {
-                Some(Ok(true)) => Reconciliation::Advanced,
-                Some(Ok(false)) => Reconciliation::Quiet,
+                Some(Ok((true, _, _))) => Reconciliation::Advanced,
+                Some(Ok((false, false, true))) => Reconciliation::Limited,
+                Some(Ok((false, false, false))) => Reconciliation::More,
+                Some(Ok((false, true, _))) => Reconciliation::Quiet,
                 _ => Reconciliation::Deferred,
             });
         }
@@ -3384,8 +3441,19 @@ impl Node {
         destination: &DeliveryDestination,
         context: DeliveryAttemptContext,
     ) -> (bool, Option<DeliveryRecoveryReason>) {
+        let (held, reason, _) = self
+            .retry_one_destination_outcome(destination, context)
+            .await;
+        (held, reason)
+    }
+
+    async fn retry_one_destination_outcome(
+        self: &Arc<Self>,
+        destination: &DeliveryDestination,
+        context: DeliveryAttemptContext,
+    ) -> (bool, Option<DeliveryRecoveryReason>, TransferContinuation) {
         if !self.delivery_destination_allowed(destination) {
-            return (false, None);
+            return (false, None, TransferContinuation::None);
         }
         let direct_peer = self
             .routing_peer(&destination.device.user_id())
@@ -3425,6 +3493,8 @@ impl Node {
             destination.receipt_eligible && context == DeliveryAttemptContext::RetainedRecovery;
         let started = std::time::Instant::now();
         let budget = super::route_timing::MAX_CONTROL_DEADLINE;
+        let direct_more = std::sync::atomic::AtomicBool::new(false);
+        let direct_limited = std::sync::atomic::AtomicBool::new(false);
         let direct = async {
             let mut held = false;
             let mut timed_out = false;
@@ -3445,24 +3515,35 @@ impl Node {
                                     Some(&receipt_ready),
                                 )
                                 .await;
-                            if !held.0 {
-                                self.emit_new_messages(destination.event.conversation_id);
+                            self.emit_new_messages(destination.event.conversation_id);
+                            if held.0 == TransferOutcome::More {
+                                direct_more.store(true, Ordering::Release);
                             }
-                            held
+                            if held.0 == TransferOutcome::Limited {
+                                direct_limited.store(true, Ordering::Release);
+                            }
+                            (held.0 == TransferOutcome::Held, held.1)
                         };
                         let receipts = || async {
                             let control = super::delivery_receipt::delivery_conversation_id(
                                 &self.identity.public(),
                                 &peer.public,
                             );
-                            Box::pin(self.transfer_delivery_destination_with_admission(
-                                &peer,
-                                destination,
-                                control,
-                                super::session_pool::AuthenticationAdmission::RouteProgress,
-                                None,
-                            ))
-                            .await;
+                            let control_outcome =
+                                Box::pin(self.transfer_delivery_destination_with_admission(
+                                    &peer,
+                                    destination,
+                                    control,
+                                    super::session_pool::AuthenticationAdmission::RouteProgress,
+                                    None,
+                                ))
+                                .await;
+                            if control_outcome.0 == TransferOutcome::More {
+                                direct_more.store(true, Ordering::Release);
+                            }
+                            if control_outcome.0 == TransferOutcome::Limited {
+                                direct_limited.store(true, Ordering::Release);
+                            }
                             self.emit_new_messages(control);
                         };
                         if independent_receipts {
@@ -3506,7 +3587,13 @@ impl Node {
                 timed_out = outcome.is_none();
                 held = outcome.unwrap_or(false);
             }
-            (held, started.elapsed(), timed_out)
+            (
+                held,
+                started.elapsed(),
+                timed_out,
+                direct_more.load(Ordering::Acquire),
+                direct_limited.load(Ordering::Acquire),
+            )
         };
         let relay = async {
             let outcome =
@@ -3561,8 +3648,8 @@ impl Node {
         }
         // Dropping an unfinished alternative releases its socket and peer lane.
         // Custody or another destination's receipt leaves this event pending.
-        let (held, direct_elapsed, direct_timeout) =
-            direct_result.unwrap_or((false, started.elapsed(), false));
+        let (held, direct_elapsed, direct_timeout, more, limited) =
+            direct_result.unwrap_or((false, started.elapsed(), false, false, false));
         let (relay_held, relay_elapsed, relay_timeout) =
             relay_result.unwrap_or((false, started.elapsed(), false));
         if started.elapsed() >= std::time::Duration::from_secs(10) {
@@ -3584,12 +3671,19 @@ impl Node {
         let held = held || relay_held;
         (
             held,
-            if held {
+            if held || more || limited {
                 None
             } else if direct_timeout || relay_timeout {
                 Some(DeliveryRecoveryReason::AttemptTimedOut)
             } else {
                 reason
+            },
+            if more {
+                TransferContinuation::More
+            } else if limited {
+                TransferContinuation::Limited
+            } else {
+                TransferContinuation::None
             },
         )
     }
@@ -6656,5 +6750,72 @@ mod requester_reception_tests {
                     .unwrap()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_sync_retry_tests {
+    use super::*;
+    #[test]
+    fn limited_sync_parks_without_claiming_quiet_or_delivery() {
+        let now = std::time::Instant::now();
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        Reconciliation::Limited.schedule(&mut retries, "peer", (), now);
+        assert!(!retries.ready(&"peer", &(), now + std::time::Duration::from_secs(1)));
+        assert!(retries.ready(&"peer", &(), now + QUIET_REPAIR_INTERVAL));
+        assert_eq!(
+            Reconciliation::receipt_result(false, false, TransferContinuation::Limited),
+            Reconciliation::Limited
+        );
+        assert_eq!(
+            Reconciliation::Limited.combine(Reconciliation::Quiet),
+            Reconciliation::Limited
+        );
+        assert_eq!(
+            Reconciliation::Limited.combine(Reconciliation::More),
+            Reconciliation::More
+        );
+    }
+    #[test]
+    fn incomplete_receipt_is_continuation_without_custody() {
+        assert_eq!(
+            Reconciliation::receipt_result(false, false, TransferContinuation::More),
+            Reconciliation::More
+        );
+        assert_eq!(
+            Reconciliation::receipt_result(true, false, TransferContinuation::More),
+            Reconciliation::Advanced
+        );
+        assert_eq!(
+            Reconciliation::receipt_result(false, true, TransferContinuation::More),
+            Reconciliation::Deferred
+        );
+        assert_eq!(
+            Reconciliation::receipt_result(false, false, TransferContinuation::None),
+            Reconciliation::Deferred
+        );
+    }
+    #[test]
+    fn bounded_sync_continuation_resets_failure_backoff_without_claiming_delivery() {
+        let now = std::time::Instant::now();
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        for _ in 0..8 {
+            Reconciliation::Deferred.schedule(&mut retries, "peer", (), now);
+        }
+        Reconciliation::More.schedule(&mut retries, "peer", (), now);
+        assert!(!retries.ready(&"peer", &(), now + std::time::Duration::from_millis(499)));
+        assert!(retries.ready(&"peer", &(), now + std::time::Duration::from_millis(500)));
+        assert_eq!(
+            Reconciliation::More.combine(Reconciliation::Quiet),
+            Reconciliation::More
+        );
+        assert_eq!(
+            Reconciliation::More.combine(Reconciliation::Deferred),
+            Reconciliation::More
+        );
+        assert_eq!(
+            Reconciliation::More.combine(Reconciliation::Advanced),
+            Reconciliation::Advanced
+        );
     }
 }

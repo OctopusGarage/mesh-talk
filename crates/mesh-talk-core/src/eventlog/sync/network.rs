@@ -109,6 +109,21 @@ pub struct ExportPage<C> {
     pub allocated_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestedExportStatus {
+    Unsupported,
+    Preparing,
+    More,
+    Complete,
+}
+pub struct RequestedExport {
+    pub status: RequestedExportStatus,
+    pub events: Vec<Event>,
+    pub unavailable: Vec<EventId>,
+    pub consumed: usize,
+    pub work: PreparationStep,
+}
+
 /// A source cutoff freezes membership, never authorization. Every selector and
 /// `validate_view` must check current destructive/authority bindings. Views own
 /// leases and scalar context, never a borrowed lock/transaction or all history.
@@ -286,6 +301,63 @@ pub trait NetworkSyncStore {
         after: Option<&Self::HaveCursor>,
         budget: IdPageBudget,
     ) -> Result<SyncPage<EventId, Self::HaveCursor>, LogError>;
+    fn requested_export(
+        &self,
+        _view: &Self::View,
+        _targets: &[EventId],
+        _budget: ExportPageBudget,
+        _preparation: PreparationBudget,
+    ) -> Result<RequestedExport, LogError> {
+        Ok(RequestedExport {
+            status: RequestedExportStatus::Unsupported,
+            events: vec![],
+            unavailable: vec![],
+            consumed: 0,
+            work: PreparationStep::default(),
+        })
+    }
+    fn requested_inventory_page(
+        &self,
+        _view: &Self::View,
+        _after: Option<i64>,
+        _budget: IdPageBudget,
+    ) -> Result<Option<SyncPage<EventId, i64>>, LogError> {
+        Err(LogError::InvalidPageBudget)
+    }
+    fn range_prepare(
+        &self,
+        _view: &Self::View,
+    ) -> Result<crate::eventlog::sync::range::RangeProgress, LogError> {
+        Ok(crate::eventlog::sync::range::RangeProgress::Unsupported)
+    }
+    fn range_receiver_prepare(
+        &self,
+        _view: &Self::View,
+    ) -> Result<crate::eventlog::sync::range::RangeReceiverProgress, LogError> {
+        Ok(crate::eventlog::sync::range::RangeReceiverProgress::Unsupported)
+    }
+    fn range_checkpoint(
+        &self,
+        _view: &Self::View,
+    ) -> Result<Option<crate::eventlog::sync::range::index::Checkpoint>, LogError> {
+        Ok(None)
+    }
+    fn range_reverse_required(&self) -> bool {
+        true
+    }
+    fn retain_range_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        self.retain_custody_view(view)
+    }
+    fn retain_range_checkpoint(
+        &self,
+        _view: &Self::View,
+        _checkpoint: crate::eventlog::sync::range::index::Checkpoint,
+    ) -> Result<(), LogError> {
+        Err(LogError::InvalidPageBudget)
+    }
+    fn range_summary(&self, _view: &Self::View, _request: &[u8]) -> Result<Vec<u8>, LogError> {
+        Err(LogError::InvalidPageBudget)
+    }
     fn export_page(
         &self,
         view: &Self::View,

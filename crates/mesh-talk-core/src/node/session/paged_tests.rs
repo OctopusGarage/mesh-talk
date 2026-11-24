@@ -3618,6 +3618,12 @@ async fn legacy_optional_custody_close_does_not_defer_completed_control_fanout()
             assert!(matches!(decode(&connection.recv().await.unwrap()).unwrap(),
                 SyncWire::FpRequest(_) | SyncWire::FpRequestV2(_) | SyncWire::FpRequestV3(_)
                 | SyncWire::FpRequestV4(_) | SyncWire::FpRequestV5(_)));
+            // An old peer treats the domain-separated capability marker as an
+            // ordinary mismatching fingerprint, then receives the real probe.
+            connection.send(&encode(&SyncWire::FpResponse(FpResponse { matched: false })).unwrap()).await.unwrap();
+            assert!(matches!(decode(&connection.recv().await.unwrap()).unwrap(),
+                SyncWire::FpRequest(_) | SyncWire::FpRequestV2(_) | SyncWire::FpRequestV3(_)
+                | SyncWire::FpRequestV4(_) | SyncWire::FpRequestV5(_)));
             // A complete matching ordinary round is independent of support for
             // the appended optional custody request on this disposable stream.
             connection.send(&encode(&SyncWire::FpResponse(FpResponse { matched: true })).unwrap()).await.unwrap();

@@ -15,7 +15,7 @@ use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
 use crate::node::channel::seal_keys_for;
-use crate::node::session::{request_durable_have, request_round_paged as request_round};
+use crate::node::session::{request_durable_have, request_range_round_paged as request_round};
 use futures_util::future::join_all;
 use futures_util::stream::{self, StreamExt};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -4352,7 +4352,8 @@ impl Node {
                         &conn,
                         super::reception_effects::ArrivalKind::CatchUp,
                     )?;
-                    let round = request_round(&mut conn, &store, channel).await;
+                    let round =
+                        super::session::request_sync_turn_paged(&mut conn, &store, channel).await;
                     let received = reception.dispatch();
                     let reason = match &round {
                         Ok(report) if report.applied > 0 => {
@@ -4394,8 +4395,15 @@ impl Node {
                             report.rejected.len()
                         )
                     });
+                    if !report.complete && !report.limited {
+                        node.schedule_channel_recovery(channel);
+                    }
                     node.recycle_sync_channel(conn);
-                    Some((report.applied, report.rejected.is_empty(), received))
+                    Some((
+                        report.applied,
+                        report.complete && report.rejected.is_empty(),
+                        received,
+                    ))
                 })
                 .await;
                 if result.is_err() {

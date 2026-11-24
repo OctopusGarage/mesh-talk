@@ -147,6 +147,35 @@ impl Preparation {
         self.history_only = true;
     }
 
+    pub(super) fn was_ready(&self) -> bool {
+        self.phase == Phase::Ready
+    }
+    pub(super) fn park_range(&mut self) -> bool {
+        if self.selection.is_none() {
+            return false;
+        }
+        self.reload = true;
+        self.principal = None;
+        self.policy_scopes = None;
+        self.active = None;
+        self.closing = None;
+        self.hash = None;
+        true
+    }
+    pub(super) fn history_only(&self) -> bool {
+        self.history_only
+    }
+    pub(super) fn restore_history_owner(
+        &mut self,
+        store: &GuardedSyncStore<'_>,
+        view: &ParticipantView,
+    ) -> Result<(), LogError> {
+        if self.was_ready() && self.history_only && self.principal.is_none() {
+            self.reload = true;
+            self.step(store, view, PreparationBudget::default())?;
+        }
+        Ok(())
+    }
     pub(super) fn history_generation(&self) -> Option<OrderGeneration> {
         self.generation
     }

@@ -661,3 +661,41 @@ fn network_validation_rechecks_metadata_corruption_without_body_reads() {
         0
     );
 }
+
+#[test]
+fn range_have_extension_rebinds_commit_boundary_and_rejects_cross_domain_or_scope() {
+    let (dir, repository) = repo();
+    let signer = DeviceIdentity::generate();
+    let first = event(&signer, 1, vec![], 1, EventKind::Message);
+    repository.append(&first).unwrap();
+    let old = repository.open_view(&first.conversation_id).unwrap();
+    let marker = old.have_end_cursor();
+    let second = event(&signer, 2, vec![first.id], 2, EventKind::Message);
+    repository.append(&second).unwrap();
+    let current = repository.open_view(&first.conversation_id).unwrap();
+    let cursor = current.extend_have_cursor(&marker).unwrap();
+    let page = repository
+        .have_page(
+            &current,
+            Some(&cursor),
+            IdPageBudget {
+                ids: 8,
+                examined: 8,
+            },
+        )
+        .unwrap();
+    assert_eq!(page.items, vec![second.id]);
+    let other_scope = repository
+        .open_view(&ConversationId::new([88; 32]))
+        .unwrap();
+    assert!(matches!(
+        other_scope.extend_have_cursor(&marker),
+        Err(LogError::StaleCursor)
+    ));
+    let other_domain = EventRepository::new(database(&dir), EventDomainId([2; 16])).unwrap();
+    let other = other_domain.open_view(&first.conversation_id).unwrap();
+    assert!(matches!(
+        other.extend_have_cursor(&marker),
+        Err(LogError::StaleCursor)
+    ));
+}

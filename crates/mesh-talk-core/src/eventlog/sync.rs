@@ -17,6 +17,7 @@
 //! so even signed events with inverted clocks make progress across bounded frames.
 
 pub mod network;
+pub mod range;
 
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};

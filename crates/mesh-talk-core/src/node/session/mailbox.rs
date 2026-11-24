@@ -6,8 +6,8 @@ use crate::postoffice::{IndexedPostOffice, MailboxCursor, MailboxDeltaPage};
 use mesh_mailbox::rpc::{decode_frame, marker};
 use mesh_mailbox::{
     rpc::{
-        Frame, RpcError, encode_frame, is_mailbox_frame, make_get_request, read_delta_response,
-        read_get_response,
+        Frame, PAGE_IDS, RpcError, encode_frame, is_mailbox_frame, make_get_request,
+        read_delta_response, read_get_response,
     },
     service::{
         DispatchError, MailboxStore, dispatch, make_probe, probe_scope, read_probe_response,
@@ -44,7 +44,58 @@ pub(crate) async fn delta<IO: AsyncRead + AsyncWrite + Unpin>(
             prior: prior.cloned(),
         })?)
         .await?;
-    Ok(read_delta_response(&channel.recv().await?, conversation)?)
+    let page = read_delta_response(&channel.recv().await?, conversation)?;
+    valid_delta_page(&page, conversation, prior)
+        .then_some(page)
+        .ok_or(SessionError::UnexpectedMessage)
+}
+
+fn valid_delta_page(
+    page: &MailboxDeltaPage,
+    scope: ConversationId,
+    prior: Option<&MailboxCursor>,
+) -> bool {
+    if page.cursor.conversation != scope
+        || page.ids.len() > PAGE_IDS
+        || page.complete != page.cursor.window.is_none()
+        || page.cursor.after < 0
+        || page.cursor.revision < 0
+        || page.cursor.epoch < 0
+        || page
+            .ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != page.ids.len()
+        || page.cursor.window.is_some_and(|(upper, revision)| {
+            upper < page.cursor.after || revision < page.cursor.revision
+        })
+    {
+        return false;
+    }
+    if page.reset {
+        return true;
+    } // The owner explicitly handles source reset.
+    let Some(prior) = prior else {
+        return true;
+    };
+    if prior.store_uuid != page.cursor.store_uuid
+        || prior.conversation != page.cursor.conversation
+        || prior.epoch != page.cursor.epoch
+        || prior.first_seen != page.cursor.first_seen
+        || page.cursor.after < prior.after
+        || page.cursor.revision < prior.revision
+        || (!page.complete && prior == &page.cursor)
+    {
+        return false;
+    }
+    if let Some(window) = prior.window {
+        if page.complete {
+            return page.cursor.after == window.0 && page.cursor.revision == window.1;
+        }
+        return page.cursor.window == Some(window) && page.cursor.revision == prior.revision;
+    }
+    true
 }
 
 pub(crate) async fn get<IO: AsyncRead + AsyncWrite + Unpin>(
@@ -151,3 +202,59 @@ pub(crate) async fn serve<IO: AsyncRead + AsyncWrite + Unpin + Send>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod delta_transition_tests {
+    use super::*;
+    fn cursor() -> MailboxCursor {
+        MailboxCursor {
+            store_uuid: [1; 16],
+            conversation: ConversationId::new([2; 32]),
+            epoch: 0,
+            first_seen: None,
+            revision: 0,
+            after: 64,
+            window: Some((201, 1)),
+        }
+    }
+    #[test]
+    fn mailbox_partial_window_is_pinned_until_the_exact_terminal_watermark() {
+        let prior = cursor();
+        let mut page = MailboxDeltaPage {
+            cursor: prior.clone(),
+            ids: vec![],
+            complete: false,
+            reset: false,
+        };
+        assert!(!valid_delta_page(&page, prior.conversation, Some(&prior)));
+        page.cursor.after = 128;
+        assert!(valid_delta_page(&page, prior.conversation, Some(&prior)));
+        page.cursor.window = Some((300, 2));
+        assert!(!valid_delta_page(&page, prior.conversation, Some(&prior)));
+        page.cursor.window = None;
+        page.complete = true;
+        page.cursor.revision = 1;
+        assert!(!valid_delta_page(&page, prior.conversation, Some(&prior)));
+        page.cursor.after = 201;
+        assert!(valid_delta_page(&page, prior.conversation, Some(&prior)));
+    }
+    #[test]
+    fn mailbox_duplicates_require_rejection_but_explicit_reset_is_preserved() {
+        let prior = cursor();
+        let mut next = prior.clone();
+        next.after = 128;
+        let id = EventId::new([3; 32]);
+        let mut page = MailboxDeltaPage {
+            cursor: next,
+            ids: vec![id, id],
+            complete: false,
+            reset: false,
+        };
+        assert!(!valid_delta_page(&page, prior.conversation, Some(&prior)));
+        page.ids.clear();
+        page.cursor.store_uuid = [4; 16];
+        assert!(!valid_delta_page(&page, prior.conversation, Some(&prior)));
+        page.reset = true;
+        assert!(valid_delta_page(&page, prior.conversation, Some(&prior)));
+    }
+}

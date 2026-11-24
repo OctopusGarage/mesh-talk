@@ -5,7 +5,8 @@ use crate::{eventlog::ConversationId, identity::device::PublicIdentity};
 use std::{collections::VecDeque, time::Instant};
 
 const MAX_ENTRIES: usize = 64;
-const MAX_BYTES: usize = 64 * 1024 * 1024;
+// Other 32 MiB is reserved globally for prepared authorized range indexes.
+const MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Purpose {
@@ -54,6 +55,19 @@ impl<T> PreparedCache<T> {
     pub(super) fn accepts_bytes(bytes: usize) -> bool {
         bytes <= MAX_BYTES
     }
+    /// Extract one oldest idle owner. Destruction must happen after releasing
+    /// the cache mutex; this never reaches an active checked-out view.
+    pub(super) fn retire_oldest(&mut self) -> Option<T> {
+        let index = self
+            .entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, entry)| (entry.returned, *index))
+            .map(|(index, _)| index)?;
+        let entry = self.entries.remove(index)?;
+        self.bytes -= entry.bytes;
+        Some(entry.value)
+    }
     fn extract(&mut self, mut remove: impl FnMut(&Entry<T>) -> bool, retired: &mut Vec<T>) {
         let mut index = 0;
         while index < self.entries.len() {
@@ -65,6 +79,17 @@ impl<T> PreparedCache<T> {
                 index += 1;
             }
         }
+    }
+    /// A candidate only. The caller must independently requalify source and
+    /// policy before using any cached permission or index.
+    pub(super) fn take_candidate(&mut self, scope: &Scope) -> Option<T> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| &entry.scope == scope)?;
+        let entry = self.entries.remove(index)?;
+        self.bytes -= entry.bytes;
+        Some(entry.value)
     }
     pub(super) fn take(&mut self, scope: &Scope, stamp: &HistorySyncStamp) -> (Option<T>, Vec<T>) {
         let mut retired = Vec::new();
@@ -219,5 +244,24 @@ mod tests {
         );
         assert_eq!(cache.clear(), vec![2]);
         assert_eq!(cache.bytes, 0);
+    }
+    #[test]
+    fn pressure_retirement_is_oldest_first_and_updates_byte_accounting() {
+        let mut cache = PreparedCache::default();
+        let now = Instant::now();
+        let second = scope(2);
+        cache.insert(scope(1), stamp(1), 3, 11, now);
+        cache.insert(
+            second.clone(),
+            stamp(1),
+            7,
+            22,
+            now + std::time::Duration::from_secs(1),
+        );
+        assert_eq!(cache.retire_oldest(), Some(11));
+        assert_eq!(cache.bytes, 7);
+        assert_eq!(cache.take(&second, &stamp(1)), (Some(22), vec![]));
+        assert_eq!(cache.bytes, 0);
+        assert_eq!(cache.retire_oldest(), None);
     }
 }
