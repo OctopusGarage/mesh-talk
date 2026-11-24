@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M86GYHH1Z626XW305TK5Q9TH",
+  "strategy": "manual-commit",
+  "branch": "integrate/session-20261124",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "crates/mesh-talk-core/src/node/session.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 165551,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 34785408,
+    "output_tokens": 33570,
+    "api_call_count": 124,
+    "subagent_tokens": {
+      "input_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 0,
+      "api_call_count": 0
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 753,
+    "layers": {
+      "betterleaks": 53,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 75,
+      "credentialed_uri": 0,
+      "entropy": 627,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
