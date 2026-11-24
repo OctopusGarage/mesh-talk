@@ -831,13 +831,16 @@ There are two wrapper scopes. Legacy opaque copies bind the device pair and a pa
 
 For an explicit healthy preference P, the shared candidate policy keeps P first.
 Automatic candidates use unclamped authenticated handshake/control latency
-estimates from the bounded session timing owner; timeout penalties and existing
-retry cooldowns demote failed paths. Samples expire after 120 seconds and clear
+estimates from the bounded session timing owner. Timeout penalties can demote a
+path before its first successful sample, and existing retry cooldowns still govern
+eligibility. Samples expire after 120 seconds and clear
 on network changes. Cold routes retain local-first defaults, with known fresh
 origin distance contributing a small forwarding allowance (50 ms per hop;
 unknown distance uses four hops). These are estimates of usable relay paths,
 not measured end-to-end delivery latency or a global shortest-path guarantee.
-Equal costs retain stable ordering. All eligible feature paths reuse the owner.
+Equal costs retain stable ordering. Targeted uploads and pulls use the destination
+or sender's fresh introduction distance. A general mailbox drain still considers
+every eligible relay because there may be ciphertext on more than one.
 Bounded batches always include the current best candidate and rotate three
 alternatives; existing upload concurrency races two attempts so a silent relay
 cannot monopolize progress. Source presentation and communication selection

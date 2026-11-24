@@ -108,7 +108,12 @@ impl RouteTimings {
             .as_ref()
             .map(Sample::margin)
             .or_else(|| e.authentication.as_ref().map(|sample| sample.margin() * 3));
-        measured.map(|cost| cost.max(e.backoff * 3).max(e.control_backoff))
+        let penalty = (e.backoff * 3).max(e.control_backoff);
+        match measured {
+            Some(cost) => Some(cost.max(penalty)),
+            None if !penalty.is_zero() => Some(penalty),
+            None => None,
+        }
     }
 
     pub(super) fn control_timed_out(&mut self, device: &str, address: SocketAddr) {
@@ -239,6 +244,28 @@ mod tests {
         );
         timings.clear();
         assert!(timings.routing_cost("slow", route(), now).is_none());
+    }
+
+    #[test]
+    fn first_timeout_demotes_a_route_before_any_success() {
+        let mut timings = RouteTimings::default();
+        let now = Instant::now();
+        timings.timed_out("dial", route());
+        timings.control_timed_out("exchange", route());
+
+        for peer in ["dial", "exchange"] {
+            assert!(timings.routing_cost(peer, route(), now).unwrap() > Duration::from_secs(1));
+            assert!(
+                timings
+                    .routing_cost(peer, route(), now + Duration::from_secs(121))
+                    .is_none()
+            );
+        }
+        timings.succeeded("dial", route(), Duration::from_millis(30));
+        timings.control_succeeded("exchange", route(), Duration::from_millis(30));
+        for peer in ["dial", "exchange"] {
+            assert!(timings.routing_cost(peer, route(), now).unwrap() < Duration::from_secs(1));
+        }
     }
 
     #[test]

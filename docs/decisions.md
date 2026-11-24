@@ -36,3 +36,12 @@ revision and keep its provenance alongside the source. Keep Mesh Talk's
 product authorization and lifecycle in its adapters. Replication defines its
 own transport interface so a consumer can compose it with Mesh Connect or
 another suitable channel. See the [architecture reference](ARCHITECTURE.md#mesh-foundation-libraries).
+
+## Use introduction distance as a relay ranking hint
+
+A targeted exchange uses the known correspondent's fresh directory distance
+alongside authenticated timing and retry state. A first timeout supplies routing
+evidence even before a successful sample. Origin distance estimates forwarding
+work, while timing observes the local leg and control exchange. Retain the
+configured healthy preference and rotate fallback relays because either direction
+can have durable copies on other paths. See the [relay ordering contract](network-design-reference.md#c-relay-preference-failover-and-partitions).

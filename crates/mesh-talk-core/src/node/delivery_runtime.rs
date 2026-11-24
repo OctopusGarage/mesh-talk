@@ -3267,7 +3267,7 @@ impl Node {
         }
         let peers = if relay {
             let roster = self.roster.lock().expect("roster lock not poisoned");
-            self.post_office_candidates(&roster)
+            self.post_office_candidates_for(&roster, &proof.public())
         } else {
             self.routing_peer(&proof.public().user_id())
                 .into_iter()
@@ -5411,6 +5411,64 @@ mod diagnostic_tests {
             node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
             fastest.public
         );
+    }
+
+    #[tokio::test]
+    async fn targeted_relay_rank_balances_origin_distance_and_responsiveness() {
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Remote sender",
+            5000,
+        );
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let near = DeviceIdentity::generate();
+        let far = DeviceIdentity::generate();
+        let near_addr = "127.0.0.1:5001".parse().unwrap();
+        let far_addr = "127.0.0.1:5002".parse().unwrap();
+        let mut roster = crate::discovery::roster::Roster::default();
+        for (relay, addr, hops) in [(&near, near_addr, 0), (&far, far_addr, 2)] {
+            let addr: std::net::SocketAddr = addr;
+            roster.update(
+                &Announce::new_post_office(relay, "Relay", addr.port()),
+                addr.ip(),
+                &node.user_id(),
+            );
+            roster.update_relayed(&peer, addr, &node.user_id());
+            roster.set_directory_expiry(
+                &peer.user_id,
+                addr,
+                std::time::Instant::now() + Duration::from_secs(15),
+                1,
+            );
+            roster.set_directory_origin_hops(&peer.user_id, addr, 1, Some(hops));
+        }
+
+        let first = || {
+            node.post_office_candidates_for(&roster, &peer.public())[0]
+                .public
+                .clone()
+        };
+        assert_eq!(first(), near.public());
+
+        node.sessions
+            .control_succeeded(&near.public(), near_addr, Duration::from_millis(400));
+        node.sessions
+            .control_succeeded(&far.public(), far_addr, Duration::from_millis(20));
+        assert_eq!(first(), far.public());
+
+        node.sessions.control_timed_out(&far.public(), far_addr);
+        assert_eq!(first(), near.public());
     }
 
     #[tokio::test]
