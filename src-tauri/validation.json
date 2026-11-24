@@ -1044,6 +1044,10 @@
           {
             "name": "Viewing account binding changes mutates nothing and acceptance requires current unlocked installation authority plus the exact reviewed device and old/new account pair",
             "reference": "docs/peer-trust.md#recover-a-device-that-changed-accounts"
+          },
+          {
+            "name": "Personal communication settings require the current unlocked installation through the durable policy commit.",
+            "reference": "docs/privacy-controls.md#personal-communication-controls"
           }
         ]
       }

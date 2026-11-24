@@ -37,7 +37,8 @@ function parseSignal(payload: string): Signal | null {
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const msg = value as Record<string, unknown>;
-  if (typeof msg.callId !== "string" || !msg.callId) return null;
+  if ("protocol" in msg || typeof msg.callId !== "string" || !msg.callId)
+    return null;
   if (msg.kind === "offer") {
     return typeof msg.sdp === "string" &&
       typeof msg.name === "string" &&

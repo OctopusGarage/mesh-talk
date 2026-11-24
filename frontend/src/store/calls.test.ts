@@ -80,6 +80,22 @@ afterEach(() => {
 });
 
 describe("onSignal — incoming offer", () => {
+  it("keeps group-protocol payloads out of the personal call receiver", () => {
+    useCalls.getState().onSignal({
+      from: "bob",
+      payload: JSON.stringify({
+        protocol: "group-voice-1",
+        group: "a".repeat(64),
+        kind: "offer",
+        callId: "unexpected",
+        sdp: "offer",
+        name: "Bob",
+        video: false,
+      }),
+    });
+    expect(useCalls.getState().phase).toBe("idle");
+  });
+
   it("a cancelled accept's late media failure cannot end a newer incoming call", async () => {
     let rejectMedia!: (error: unknown) => void;
     getUserMedia.mockImplementationOnce(

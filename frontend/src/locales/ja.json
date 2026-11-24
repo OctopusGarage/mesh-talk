@@ -9,6 +9,12 @@
     "historyHint": "選択しなければ、チャットを再び開くと履歴を確認できます。お気に入りと書き出したファイルは残ります。"
   },
   "privacy": {
+    "contactsOnly": "許可した連絡先のみ",
+    "contactsOnlyDescription": "許可した連絡先のみが個別チャット、通話、ファイル送信を開始できます。",
+    "block": "ブロック",
+    "unblock": "ブロック解除",
+    "blockAccount": "{{name}}をブロック",
+    "unblockAccount": "{{name}}のブロックを解除",
     "retry": "再試行",
     "section": "ネットワークのプライバシー",
     "title": "非表示モード",

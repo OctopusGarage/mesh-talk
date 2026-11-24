@@ -1120,7 +1120,9 @@ impl Node {
             if !channel.io_admitted() {
                 return;
             }
-            if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
+            if !self.account_allowed(channel.peer_identity(), channel.peer_announcement())
+                || !self.call_privacy_allowed(&channel, &signal)
+            {
                 return;
             }
             if self.serve_call_signal(&channel, signal).is_err() {
@@ -1372,6 +1374,7 @@ impl Node {
                     continue;
                 };
                 if self.certified_sibling(&proof.public())
+                    || !self.personal_peer_allowed(&proof.public(), Some(&proof))
                     || conv
                         != super::conversation::dm_conversation_id(
                             &self.identity.public(),
@@ -2751,6 +2754,7 @@ impl Node {
             .iter()
             .filter(|proof| {
                 self.historical_dm_peer_allowed(proof)
+                    && self.personal_peer_allowed(&proof.public(), Some(proof))
                     && self.verified_dm_pull_peer(&proof.public().user_id())
             })
             .cloned()

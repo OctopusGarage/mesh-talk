@@ -397,6 +397,7 @@ pub fn run_tauri_configured(
                 crate::privacy_commands::accept_account_binding_change,
                 crate::privacy_commands::set_invisible,
                 crate::privacy_commands::set_privacy_allowed,
+                crate::privacy_commands::set_personal_privacy,
                 crate::privacy_commands::initiate_privacy_contact,
                 commands::logout,
                 commands::register,

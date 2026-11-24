@@ -1400,6 +1400,7 @@ mod tests {
                     crate::privacy_commands::accept_account_binding_change,
                     crate::privacy_commands::set_invisible,
                     crate::privacy_commands::set_privacy_allowed,
+                    crate::privacy_commands::set_personal_privacy,
                     crate::privacy_commands::initiate_privacy_contact
                 ])
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -5753,7 +5754,7 @@ mod tests {
         assert_eq!(fixture.sync_documents(), before);
     }
 
-    fn privacy_requests(account: &str) -> [(&'static str, serde_json::Value); 6] {
+    fn privacy_requests(account: &str) -> [(&'static str, serde_json::Value); 7] {
         [
             ("get_privacy", serde_json::json!({"owner":"alice"})),
             (
@@ -5773,6 +5774,10 @@ mod tests {
             (
                 "set_privacy_allowed",
                 serde_json::json!({"owner":"alice","account":account,"allowed":true}),
+            ),
+            (
+                "set_personal_privacy",
+                serde_json::json!({"owner":"alice","account":account,"enabled":true}),
             ),
             (
                 "initiate_privacy_contact",
@@ -5872,6 +5877,7 @@ mod tests {
         for command in [
             "set_invisible",
             "set_privacy_allowed",
+            "set_personal_privacy",
             "initiate_privacy_contact",
         ] {
             registered_logout_during_local_grant_wait(command);
@@ -5980,6 +5986,9 @@ mod tests {
             "set_privacy_allowed" => {
                 serde_json::json!({"owner":owner,"account":account,"allowed":true})
             }
+            "set_personal_privacy" => {
+                serde_json::json!({"owner":owner,"account":account,"enabled":true})
+            }
             "initiate_privacy_contact" => serde_json::json!({"owner":owner,"account":account}),
             "send_file_to_account" => {
                 serde_json::json!({"account":account,"path":path,"media":false})
@@ -6012,7 +6021,10 @@ mod tests {
         };
         let privacy = matches!(
             command,
-            "set_invisible" | "set_privacy_allowed" | "initiate_privacy_contact"
+            "set_invisible"
+                | "set_privacy_allowed"
+                | "set_personal_privacy"
+                | "initiate_privacy_contact"
         );
         let authorized = wait_phase(if privacy {
             "owner-entry"

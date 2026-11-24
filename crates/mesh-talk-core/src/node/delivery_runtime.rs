@@ -1092,6 +1092,11 @@ impl Node {
         {
             return Err(LogError::CorruptFile("invalid manifest device pair".into()));
         }
+        if !self.personal_peer_allowed(&peer, Some(proof)) {
+            return Err(LogError::AdmissionRejected(
+                "personal communication denied".into(),
+            ));
+        }
         if self.files.lock().expect("files lock").processed(event.id)? {
             crate::transport::diagnostics::note_duplicate_receive();
             return Ok(());
@@ -1416,6 +1421,9 @@ impl Node {
         {
             crate::transport::diagnostics::note_duplicate_receive();
             return Ok(Some(()));
+        }
+        if !sibling && !self.personal_peer_allowed(&peer, proof) {
+            return Ok(None);
         }
         if sibling && !self.device_sync_policy().history {
             return Ok(None);

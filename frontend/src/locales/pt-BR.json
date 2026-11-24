@@ -9,6 +9,12 @@
     "historyHint": "Desmarcado, o histórico fica disponível ao reabrir o chat. Favoritos e arquivos exportados são preservados."
   },
   "privacy": {
+    "contactsOnly": "Somente contatos autorizados",
+    "contactsOnlyDescription": "Somente contatos autorizados podem iniciar conversas privadas, chamadas ou convites de arquivos.",
+    "block": "Bloquear",
+    "unblock": "Desbloquear",
+    "blockAccount": "Bloquear {{name}}",
+    "unblockAccount": "Desbloquear {{name}}",
     "relayHelp": "A entrega offline exige uma conta retransmissora de confiança autorizada manualmente. Mensagens sem identidade verificada do remetente são rejeitadas; versões antigas do retransmissor podem não oferecer entrega no modo invisível.",
     "retry": "Tentar novamente",
     "section": "Privacidade na rede",

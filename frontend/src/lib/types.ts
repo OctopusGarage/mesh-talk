@@ -629,6 +629,8 @@ export interface PrivacySnapshot {
   owner: string;
   version: number;
   invisible: boolean;
+  contacts_only?: boolean;
+  blocked_accounts?: string[];
   allowed_accounts: {
     id: string;
     name: string;

@@ -9,6 +9,12 @@
     "historyHint": "Sin marcar, el historial se conserva para cuando abras el chat. Se conservan Favoritos y los archivos exportados."
   },
   "privacy": {
+    "contactsOnly": "Solo contactos autorizados",
+    "contactsOnlyDescription": "Solo los contactos autorizados pueden iniciar chats privados, llamadas o invitaciones de archivos.",
+    "block": "Bloquear",
+    "unblock": "Desbloquear",
+    "blockAccount": "Bloquear a {{name}}",
+    "unblockAccount": "Desbloquear a {{name}}",
     "retry": "Reintentar",
     "section": "Privacidad de red",
     "title": "Modo invisible",

@@ -546,6 +546,34 @@
       ]
     },
     {
+      "id": "core-personal-privacy",
+      "paths": [
+        "crates/mesh-talk-core/src/node/privacy.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync/admission_tests.rs",
+        "crates/mesh-talk-core/src/node/call.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["node::privacy::tests::", "personal_admission_rejects_direct_and_relay_ingress_by_author_account"]
+        }
+      ],
+      "capability": {
+        "summary": "Apply durable local account restrictions to inbound personal communication.",
+        "guide": "docs/privacy-controls.md#personal-communication-controls",
+        "invariants": [
+          {
+            "name": "A block overrides approval for each verified device of the account, including events forwarded by custody.",
+            "reference": "docs/privacy-controls.md#personal-communication-controls"
+          }
+        ]
+      }
+    },
+    {
       "id": "core-private-route-probe-capacity",
       "paths": [
         "crates/mesh-talk-core/src/node/privacy_routing.rs",

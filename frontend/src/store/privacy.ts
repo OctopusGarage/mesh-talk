@@ -12,6 +12,11 @@ interface PrivacyState {
   error: "load" | "save" | null;
   reset: () => void;
   load: (owner: string) => Promise<void>;
+  setPersonal: (
+    owner: string,
+    account: string | null,
+    enabled: boolean,
+  ) => Promise<boolean>;
   setInvisible: (owner: string, invisible: boolean) => Promise<boolean>;
   setAllowed: (
     owner: string,
@@ -32,7 +37,14 @@ function validate(value: PrivacySnapshot, owner: string): PrivacySnapshot {
   if (
     !value ||
     value.owner !== owner ||
-    value.version !== 1 ||
+    (value.version !== 1 && value.version !== 2) ||
+    (value.version === 2 &&
+      (typeof value.contacts_only !== "boolean" ||
+        !Array.isArray(value.blocked_accounts) ||
+        value.blocked_accounts.length > 1024 ||
+        value.blocked_accounts.some(
+          (id) => typeof id !== "string" || !/^[0-9a-f]{32}$/.test(id),
+        ))) ||
     typeof value.invisible !== "boolean" ||
     !Array.isArray(value.allowed_accounts) ||
     value.allowed_accounts.length > 1024
@@ -103,6 +115,8 @@ export const usePrivacy = create<PrivacyState>((set, get) => {
           set({ loaded: false, loading: false, error: "load" });
       }
     },
+    setPersonal: (owner, account, enabled) =>
+      change(owner, () => privacy.setPersonal(owner, account, enabled)),
     setInvisible: (owner, invisible) =>
       change(owner, () => privacy.setInvisible(owner, invisible)),
     setAllowed: (owner, account, allowed) =>

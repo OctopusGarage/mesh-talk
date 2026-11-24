@@ -280,3 +280,16 @@ keys or guarantee erasure of browser, operating-system or process memory.
 
 For implementation details, see [the architecture](ARCHITECTURE.md). For backup
 limits, see [backup and recovery](backup-recovery.md).
+
+
+## Personal communication controls
+
+Approved contacts only is opt-in for unsolicited personal messages, calls and
+file invitations. The existing manual and initiated permissions identify
+approved accounts. A local block overrides either permission across devices
+with a verified binding to the blocked account. A rejected attempt does not
+create a contact request. Existing local history is retained. Joined group
+traffic and certified linked-device synchronization keep their own admission
+rules. When the mode is on, starting a personal call uses the existing initiated
+contact permission so the recipient can answer. The settings are stored in
+the encrypted local profile policy.

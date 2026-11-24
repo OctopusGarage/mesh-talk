@@ -58,6 +58,10 @@ export function PrivacySettings() {
     }
     for (const account of snapshot?.allowed_accounts ?? [])
       merged.set(account.id, { ...account, allowed: true });
+    for (const id of snapshot?.blocked_accounts ?? []) {
+      if (!merged.has(id))
+        merged.set(id, { id, name: shortId(id), allowed: false });
+    }
     return [...merged.values()].sort(
       (a, b) =>
         Number(b.allowed) - Number(a.allowed) || a.name.localeCompare(b.name),
@@ -124,6 +128,28 @@ export function PrivacySettings() {
             }
           />
         </div>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <label
+              htmlFor="contacts-only-switch"
+              className="text-sm font-medium"
+            >
+              {t("privacy.contactsOnly")}
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {t("privacy.contactsOnlyDescription")}
+            </p>
+          </div>
+          <Switch
+            id="contacts-only-switch"
+            checked={snapshot?.contacts_only ?? false}
+            disabled={!enabled}
+            onCheckedChange={(value) => {
+              if (owner)
+                void usePrivacy.getState().setPersonal(owner, null, value);
+            }}
+          />
+        </div>
         {(loading || (!loaded && !error)) && (
           <p className="text-xs text-muted-foreground">
             {t("privacy.loading")}
@@ -171,56 +197,79 @@ export function PrivacySettings() {
                   {t("privacy.empty")}
                 </p>
               )}
-              {matches.map((contact) => (
-                <div
-                  role="listitem"
-                  key={contact.id}
-                  className="flex items-center gap-3 rounded-lg border p-3"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p
-                      className="truncate text-sm font-medium"
-                      title={contact.name}
-                    >
-                      {contact.name}
-                    </p>
-                    <p
-                      className="truncate font-mono text-xs text-muted-foreground"
-                      title={contact.id}
-                    >
-                      {shortId(contact.id, 12)}
-                    </p>
-                    {contact.allowed && (
-                      <p className="text-xs text-muted-foreground">
-                        {t(
-                          contact.source === "Initiated"
-                            ? "privacy.initiated"
-                            : "privacy.manual",
-                        )}
-                      </p>
-                    )}
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={!enabled}
-                    data-testid={`privacy-${contact.allowed ? "revoke" : "allow"}-${contact.id}`}
-                    aria-label={`${t(contact.allowed ? "privacy.revoke" : "privacy.allow")} ${contact.name}`}
-                    onClick={(event) => {
-                      if (contact.allowed) {
-                        revokeTrigger.current = event.currentTarget;
-                        setRevoke(contact);
-                      } else if (owner) {
-                        void usePrivacy
-                          .getState()
-                          .setAllowed(owner, contact.id, true);
-                      }
-                    }}
+              {matches.map((contact) => {
+                const blocked =
+                  snapshot?.blocked_accounts?.includes(contact.id) ?? false;
+                return (
+                  <div
+                    role="listitem"
+                    key={contact.id}
+                    className="flex items-center gap-3 rounded-lg border p-3"
                   >
-                    {t(contact.allowed ? "privacy.revoke" : "privacy.allow")}
-                  </Button>
-                </div>
-              ))}
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className="truncate text-sm font-medium"
+                        title={contact.name}
+                      >
+                        {contact.name}
+                      </p>
+                      <p
+                        className="truncate font-mono text-xs text-muted-foreground"
+                        title={contact.id}
+                      >
+                        {shortId(contact.id, 12)}
+                      </p>
+                      {contact.allowed && (
+                        <p className="text-xs text-muted-foreground">
+                          {t(
+                            contact.source === "Initiated"
+                              ? "privacy.initiated"
+                              : "privacy.manual",
+                          )}
+                        </p>
+                      )}
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!enabled}
+                      data-testid={`privacy-${contact.allowed ? "revoke" : "allow"}-${contact.id}`}
+                      aria-label={`${t(contact.allowed ? "privacy.revoke" : "privacy.allow")} ${contact.name}`}
+                      onClick={(event) => {
+                        if (contact.allowed) {
+                          revokeTrigger.current = event.currentTarget;
+                          setRevoke(contact);
+                        } else if (owner) {
+                          void usePrivacy
+                            .getState()
+                            .setAllowed(owner, contact.id, true);
+                        }
+                      }}
+                    >
+                      {t(contact.allowed ? "privacy.revoke" : "privacy.allow")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!enabled}
+                      aria-label={t(
+                        blocked
+                          ? "privacy.unblockAccount"
+                          : "privacy.blockAccount",
+                        { name: contact.name },
+                      )}
+                      onClick={() => {
+                        if (owner)
+                          void usePrivacy
+                            .getState()
+                            .setPersonal(owner, contact.id, !blocked);
+                      }}
+                    >
+                      {t(blocked ? "privacy.unblock" : "privacy.block")}
+                    </Button>
+                  </div>
+                );
+              })}
             </div>
           </DialogContent>
         </Dialog>

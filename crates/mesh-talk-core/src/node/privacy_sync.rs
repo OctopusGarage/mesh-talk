@@ -1687,14 +1687,31 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .expect("files lock not poisoned")
                 .contains_file(event.conversation_id)?
         };
+        let personal_author = (!known_file
+            && matches!(event.kind, EventKind::Message | EventKind::FileManifest))
+        .then(|| self.node.historical_author(event.author.ed25519_pub()))
+        .flatten();
+        if let Some(proof) = personal_author.as_ref()
+            && super::conversation::dm_conversation_id(
+                &self.node.identity.public(),
+                &proof.public(),
+            ) == event.conversation_id
+            && !self
+                .node
+                .personal_peer_allowed(&proof.public(), Some(proof))
+        {
+            self.denied = true;
+            return Err(LogError::AdmissionRejected(
+                "personal communication denied".into(),
+            ));
+        }
         // A chunk-first legacy sender must not fill the recipient's log before
         // its offer has arrived. Ordinary messages have an authenticated DM,
         // control, or established channel scope; a fresh file conversation has
         // none until its verified manifest has been installed.
         if event.kind == EventKind::Message && !known_file {
             let own = self.node.identity.public();
-            let peer = self.node.historical_author(event.author.ed25519_pub());
-            let direct = peer.as_ref().is_some_and(|proof| {
+            let direct = personal_author.as_ref().is_some_and(|proof| {
                 super::conversation::dm_conversation_id(&own, &proof.public())
                     == event.conversation_id
                     || super::delivery_receipt::delivery_conversation_id(&own, &proof.public())

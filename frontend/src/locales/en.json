@@ -9,6 +9,12 @@
     "historyHint": "Leave unchecked to keep history for when you reopen this chat. Favorites and exported files are kept."
   },
   "privacy": {
+    "contactsOnly": "Approved contacts only",
+    "contactsOnlyDescription": "Only approved contacts can start private chats, calls or file invitations.",
+    "block": "Block",
+    "unblock": "Unblock",
+    "blockAccount": "Block {{name}}",
+    "unblockAccount": "Unblock {{name}}",
     "relayHelp": "Offline delivery requires a manually allowed trusted relay account. Missing verified sender identity is rejected; old relay versions may not support delivery while invisible.",
     "retry": "Retry",
     "section": "Network privacy",

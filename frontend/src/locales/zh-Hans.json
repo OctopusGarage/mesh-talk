@@ -9,6 +9,12 @@
     "historyHint": "不勾选会保留记录，再次打开聊天时可以查看。收藏和已导出的文件会保留。"
   },
   "privacy": {
+    "contactsOnly": "仅限已批准的联系人",
+    "contactsOnlyDescription": "只有已批准的联系人可以发起私聊、来电或文件邀请。",
+    "block": "拉黑",
+    "unblock": "解除拉黑",
+    "blockAccount": "拉黑 {{name}}",
+    "unblockAccount": "解除拉黑 {{name}}",
     "relayHelp": "离线投递需要手动允许可信中继账号。无法验证发送者身份的消息会被拒绝；旧版中继可能无法在隐身时完成投递。",
     "retry": "重试",
     "section": "网络隐私",

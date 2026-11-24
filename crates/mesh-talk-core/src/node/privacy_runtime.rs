@@ -264,9 +264,11 @@ impl Node {
             .as_ref()
             .map(|s| s.policy.snapshot())
             .unwrap_or(PrivacySnapshot {
-                version: 1,
+                version: 2,
                 invisible: false,
                 allowed_accounts: Vec::new(),
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
             })
     }
     /// Persist visibility and synchronize disclosure boundaries on a configured node.
@@ -381,6 +383,70 @@ impl Node {
         }
         Ok(())
     }
+    /// Update personal admission under the same gate as receive operations.
+    pub async fn set_personal_privacy_guarded(
+        &self,
+        account: Option<&str>,
+        enabled: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
+    ) -> io::Result<()> {
+        let _wake = self.profile_policy_wake();
+        let _operation = self.privacy.gate.write().await;
+        authorize(&mut || {
+            if account == Some(self.account_id().as_str()) {
+                return Err(denied());
+            }
+            let mut guard = self
+                .privacy
+                .state
+                .write()
+                .expect("privacy lock not poisoned");
+            let state = guard.as_mut().ok_or_else(denied)?;
+            let changed = match account {
+                Some(account) => state.policy.set_blocked(account, enabled)?,
+                None => state.policy.set_contacts_only(enabled)?,
+            };
+            if changed {
+                self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    }
+
+    pub(super) fn personal_contacts_only(&self) -> bool {
+        self.privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned")
+            .as_ref()
+            .is_some_and(|state| state.policy.contacts_only())
+    }
+
+    pub(super) fn personal_peer_allowed(
+        &self,
+        public: &PublicIdentity,
+        announcement: Option<&Announce>,
+    ) -> bool {
+        let guard = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned");
+        let Some(state) = guard
+            .as_ref()
+            .filter(|state| state.policy.has_personal_restrictions())
+        else {
+            return true;
+        };
+        let account = state.proofs.account_for(public).or_else(|| {
+            announcement
+                .filter(|proof| proof.public() == *public && proof.verify())
+                .and_then(Announce::account_id)
+        });
+        account.as_deref() == Some(self.account_id().as_str())
+            || state.policy.allows_personal(account.as_deref())
+    }
+
     /// Inspect current signed claims without persisting discovery or granting trust.
     pub fn account_binding_changes(&self, account: &str) -> Vec<AccountBindingChange> {
         let guard = self

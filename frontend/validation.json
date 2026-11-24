@@ -2873,6 +2873,17 @@
       "browser": ["e2e/group-reception.spec.ts"]
     },
     {
+      "id": "frontend-personal-privacy-acceptance",
+      "paths": [
+        "frontend/src/features/chat/PrivacySettings.tsx",
+        "frontend/src/lib/api/privacy.ts",
+        "frontend/src/store/privacy.ts",
+        "frontend/e2e/privacy.spec.ts"
+      ],
+      "browser": ["e2e/privacy.spec.ts"],
+      "native": ["host"]
+    },
+    {
       "id": "frontend-dialog-focus-acceptance",
       "paths": [
         "frontend/src/components/ui/dialog.tsx",

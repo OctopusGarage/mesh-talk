@@ -9,6 +9,12 @@
     "historyHint": "不勾選便會保留記錄，再次開啟聊天時可以查看。收藏和已匯出的檔案會保留。"
   },
   "privacy": {
+    "contactsOnly": "只限已批准嘅聯絡人",
+    "contactsOnlyDescription": "只有已批准嘅聯絡人可以發起私聊、來電或者檔案邀請。",
+    "block": "封鎖",
+    "unblock": "解除封鎖",
+    "blockAccount": "封鎖 {{name}}",
+    "unblockAccount": "解除封鎖 {{name}}",
     "retry": "再試",
     "section": "網絡私隱",
     "title": "隱身模式",
