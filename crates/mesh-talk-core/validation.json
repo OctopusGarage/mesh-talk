@@ -614,6 +614,7 @@
             "responsive_relay_order_preserves_preference_and_avoids_failed_paths",
             "exact_chunk_lookup_requires_outgoing_authority",
             "federated_body_claims_are_exact_and_released_on_cancellation",
+            "relay_completes_attachment_after_direct_prefix",
             "authenticated_talk_channel_carries_sdk_chunk_requests",
             "recipient_pulls_file_chunks_directly_when_push_missed",
             "duplicate_hung_endpoint_handshakes_do_not_starve_healthy_sync",

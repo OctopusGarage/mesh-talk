@@ -6818,6 +6818,15 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
 
 #[tokio::test]
 async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnects() {
+    assert_relay_file_fallback(false).await;
+}
+
+#[tokio::test]
+async fn relay_completes_attachment_after_direct_prefix() {
+    assert_relay_file_fallback(true).await;
+}
+
+async fn assert_relay_file_fallback(with_direct_prefix: bool) {
     let mut timing = super::delivery_runtime::TestTiming::new("relay-file-fixture-setup");
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
@@ -6827,7 +6836,15 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     let bob = DeviceIdentity::generate();
     let bob_account = Account::generate();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+    let direct_listener = if with_direct_prefix {
+        Some(TcpListener::bind("127.0.0.1:0").await.unwrap())
+    } else {
+        None
+    };
+    let direct_port = direct_listener
+        .as_ref()
+        .map_or(1, |listener| listener.local_addr().unwrap().port());
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", direct_port);
     let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
@@ -6934,6 +6951,40 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     drop(channel);
     recipient_task.abort();
     let _ = recipient_task.await;
+
+    if let Some(listener) = direct_listener {
+        let address = listener.local_addr().unwrap();
+        let source = Arc::clone(&a);
+        let server = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let source = Arc::clone(&source);
+                connections.spawn(async move {
+                    if let Ok(channel) = source.privacy_accept(stream).await {
+                        source.serve_connection(channel).await;
+                    }
+                });
+                while connections.try_join_next().is_some() {}
+            }
+        });
+        let author = crate::eventlog::Author::from_ed25519(ap.public().ed25519_pub);
+        let mut channel = b.privacy_sync_dial(address, &ap.public()).await.unwrap();
+        let first = super::session::request_signed_chunk(&mut channel, file, author, 0)
+            .await
+            .unwrap()
+            .expect("source serves the signed prefix over direct TCP");
+        let store = b.sync_store(channel.peer_identity());
+        crate::eventlog::sync::network::NetworkSyncStore::ingest(
+            &mut *store.lock().unwrap(),
+            first,
+        )
+        .unwrap();
+        drop(channel);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert_eq!(b.file_progress(file).unwrap().unwrap().done, 1);
+    }
 
     // A stale preferred relay must not strand consented chunks while another
     // authenticated relay on this LAN is accepting mailbox rounds.
