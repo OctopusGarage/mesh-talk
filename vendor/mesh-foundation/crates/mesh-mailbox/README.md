@@ -2,7 +2,16 @@
 
 Opaque scoped records, negotiated delta retrieval and durable mailbox spools.
 
-Start with `Record::new(scope, bytes)` and the `service` and `spool` modules. Hosts own payload encryption, admission, expiry scheduling and federation; the spool owns its writer lease.
+Start with `Record::new(scope, bytes)`, `ports::MailboxTransport` and
+`client::sync_turn`. The typed engine has no codec, filesystem or scheduler. Hosts
+own payload authentication, admission, retention, scheduling and federation.
+
+Optional default features are `wire` (MFOM2 codecs, service and session adapter)
+and `spool` (encrypted durable storage). They can be selected independently.
+`SpoolOptions` separates record/query limits from wire framing and selects manual
+or first-window-age retention. Atomic body/cursor commits and current access
+checks remain host responsibilities. See [composition](../../docs/sdk-composition.md)
+for budgets, source binding and integration order.
 
 ## Development and documentation
 
@@ -26,5 +35,6 @@ Licensed under MIT; see the workspace LICENSE.
 
 This page describes unreleased alpha.2. The old chat envelope and wire/spool
 profiles are application-owned; see [migration](../../docs/business-neutral-migration.md).
-Run `cargo run -p mesh-foundation-mailbox --example opaque_mailbox` for a minimal
-durable example. Content integrity is not authentication or permission.
+Run `cargo run -p mesh-foundation-mailbox --no-default-features --example typed_mailbox`
+for a carrier-independent example, or enable `spool` and run `--example opaque_mailbox`
+for durable storage. Content integrity is not authentication or permission.

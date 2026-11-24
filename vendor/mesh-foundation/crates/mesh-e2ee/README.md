@@ -1,6 +1,6 @@
 # mesh-foundation-e2ee
 
-Pairwise ratchets, group sender keys and checkpoint codecs.
+Pairwise ratchets, multi-recipient sender keys and checkpoint codecs.
 
 Start with the `ratchet` and `sender_key` modules. Applications own authenticated key distribution and must atomically persist accepted events with receive checkpoints. In-memory candidate checks do not replace durable concurrency control.
 
@@ -23,3 +23,9 @@ See the repository [README](https://github.com/OctopusGarage/mesh-foundation#rea
 [contribution guide](https://github.com/OctopusGarage/mesh-foundation/blob/main/CONTRIBUTING.md)
 and [security policy](https://github.com/OctopusGarage/mesh-foundation/blob/main/SECURITY.md).
 Licensed under MIT; see the workspace LICENSE.
+
+Unreleased alpha.2 exposes explicit sender-chain `prepare_rebase`/`install`.
+The host authenticates key distributions and decides when recovery is permitted;
+the SDK validates the transition and rejects stale candidates. Persist checkpoints
+atomically with application state. Membership, rotation timing and gap-based
+recovery thresholds belong to the application.

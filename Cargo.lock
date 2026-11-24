@@ -3417,10 +3417,7 @@ dependencies = [
 name = "mesh-foundation-mailbox"
 version = "0.1.0-alpha.2"
 dependencies = [
- "bincode",
  "mesh-foundation-replication",
- "mesh-foundation-storage",
- "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
 ]

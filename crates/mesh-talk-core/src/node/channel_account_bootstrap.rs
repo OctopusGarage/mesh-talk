@@ -408,7 +408,9 @@ pub(super) fn apply_receive_keys(
     graph: &impl super::channel::graph::AuthorityGraph,
 ) -> Result<(), LogError> {
     for item in open_receive_distributions(me, state, event, authority, graph)? {
-        state.refresh_sender_chain(item.author.user_id(), item.epoch, &item.distribution);
+        state
+            .refresh_sender_chain(item.author.user_id(), item.epoch, &item.distribution)
+            .map_err(|error| LogError::AdmissionRejected(error.to_string()))?;
     }
     Ok(())
 }

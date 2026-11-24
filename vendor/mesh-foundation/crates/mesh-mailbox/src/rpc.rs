@@ -23,47 +23,11 @@ impl std::fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct MailboxCursor {
-    pub store_uuid: [u8; 16],
-    pub scope: ScopeId,
-    pub epoch: i64,
-    pub first_seen: Option<u64>,
-    pub revision: i64,
-    pub after: i64,
-    pub window: Option<(i64, i64)>,
-}
+pub use crate::model::{MailboxCursor, MailboxDeltaPage};
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct MailboxDeltaPage {
-    pub cursor: MailboxCursor,
-    pub ids: Vec<RecordId>,
-    pub complete: bool,
-    pub reset: bool,
-}
-
-impl MailboxCursor {
-    pub fn accepts(&self, current: &Self) -> bool {
-        self.store_uuid == current.store_uuid
-            && self.scope == current.scope
-            && self.epoch == current.epoch
-            && self.first_seen == current.first_seen
-            && self.revision >= 0
-            && self.revision <= current.revision
-            && self.after >= 0
-            && self.after <= current.after
-            && self.window.is_none_or(|(upper, revision)| {
-                self.after <= upper
-                    && upper <= current.after
-                    && self.revision <= revision
-                    && revision <= current.revision
-            })
-    }
-}
-
-const MAGIC: &[u8; 5] = b"MFOM1";
+const MAGIC: &[u8; 5] = b"MFOM2";
 pub const PAGE_IDS: usize = 64;
-pub const BODY_BUDGET: usize = MAX_PLAINTEXT - 2048;
+pub const BODY_BUDGET: usize = MAX_PLAINTEXT - 8192;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Frame {
@@ -79,12 +43,15 @@ pub enum Frame {
     Delta {
         scope: ScopeId,
         prior: Option<MailboxCursor>,
+        limit: u16,
+        max_bytes: u32,
     },
     Page(MailboxDeltaPage),
     Get {
         scope: ScopeId,
         cursor: MailboxCursor,
         ids: Vec<RecordId>,
+        max_bytes: u32,
     },
     Records {
         scope: ScopeId,
@@ -128,16 +95,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, RpcError> {
 /// Qualify a delta response before its cursor can be considered for local commit.
 pub fn read_delta_response(bytes: &[u8], scope: ScopeId) -> Result<MailboxDeltaPage, RpcError> {
     match decode_frame(bytes)? {
-        Frame::Page(page)
-            if page.cursor.scope == scope
-                && page.ids.len() <= PAGE_IDS
-                && page.complete == page.cursor.window.is_none()
-                && page.cursor.after >= 0
-                && page.cursor.revision >= 0
-                && page.cursor.epoch >= 0 =>
-        {
-            Ok(page)
-        }
+        Frame::Page(page) if page.is_well_formed(scope, PAGE_IDS) => Ok(page),
         _ => Err(RpcError::UnexpectedMessage),
     }
 }
@@ -147,13 +105,28 @@ pub fn make_get_request(
     cursor: &MailboxCursor,
     ids: &[RecordId],
 ) -> Result<Vec<u8>, RpcError> {
-    if ids.len() > PAGE_IDS || cursor.scope != scope {
+    make_get_request_bounded(scope, cursor, ids, BODY_BUDGET)
+}
+
+pub fn make_get_request_bounded(
+    scope: ScopeId,
+    cursor: &MailboxCursor,
+    ids: &[RecordId],
+    max_bytes: usize,
+) -> Result<Vec<u8>, RpcError> {
+    if ids.is_empty()
+        || ids.len() > PAGE_IDS
+        || cursor.scope != scope
+        || max_bytes == 0
+        || max_bytes > BODY_BUDGET
+    {
         return Err(RpcError::UnexpectedMessage);
     }
     encode_frame(&Frame::Get {
         scope,
         cursor: cursor.clone(),
         ids: ids.to_vec(),
+        max_bytes: max_bytes as u32,
     })
 }
 
@@ -163,8 +136,18 @@ pub fn read_get_response(
     bytes: &[u8],
     scope: ScopeId,
     ids: &[RecordId],
-    encoded_size: impl Fn(&Record) -> usize,
 ) -> Result<Vec<Record>, RpcError> {
+    read_get_response_bounded(bytes, scope, ids, BODY_BUDGET)
+}
+pub fn read_get_response_bounded(
+    bytes: &[u8],
+    scope: ScopeId,
+    ids: &[RecordId],
+    max_bytes: usize,
+) -> Result<Vec<Record>, RpcError> {
+    if max_bytes == 0 || max_bytes > BODY_BUDGET || ids.len() > PAGE_IDS {
+        return Err(RpcError::UnexpectedMessage);
+    }
     match decode_frame(bytes)? {
         Frame::Records {
             scope: response,
@@ -176,8 +159,8 @@ pub fn read_get_response(
             })
             && records
                 .iter()
-                .try_fold(0usize, |sum, event| sum.checked_add(encoded_size(event)))
-                .is_some_and(|bytes| bytes <= BODY_BUDGET) =>
+                .try_fold(0usize, |sum, event| sum.checked_add(event.body.len()))
+                .is_some_and(|bytes| bytes <= max_bytes) =>
         {
             Ok(records)
         }

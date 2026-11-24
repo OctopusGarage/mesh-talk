@@ -1,304 +1,314 @@
-use mesh_mailbox::{Record, ScopeId};
 use mesh_mailbox::{
-    client::{MailboxTurnLimits, sync_turn},
-    rpc::{self, Frame, MailboxCursor, MailboxDeltaPage},
+    Record, RecordId, ScopeId,
+    client::{MailboxTurnErrorKind, MailboxTurnLimits, sync_turn},
+    model::{MailboxCursor, MailboxDeltaPage},
+    ports::MailboxTransport,
 };
-use mesh_replication::session::ReconciliationSession;
-use std::collections::VecDeque;
-
-struct Session {
-    received: VecDeque<Vec<u8>>,
-    sends: usize,
+use mesh_replication::pull::PullTurnLimits;
+use std::{collections::VecDeque, time::Duration};
+struct Queue {
+    pages: VecDeque<MailboxDeltaPage>,
+    bodies: VecDeque<Vec<Record>>,
+    pending_body: bool,
+    calls: usize,
 }
-impl ReconciliationSession for Session {
-    type Peer = ();
+impl Queue {
+    fn new(pages: Vec<MailboxDeltaPage>, bodies: Vec<Vec<Record>>) -> Self {
+        Self {
+            pages: pages.into(),
+            bodies: bodies.into(),
+            pending_body: false,
+            calls: 0,
+        }
+    }
+}
+impl MailboxTransport for Queue {
     type Error = &'static str;
-    fn peer_identity(&self) -> &() {
-        &()
+    async fn delta(
+        &mut self,
+        _: ScopeId,
+        _: Option<&MailboxCursor>,
+        _: usize,
+        _: usize,
+    ) -> Result<MailboxDeltaPage, Self::Error> {
+        self.calls += 1;
+        self.pages.pop_front().ok_or("closed")
     }
-    async fn send(&mut self, _: &[u8]) -> Result<(), Self::Error> {
-        self.sends += 1;
-        Ok(())
-    }
-    async fn recv(&mut self) -> Result<Vec<u8>, Self::Error> {
-        self.received.pop_front().ok_or("closed")
+    async fn bodies(
+        &mut self,
+        _: ScopeId,
+        _: &MailboxCursor,
+        _: &[RecordId],
+        _: usize,
+    ) -> Result<Vec<Record>, Self::Error> {
+        self.calls += 1;
+        if self.pending_body {
+            std::future::pending().await
+        } else {
+            self.bodies.pop_front().ok_or("closed")
+        }
     }
 }
-fn cursor(scope: ScopeId) -> MailboxCursor {
+fn scope() -> ScopeId {
+    ScopeId::new([1; 32])
+}
+fn cursor(after: i64) -> MailboxCursor {
     MailboxCursor {
         store_uuid: [1; 16],
-        scope,
+        scope: scope(),
         epoch: 0,
-        first_seen: None,
-        revision: 1,
-        after: 0,
+        revision: 3,
+        after,
         window: None,
     }
 }
-#[tokio::test]
-async fn empty_page_checkpoint_is_committed_before_returning_complete() {
-    let scope = ScopeId::new([1; 32]);
-    let mut c = cursor(scope);
-    c.after = 5;
-    let frame = rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
-        cursor: c.clone(),
-        ids: vec![],
-        complete: true,
+fn page(after: i64, ids: Vec<RecordId>, complete: bool) -> MailboxDeltaPage {
+    let mut c = cursor(after);
+    if !complete {
+        c.window = Some((3, 3));
+    }
+    MailboxDeltaPage {
+        cursor: c,
+        ids,
+        complete,
         reset: false,
-    }))
-    .unwrap();
-    let mut session = Session {
-        received: VecDeque::from([frame]),
-        sends: 0,
-    };
+    }
+}
+fn record(byte: u8) -> Record {
+    Record::new(scope(), vec![byte])
+}
+#[tokio::test]
+async fn empty_completion_is_committed_and_failed_commit_keeps_prior() {
+    let prior = cursor(0);
+    let p = page(3, vec![], true);
+    let mut q = Queue::new(vec![p.clone()], vec![]);
     let mut saved = None;
-    let progress = sync_turn(
-        &mut session,
-        scope,
-        None,
+    let result = sync_turn(
+        &mut q,
+        scope(),
+        Some(prior.clone()),
         MailboxTurnLimits::default(),
-        |records, checkpoint| {
-            assert!(records.is_empty());
-            saved = Some(checkpoint.clone());
-            Ok::<_, &'static str>(())
+        |r, c| {
+            assert!(r.is_empty());
+            saved = Some(c.clone());
+            Ok::<_, ()>(())
         },
     )
     .await
     .unwrap();
-    assert!(progress.work.complete);
-    assert_eq!(saved, Some(c));
-    assert_eq!(session.sends, 1);
-}
-#[tokio::test]
-async fn failed_commit_retains_prior_checkpoint() {
-    let scope = ScopeId::new([1; 32]);
-    let prior = cursor(scope);
-    let mut next = prior.clone();
-    next.after = 5;
-    let frame = rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
-        cursor: next,
-        ids: vec![],
-        complete: true,
-        reset: false,
-    }))
-    .unwrap();
-    let mut session = Session {
-        received: VecDeque::from([frame]),
-        sends: 0,
-    };
-    let error = sync_turn(
-        &mut session,
-        scope,
+    assert!(result.work.complete);
+    assert_eq!(saved, Some(p.cursor.clone()));
+    let mut q = Queue::new(vec![p], vec![]);
+    let err = sync_turn(
+        &mut q,
+        scope(),
         Some(prior.clone()),
         MailboxTurnLimits::default(),
         |_, _| Err::<(), _>("disk full"),
     )
     .await
     .unwrap_err();
-    assert_eq!(error.progress.cursor, Some(prior));
-    assert!(!error.progress.work.complete);
-}
-
-fn messages(scope: ScopeId, count: usize) -> Vec<Record> {
-    (0..count)
-        .map(|i| Record::new(scope, (i as u64).to_le_bytes().to_vec()))
-        .collect()
-}
-fn pages(scope: ScopeId, records: &[Record], offset: usize) -> Session {
-    let mut received = VecDeque::new();
-    for (n, batch) in records.chunks(64).enumerate() {
-        let after = offset + (n * 64) + batch.len();
-        let mut c = cursor(scope);
-        c.after = after as i64;
-        let complete = after == 201;
-        if !complete {
-            c.window = Some((201, 1));
-        }
-        received.push_back(
-            rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
-                cursor: c,
-                ids: batch.iter().map(|e| e.id).collect(),
-                complete,
-                reset: false,
-            }))
-            .unwrap(),
-        );
-        received.push_back(
-            rpc::encode_frame(&Frame::Records {
-                scope,
-                records: batch.to_vec(),
-            })
-            .unwrap(),
-        );
-    }
-    Session { received, sends: 0 }
-}
-#[tokio::test]
-async fn full_pages_never_turn_a_200_record_budget_into_256_or_skip_unacknowledged_ids() {
-    let scope = ScopeId::new([2; 32]);
-    let records = messages(scope, 201);
-    let mut first = pages(scope, &records, 0);
-    let mut saved = Vec::new();
-    let p = sync_turn(
-        &mut first,
-        scope,
-        None,
-        MailboxTurnLimits::default(),
-        |batch, _| {
-            saved.extend(batch.iter().map(|e| e.id));
-            Ok::<_, &'static str>(())
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(p.work.committed, 192);
-    assert!(!p.work.complete);
-    assert_eq!(first.sends, 7);
-    assert_eq!(p.cursor.as_ref().unwrap().after, 192);
-    let mut second = pages(scope, &records[192..], 192);
-    let p = sync_turn(
-        &mut second,
-        scope,
-        p.cursor,
-        MailboxTurnLimits::default(),
-        |batch, _| {
-            saved.extend(batch.iter().map(|e| e.id));
-            Ok::<_, &'static str>(())
-        },
-    )
-    .await
-    .unwrap();
-    assert!(p.work.complete);
-    assert_eq!(saved, records.iter().map(|e| e.id).collect::<Vec<_>>());
-}
-#[tokio::test]
-async fn nonadvancing_partial_page_fails_without_acknowledgement() {
-    let scope = ScopeId::new([3; 32]);
-    let mut c = cursor(scope);
-    c.window = Some((100, 1));
-    let bytes = rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
-        cursor: c.clone(),
-        ids: vec![],
-        complete: false,
-        reset: false,
-    }))
-    .unwrap();
-    let mut session = Session {
-        received: VecDeque::from([bytes]),
-        sends: 0,
-    };
-    let result = sync_turn(
-        &mut session,
-        scope,
-        Some(c),
-        MailboxTurnLimits::default(),
-        |_, _| Ok::<_, &'static str>(()),
-    )
-    .await;
-    assert!(result.is_err());
-}
-
-#[tokio::test]
-async fn reset_is_explicit_and_does_not_acknowledge_a_new_checkpoint() {
-    let scope = ScopeId::new([4; 32]);
-    let prior = cursor(scope);
-    let mut next = prior.clone();
-    next.epoch = 1;
-    let bytes = rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
-        cursor: next,
-        ids: vec![],
-        complete: true,
-        reset: true,
-    }))
-    .unwrap();
-    let mut session = Session {
-        received: VecDeque::from([bytes]),
-        sends: 0,
-    };
-    let result = sync_turn(
-        &mut session,
-        scope,
-        Some(prior.clone()),
-        MailboxTurnLimits::default(),
-        |_, _| panic!("reset must not commit"),
-    )
-    .await;
-    let error: mesh_mailbox::client::MailboxTurnError<&str, ()> = result.unwrap_err();
     assert!(matches!(
-        error.kind,
-        mesh_mailbox::client::MailboxTurnErrorKind::CheckpointInvalidated
+        err.kind,
+        MailboxTurnErrorKind::Commit("disk full")
     ));
-    assert_eq!(error.progress.cursor, Some(prior));
+    assert_eq!(err.progress.cursor, Some(prior));
 }
-
 #[tokio::test]
-async fn partial_snapshot_cannot_move_its_upper_watermark_or_finish_early() {
-    let scope = ScopeId::new([5; 32]);
-    let mut prior = cursor(scope);
-    prior.after = 64;
-    prior.window = Some((201, 1));
-    for (after, window, complete) in [(128, Some((300, 2)), false), (128, None, true)] {
-        let mut next = prior.clone();
-        next.after = after;
-        next.window = window;
-        let bytes = rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
-            cursor: next,
-            ids: vec![],
-            complete,
-            reset: false,
-        }))
-        .unwrap();
-        let mut session = Session {
-            received: VecDeque::from([bytes]),
-            sends: 0,
-        };
-        let error = sync_turn(
-            &mut session,
-            scope,
+async fn initial_and_resumed_nonadvancing_pages_never_acknowledge() {
+    for prior in [None, Some(cursor(0))] {
+        let mut q = Queue::new(vec![page(0, vec![], false)], vec![]);
+        let mut saved = false;
+        let err = sync_turn(
+            &mut q,
+            scope(),
+            prior.clone(),
+            MailboxTurnLimits::default(),
+            |_, _| {
+                saved = true;
+                Ok::<_, ()>(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err.kind, MailboxTurnErrorKind::InvalidPage));
+        assert!(!saved);
+        assert_eq!(err.progress.cursor, prior);
+    }
+}
+#[tokio::test]
+async fn source_reset_cannot_acknowledge_a_new_identity() {
+    let mut p = page(0, vec![], true);
+    p.reset = true;
+    p.cursor.store_uuid = [9; 16];
+    let mut q = Queue::new(vec![p], vec![]);
+    let err = sync_turn(
+        &mut q,
+        scope(),
+        Some(cursor(0)),
+        MailboxTurnLimits::default(),
+        |_, _| Ok::<_, ()>(()),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        err.kind,
+        MailboxTurnErrorKind::CheckpointInvalidated
+    ));
+    assert_eq!(err.progress.cursor, Some(cursor(0)));
+}
+#[tokio::test]
+async fn unfinished_window_cannot_move_or_finish_before_its_upper() {
+    let mut prior = cursor(1);
+    prior.window = Some((3, 3));
+    for (after, window) in [(2, Some((4, 4))), (2, None)] {
+        let mut p = page(after, vec![], window.is_none());
+        p.cursor.window = window;
+        let mut q = Queue::new(vec![p], vec![]);
+        let err = sync_turn(
+            &mut q,
+            scope(),
             Some(prior.clone()),
             MailboxTurnLimits::default(),
             |_, _| Ok::<_, ()>(()),
         )
         .await
         .unwrap_err();
-        assert!(matches!(
-            error.kind,
-            mesh_mailbox::client::MailboxTurnErrorKind::Wire(_)
-        ));
-        assert_eq!(error.progress.cursor, Some(prior.clone()));
+        assert!(matches!(err.kind, MailboxTurnErrorKind::InvalidPage));
+        assert_eq!(err.progress.cursor, Some(prior.clone()));
     }
 }
-
 #[tokio::test]
-async fn initial_partial_page_must_advance_before_any_acknowledgement() {
-    let scope = ScopeId::new([1; 32]);
-    let mut c = cursor(scope);
-    c.window = Some((5, 1));
-    let frame = rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
-        cursor: c,
-        ids: vec![],
-        complete: false,
-        reset: false,
-    }))
-    .unwrap();
-    let mut session = Session {
-        received: VecDeque::from([frame]),
-        sends: 0,
+async fn duplicate_ids_wrong_scope_and_oversized_pages_fail_before_body_fetch() {
+    let r = record(1);
+    let mut wrong = page(1, vec![r.id], true);
+    wrong.cursor.scope = ScopeId::new([8; 32]);
+    for p in [
+        page(3, vec![r.id, r.id], true),
+        wrong,
+        page(3, vec![record(1).id, record(2).id], true),
+    ] {
+        let mut q = Queue::new(vec![p], vec![]);
+        let limits = MailboxTurnLimits {
+            page_records: 1,
+            ..Default::default()
+        };
+        let err = sync_turn(&mut q, scope(), None, limits, |_, _| Ok::<_, ()>(()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err.kind, MailboxTurnErrorKind::InvalidPage));
+        assert_eq!(q.calls, 1);
+    }
+}
+#[tokio::test]
+async fn hash_scope_order_and_byte_validation_precede_commit() {
+    let r = record(1);
+    let mut bad_hash = r.clone();
+    bad_hash.body[0] = 2;
+    let mut bad_scope = r.clone();
+    bad_scope.scope = ScopeId::new([7; 32]);
+    for body in [
+        bad_hash,
+        bad_scope,
+        record(2),
+        Record::new(scope(), vec![0; 2048]),
+    ] {
+        let mut q = Queue::new(vec![page(3, vec![r.id], true)], vec![vec![body]]);
+        let mut saved = false;
+        let mut limits = MailboxTurnLimits::default();
+        limits.work.bytes = 1024;
+        let err = sync_turn(&mut q, scope(), None, limits, |_, _| {
+            saved = true;
+            Ok::<_, ()>(())
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err.kind,
+            MailboxTurnErrorKind::InvalidRecords | MailboxTurnErrorKind::BodyLimit
+        ));
+        assert!(!saved);
+        assert!(err.progress.cursor.is_none());
+    }
+}
+#[tokio::test]
+async fn a_one_byte_payload_budget_and_one_request_probe_are_valid() {
+    let r = record(1);
+    let limits = MailboxTurnLimits {
+        work: PullTurnLimits {
+            records: 1,
+            bytes: 1,
+            requests: 2,
+        },
+        pages: 1,
+        page_records: 1,
     };
-    let mut acknowledged = false;
-    assert!(
+    let mut q = Queue::new(vec![page(3, vec![r.id], true)], vec![vec![r.clone()]]);
+    let p = sync_turn(&mut q, scope(), None, limits, |_, _| Ok::<_, ()>(()))
+        .await
+        .unwrap();
+    assert_eq!(p.work.bytes, 1);
+    assert!(p.work.complete);
+    let mut q = Queue::new(vec![page(3, vec![r.id], true)], vec![]);
+    let mut limits = limits;
+    limits.work.requests = 1;
+    let p = sync_turn(&mut q, scope(), None, limits, |_, _| -> Result<(), ()> {
+        panic!("no body commit")
+    })
+    .await;
+    assert!(p.is_ok());
+    assert_eq!(q.calls, 1);
+}
+#[tokio::test]
+async fn cancellation_while_loading_a_body_keeps_the_cursor_unacknowledged() {
+    let r = record(1);
+    let mut q = Queue::new(vec![page(3, vec![r.id], true)], vec![]);
+    q.pending_body = true;
+    let mut committed = false;
+    let result = tokio::time::timeout(
+        Duration::from_millis(10),
         sync_turn(
-            &mut session,
-            scope,
-            None,
+            &mut q,
+            scope(),
+            Some(cursor(0)),
             MailboxTurnLimits::default(),
             |_, _| {
-                acknowledged = true;
-                Ok::<_, &'static str>(())
-            }
-        )
-        .await
-        .is_err()
+                committed = true;
+                Ok::<_, ()>(())
+            },
+        ),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(!committed);
+}
+#[tokio::test]
+async fn later_failure_preserves_only_earlier_atomic_page_progress() {
+    let first = record(1);
+    let second = record(2);
+    let mut bad = second.clone();
+    bad.body[0] = 3;
+    let mut q = Queue::new(
+        vec![
+            page(1, vec![first.id], false),
+            page(3, vec![second.id], true),
+        ],
+        vec![vec![first], vec![bad]],
     );
-    assert!(!acknowledged);
+    let mut committed = 0;
+    let err = sync_turn(
+        &mut q,
+        scope(),
+        None,
+        MailboxTurnLimits::default(),
+        |r, _| {
+            committed += r.len();
+            Ok::<_, ()>(())
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(committed, 1);
+    assert_eq!(err.progress.work.committed, 1);
+    assert_eq!(err.progress.cursor.unwrap().after, 1);
 }

@@ -1,3 +1,4 @@
+#![cfg(all(feature = "wire", feature = "spool"))]
 use mesh_connect::PeerSession;
 use mesh_identity::device::DeviceIdentity;
 use mesh_mailbox::{
@@ -54,7 +55,15 @@ async fn mailbox_reuses_an_authenticated_stream_and_resumes_after_a_lost_reply()
                         PeerSession::connect(stream, &recipient_secret, &relay_public)
                             .await
                             .unwrap();
-                    let delta = |prior| encode_frame(&Frame::Delta { scope, prior }).unwrap();
+                    let delta = |prior| {
+                        encode_frame(&Frame::Delta {
+                            scope,
+                            prior,
+                            limit: PAGE_IDS as u16,
+                            max_bytes: mesh_mailbox::rpc::BODY_BUDGET as u32,
+                        })
+                        .unwrap()
+                    };
                     session.send(&delta(prior.clone())).await.unwrap();
                     let page = read_delta_response(&session.recv().await.unwrap(), scope).unwrap();
                     assert_eq!(page.complete, attempt == 1);
@@ -65,13 +74,9 @@ async fn mailbox_reuses_an_authenticated_stream_and_resumes_after_a_lost_reply()
                         .send(&make_get_request(scope, &page.cursor, &page.ids).unwrap())
                         .await
                         .unwrap();
-                    let events = read_get_response(
-                        &session.recv().await.unwrap(),
-                        scope,
-                        &page.ids,
-                        |event| bincode::serialized_size(event).unwrap() as usize,
-                    )
-                    .unwrap();
+                    let events =
+                        read_get_response(&session.recv().await.unwrap(), scope, &page.ids)
+                            .unwrap();
                     delivered.extend(events.iter().map(|event| {
                         u64::from_le_bytes(event.body.as_slice().try_into().unwrap())
                     }));

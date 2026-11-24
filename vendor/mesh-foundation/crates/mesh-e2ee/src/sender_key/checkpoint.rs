@@ -124,10 +124,14 @@ mod tests {
         original.message_key(1).unwrap();
         let mut restored =
             SenderChain::decode_checkpoint(&original.encode_checkpoint().unwrap()).unwrap();
-        restored.refresh_distribution(&SenderKeyDistribution {
-            chain_key: [41; 32],
-            n: 2000,
-        });
+        restored
+            .prepare_rebase(&SenderKeyDistribution {
+                chain_key: [41; 32],
+                n: 2000,
+            })
+            .unwrap()
+            .install(&mut restored)
+            .unwrap();
         for position in [0, 2] {
             assert_eq!(
                 restored.message_key(position).unwrap(),

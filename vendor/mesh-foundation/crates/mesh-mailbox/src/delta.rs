@@ -1,7 +1,7 @@
 //! Bounded delta selection over a finite mailbox prefix.
 
 use crate::RecordId;
-use crate::rpc::{MailboxCursor, MailboxDeltaPage};
+use crate::model::{MailboxCursor, MailboxDeltaPage};
 
 /// A page's authorization and SQL transaction are owned by the caller.
 pub enum DeltaSelection {
@@ -32,7 +32,12 @@ impl DeltaSelection {
         prior: Option<&MailboxCursor>,
         limit: usize,
     ) -> Result<Self, DeltaError> {
-        if limit == 0 || limit > 1500 {
+        if limit == 0
+            || i64::try_from(limit)
+                .ok()
+                .and_then(|n| n.checked_add(1))
+                .is_none()
+        {
             return Err(DeltaError::InvalidLimit);
         }
         let prior_valid = prior.filter(|cursor| cursor.accepts(current));
@@ -53,12 +58,15 @@ impl DeltaSelection {
             ..current.clone()
         });
         let (upper, revision) = cursor.window.unwrap_or((current.after, current.revision));
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(limit)
+            .map_err(|_| DeltaError::InvalidLimit)?;
         Ok(Self::Scan(DeltaScan {
             cursor,
             upper,
             revision,
             reset,
-            ids: Vec::with_capacity(limit),
+            ids,
             limit,
             complete: true,
         }))
@@ -99,6 +107,11 @@ impl DeltaScan {
         Ok(())
     }
 
+    /// A host budget stopped before the next unconsumed row.
+    pub fn defer_remaining(&mut self) {
+        self.complete = false;
+    }
+
     pub fn finish(mut self) -> MailboxDeltaPage {
         if self.complete {
             self.cursor.after = self.upper;
@@ -126,7 +139,6 @@ mod tests {
             store_uuid: [1; 16],
             scope: ScopeId::new([5; 32]),
             epoch: 2,
-            first_seen: Some(100),
             revision,
             after,
             window: None,

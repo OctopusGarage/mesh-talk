@@ -1,8 +1,7 @@
-//! Channel sender-key ratchet: per-sender symmetric chains for forward-secret group
-//! messages. Reuses the DM ratchet's chain step + message-key derivation; there is no
-//! DH ratchet (sender keys rotate wholesale on membership change). A sender advances
-//! its own chain per message (deleting old keys); each receiver tracks that sender's
-//! chain and ratchets forward to a message's position, buffering bounded skipped keys.
+//! Per-sender symmetric chains for forward-secret multi-recipient encryption.
+//! Reuses the pairwise ratchet's chain step and message-key derivation without
+//! a DH ratchet. Hosts own key distribution, authorization and rotation policy.
+//! Each receiver tracks one chain and buffers a bounded number of skipped keys.
 
 use crate::ratchet::{kdf_ck, message_keys};
 use aes_gcm::aead::{Aead, Payload};
@@ -57,7 +56,7 @@ impl SenderKeyError {
     }
 }
 
-/// A member's SENDING chain for one channel epoch.
+/// One sending chain; hosts define its scope and lifetime.
 pub struct SenderKey {
     chain_key: [u8; 32],
     n: u32,
@@ -225,6 +224,25 @@ impl PreparedReceiverOpen {
     }
 }
 
+/// Private candidate. For durable use compare the persisted base and atomically
+/// commit the returned checkpoint; memory generation checks alone are insufficient.
+pub struct PreparedReceiverRebase {
+    base: Arc<()>,
+    next: SenderChain,
+}
+impl PreparedReceiverRebase {
+    pub fn into_checkpoint(self) -> Result<Zeroizing<Vec<u8>>, SenderKeyError> {
+        self.next.encode_checkpoint()
+    }
+    pub fn install(self, chain: &mut SenderChain) -> Result<(), SenderKeyError> {
+        if !Arc::ptr_eq(&self.base, &chain.generation) {
+            return Err(SenderKeyError::StaleReceiverCandidate);
+        }
+        *chain = self.next;
+        Ok(())
+    }
+}
+
 impl Drop for SenderChain {
     fn drop(&mut self) {
         self.chain_key.zeroize();
@@ -252,17 +270,28 @@ impl SenderChain {
             plaintext,
         })
     }
-    /// Recover a gap the normal ratchet cannot cross. Routine out-of-order
-    /// messages keep their original receive position and this device's buffered
-    /// skipped keys. Only an authenticated account snapshot may jump a stalled
-    /// receiver; its own unconsumed skipped keys survive and consumed keys do not.
-    pub fn refresh_distribution(&mut self, skd: &SenderKeyDistribution) {
-        if skd.n.saturating_sub(self.n) > MAX_SKIP {
-            Arc::make_mut(&mut self.generation);
-            self.chain_key.zeroize();
-            self.chain_key = skd.chain_key;
-            self.n = skd.n;
+    /// Prepare an explicitly authorized forward checkpoint replacement. The host
+    /// validates source and epoch and decides when recovery is appropriate.
+    /// Existing delayed keys remain local; consumed positions never reappear.
+    pub fn prepare_rebase(
+        &self,
+        distribution: &SenderKeyDistribution,
+    ) -> Result<PreparedReceiverRebase, SenderKeyError> {
+        if distribution.n < self.n
+            || (distribution.n == self.n && distribution.chain_key != self.chain_key)
+        {
+            return Err(SenderKeyError::Malformed(
+                "checkpoint would rewind or conflict".into(),
+            ));
         }
+        let mut next = Self::decode_checkpoint(&self.encode_checkpoint()?)?;
+        next.chain_key.zeroize();
+        next.chain_key = distribution.chain_key;
+        next.n = distribution.n;
+        Ok(PreparedReceiverRebase {
+            base: Arc::clone(&self.generation),
+            next,
+        })
     }
 
     pub fn from_distribution(skd: &SenderKeyDistribution) -> Self {
@@ -343,7 +372,7 @@ impl SenderChain {
 }
 
 /// Seal `plaintext` with a single-use message key; `aad` authenticates the wire
-/// framing (epoch ‖ sender ‖ n) the channel layer prepends.
+/// framing the host authenticates alongside the ciphertext.
 pub fn seal_message(
     mk: &[u8; 32],
     plaintext: &[u8],
@@ -705,5 +734,64 @@ mod tests {
         .encode();
         junk.push(0xAB);
         assert_eq!(SenderKeyDistribution::decode(&junk), None);
+    }
+}
+
+#[cfg(test)]
+mod rebase_tests {
+    use super::*;
+    #[test]
+    fn explicit_rebase_is_not_gated_by_skip_policy_and_rejects_stale_candidates() {
+        let mut chain = SenderChain::from_distribution(&SenderKeyDistribution {
+            chain_key: [1; 32],
+            n: 0,
+        });
+        let a = chain
+            .prepare_rebase(&SenderKeyDistribution {
+                chain_key: [2; 32],
+                n: 2,
+            })
+            .unwrap();
+        let b = chain
+            .prepare_rebase(&SenderKeyDistribution {
+                chain_key: [3; 32],
+                n: 3,
+            })
+            .unwrap();
+        a.install(&mut chain).unwrap();
+        assert!(b.install(&mut chain).is_err());
+        assert_eq!(chain.current_distribution().n, 2);
+        assert!(
+            chain
+                .prepare_rebase(&SenderKeyDistribution {
+                    chain_key: [1; 32],
+                    n: 1
+                })
+                .is_err()
+        );
+        assert!(
+            chain
+                .prepare_rebase(&SenderKeyDistribution {
+                    chain_key: [9; 32],
+                    n: 2
+                })
+                .is_err()
+        );
+    }
+    #[test]
+    fn intervening_receive_invalidates_rebase() {
+        let mut chain = SenderChain::from_distribution(&SenderKeyDistribution {
+            chain_key: [1; 32],
+            n: 0,
+        });
+        let candidate = chain
+            .prepare_rebase(&SenderKeyDistribution {
+                chain_key: [2; 32],
+                n: 5,
+            })
+            .unwrap();
+        chain.message_key(0).unwrap();
+        assert!(candidate.install(&mut chain).is_err());
+        assert_eq!(chain.current_distribution().n, 1);
     }
 }

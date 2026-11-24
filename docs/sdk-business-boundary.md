@@ -18,3 +18,18 @@ Protocol regression tests retain old behavior and independent golden vectors.
 The new crate participates in the actual Rust package inventory and validation
 contracts. The application remains on its existing development branch; this is
 source migration, not a new application or registry release.
+
+
+## Explicit application policies
+
+The neutral SDK account has no lifecycle timestamps. This application's existing
+account profile retains creation metadata and historical identifiers.
+Sender-chain rebasing is an explicit SDK candidate operation; Mesh Talk retains
+its existing authenticated recovery rules and gap threshold in the channel owner.
+Both in-memory test helpers and durable checkpoint paths propagate candidate errors.
+Checkpoint encoding and delayed/consumed-message semantics remain unchanged.
+
+The protocol crate uses the SDK mailbox with default features disabled: it needs
+only generic quota mechanisms. Original chat envelopes, codec/spool profiles,
+recipient addressing and expiry scheduling remain application-owned. The SDK's
+new typed mailbox ports and optional MFOM2/spool adapters do not alter MTOM1 bytes.

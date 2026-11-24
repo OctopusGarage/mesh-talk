@@ -1,17 +1,11 @@
-//! Account identity (multi-device): an Ed25519 account keypair shared across a
-//! user's devices, and device certificates (the account key signs each device's
-//! public key, binding the device to the account). The `account_id` is the user's
-//! stable cross-device handle. This module owns cryptographic identity and
-//! certificates; persistence and synchronization belong to their respective owners.
+//! Issuer signing identities and device-key binding certificates.
+//! Hosts decide trust, key storage, lifecycle and device enrollment policy.
 
 use crate::{device::DeviceIdentity, random_signing_key};
 use bincode::Options;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-
-/// Domain separator for the device-certificate signed message.
-pub const MAX_ACCOUNT_CREATED_AT_MS: u64 = 253_402_300_799_999;
 
 const CERT_DOMAIN: &[u8] = b"mesh-foundation-device-cert-v1";
 
@@ -79,49 +73,32 @@ impl AccountPublic {
     }
 }
 
-/// A user's account secret and immutable creation metadata, persisted together
-/// in the encrypted account keystore and shared across linked devices.
+/// Signing identity used to issue device bindings. Hosts own lifecycle metadata.
+/// Lifecycle metadata is intentionally absent from cryptographic identities.
+///
+/// ```compile_fail
+/// let account = mesh_identity::account::Account::generate();
+/// account.created_at_ms();
+/// ```
+///
+/// ```compile_fail
+/// mesh_identity::account::Account::from_secret_bytes_with_created_at([1; 32], Some(1));
+/// ```
 pub struct Account {
     signing_key: SigningKey,
-    created_at_ms: Option<u64>,
 }
 
 impl Account {
     pub fn generate() -> Self {
         Account {
             signing_key: random_signing_key(),
-            created_at_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-                .filter(|time| (1..=MAX_ACCOUNT_CREATED_AT_MS).contains(time)),
         }
     }
 
     pub fn from_secret_bytes(ed25519_secret: [u8; 32]) -> Self {
         Account {
             signing_key: SigningKey::from_bytes(&ed25519_secret),
-            created_at_ms: None,
         }
-    }
-
-    /// Restore authoritative metadata alongside its secret. Legacy secrets retain
-    /// an unknown timestamp; dates are never inferred from login or file times.
-    pub fn from_secret_bytes_with_created_at(
-        ed25519_secret: [u8; 32],
-        created_at_ms: Option<u64>,
-    ) -> Option<Self> {
-        if created_at_ms.is_some_and(|time| time == 0 || time > MAX_ACCOUNT_CREATED_AT_MS) {
-            return None;
-        }
-        Some(Self {
-            signing_key: SigningKey::from_bytes(&ed25519_secret),
-            created_at_ms,
-        })
-    }
-
-    pub fn created_at_ms(&self) -> Option<u64> {
-        self.created_at_ms
     }
 
     pub fn secret_bytes(&self) -> [u8; 32] {
@@ -139,8 +116,7 @@ impl Account {
     }
 
     /// Sign an arbitrary (already domain-separated) message with the account key.
-    /// Used to authenticate account-level artifacts like the profile/avatar so a peer
-    /// device cannot forge another account's profile.
+    /// The host supplies its authenticated application context and payload schema.
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
         self.signing_key.sign(message).to_bytes()
     }
@@ -258,26 +234,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn creation_metadata_is_recorded_once_and_unknown_for_legacy_secrets() {
-        let account = Account::generate();
-        assert!(account.created_at_ms().is_some());
+    fn restoring_signing_material_preserves_identifiers_signatures_and_certificates() {
+        let original = Account::from_secret_bytes([7; 32]);
+        let restored = Account::from_secret_bytes(original.secret_bytes());
+        assert_eq!(original.account_id(), restored.account_id());
         assert_eq!(
-            Account::from_secret_bytes(account.secret_bytes()).created_at_ms(),
-            None
+            original.sign(b"application-domain/payload"),
+            restored.sign(b"application-domain/payload")
         );
-        let restored = Account::from_secret_bytes_with_created_at(
-            account.secret_bytes(),
-            account.created_at_ms(),
-        )
-        .unwrap();
-        assert_eq!(restored.created_at_ms(), account.created_at_ms());
-        assert_eq!(restored.account_id(), account.account_id());
-        for invalid in [0, MAX_ACCOUNT_CREATED_AT_MS + 1, u64::MAX] {
-            assert!(
-                Account::from_secret_bytes_with_created_at(account.secret_bytes(), Some(invalid))
-                    .is_none()
-            );
-        }
+        let device = DeviceIdentity::generate();
+        assert_eq!(
+            original.certify(&device.public().ed25519_pub),
+            restored.certify(&device.public().ed25519_pub)
+        );
+        assert!(
+            restored
+                .certify(&device.public().ed25519_pub)
+                .verify_for_device(&device.public().ed25519_pub)
+        );
     }
 
     #[test]

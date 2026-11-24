@@ -1,21 +1,24 @@
 use mesh_mailbox::{
     Record, ScopeId,
     capacity::CapacityLimits,
-    service::MailboxStore,
-    spool::{Deposit, Spool},
+    ports::MailboxStore,
+    spool::{Deposit, Retention, Spool, SpoolOptions},
 };
 use mesh_storage::EncryptionKey;
-use std::num::NonZeroU64;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let scope = ScopeId::new([7; 32]);
     let limits = CapacityLimits::new(100, 0, 1024 * 1024, 0).map_err(|_| "invalid limits")?;
     // Test-only fixed key. Hosts supply their protected key-management mechanism.
-    let mut spool = Spool::open_with_key_provider(
+    let mut spool = Spool::open_configured(
         &dir.path().join("records"),
         scope,
-        limits,
-        NonZeroU64::new(60).unwrap(),
+        SpoolOptions {
+            capacity: limits,
+            retention: Retention::Manual,
+            max_record_bytes: 512 * 1024,
+            max_query_records: 100,
+        },
         |_| Ok(EncryptionKey::from_derived_key([5; 32])),
     )?;
     // Real hosts encrypt/authenticate this payload and authorize the depositor.

@@ -32,3 +32,7 @@ separators. Raw device key bytes remain unchanged; node fingerprints now use
 requiring historic product-specific device/account IDs and certificate signatures must
 keep their original profile adapter; do not reinterpret existing signatures under
 the new domains. Enrollment, trust, revocation and recovery remain host policy.
+
+The neutral signing identity contains no account creation date or wall-clock
+policy. Applications store lifecycle metadata separately from signing material;
+Mesh Talk retains its original metadata-bearing account profile in its own crate.

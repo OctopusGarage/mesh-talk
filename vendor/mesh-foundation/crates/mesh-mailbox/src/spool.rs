@@ -6,8 +6,8 @@ use crate::{Record, RecordId, ScopeId};
 use crate::{
     capacity::{Admission, CapacityLimits},
     delta::{DeltaError, DeltaSelection},
-    rpc::{MailboxCursor, MailboxDeltaPage, PAGE_IDS},
-    service::MailboxStore,
+    model::{MailboxCursor, MailboxDeltaPage},
+    ports::MailboxStore,
 };
 use mesh_storage::{
     EncryptionKey, SALT_SIZE, StorageError,
@@ -84,7 +84,20 @@ enum JournalEntry {
 
 struct Entry {
     event: Record,
-    wire_bytes: u64,
+}
+
+/// Explicit host-selected retention. WindowAge expires the whole first-seen window.
+#[derive(Clone, Copy, Debug)]
+pub enum Retention {
+    Manual,
+    WindowAge(NonZeroU64),
+}
+#[derive(Clone, Copy)]
+pub struct SpoolOptions {
+    pub capacity: CapacityLimits,
+    pub retention: Retention,
+    pub max_record_bytes: usize,
+    pub max_query_records: usize,
 }
 
 pub struct Spool {
@@ -94,7 +107,8 @@ pub struct Spool {
     positions: HashMap<RecordId, usize>,
     bytes: u64,
     limits: CapacityLimits,
-    max_age_secs: NonZeroU64,
+    options: SpoolOptions,
+    first_seen: Option<u64>,
     _lease: File,
 }
 
@@ -133,6 +147,42 @@ impl Spool {
         max_age_secs: NonZeroU64,
         derive: impl FnOnce(&[u8; SALT_SIZE]) -> Result<EncryptionKey, StorageError>,
     ) -> Result<Self, SpoolError> {
+        Self::open_configured(
+            path,
+            scope,
+            SpoolOptions {
+                capacity: limits,
+                retention: Retention::WindowAge(max_age_secs),
+                max_record_bytes: 1024 * 1024,
+                max_query_records: 200,
+            },
+            derive,
+        )
+    }
+
+    /// Open with independent storage limits; no network profile is implied.
+    pub fn open_configured(
+        path: &Path,
+        scope: ScopeId,
+        options: SpoolOptions,
+        derive: impl FnOnce(&[u8; SALT_SIZE]) -> Result<EncryptionKey, StorageError>,
+    ) -> Result<Self, SpoolError> {
+        if options.max_record_bytes == 0
+            || options.max_query_records == 0
+            || options
+                .max_query_records
+                .checked_add(1)
+                .and_then(|n| i64::try_from(n).ok())
+                .is_none()
+        {
+            return Err(SpoolError::Limit);
+        }
+        let frame_limit = options
+            .max_record_bytes
+            .checked_add(128)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or(SpoolError::Limit)?;
+        let limits = options.capacity;
         let mut sidecar = path.as_os_str().to_owned();
         sidecar.push(".mesh-spool-lock");
         let lock_path = PathBuf::from(sidecar);
@@ -163,7 +213,7 @@ impl Spool {
             path,
             MAGIC,
             derive,
-            128 * 1024,
+            frame_limit,
             |record| {
                 let error = match record {
                     JournalEntry::Header {
@@ -180,6 +230,7 @@ impl Spool {
                     } if loaded.is_some()
                         && first_seen.is_none_or(|old| old == time)
                         && !positions.contains_key(&event.id)
+                        && event.body.len() <= options.max_record_bytes
                         && valid_record(scope, &event) =>
                     {
                         match encoded_size(&event).and_then(|size| {
@@ -194,10 +245,10 @@ impl Spool {
                                 .ok_or(SpoolError::CounterExhausted)?;
                             Ok(size)
                         }) {
-                            Ok(wire_bytes) => {
+                            Ok(_) => {
                                 first_seen = Some(time);
                                 positions.insert(event.id, entries.len());
-                                entries.push(Entry { event, wire_bytes });
+                                entries.push(Entry { event });
                                 return Ok(());
                             }
                             Err(error) => error,
@@ -234,7 +285,6 @@ impl Spool {
                 store_uuid,
                 scope,
                 epoch,
-                first_seen,
                 revision: after,
                 after,
                 window: None,
@@ -243,15 +293,19 @@ impl Spool {
             positions,
             bytes,
             limits,
-            max_age_secs,
+            options,
+            first_seen,
             _lease: lease,
         })
     }
 
     fn expired(&self, now: u64) -> bool {
-        self.cursor
-            .first_seen
-            .is_some_and(|first| first.saturating_add(self.max_age_secs.get()) <= now)
+        match self.options.retention {
+            Retention::Manual => false,
+            Retention::WindowAge(age) => self
+                .first_seen
+                .is_some_and(|first| first.saturating_add(age.get()) <= now),
+        }
     }
 
     /// Advance the destructive generation only after the replacement commits.
@@ -272,6 +326,11 @@ impl Spool {
         if !self.expired(now) {
             return Ok(None);
         }
+        self.clear().map(Some)
+    }
+
+    /// Explicit destructive reset; the old cursor is invalid only after commit.
+    pub fn clear(&mut self) -> Result<ExpiryReport, SpoolError> {
         let epoch = self
             .cursor
             .epoch
@@ -287,13 +346,13 @@ impl Spool {
         self.positions.clear();
         self.bytes = 0;
         self.cursor.epoch = epoch;
-        self.cursor.first_seen = None;
+        self.first_seen = None;
         self.cursor.revision = 0;
         self.cursor.after = 0;
-        Ok(Some(ExpiryReport {
+        Ok(ExpiryReport {
             removed,
             durability,
-        }))
+        })
     }
 
     /// The host authenticates the depositor before calling this method.
@@ -309,6 +368,9 @@ impl Spool {
         now: u64,
         on_expiry: impl FnOnce(ExpiryReport),
     ) -> Result<Deposit, SpoolError> {
+        if event.body.len() > self.options.max_record_bytes {
+            return Ok(Deposit::TooLarge);
+        }
         // Only byte-for-byte equivalent, previously authenticated entries can
         // skip verification. A matching ID alone cannot authenticate a retry.
         if !self.expired(now)
@@ -341,18 +403,15 @@ impl Spool {
             .after
             .checked_add(1)
             .ok_or(SpoolError::CounterExhausted)?;
-        let first_seen = self.cursor.first_seen.unwrap_or(now);
+        let first_seen = self.first_seen.unwrap_or(now);
         self.log.append_durable(&JournalEntry::Envelope {
             first_seen,
             event: event.clone(),
         })?;
         self.positions.insert(event.id, self.entries.len());
-        self.entries.push(Entry {
-            event,
-            wire_bytes: size,
-        });
+        self.entries.push(Entry { event });
         self.bytes += size;
-        self.cursor.first_seen = Some(first_seen);
+        self.first_seen = Some(first_seen);
         self.cursor.revision = next;
         self.cursor.after = next;
         Ok(Deposit::Stored)
@@ -377,12 +436,16 @@ pub struct SpoolView<'a> {
 impl MailboxStore for SpoolView<'_> {
     type Error = SpoolError;
 
-    fn delta(
+    fn delta_bounded(
         &self,
         scope: &ScopeId,
         prior: Option<&MailboxCursor>,
         limit: usize,
+        max_bytes: usize,
     ) -> Result<MailboxDeltaPage, SpoolError> {
+        if limit == 0 || max_bytes == 0 || limit > self.spool.options.max_query_records {
+            return Err(SpoolError::Limit);
+        }
         if *scope != self.spool.cursor.scope || self.spool.expired(self.now) {
             return Err(SpoolError::StaleCursor);
         }
@@ -397,10 +460,22 @@ impl MailboxStore for SpoolView<'_> {
             .entries
             .get(lower..upper)
             .ok_or(SpoolError::StaleCursor)?;
+        let mut payload_bytes = 0usize;
         for (offset, entry) in window.iter().enumerate().take(limit + 1) {
             if !scan.accept_row() {
                 break;
             }
+            let Some(next_bytes) = payload_bytes.checked_add(entry.event.body.len()) else {
+                return Err(SpoolError::Limit);
+            };
+            if next_bytes > max_bytes {
+                if payload_bytes == 0 && offset == 0 {
+                    return Err(SpoolError::Limit);
+                }
+                scan.defer_remaining();
+                break;
+            }
+            payload_bytes = next_bytes;
             scan.push((lower + offset) as i64, entry.event.id)?;
         }
         Ok(scan.finish())
@@ -419,7 +494,7 @@ impl MailboxStore for SpoolView<'_> {
         {
             return Err(SpoolError::StaleCursor);
         }
-        if ids.len() > PAGE_IDS || max_bytes == 0 {
+        if ids.len() > self.spool.options.max_query_records || max_bytes == 0 {
             return Err(SpoolError::Limit);
         }
         let mut bytes = 0u64;
@@ -434,7 +509,7 @@ impl MailboxStore for SpoolView<'_> {
                 .ok_or(SpoolError::StaleCursor)?;
             let entry = &self.spool.entries[position];
             bytes = bytes
-                .checked_add(entry.wire_bytes)
+                .checked_add(entry.event.body.len() as u64)
                 .ok_or(SpoolError::CounterExhausted)?;
             if bytes > max_bytes as u64 {
                 return Err(SpoolError::Limit);

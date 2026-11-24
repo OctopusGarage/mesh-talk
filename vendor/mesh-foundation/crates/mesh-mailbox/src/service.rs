@@ -1,11 +1,8 @@
 //! Dispatch for the existing authenticated mailbox delta protocol. The host
 //! owns authentication, per-session negotiation and the transaction/permit.
 
-use crate::rpc::{
-    BODY_BUDGET, Frame, MailboxCursor, MailboxDeltaPage, PAGE_IDS, RpcError, decode_frame,
-    encode_frame,
-};
-use crate::{Record, RecordId, ScopeId};
+use crate::ScopeId;
+use crate::rpc::{BODY_BUDGET, Frame, PAGE_IDS, RpcError, decode_frame, encode_frame};
 
 /// A capability probe for this generic mailbox profile. Hosts negotiate on an
 /// authenticated session before dispatch; advertised support grants no access.
@@ -26,26 +23,7 @@ pub fn read_probe_response(bytes: &[u8], scope: ScopeId) -> Result<bool, RpcErro
     }
 }
 
-/// Current authorized relay store. Implementations must recheck retention,
-/// cursor identity, and current authority under the same read transaction.
-pub trait MailboxStore {
-    type Error;
-
-    fn delta(
-        &self,
-        scope: &ScopeId,
-        prior: Option<&MailboxCursor>,
-        limit: usize,
-    ) -> Result<MailboxDeltaPage, Self::Error>;
-
-    fn bodies(
-        &self,
-        scope: &ScopeId,
-        cursor: &MailboxCursor,
-        ids: &[RecordId],
-        max_bytes: usize,
-    ) -> Result<Vec<Record>, Self::Error>;
-}
+pub use crate::ports::MailboxStore;
 
 pub struct MailboxReply {
     pub scope: ScopeId,
@@ -67,18 +45,48 @@ pub fn dispatch<S: MailboxStore>(
 ) -> Result<MailboxReply, DispatchError<S::Error>> {
     let request = decode_frame(bytes).map_err(DispatchError::Wire)?;
     let (scope, response) = match request {
-        Frame::Delta { scope, prior } if authorized == Some(scope) => {
+        Frame::Delta {
+            scope,
+            prior,
+            limit,
+            max_bytes,
+        } if authorized == Some(scope)
+            && limit > 0
+            && usize::from(limit) <= PAGE_IDS
+            && max_bytes > 0
+            && max_bytes as usize <= BODY_BUDGET =>
+        {
             let page = store
-                .delta(&scope, prior.as_ref(), PAGE_IDS)
+                .delta_bounded(
+                    &scope,
+                    prior.as_ref(),
+                    usize::from(limit),
+                    max_bytes as usize,
+                )
                 .map_err(DispatchError::Store)?;
+            if !page.is_well_formed(scope, usize::from(limit)) {
+                return Err(DispatchError::Wire(RpcError::UnexpectedMessage));
+            }
             (scope, Frame::Page(page))
         }
-        Frame::Get { scope, cursor, ids }
-            if authorized == Some(scope) && cursor.scope == scope && ids.len() <= PAGE_IDS =>
+        Frame::Get {
+            scope,
+            cursor,
+            ids,
+            max_bytes,
+        } if authorized == Some(scope)
+            && cursor.scope == scope
+            && !ids.is_empty()
+            && ids.len() <= PAGE_IDS
+            && max_bytes > 0
+            && max_bytes as usize <= BODY_BUDGET
+            && ids.iter().collect::<std::collections::HashSet<_>>().len() == ids.len() =>
         {
             let records = store
-                .bodies(&scope, &cursor, &ids, BODY_BUDGET)
+                .bodies(&scope, &cursor, &ids, max_bytes as usize)
                 .map_err(DispatchError::Store)?;
+            crate::model::validate_batch(scope, &ids, &records, max_bytes as usize)
+                .map_err(|_| DispatchError::Wire(RpcError::UnexpectedMessage))?;
             (scope, Frame::Records { scope, records })
         }
         _ => return Err(DispatchError::Wire(RpcError::UnexpectedMessage)),

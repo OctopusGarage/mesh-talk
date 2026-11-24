@@ -41,8 +41,8 @@ const PBKDF2_ROUNDS: u32 = 1;
 
 pub struct EncryptionKey([u8; KEY_SIZE]);
 
-/// Zeroize the derived key on drop so it does not linger in freed memory (mirrors
-/// `GroupKey`/`RatchetState`). This is at-rest key material, never serialized, so this
+/// Zeroize the derived key on drop so it does not linger in freed memory.
+/// This is at-rest key material, never serialized, so this
 /// changes no wire/on-disk format.
 impl Drop for EncryptionKey {
     fn drop(&mut self) {

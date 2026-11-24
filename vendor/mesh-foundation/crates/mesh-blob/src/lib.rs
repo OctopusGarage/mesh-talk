@@ -1,6 +1,6 @@
-//! File crypto: a per-file symmetric key + raw-key AES-256-GCM per chunk (the same
-//! primitive as `channel::crypto`), a whole-file SHA-256 checksum for end-to-end
-//! verification, and fixed-size chunking. Pure — no I/O, no network.
+//! Blob cryptography: per-object AES-256-GCM chunk encryption and SHA-256
+//! integrity. Applications own manifests, key distribution and access policy.
+//! The cryptographic functions perform no I/O or network operations.
 //!
 //! Two chunk-sealing schemes coexist:
 //!
@@ -53,13 +53,13 @@ const TAG_SIZE: usize = 16;
 /// smaller. This is the plaintext size; a 1-byte file is one chunk.
 pub const CHUNK_SIZE: usize = 48 * 1024;
 
-/// A per-file symmetric key (AES-256-GCM). Generated fresh per file; carried inside
-/// the (sealed) `FileManifest` so only conversation members can decrypt chunks.
+/// A fresh per-object AES-256-GCM key. Hosts distribute it over their own
+/// authenticated, authorized mechanism; this type defines no manifest or membership.
 #[derive(Clone)]
 pub struct FileKey([u8; KEY_SIZE]);
 
 /// Zeroize the per-file key on drop so it does not linger in freed memory (mirrors
-/// `GroupKey`/`RatchetState`). Each `Clone` owns its own copy, each zeroized on its
+/// other protected key material). Each `Clone` owns its own copy, each zeroized on its
 /// own drop. The key bytes still travel inside the sealed manifest unchanged, so this
 /// changes no wire/on-disk format.
 impl Drop for FileKey {

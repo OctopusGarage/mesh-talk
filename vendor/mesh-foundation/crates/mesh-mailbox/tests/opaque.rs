@@ -1,7 +1,8 @@
+#![cfg(feature = "spool")]
 use mesh_mailbox::{
     Record, ScopeId,
     capacity::CapacityLimits,
-    service::MailboxStore,
+    ports::MailboxStore,
     spool::{Deposit, Spool},
 };
 use mesh_storage::EncryptionKey;

@@ -1,26 +1,21 @@
-//! One bounded turn on an already negotiated authenticated mailbox session.
-//!
-//! A page cursor is acknowledged only with its entire batch. The commit callback
-//! must authenticate records, recheck authorization, and atomically persist bodies
-//! plus cursor. A complete result covers this source snapshot, not group convergence.
-
-use crate::rpc::{self, BODY_BUDGET, Frame, MailboxCursor, RpcError};
-use crate::{Record, ScopeId};
-use mesh_replication::{
-    pull::{PullProgress, PullTurnLimits},
-    session::ReconciliationSession,
+//! One budgeted typed operation. No wire codec, storage format or scheduling policy.
+use crate::{
+    model::{MailboxCursor, MailboxDeltaPage, Record, ScopeId},
+    ports::MailboxTransport,
 };
-
+use mesh_replication::pull::{PullProgress, PullTurnLimits};
 #[derive(Clone, Copy, Debug)]
 pub struct MailboxTurnLimits {
     pub work: PullTurnLimits,
     pub pages: usize,
+    pub page_records: usize,
 }
 impl Default for MailboxTurnLimits {
     fn default() -> Self {
         Self {
             work: PullTurnLimits::default(),
             pages: 8,
+            page_records: 64,
         }
     }
 }
@@ -34,13 +29,10 @@ pub struct MailboxProgress {
 pub enum MailboxTurnErrorKind<Io, Commit> {
     InvalidLimits,
     Transport(Io),
-    Wire(RpcError),
+    InvalidPage,
+    InvalidRecords,
+    BodyLimit,
     Commit(Commit),
-    /// This page cannot be acknowledged partially. Increase the record
-    /// allowance to at least one page; never discard unacknowledged IDs.
-    PageExceedsTurn,
-    /// The server invalidated the source-local checkpoint. Reauthorize and start
-    /// a bounded repair from no cursor; no cursor was acknowledged by this turn.
     CheckpointInvalidated,
 }
 #[derive(Debug)]
@@ -48,14 +40,59 @@ pub struct MailboxTurnError<Io, Commit> {
     pub progress: Box<MailboxProgress>,
     pub kind: MailboxTurnErrorKind<Io, Commit>,
 }
-
-pub async fn sync_turn<S: ReconciliationSession, Commit>(
-    session: &mut S,
+fn valid_page(
+    page: &MailboxDeltaPage,
+    scope: ScopeId,
+    previous: Option<&MailboxCursor>,
+    limit: usize,
+) -> bool {
+    let c = &page.cursor;
+    if !page.is_well_formed(scope, limit) {
+        return false;
+    }
+    let after = previous.map_or(0, |p| p.after);
+    if !page.complete && c.after <= after {
+        return false;
+    }
+    if !c
+        .after
+        .checked_sub(after)
+        .is_some_and(|diff| i64::try_from(page.ids.len()).is_ok_and(|n| diff >= n))
+    {
+        return false;
+    }
+    if let Some(p) = previous {
+        if p.store_uuid != c.store_uuid
+            || p.scope != c.scope
+            || p.epoch != c.epoch
+            || c.after < p.after
+            || c.revision < p.revision
+        {
+            return false;
+        }
+        if let Some(window) = p.window {
+            if page.complete {
+                if (c.after, c.revision) != window {
+                    return false;
+                }
+            } else if c.window != Some(window) || c.revision != p.revision {
+                return false;
+            }
+        }
+    }
+    true
+}
+/// Commits a complete admitted page and its cursor together, synchronously.
+/// The host authenticates records and policy in that callback. Failure/cancellation
+/// cannot acknowledge the current page; completed earlier pages remain durable.
+/// `work.bytes` measures raw payload bytes, independent of any transport encoding.
+pub async fn sync_turn<T: MailboxTransport + ?Sized, Commit>(
+    transport: &mut T,
     scope: ScopeId,
     prior: Option<MailboxCursor>,
     limits: MailboxTurnLimits,
     mut commit: impl FnMut(&[Record], &MailboxCursor) -> Result<(), Commit>,
-) -> Result<MailboxProgress, MailboxTurnError<S::Error, Commit>> {
+) -> Result<MailboxProgress, MailboxTurnError<T::Error, Commit>> {
     let mut progress = MailboxProgress {
         cursor: prior,
         ..Default::default()
@@ -69,109 +106,72 @@ pub async fn sync_turn<S: ReconciliationSession, Commit>(
         };
     }
     if limits.work.records == 0
-        || limits.work.bytes < BODY_BUDGET
-        || limits.work.requests < 2
+        || limits.work.bytes == 0
+        || limits.work.requests == 0
         || limits.pages == 0
-        || progress.cursor.as_ref().is_some_and(|c| c.scope != scope)
+        || limits.page_records == 0
+        || progress.cursor.as_ref().is_some_and(|c| {
+            c.scope != scope
+                || c.epoch < 0
+                || c.after < 0
+                || c.revision < 0
+                || c.window
+                    .is_some_and(|(upper, revision)| upper <= c.after || revision < c.revision)
+        })
     {
         fail!(MailboxTurnErrorKind::InvalidLimits);
     }
-    while progress.pages < limits.pages && progress.work.requests < limits.work.requests {
-        let request = match rpc::encode_frame(&Frame::Delta {
-            scope,
-            prior: progress.cursor.clone(),
-        }) {
-            Ok(request) => request,
-            Err(error) => fail!(MailboxTurnErrorKind::Wire(error)),
-        };
+    while progress.pages < limits.pages
+        && progress.work.requests < limits.work.requests
+        && progress.work.committed < limits.work.records
+        && progress.work.bytes < limits.work.bytes
+    {
+        let limit = limits
+            .page_records
+            .min(limits.work.records - progress.work.committed);
         progress.work.requests += 1;
-        if let Err(error) = session.send(&request).await {
-            fail!(MailboxTurnErrorKind::Transport(error));
-        }
-        let response = match session.recv().await {
-            Ok(response) => response,
-            Err(error) => fail!(MailboxTurnErrorKind::Transport(error)),
-        };
-        let page = match rpc::read_delta_response(&response, scope) {
+        let page = match transport
+            .delta(
+                scope,
+                progress.cursor.as_ref(),
+                limit,
+                limits.work.bytes - progress.work.bytes,
+            )
+            .await
+        {
             Ok(page) => page,
-            Err(error) => fail!(MailboxTurnErrorKind::Wire(error)),
+            Err(e) => fail!(MailboxTurnErrorKind::Transport(e)),
         };
         progress.pages += 1;
         if page.reset {
             fail!(MailboxTurnErrorKind::CheckpointInvalidated);
         }
-        let previous = progress.cursor.as_ref();
-        let identity_changed = previous.is_some_and(|p| {
-            p.store_uuid != page.cursor.store_uuid
-                || p.epoch != page.cursor.epoch
-                || p.first_seen != page.cursor.first_seen
-        });
-        let changed_window = previous.and_then(|p| p.window).is_some_and(|window| {
-            if page.complete {
-                page.cursor.after != window.0 || page.cursor.revision != window.1
-            } else {
-                page.cursor.window != Some(window)
-                    || previous.is_some_and(|p| page.cursor.revision != p.revision)
-            }
-        });
-        let invalid = (!page.complete
-            && page.ids.is_empty()
-            && page.cursor.after <= previous.map_or(0, |p| p.after))
-            || changed_window
-            || (!page.reset
-                && (identity_changed
-                    || previous.is_some_and(|p| {
-                        page.cursor.after < p.after || page.cursor.revision < p.revision
-                    })))
-            || (!page.complete && previous == Some(&page.cursor))
-            || page.cursor.window.is_some_and(|(upper, revision)| {
-                upper < page.cursor.after || revision < page.cursor.revision
-            })
-            || page
-                .ids
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                != page.ids.len();
-        if invalid {
-            fail!(MailboxTurnErrorKind::Wire(RpcError::UnexpectedMessage));
+        if !valid_page(&page, scope, progress.cursor.as_ref(), limit) {
+            fail!(MailboxTurnErrorKind::InvalidPage);
         }
-        if page.ids.len() > limits.work.records - progress.work.committed {
-            if progress.work.committed == 0 {
-                fail!(MailboxTurnErrorKind::PageExceedsTurn);
-            }
-            return Ok(progress);
-        }
+        let available = limits.work.bytes - progress.work.bytes;
         let records = if page.ids.is_empty() {
-            Vec::new()
+            vec![]
         } else {
-            // Get frames cannot advertise a smaller byte budget: reserve a
-            // full protocol response before requesting any bodies.
-            if limits.work.bytes - progress.work.bytes < BODY_BUDGET
-                || progress.work.requests == limits.work.requests
-            {
+            if progress.work.requests == limits.work.requests {
                 return Ok(progress);
             }
-            let request = match rpc::make_get_request(scope, &page.cursor, &page.ids) {
-                Ok(request) => request,
-                Err(error) => fail!(MailboxTurnErrorKind::Wire(error)),
-            };
             progress.work.requests += 1;
-            if let Err(error) = session.send(&request).await {
-                fail!(MailboxTurnErrorKind::Transport(error));
-            }
-            let response = match session.recv().await {
-                Ok(response) => response,
-                Err(error) => fail!(MailboxTurnErrorKind::Transport(error)),
-            };
-            match rpc::read_get_response(&response, scope, &page.ids, event_size) {
+            match transport
+                .bodies(scope, &page.cursor, &page.ids, available)
+                .await
+            {
                 Ok(records) => records,
-                Err(error) => fail!(MailboxTurnErrorKind::Wire(error)),
+                Err(e) => fail!(MailboxTurnErrorKind::Transport(e)),
             }
         };
-        let bytes = records.iter().map(event_size).sum::<usize>();
-        if let Err(error) = commit(&records, &page.cursor) {
-            fail!(MailboxTurnErrorKind::Commit(error));
+        let bytes = match crate::model::validate_batch(scope, &page.ids, &records, available) {
+            Ok(bytes) => bytes,
+            Err(crate::model::BatchError::Records) => fail!(MailboxTurnErrorKind::InvalidRecords),
+            Err(crate::model::BatchError::Bytes) => fail!(MailboxTurnErrorKind::BodyLimit),
+        };
+        if let Err(e) = commit(&records, &page.cursor) {
+            fail!(MailboxTurnErrorKind::Commit(e));
         }
         progress.work.committed += records.len();
         progress.work.bytes += bytes;
@@ -180,22 +180,10 @@ pub async fn sync_turn<S: ReconciliationSession, Commit>(
             progress.work.complete = true;
             return Ok(progress);
         }
-        if progress.work.committed == limits.work.records {
-            return Ok(progress);
-        }
     }
     Ok(progress)
 }
-fn event_size(event: &Record) -> usize {
-    bincode::serialized_size(event)
-        .ok()
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(usize::MAX)
-}
-
-impl<Io: std::fmt::Display, Commit: std::fmt::Display> std::fmt::Display
-    for MailboxTurnError<Io, Commit>
-{
+impl<I: std::fmt::Display, C: std::fmt::Display> std::fmt::Display for MailboxTurnError<I, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -203,27 +191,23 @@ impl<Io: std::fmt::Display, Commit: std::fmt::Display> std::fmt::Display
             self.progress.work.committed
         )?;
         match &self.kind {
-            MailboxTurnErrorKind::InvalidLimits => f.write_str("invalid turn limits"),
-            MailboxTurnErrorKind::Transport(error) => write!(f, "transport: {error}"),
-            MailboxTurnErrorKind::Wire(error) => write!(f, "frame: {error}"),
-            MailboxTurnErrorKind::Commit(error) => write!(f, "commit: {error}"),
-            MailboxTurnErrorKind::PageExceedsTurn => {
-                f.write_str("page exceeds the turn record allowance")
-            }
-            MailboxTurnErrorKind::CheckpointInvalidated => {
-                f.write_str("source checkpoint invalidated")
-            }
+            MailboxTurnErrorKind::InvalidLimits => f.write_str("invalid limits"),
+            MailboxTurnErrorKind::Transport(e) => write!(f, "transport: {e}"),
+            MailboxTurnErrorKind::InvalidPage => f.write_str("invalid page"),
+            MailboxTurnErrorKind::InvalidRecords => f.write_str("invalid records"),
+            MailboxTurnErrorKind::BodyLimit => f.write_str("payload byte limit"),
+            MailboxTurnErrorKind::Commit(e) => write!(f, "commit: {e}"),
+            MailboxTurnErrorKind::CheckpointInvalidated => f.write_str("checkpoint invalidated"),
         }
     }
 }
-impl<Io: std::error::Error + 'static, Commit: std::error::Error + 'static> std::error::Error
-    for MailboxTurnError<Io, Commit>
+impl<I: std::error::Error + 'static, C: std::error::Error + 'static> std::error::Error
+    for MailboxTurnError<I, C>
 {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.kind {
-            MailboxTurnErrorKind::Transport(error) => Some(error),
-            MailboxTurnErrorKind::Wire(error) => Some(error),
-            MailboxTurnErrorKind::Commit(error) => Some(error),
+            MailboxTurnErrorKind::Transport(e) => Some(e),
+            MailboxTurnErrorKind::Commit(e) => Some(e),
             _ => None,
         }
     }

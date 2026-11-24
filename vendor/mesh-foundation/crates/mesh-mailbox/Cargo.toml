@@ -10,13 +10,18 @@ keywords = ["mesh", "peer-to-peer", "sdk"]
 categories = ["network-programming"]
 description = "Bounded opaque mailbox records, resumable retrieval and durable spool storage"
 
+[features]
+default = ["wire", "spool"]
+wire = ["dep:bincode"]
+spool = ["dep:bincode", "dep:mesh-storage", "dep:rand_core"]
+
 [dependencies]
-bincode = "1.3"
+bincode = { version = "1.3", optional = true }
 mesh-replication = { package = "mesh-foundation-replication", version = "=0.1.0-alpha.2", path = "../mesh-replication", default-features = false }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
-mesh-storage = { package = "mesh-foundation-storage", version = "=0.1.0-alpha.2", path = "../mesh-storage" }
-rand_core = { version = "0.6", features = ["getrandom"] }
+mesh-storage = { package = "mesh-foundation-storage", version = "=0.1.0-alpha.2", path = "../mesh-storage", optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 
 [dev-dependencies]
 mesh-identity = { package = "mesh-foundation-identity", version = "=0.1.0-alpha.2", path = "../mesh-identity" }
@@ -29,3 +34,7 @@ name = "mesh_mailbox"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[[example]]
+name = "opaque_mailbox"
+required-features = ["spool"]
