@@ -135,3 +135,112 @@ async fn cancelling_partial_receive_closes_the_stream() {
     ));
     assert!(matches!(send.await, Err(TransportError::Io(_))));
 }
+
+#[tokio::test]
+async fn discovery_config_rejects_unicast_and_retains_the_assigned_port() {
+    use mesh_connect::net::DiscoveryConfig;
+    use std::net::Ipv4Addr;
+
+    assert!(DiscoveryConfig::new(47474, Ipv4Addr::LOCALHOST).is_err());
+    let group = Ipv4Addr::new(239, 42, 1, 2);
+    let discovery = DiscoveryConfig::new(0, group).unwrap().bind().unwrap();
+    let local = discovery.socket().local_addr().unwrap();
+    assert_ne!(local.port(), 0);
+    assert_eq!(discovery.multicast_target(), (group, local.port()).into());
+}
+
+#[tokio::test]
+async fn vectored_frame_write_coalesces_header_and_handles_short_writes() {
+    use std::{
+        io::{self, IoSlice},
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::io::AsyncWrite;
+
+    #[derive(Default)]
+    struct ShortWriter {
+        stalled: bool,
+        bytes: Vec<u8>,
+        vectored_calls: usize,
+        flushes: usize,
+    }
+
+    impl AsyncWrite for ShortWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            panic!("a vectored writer should receive the complete frame as slices")
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+
+        fn poll_write_vectored(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            slices: &[IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            self.vectored_calls += 1;
+            if self.stalled {
+                return Poll::Ready(Ok(0));
+            }
+            let start = self.bytes.len();
+            // Stop first inside the header, then inside the body.
+            self.bytes.extend(
+                slices
+                    .iter()
+                    .flat_map(|slice| slice.iter().copied())
+                    .take(3),
+            );
+            Poll::Ready(Ok(self.bytes.len() - start))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.flushes += 1;
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let mut writer = ShortWriter::default();
+    mesh_connect::frame::write_frame(&mut writer, b"hello")
+        .await
+        .unwrap();
+    assert_eq!(writer.bytes, b"\0\0\0\x05hello");
+    assert_eq!(writer.vectored_calls, 3);
+    assert_eq!(writer.flushes, 1);
+
+    let mut stalled = ShortWriter {
+        stalled: true,
+        ..ShortWriter::default()
+    };
+    assert!(matches!(
+        mesh_connect::frame::write_frame(&mut stalled, b"hello").await,
+        Err(TransportError::Io(error)) if error.kind() == io::ErrorKind::WriteZero
+    ));
+    assert!(stalled.bytes.is_empty());
+    assert_eq!(stalled.flushes, 0);
+}
+
+#[test]
+fn tcp_session_connect_future_is_send() {
+    fn require_send(_: impl Send) {}
+    async fn connect(stream: TcpStream) {
+        let secret = [11; 32];
+        let expected_peer = public([22; 32]);
+        let _ = PeerSession::connect(stream, &secret, &expected_peer).await;
+    }
+
+    fn assert_connect(stream: TcpStream) {
+        require_send(connect(stream));
+    }
+
+    let _: fn(TcpStream) = assert_connect;
+}

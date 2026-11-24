@@ -1,9 +1,13 @@
 [package]
-name = "mesh-e2ee"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-repository = "https://github.com/OctopusGarage/mesh-foundation"
+name = "mesh-foundation-e2ee"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["mesh", "peer-to-peer", "sdk"]
+categories = ["network-programming"]
 description = "Content encryption state machines for peer applications"
 
 [dependencies]
@@ -18,3 +22,9 @@ zeroize = "1"
 
 [dev-dependencies]
 hex = "0.4"
+
+[lib]
+name = "mesh_e2ee"
+
+[package.metadata.docs.rs]
+all-features = true

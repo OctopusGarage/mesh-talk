@@ -1,19 +1,25 @@
 [package]
-name = "mesh-connect"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-repository = "https://github.com/OctopusGarage/mesh-foundation"
+name = "mesh-foundation-connect"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["mesh", "peer-to-peer", "sdk"]
+categories = ["network-programming"]
 description = "Authenticated, encrypted peer sessions for mesh applications"
 
 [features]
+default = ["signed-discovery"]
+signed-discovery = ["dep:bincode", "dep:mesh-identity", "dep:serde"]
 test-observability = []
 
 [dependencies]
-bincode = "1.3"
+bincode = { version = "1.3", optional = true }
 futures-util = "0.3"
-mesh-identity = { path = "../mesh-identity" }
-serde = { version = "1", features = ["derive"] }
+mesh-identity = { package = "mesh-foundation-identity", version = "=0.1.0-alpha.2", path = "../mesh-identity", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
 if-addrs = "0.15"
 log = "0.4"
 socket2 = { version = "0.6", features = ["all"] }
@@ -22,8 +28,15 @@ tokio = { version = "1", features = ["io-util", "net", "sync"] }
 
 [dev-dependencies]
 hex = "0.4"
-mesh-identity = { path = "../mesh-identity", features = ["test-observability"] }
+mesh-identity = { package = "mesh-foundation-identity", version = "=0.1.0-alpha.2", path = "../mesh-identity", features = ["test-observability"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 x25519-dalek = { version = "3", features = ["static_secrets"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Networking_WinSock"] }
+
+[lib]
+name = "mesh_connect"
+
+[package.metadata.docs.rs]
+all-features = true

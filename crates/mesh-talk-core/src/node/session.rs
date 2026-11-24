@@ -8,7 +8,6 @@
 //! The store is shared as a `&Mutex<S>` and locked only for the synchronous
 //! handler calls — never across an `.await` — so a `std::sync::Mutex` is correct.
 
-#[cfg(test)]
 use crate::eventlog::event::EventKind;
 use crate::eventlog::event::{ConversationId, EventId};
 #[cfg(test)]
@@ -23,8 +22,8 @@ mod have_budget;
 pub(crate) mod mailbox;
 pub(crate) mod mailbox_watch;
 use backend::*;
+use bincode::Options;
 pub use have_budget::RemoteHaveBudget;
-#[cfg(test)]
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -147,6 +146,20 @@ pub(super) struct StickerTestFrame {
 #[cfg(test)]
 pub(super) fn sticker_test_frame(bytes: &[u8], file: ConversationId) -> StickerTestFrame {
     let mut frame = StickerTestFrame::default();
+    match decode_attachment(bytes) {
+        Ok(AttachmentWire::SignedChunkRequest {
+            file: requested, ..
+        }) => {
+            frame.signed_chunk_request = true;
+            frame.requests_body = requested == file;
+            return frame;
+        }
+        Ok(AttachmentWire::SignedChunkAvailabilityRequest { .. }) => {
+            frame.signed_chunk_request = true;
+            return frame;
+        }
+        _ => {}
+    }
     let events = match decode(bytes) {
         Ok(SyncWire::StickerFileConsentRequest { headers, .. }) => {
             frame.proof = true;
@@ -176,17 +189,6 @@ pub(super) fn sticker_test_frame(bytes: &[u8], file: ConversationId) -> StickerT
             | SyncWire::RequestV5(request),
         ) => {
             frame.requests_body = request.conversation == file;
-            return frame;
-        }
-        Ok(SyncWire::SignedChunkRequest {
-            file: requested, ..
-        }) => {
-            frame.signed_chunk_request = true;
-            frame.requests_body = requested == file;
-            return frame;
-        }
-        Ok(SyncWire::SignedChunkAvailabilityRequest { .. }) => {
-            frame.signed_chunk_request = true;
             return frame;
         }
         _ => return frame,
@@ -299,6 +301,64 @@ fn decode(bytes: &[u8]) -> Result<SyncWire, SessionError> {
     legacy_wire::decode(bytes).map_err(SessionError::Serialization)
 }
 
+// These app-owned discriminants immediately follow the frozen legacy SDK tags.
+const ATTACHMENT_WIRE_BASE: u32 = 32;
+
+#[derive(Serialize, Deserialize)]
+enum AttachmentWire {
+    SignedChunkRequest {
+        file: ConversationId,
+        author: crate::eventlog::Author,
+        index: u32,
+    },
+    SignedChunkResponse {
+        file: ConversationId,
+        index: u32,
+        event: Option<crate::eventlog::Event>,
+    },
+    SignedChunkAvailabilityRequest {
+        file: ConversationId,
+        author: crate::eventlog::Author,
+        start: u32,
+        count: u32,
+    },
+    SignedChunkAvailabilityResponse {
+        file: ConversationId,
+        start: u32,
+        availability: Option<Vec<bool>>,
+    },
+}
+
+fn encode_attachment(wire: &AttachmentWire) -> Result<Vec<u8>, SessionError> {
+    let mut bytes = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .serialize(wire)
+        .map_err(|error| SessionError::Serialization(error.to_string()))?;
+    let tag = u32::from_le_bytes(bytes[..4].try_into().expect("serialized enum tag"));
+    bytes[..4].copy_from_slice(&(ATTACHMENT_WIRE_BASE + tag).to_le_bytes());
+    Ok(bytes)
+}
+
+fn attachment_variant(bytes: &[u8]) -> Option<u32> {
+    let tag = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?);
+    tag.checked_sub(ATTACHMENT_WIRE_BASE)
+        .filter(|variant| *variant < 4)
+}
+
+fn decode_attachment(bytes: &[u8]) -> Result<AttachmentWire, SessionError> {
+    let variant = attachment_variant(bytes)
+        .filter(|_| bytes.len() <= MAX_PLAINTEXT)
+        .ok_or(SessionError::UnexpectedMessage)?;
+    let mut frame = bytes.to_vec();
+    frame[..4].copy_from_slice(&variant.to_le_bytes());
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_PLAINTEXT as u64)
+        .reject_trailing_bytes()
+        .deserialize(&frame)
+        .map_err(|error| SessionError::Serialization(error.to_string()))
+}
+
 /// A qualified exact storage claim over the authenticated channel, issued only
 /// after the remote synchronizes its currently authorized durable store.
 /// This is custody, never a recipient delivery receipt.
@@ -362,14 +422,14 @@ pub(super) async fn request_signed_chunk<IO: AsyncRead + AsyncWrite + Unpin>(
     index: u32,
 ) -> Result<Option<crate::eventlog::Event>, SessionError> {
     channel
-        .send(&encode(&SyncWire::SignedChunkRequest {
+        .send(&encode_attachment(&AttachmentWire::SignedChunkRequest {
             file,
             author,
             index,
         })?)
         .await?;
-    match decode(&channel.recv().await?)? {
-        SyncWire::SignedChunkResponse {
+    match decode_attachment(&channel.recv().await?)? {
+        AttachmentWire::SignedChunkResponse {
             file: actual,
             index: returned,
             event,
@@ -396,15 +456,17 @@ pub(super) async fn request_signed_chunk_availability<IO: AsyncRead + AsyncWrite
     count: u32,
 ) -> Result<Option<Vec<bool>>, SessionError> {
     channel
-        .send(&encode(&SyncWire::SignedChunkAvailabilityRequest {
-            file,
-            author,
-            start,
-            count,
-        })?)
+        .send(&encode_attachment(
+            &AttachmentWire::SignedChunkAvailabilityRequest {
+                file,
+                author,
+                start,
+                count,
+            },
+        )?)
         .await?;
-    match decode(&channel.recv().await?)? {
-        SyncWire::SignedChunkAvailabilityResponse {
+    match decode_attachment(&channel.recv().await?)? {
+        AttachmentWire::SignedChunkAvailabilityResponse {
             file: actual,
             start: returned,
             availability,
@@ -804,9 +866,14 @@ async fn serve_wire_backend<B: SessionBackend>(
     backend: &B,
     bytes: &[u8],
 ) -> Result<Served, SessionError> {
+    if attachment_variant(bytes).is_none() {
+        let scope =
+            legacy_round::serve(channel, &backend::RoundStoreAdapter(backend), bytes).await?;
+        return Ok(Served::Handled(scope));
+    }
     backend.bind_session_peer(channel.peer_identity());
-    match decode(bytes)? {
-        SyncWire::SignedChunkAvailabilityRequest {
+    match decode_attachment(bytes)? {
+        AttachmentWire::SignedChunkAvailabilityRequest {
             file,
             author,
             start,
@@ -827,25 +894,27 @@ async fn serve_wire_backend<B: SessionBackend>(
                 None
             };
             channel
-                .send(&encode(&SyncWire::SignedChunkAvailabilityResponse {
-                    file,
-                    start,
-                    availability,
-                })?)
+                .send(&encode_attachment(
+                    &AttachmentWire::SignedChunkAvailabilityResponse {
+                        file,
+                        start,
+                        availability,
+                    },
+                )?)
                 .await?;
             if let Some(view) = view {
                 drop(backend.retain_custody_view(view)?);
             }
             Ok(Served::Handled(file))
         }
-        SyncWire::SignedChunkRequest {
+        AttachmentWire::SignedChunkRequest {
             file,
             author,
             index,
         } => {
             if !backend.supports_file_chunk_scope(&file)? {
                 channel
-                    .send(&encode(&SyncWire::SignedChunkResponse {
+                    .send(&encode_attachment(&AttachmentWire::SignedChunkResponse {
                         file,
                         index,
                         event: None,
@@ -856,7 +925,9 @@ async fn serve_wire_backend<B: SessionBackend>(
             let view = open_prepared_view(backend, &file).await?;
             prepare_outgoing_selection(backend, &view, &Default::default()).await?;
             let event = backend.export_file_chunk(&view, author, index, MAX_PLAINTEXT)?;
-            let reply = |event| encode(&SyncWire::SignedChunkResponse { file, index, event });
+            let reply = |event| {
+                encode_attachment(&AttachmentWire::SignedChunkResponse { file, index, event })
+            };
             let mut response = reply(event)?;
             if response.len() > MAX_PLAINTEXT {
                 response = reply(None)?;
@@ -867,11 +938,7 @@ async fn serve_wire_backend<B: SessionBackend>(
             Ok(Served::Handled(file))
         }
 
-        _ => {
-            let scope =
-                legacy_round::serve(channel, &backend::RoundStoreAdapter(backend), bytes).await?;
-            Ok(Served::Handled(scope))
-        }
+        _ => Err(SessionError::UnexpectedMessage),
     }
 }
 
@@ -881,6 +948,33 @@ mod tests {
     use crate::eventlog::event::{Event, EventKind};
     use crate::eventlog::store::EventLog;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn signed_attachment_frames_preserve_the_app_wire_tags() {
+        let file = ConversationId::new([7; 32]);
+        let author = crate::eventlog::Author::from_ed25519([8; 32]);
+        let legacy = encode(&SyncWire::FollowupV5(SyncFollowup {
+            conversation: file,
+            events: vec![],
+        }))
+        .unwrap();
+        assert_eq!(&legacy[..4], &31_u32.to_le_bytes());
+        assert!(attachment_variant(&legacy).is_none());
+
+        let request = AttachmentWire::SignedChunkRequest {
+            file,
+            author,
+            index: 9,
+        };
+        let mut frame = encode_attachment(&request).unwrap();
+        assert_eq!(&frame[..4], &32_u32.to_le_bytes());
+        assert!(matches!(
+            decode_attachment(&frame).unwrap(),
+            AttachmentWire::SignedChunkRequest { index: 9, .. }
+        ));
+        frame.push(0);
+        assert!(decode_attachment(&frame).is_err());
+    }
 
     #[derive(Clone, Copy)]
     enum ReadFault {

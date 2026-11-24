@@ -707,6 +707,58 @@ fn request_version(wire: &SyncWire) -> u8 {
     }
 }
 
+async fn serve_file_message_identities<B, S, E>(
+    channel: &mut S,
+    backend: &B,
+    requests: Vec<(ConversationId, EventId)>,
+    offers: Vec<Event>,
+) -> Result<ConversationId, E>
+where
+    B: ResponderBackend<E>,
+    S: ReconciliationSession<Peer = B::Peer, Error = E>,
+    E: From<RoundFault>,
+{
+    if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
+        return Err(RoundFault::UnexpectedMessage.into());
+    }
+    let conversation = requests
+        .first()
+        .map(|(file, _)| *file)
+        .or_else(|| offers.first().map(|event| event.conversation_id))
+        .unwrap_or(ConversationId::new([0; 32]));
+    for bundle in offers {
+        backend.accept_file_message_identity(bundle)?;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut bundles = Vec::new();
+    for (file, manifest) in requests {
+        if let Some(bundle) = backend.file_message_identity(&file, &manifest)?
+            && seen.insert(bundle.id)
+        {
+            bundles.push(bundle);
+        }
+    }
+    channel
+        .send(&encode_frame(&SyncWire::FileMessageIdentitiesResponse {
+            bundles,
+        })?)
+        .await?;
+    Ok(conversation)
+}
+
+async fn acquire_custody_view<B, E>(
+    backend: &B,
+    conversation: &ConversationId,
+) -> Result<B::View, E>
+where
+    B: ResponderBackend<E>,
+{
+    match backend.take_custody_view(conversation)? {
+        Some(view) => Ok(view),
+        None => backend.open_prepared_view(conversation).await,
+    }
+}
+
 pub async fn serve<B, S, E>(channel: &mut S, backend: &B, bytes: &[u8]) -> Result<ConversationId, E>
 where
     B: ResponderBackend<E>,
@@ -719,32 +771,7 @@ where
     let (v2, v3, v4, v5) = (version >= 2, version >= 3, version >= 4, version >= 5);
     match wire {
         SyncWire::FileMessageIdentitiesRequest { requests, offers } => {
-            if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
-                return Err(RoundFault::UnexpectedMessage.into());
-            }
-            let conversation = requests
-                .first()
-                .map(|(file, _)| *file)
-                .or_else(|| offers.first().map(|event| event.conversation_id))
-                .unwrap_or(ConversationId::new([0; 32]));
-            for bundle in offers {
-                backend.accept_file_message_identity(bundle)?;
-            }
-            let mut seen = std::collections::HashSet::new();
-            let mut bundles = Vec::new();
-            for (file, manifest) in requests {
-                if let Some(bundle) = backend.file_message_identity(&file, &manifest)?
-                    && seen.insert(bundle.id)
-                {
-                    bundles.push(bundle);
-                }
-            }
-            channel
-                .send(&encode_frame(&SyncWire::FileMessageIdentitiesResponse {
-                    bundles,
-                })?)
-                .await?;
-            Ok(conversation)
+            serve_file_message_identities(channel, backend, requests, offers).await
         }
         SyncWire::StickerFileProofRequest { file, manifest } => {
             let headers = backend.sticker_file_proof(&file, &manifest)?;
@@ -805,10 +832,7 @@ where
             conversation,
             event_id,
         } => {
-            let view = match backend.take_custody_view(&conversation)? {
-                Some(view) => view,
-                None => backend.open_prepared_view(&conversation).await?,
-            };
+            let view = acquire_custody_view(backend, &conversation).await?;
             let stored = backend.durable_have_in_view(&view, &conversation, &event_id)?;
             backend.validate_view(&view)?;
             let uncached_view = backend.retain_custody_view(view)?;
@@ -834,10 +858,7 @@ where
                 receive_have(backend, channel, conversation, HaveSender::Requester, false).await?;
             // Transfer the existing connection-owned lease before awaiting.
             // Incomplete responses drop it; only a fully sent response is retained.
-            let view = match backend.take_custody_view(&conversation)? {
-                Some(view) => view,
-                None => backend.open_prepared_view(&conversation).await?,
-            };
+            let view = acquire_custody_view(backend, &conversation).await?;
             let metadata = backend.metadata(&view)?;
             backend.have_count(metadata.count)?;
             let response = if unsupported_metadata(metadata, v2, v3, v4, v5) {

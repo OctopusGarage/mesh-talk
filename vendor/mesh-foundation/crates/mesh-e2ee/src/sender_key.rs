@@ -99,7 +99,7 @@ impl SenderKey {
             .expect("sender key serializes")
     }
 
-    /// Reconstruct a sending chain from [`serialize`] output. `None` if malformed.
+    /// Reconstruct a sending chain from [`Self::serialize`] output. `None` if malformed.
     /// Strict parse (`reject_trailing_bytes`): the serialized sender key is secret
     /// chain-key material stored encrypted at rest; it must STAY strict, and grows
     /// only via a new version, never by tolerating extra bytes.

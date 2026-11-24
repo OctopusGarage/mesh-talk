@@ -52,13 +52,14 @@ impl QueryTracker {
         let nonce: Nonce = bytes.get(5..21)?.try_into().ok()?;
         let key = (ip, nonce);
         let sent = *self.pending.get(&key)?;
-        if now.saturating_duration_since(sent) > QUERY_LIFETIME {
+        let latency = now.saturating_duration_since(sent);
+        if latency > QUERY_LIFETIME {
             self.pending.remove(&key);
             return None;
         }
         let announce = decode_response(bytes, nonce)?;
         self.pending.remove(&key);
-        Some((announce, now.saturating_duration_since(sent)))
+        Some((announce, latency))
     }
 }
 

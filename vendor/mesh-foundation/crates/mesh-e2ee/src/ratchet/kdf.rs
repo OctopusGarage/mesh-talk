@@ -9,31 +9,27 @@ use zeroize::Zeroize;
 /// and a fresh DH output. `salt = rk`, `ikm = dh_out`. The HKDF output buffer is wiped
 /// before return (the returned keys are owned by the caller) — consistent with `dm.rs`.
 pub fn kdf_rk(rk: &[u8; 32], dh_out: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-    let hk = Hkdf::<Sha256>::new(Some(rk), dh_out);
-    let mut okm = [0u8; 64];
-    hk.expand(b"MeshTalk-Ratchet-RK", &mut okm)
-        .expect("64 is a valid HKDF length");
-    let mut rk2 = [0u8; 32];
-    let mut ck = [0u8; 32];
-    rk2.copy_from_slice(&okm[..32]);
-    ck.copy_from_slice(&okm[32..]);
-    okm.zeroize();
-    (rk2, ck)
+    derive_pair(rk, dh_out, b"MeshTalk-Ratchet-RK")
 }
 
 /// Chain KDF: derive the next chain key + a single-use message key from a chain key.
 /// `salt = ck`, `ikm = empty`.
 pub fn kdf_ck(ck: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-    let hk = Hkdf::<Sha256>::new(Some(ck), &[]);
-    let mut okm = [0u8; 64];
-    hk.expand(b"MeshTalk-Ratchet-CK", &mut okm)
+    derive_pair(ck, &[], b"MeshTalk-Ratchet-CK")
+}
+
+fn derive_pair(salt: &[u8; 32], input: &[u8], label: &[u8]) -> ([u8; 32], [u8; 32]) {
+    let hk = Hkdf::<Sha256>::new(Some(salt), input);
+    let mut material = [0u8; 64];
+    hk.expand(label, &mut material)
         .expect("64 is a valid HKDF length");
-    let mut ck2 = [0u8; 32];
-    let mut mk = [0u8; 32];
-    ck2.copy_from_slice(&okm[..32]);
-    mk.copy_from_slice(&okm[32..]);
-    okm.zeroize();
-    (ck2, mk)
+    let (first, second) = material.split_at(32);
+    let mut next = [0u8; 32];
+    let mut derived = [0u8; 32];
+    next.copy_from_slice(first);
+    derived.copy_from_slice(second);
+    material.zeroize();
+    (next, derived)
 }
 
 /// Derive the AES-256-GCM key + 96-bit nonce for one message from its message key.

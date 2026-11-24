@@ -137,41 +137,74 @@ impl RatchetState {
     /// Encrypt `plaintext`, advancing the sending chain. Returns the header + the
     /// AEAD ciphertext (the header is authenticated as AAD).
     pub fn ratchet_encrypt(&mut self, plaintext: &[u8]) -> Result<(Header, Vec<u8>), RatchetError> {
-        let cks = self.cks.ok_or(RatchetError::NotInitializedForSend)?;
-        let (cks2, mk) = kdf_ck(&cks);
-        self.cks = Some(cks2);
+        let chain = self
+            .cks
+            .as_ref()
+            .ok_or(RatchetError::NotInitializedForSend)?;
+        let next = self.ns.checked_add(1).ok_or(RatchetError::Malformed)?;
+        let (next_chain, key) = kdf_ck(chain);
+        let next_chain = zeroize::Zeroizing::new(next_chain);
+        let key = zeroize::Zeroizing::new(key);
         let header = Header {
             ratchet_pub: self.dhs_public.to_bytes(),
             pn: self.pn,
             n: self.ns,
         };
-        self.ns += 1;
-        let ct = aead_encrypt(&mk, plaintext, &header.encode())?;
-        Ok((header, ct))
+        let ciphertext = aead_encrypt(&key, plaintext, &header.encode())?;
+        if let Some(chain) = &mut self.cks {
+            chain.zeroize();
+        }
+        self.cks = Some(*next_chain);
+        self.ns = next;
+        Ok((header, ciphertext))
     }
 
-    /// Decrypt a message. Handles a DH-ratchet step (new `ratchet_pub`) and
-    /// out-of-order delivery (skipped keys), then advances the receiving chain.
-    ///
-    /// NOTE: this mutates `self` (DH ratchet / skipped keys / chain advance) BEFORE the final
-    /// AEAD authentication, so a forged message can leave `self` in an advanced state on `Err`.
-    /// Callers must therefore decrypt on a COPY and persist it only on `Ok` — the node does
-    /// (`node::dm_ratchet` operates on a fresh `RatchetSessions::get` clone, `put`-ing only on
-    /// success), so a forged/replayed message cannot corrupt the durable session.
+    /// Authenticate a message and advance the receiving chain only on success.
     pub fn ratchet_decrypt(
         &mut self,
         header: &Header,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, RatchetError> {
-        // 1. A previously-skipped key for this exact (ratchet_pub, n)?
         let key = (header.ratchet_pub, header.n);
-        if let Some(mk) = self.skipped.remove(&key) {
-            // Drop the matching FIFO entry too, or `skipped_order` would accumulate
-            // consumed-key tombstones without bound (the MAX_SKIPPED_TOTAL cap only
-            // bounds the map). Kept in sync, `skipped_order.len() == skipped.len()`.
-            self.skipped_order.retain(|k| *k != key);
-            return aead_decrypt(&mk, ciphertext, &header.encode());
+        if let Some(mk) = self.skipped.get(&key) {
+            let plaintext = aead_decrypt(mk, ciphertext, &header.encode())?;
+            if let Some(mut consumed) = self.skipped.remove(&key) {
+                consumed.zeroize();
+            }
+            self.skipped_order.retain(|stored| *stored != key);
+            return Ok(plaintext);
         }
+        if self.dhr.map(|key| key.to_bytes()) == Some(header.ratchet_pub) {
+            match header.n.cmp(&self.nr) {
+                std::cmp::Ordering::Less => return Err(RatchetError::Decrypt),
+                std::cmp::Ordering::Equal => return self.open_next(header, ciphertext),
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        // Only a new DH step or an out-of-order gap requires a candidate copy.
+        let mut candidate = Self {
+            dhs_secret: self.dhs_secret.clone(),
+            dhs_public: self.dhs_public,
+            dhr: self.dhr,
+            rk: self.rk,
+            cks: self.cks,
+            ckr: self.ckr,
+            ns: self.ns,
+            nr: self.nr,
+            pn: self.pn,
+            skipped: self.skipped.clone(),
+            skipped_order: self.skipped_order.clone(),
+        };
+        let plaintext = candidate.open_after_gap(header, ciphertext)?;
+        *self = candidate;
+        Ok(plaintext)
+    }
+
+    fn open_after_gap(
+        &mut self,
+        header: &Header,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, RatchetError> {
         // 2. New DH ratchet key? Skip the rest of the current receiving chain, then ratchet.
         let header_pub = PublicKey::from(header.ratchet_pub);
         if self.dhr.map(|d| d.to_bytes()) != Some(header.ratchet_pub) {
@@ -180,12 +213,22 @@ impl RatchetState {
         }
         // 3. Skip forward in the (now correct) receiving chain to header.n.
         self.skip_message_keys(header.n)?;
-        // 4. Derive this message's key and advance.
-        let ckr = self.ckr.ok_or(RatchetError::Malformed)?;
-        let (ckr2, mk) = kdf_ck(&ckr);
-        self.ckr = Some(ckr2);
-        self.nr += 1;
-        aead_decrypt(&mk, ciphertext, &header.encode())
+        self.open_next(header, ciphertext)
+    }
+
+    fn open_next(&mut self, header: &Header, ciphertext: &[u8]) -> Result<Vec<u8>, RatchetError> {
+        let next = self.nr.checked_add(1).ok_or(RatchetError::Malformed)?;
+        let chain = self.ckr.as_ref().ok_or(RatchetError::Malformed)?;
+        let (next_chain, key) = kdf_ck(chain);
+        let next_chain = zeroize::Zeroizing::new(next_chain);
+        let key = zeroize::Zeroizing::new(key);
+        let plaintext = aead_decrypt(&key, ciphertext, &header.encode())?;
+        if let Some(chain) = &mut self.ckr {
+            chain.zeroize();
+        }
+        self.ckr = Some(*next_chain);
+        self.nr = next;
+        Ok(plaintext)
     }
 
     /// Store skipped message keys in the current receiving chain up to (not incl) `until`.
@@ -287,7 +330,7 @@ impl RatchetState {
             .expect("ratchet state serializes")
     }
 
-    /// Reconstruct a session from [`serialize`] output. `None` if malformed.
+    /// Reconstruct a session from [`Self::serialize`] output. `None` if malformed.
     /// Strict parse (`reject_trailing_bytes`): the serialized session is secret
     /// key material stored encrypted at rest; it must STAY strict, and grows only
     /// via a new version, never by tolerating extra bytes.
@@ -616,4 +659,49 @@ mod tests {
         // Total buffered skipped keys never exceeds the cap.
         assert!(bob.skipped_len() <= MAX_SKIPPED_TOTAL);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn failed_authentication_preserves_receive_state() {
+    let secret = [7; 32];
+    let mut receiver = init_bob(&secret, [13; 32]);
+    let mut sender = init_alice(&secret, &receiver.ratchet_public());
+    let (first, ciphertext) = sender.ratchet_encrypt(b"first").unwrap();
+    let mut corrupt = ciphertext.clone();
+    corrupt[0] ^= 1;
+    let before = receiver.serialize();
+    assert!(receiver.ratchet_decrypt(&first, &corrupt).is_err());
+    assert_eq!(receiver.serialize(), before);
+    assert_eq!(
+        receiver.ratchet_decrypt(&first, &ciphertext).unwrap(),
+        b"first"
+    );
+
+    let (skipped, ciphertext) = sender.ratchet_encrypt(b"skipped").unwrap();
+    let (last, later) = sender.ratchet_encrypt(b"later").unwrap();
+    receiver.ratchet_decrypt(&last, &later).unwrap();
+    let mut corrupt = ciphertext.clone();
+    corrupt[0] ^= 1;
+    let before = receiver.serialize();
+    assert!(receiver.ratchet_decrypt(&skipped, &corrupt).is_err());
+    assert_eq!(receiver.serialize(), before);
+    assert_eq!(
+        receiver.ratchet_decrypt(&skipped, &ciphertext).unwrap(),
+        b"skipped"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn exhausted_sending_chain_does_not_wrap_or_advance() {
+    let peer = init_bob(&[7; 32], [13; 32]);
+    let mut ratchet = init_alice(&[7; 32], &peer.ratchet_public());
+    ratchet.ns = u32::MAX;
+    let before = ratchet.serialize();
+    assert!(matches!(
+        ratchet.ratchet_encrypt(b"message"),
+        Err(RatchetError::Malformed)
+    ));
+    assert!(ratchet.serialize() == before);
 }

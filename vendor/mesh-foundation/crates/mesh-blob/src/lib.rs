@@ -29,8 +29,16 @@ use rand_core::RngCore;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+mod download;
+pub use download::{ChunkSource, DownloadError, EncryptedChunkError, EncryptedChunkSource};
 mod receive;
-pub use receive::BlobVerifier;
+#[cfg(feature = "mesh-connect")]
+pub mod session;
+mod sparse;
+pub use receive::{BlobLayout, BlobVerifier};
+pub use sparse::{
+    ChunkAcceptance, ChunkStore, DirectoryChunkStore, SparseBlobReceiver, SparseReceiveError,
+};
 
 const KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
@@ -103,17 +111,13 @@ impl std::error::Error for FileError {}
 /// SHA-256 of the whole file plaintext — recorded in the manifest, re-checked after
 /// reassembly for end-to-end integrity.
 pub fn file_checksum(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
+    Sha256::digest(data).into()
 }
 
 /// SHA-256 of a single chunk's plaintext — recorded per chunk in the v2 manifest so a
 /// received chunk can be verified on arrival (independent of the whole-file checksum).
 pub fn chunk_hash(plaintext: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(plaintext);
-    hasher.finalize().into()
+    file_checksum(plaintext)
 }
 
 /// A fresh random 8-byte per-file nonce salt for the v2 deterministic-nonce scheme.
@@ -141,12 +145,13 @@ pub fn split_chunks(data: &[u8]) -> Vec<&[u8]> {
     data.chunks(CHUNK_SIZE).collect()
 }
 
-/// Number of `CHUNK_SIZE` chunks for a file of `size` bytes (>= 1; empty == 1).
+/// Legacy chunk count, saturating outside the supported index range.
+/// Use [BlobLayout::new] to validate untrusted sizes.
 pub fn chunk_count_for(size: u64) -> u32 {
     if size == 0 {
         return 1;
     }
-    size.div_ceil(CHUNK_SIZE as u64) as u32
+    u32::try_from(size.div_ceil(CHUNK_SIZE as u64)).unwrap_or(u32::MAX)
 }
 
 // ---- v2: deterministic-nonce, indexed chunk crypto (the large-file path) ----

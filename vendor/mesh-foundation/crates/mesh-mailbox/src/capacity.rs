@@ -68,7 +68,8 @@ mod tests {
     fn admits_through_slack_and_distinguishes_drain_from_impossible() {
         let limits = CapacityLimits::new(1, 1, 10, 5).unwrap();
         assert!(limits.at_base(1, 10));
-        assert!(!limits.at_base(2, 15));
+        assert!(!limits.at_base(2, 10));
+        assert!(!limits.at_base(1, 11));
         assert!(!limits.above_envelope(2, 15));
         assert_eq!(limits.admit(1, 10, 5), Ok(Admission::Accept));
         assert_eq!(limits.admit(1, 10, 6), Ok(Admission::Backpressure));
@@ -78,6 +79,13 @@ mod tests {
             CapacityLimits::new(0, 0, 10, 5).unwrap().admit(0, 0, 1),
             Ok(Admission::Impossible)
         );
+    }
+
+    #[test]
+    fn admits_the_only_event_at_the_exact_byte_limit() {
+        let limits = CapacityLimits::new(1, 0, 10, 0).unwrap();
+        assert_eq!(limits.admit(0, 0, 10), Ok(Admission::Accept));
+        assert_eq!(limits.admit(1, 0, 10), Ok(Admission::Backpressure));
     }
 
     #[test]

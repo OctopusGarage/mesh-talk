@@ -1,6 +1,19 @@
 //! Mesh Talk identity and device certificate formats.
 //! Applications establish trust and decide how to enroll and revoke devices.
 
+//! # Example
+//!
+//! ```
+//! use mesh_identity::device::DeviceIdentity;
+//!
+//! let device = DeviceIdentity::generate();
+//! let message = b"hello mesh";
+//! let signature = device.sign(message);
+//! assert!(DeviceIdentity::verify(&device.public().ed25519_pub, message, &signature));
+//! ```
+//!
+//! Signature verification does not establish account trust or authorize access.
+
 pub mod account;
 pub mod device;
 

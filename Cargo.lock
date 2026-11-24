@@ -3356,40 +3356,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "mesh-blob"
-version = "0.1.0"
+name = "mesh-foundation-blob"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aes-gcm 0.11.1",
+ "futures-util",
+ "mesh-foundation-connect",
  "rand_core 0.6.4",
  "sha2 0.10.9",
+ "tempfile",
+ "tokio",
  "zeroize",
 ]
 
 [[package]]
-name = "mesh-connect"
-version = "0.1.0"
+name = "mesh-foundation-connect"
+version = "0.1.0-alpha.2"
 dependencies = [
  "bincode",
  "futures-util",
- "hex",
  "if-addrs",
  "log",
- "mesh-identity",
+ "mesh-foundation-identity",
  "serde",
  "snow",
  "socket2",
  "tokio",
  "windows-sys 0.61.2",
- "x25519-dalek",
 ]
 
 [[package]]
-name = "mesh-e2ee"
-version = "0.1.0"
+name = "mesh-foundation-e2ee"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aes-gcm 0.11.1",
  "bincode",
- "hex",
  "hkdf",
  "rand_core 0.6.4",
  "serde",
@@ -3399,8 +3400,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "mesh-identity"
-version = "0.1.0"
+name = "mesh-foundation-identity"
+version = "0.1.0-alpha.2"
 dependencies = [
  "bincode",
  "ed25519-dalek",
@@ -3413,48 +3414,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "mesh-mailbox"
-version = "0.1.0"
+name = "mesh-foundation-mailbox"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aes-gcm 0.11.1",
  "bincode",
  "hkdf",
- "mesh-identity",
- "mesh-replication",
- "mesh-storage",
+ "mesh-foundation-identity",
+ "mesh-foundation-replication",
+ "mesh-foundation-storage",
  "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
- "tempfile",
  "x25519-dalek",
  "zeroize",
 ]
 
 [[package]]
-name = "mesh-replication"
-version = "0.1.0"
+name = "mesh-foundation-replication"
+version = "0.1.0-alpha.2"
 dependencies = [
  "bincode",
  "hex",
  "log",
- "mesh-identity",
+ "mesh-foundation-identity",
  "serde",
  "sha2 0.10.9",
- "tokio",
 ]
 
 [[package]]
-name = "mesh-storage"
-version = "0.1.0"
+name = "mesh-foundation-storage"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aes-gcm 0.11.1",
  "bincode",
  "log",
- "pbkdf2",
  "rand_core 0.6.4",
  "ring",
  "serde",
- "sha2 0.10.9",
  "tempfile",
  "zeroize",
 ]
@@ -3536,13 +3533,13 @@ dependencies = [
  "image",
  "libc",
  "log",
- "mesh-blob",
- "mesh-connect",
- "mesh-e2ee",
- "mesh-identity",
- "mesh-mailbox",
- "mesh-replication",
- "mesh-storage",
+ "mesh-foundation-blob",
+ "mesh-foundation-connect",
+ "mesh-foundation-e2ee",
+ "mesh-foundation-identity",
+ "mesh-foundation-mailbox",
+ "mesh-foundation-replication",
+ "mesh-foundation-storage",
  "mesh-talk-core",
  "pbkdf2",
  "rand_chacha",

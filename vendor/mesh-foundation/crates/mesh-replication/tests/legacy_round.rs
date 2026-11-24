@@ -1,3 +1,5 @@
+#![cfg(feature = "legacy-wire")]
+
 use mesh_identity::device::DeviceIdentity;
 use mesh_replication::legacy_round::{ResponderBackend, serve};
 use mesh_replication::{
@@ -211,6 +213,53 @@ impl RoundBackend<RoundFault> for Replica {
             vec![events]
         })
     }
+}
+
+#[tokio::test]
+async fn file_identity_exchange_checks_both_budgets_and_preserves_scope() {
+    use mesh_replication::legacy_round::MAX_FILE_IDENTITIES;
+
+    let scope = ConversationId::new([7; 32]);
+    let event = Event::new(
+        &DeviceIdentity::generate(),
+        scope,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![],
+    );
+    let replica = Replica::default();
+    let mut channel = Connection::default();
+
+    for (requests, offers) in [
+        (vec![(scope, event.id); MAX_FILE_IDENTITIES + 1], vec![]),
+        (vec![], vec![event.clone(); MAX_FILE_IDENTITIES + 1]),
+    ] {
+        let request =
+            legacy_wire::encode(&SyncWire::FileMessageIdentitiesRequest { requests, offers })
+                .unwrap();
+        assert_eq!(
+            serve(&mut channel, &replica, &request).await,
+            Err(RoundFault::UnexpectedMessage)
+        );
+        assert!(channel.sent.is_empty());
+    }
+
+    let request = legacy_wire::encode(&SyncWire::FileMessageIdentitiesRequest {
+        requests: vec![],
+        offers: vec![event],
+    })
+    .unwrap();
+    assert_eq!(serve(&mut channel, &replica, &request).await, Ok(scope));
+    let [response] = channel.sent.as_slice() else {
+        panic!("expected one response");
+    };
+    assert!(matches!(
+        legacy_wire::decode(response).unwrap(),
+        SyncWire::FileMessageIdentitiesResponse { bundles } if bundles.is_empty()
+    ));
 }
 
 fn incoming(frames: impl IntoIterator<Item = SyncWire>) -> Connection {

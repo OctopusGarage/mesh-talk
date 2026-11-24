@@ -254,3 +254,29 @@ async fn export_returns_the_source_error_when_one_row_does_not_fit() {
     );
     assert_eq!(source.0.front(), Some(&8));
 }
+
+#[tokio::test]
+async fn receives_a_complete_inventory_or_rejects_duplicates_across_pages() {
+    fn decode_ids(bytes: &[u8]) -> Result<HaveFrame<mesh_replication::EventId>, &'static str> {
+        let page = decode(bytes)?;
+        Ok(HaveFrame {
+            ids: page.ids.into_iter().map(|id| [id; 32]).collect(),
+            more: page.more,
+        })
+    }
+
+    let mut session = Session([vec![1, 9], vec![0, 8]].into());
+    let remote = receive_inventory(&mut session, limits(), decode_ids)
+        .await
+        .unwrap();
+    let local = mesh_replication::CompleteInventory::from_ids(&[[9; 32]], 3).unwrap();
+    assert_eq!(remote.missing_from(&local).collect::<Vec<_>>(), [[8; 32]]);
+
+    let mut session = Session([vec![1, 8], vec![0, 8]].into());
+    assert!(matches!(
+        receive_inventory(&mut session, limits(), decode_ids).await,
+        Err(ReceiveInventoryError::Inventory(
+            mesh_replication::InventoryError::Duplicate
+        ))
+    ));
+}

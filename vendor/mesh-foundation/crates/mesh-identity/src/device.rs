@@ -54,23 +54,17 @@ pub struct DeviceIdentity {
 impl DeviceIdentity {
     /// Generate a fresh identity from the OS CSPRNG.
     pub fn generate() -> Self {
-        let signing_key = random_signing_key();
-        let dh_secret = StaticSecret::random();
-        let public = PublicIdentity {
-            ed25519_pub: signing_key.verifying_key().to_bytes(),
-            x25519_pub: derive_x_public(&dh_secret),
-        };
-        Self {
-            signing_key,
-            dh_secret,
-            public,
-        }
+        Self::from_keys(random_signing_key(), StaticSecret::random())
     }
 
     /// Reconstruct from raw secret-key bytes (used by the keystore on load).
     pub fn from_secret_bytes(ed25519_secret: [u8; 32], x25519_secret: [u8; 32]) -> Self {
         let signing_key = SigningKey::from_bytes(&ed25519_secret);
         let dh_secret = StaticSecret::from(x25519_secret);
+        Self::from_keys(signing_key, dh_secret)
+    }
+
+    fn from_keys(signing_key: SigningKey, dh_secret: StaticSecret) -> Self {
         let public = PublicIdentity {
             ed25519_pub: signing_key.verifying_key().to_bytes(),
             x25519_pub: derive_x_public(&dh_secret),
@@ -93,7 +87,7 @@ impl DeviceIdentity {
     }
 
     pub fn user_id(&self) -> String {
-        self.public().user_id()
+        self.public.user_id()
     }
 
     /// Sign a message with the Ed25519 signing key.

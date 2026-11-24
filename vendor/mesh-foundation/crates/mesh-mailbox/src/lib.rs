@@ -457,3 +457,6 @@ pub mod service;
 
 /// Durable bounded spool for mailbox hosts.
 pub mod spool;
+
+/// Budgeted mailbox retrieval with atomic cursor acknowledgement.
+pub mod client;

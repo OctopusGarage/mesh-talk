@@ -1,9 +1,13 @@
 [package]
-name = "mesh-storage"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-repository = "https://github.com/OctopusGarage/mesh-foundation"
+name = "mesh-foundation-storage"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["mesh", "peer-to-peer", "sdk"]
+categories = ["network-programming"]
 description = "At-rest record encryption compatible with Mesh Talk"
 
 [features]
@@ -23,3 +27,9 @@ tempfile = "3"
 [dev-dependencies]
 pbkdf2 = "0.12"
 sha2 = "0.10"
+
+[lib]
+name = "mesh_storage"
+
+[package.metadata.docs.rs]
+all-features = true

@@ -411,7 +411,7 @@ impl Node {
         event: EventId,
     ) -> Result<bool, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         if !self.relay_send_allowed(channel.peer_identity()) {
             return Ok(false);

@@ -183,6 +183,15 @@ impl DeviceCertificate {
         &self.device_ed25519_pub == expected_device && self.verify()
     }
 
+    /// Return the cryptographically verified issuer for the expected device.
+    /// The caller still checks whether this issuer is trusted and authorized.
+    pub fn verified_issuer_for_device(&self, expected_device: &[u8; 32]) -> Option<AccountPublic> {
+        self.verify_for_device(expected_device)
+            .then_some(AccountPublic {
+                ed25519_pub: self.account_ed25519_pub,
+            })
+    }
+
     /// The account id this cert binds to (only meaningful if `verify()` is true).
     pub fn account_id(&self) -> String {
         AccountPublic {
@@ -256,6 +265,14 @@ mod tests {
         let other = DeviceIdentity::generate();
         let cert = account.certify(&owner.public().ed25519_pub);
         assert!(cert.verify_for_device(&owner.public().ed25519_pub));
+        assert_eq!(
+            cert.verified_issuer_for_device(&owner.public().ed25519_pub),
+            Some(account.public())
+        );
+        assert_eq!(
+            cert.verified_issuer_for_device(&other.public().ed25519_pub),
+            None
+        );
         assert!(!cert.verify_for_device(&other.public().ed25519_pub));
         let mut tampered = cert;
         tampered.signature[0] ^= 1;

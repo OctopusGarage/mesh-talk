@@ -1,4 +1,5 @@
 use crate::{MAX_FRAME, TransportError};
+use std::io::{Error, ErrorKind, IoSlice};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Write a length-prefixed frame (4-byte big-endian length + blob) and flush.
@@ -9,9 +10,21 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     if blob.len() > MAX_FRAME {
         return Err(TransportError::FrameTooLarge(blob.len()));
     }
-    let len = blob.len() as u32;
-    w.write_all(&len.to_be_bytes()).await?;
-    w.write_all(blob).await?;
+    let length = (blob.len() as u32).to_be_bytes();
+    if w.is_write_vectored() && !blob.is_empty() {
+        let mut frame = [IoSlice::new(&length), IoSlice::new(blob)];
+        let mut pending = &mut frame[..];
+        while !pending.is_empty() {
+            let written = w.write_vectored(pending).await?;
+            if written == 0 {
+                return Err(Error::new(ErrorKind::WriteZero, "failed to write frame").into());
+            }
+            IoSlice::advance_slices(&mut pending, written);
+        }
+    } else {
+        w.write_all(&length).await?;
+        w.write_all(blob).await?;
+    }
     w.flush().await?;
     Ok(())
 }

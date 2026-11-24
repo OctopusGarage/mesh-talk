@@ -12,6 +12,52 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 /// (`255.255.255.255`) gets dropped or pinned to a single interface (e.g. macOS).
 pub const DISCOVERY_MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
 
+/// IPv4 multicast settings. Port zero asks the OS for an available port.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiscoveryConfig {
+    port: u16,
+    group: Ipv4Addr,
+}
+
+impl DiscoveryConfig {
+    pub fn new(port: u16, group: Ipv4Addr) -> std::io::Result<Self> {
+        if !group.is_multicast() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "discovery group must be IPv4 multicast",
+            ));
+        }
+        Ok(Self { port, group })
+    }
+
+    pub fn bind(self) -> std::io::Result<DiscoverySocket> {
+        let socket = bind_discovery(self.port, self.group)?;
+        let target = std::net::SocketAddrV4::new(self.group, socket.local_addr()?.port());
+        Ok(DiscoverySocket { socket, target })
+    }
+}
+
+/// A bound socket and its matching multicast target. This owns no schedule.
+pub struct DiscoverySocket {
+    socket: UdpSocket,
+    target: std::net::SocketAddrV4,
+}
+
+impl DiscoverySocket {
+    pub fn socket(&self) -> &UdpSocket {
+        &self.socket
+    }
+
+    pub fn multicast_target(&self) -> SocketAddr {
+        self.target.into()
+    }
+
+    /// Rejoin this socket's group after local interface changes.
+    pub fn refresh_memberships(&self) {
+        join_group(&self.socket, *self.target.ip());
+    }
+}
+
 /// Bind the shared discovery UDP socket: `SO_REUSEADDR` + `SO_REUSEPORT` (so two
 /// nodes on one host can share the port) + `SO_BROADCAST`, bound to
 /// `0.0.0.0:<discovery_port>`, then join [`DISCOVERY_MULTICAST_GROUP`] on every
@@ -19,6 +65,10 @@ pub const DISCOVERY_MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
 /// also joins loopback for co-resident processes and sends public multicast via
 /// explicitly selected interfaces rather than relying on the default route.
 pub fn discovery_socket(discovery_port: u16) -> std::io::Result<UdpSocket> {
+    bind_discovery(discovery_port, DISCOVERY_MULTICAST_GROUP)
+}
+
+fn bind_discovery(discovery_port: u16, group: Ipv4Addr) -> std::io::Result<UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
@@ -30,7 +80,7 @@ pub fn discovery_socket(discovery_port: u16) -> std::io::Result<UdpSocket> {
     socket.set_nonblocking(true)?;
     let sock = UdpSocket::from_std(socket.into())?;
 
-    join_discovery_group_all_ifaces(&sock);
+    join_group(&sock, group);
 
     Ok(sock)
 }
@@ -58,15 +108,19 @@ pub fn routed_ipv6_socket(discovery_port: u16) -> std::io::Result<UdpSocket> {
 /// errors are ignored. Called once at bind time and again periodically so interfaces
 /// that come up after launch (e.g. WiFi associating late) get joined.
 pub fn join_discovery_group_all_ifaces(sock: &UdpSocket) {
+    join_group(sock, DISCOVERY_MULTICAST_GROUP);
+}
+
+fn join_group(sock: &UdpSocket, group: Ipv4Addr) {
     for iface in ipv4_interface_addrs() {
-        let _ = sock.join_multicast_v4(DISCOVERY_MULTICAST_GROUP, iface);
+        let _ = sock.join_multicast_v4(group, iface);
     }
     // Winsock can select loopback for local multicast. Co-resident desktop/CLI
     // processes must receive it even when non-loopback adapters are present.
     #[cfg(windows)]
-    let _ = sock.join_multicast_v4(DISCOVERY_MULTICAST_GROUP, Ipv4Addr::LOCALHOST);
+    let _ = sock.join_multicast_v4(group, Ipv4Addr::LOCALHOST);
     // Fallback: let the OS pick the interface, in case enumeration missed one.
-    let _ = sock.join_multicast_v4(DISCOVERY_MULTICAST_GROUP, Ipv4Addr::UNSPECIFIED);
+    let _ = sock.join_multicast_v4(group, Ipv4Addr::UNSPECIFIED);
 }
 
 /// Winsock's default multicast interface can be loopback or a virtual adapter.

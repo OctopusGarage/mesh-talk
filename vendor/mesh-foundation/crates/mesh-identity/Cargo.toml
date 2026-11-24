@@ -1,9 +1,13 @@
 [package]
-name = "mesh-identity"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-repository = "https://github.com/OctopusGarage/mesh-foundation"
+name = "mesh-foundation-identity"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["mesh", "peer-to-peer", "sdk"]
+categories = ["network-programming"]
 description = "Mesh Talk-compatible device identities and account certificates"
 
 [features]
@@ -18,3 +22,9 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 x25519-dalek = { version = "3", features = ["static_secrets", "getrandom"] }
 zeroize = "1"
+
+[lib]
+name = "mesh_identity"
+
+[package.metadata.docs.rs]
+all-features = true

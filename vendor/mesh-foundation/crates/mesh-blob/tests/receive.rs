@@ -29,3 +29,23 @@ fn requires_the_empty_chunk_and_checks_the_final_digest() {
         Err(mesh_blob::FileError::ChecksumMismatch)
     ));
 }
+
+#[test]
+fn validated_layout_rejects_overflow_and_enforces_exact_chunk_sizes() {
+    use mesh_blob::BlobLayout;
+
+    assert!(BlobLayout::new(u64::MAX, 1, u64::MAX).is_err());
+    assert!(BlobLayout::new(1, 0, 1).is_err());
+    assert!(BlobLayout::new(5, 2, 4).is_err());
+    let layout = BlobLayout::new(5, 2, 5).unwrap();
+    assert_eq!(layout.chunk_count(), 3);
+    assert_eq!(layout.chunk_len(2).unwrap(), 1);
+    assert!(layout.chunk_len(3).is_err());
+    let mut verifier = BlobVerifier::for_layout(layout, file_checksum(b"abcde"));
+    assert!(verifier.push(0, b"a").is_err());
+    assert_eq!(verifier.next_index(), 0);
+    verifier.push(0, b"ab").unwrap();
+    verifier.push(1, b"cd").unwrap();
+    verifier.push(2, b"e").unwrap();
+    verifier.finish().unwrap();
+}

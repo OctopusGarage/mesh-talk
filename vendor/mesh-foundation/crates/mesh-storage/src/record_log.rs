@@ -28,6 +28,8 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+const FRAME_CRYPTO_OVERHEAD: u64 = (NONCE_SIZE + 16) as u64;
+
 /// Error reported by the encrypted record log.
 #[derive(Debug)]
 pub enum RecordLogError {
@@ -93,6 +95,7 @@ pub struct EncryptedRecordLog<R> {
     magic: [u8; 6],
     path: PathBuf,
     poisoned: bool,
+    max_frame_bytes: u32,
     // Only this owned prefix is confirmed. Mutations require &mut self; the
     // atomic preserves shared sync(&self) and the existing Send + Sync bounds.
     needs_sync: AtomicBool,
@@ -164,6 +167,25 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         derive: impl FnOnce(&[u8; SALT_SIZE]) -> Result<EncryptionKey, crate::StorageError>,
         visit: impl FnMut(R) -> Result<(), RecordLogError>,
     ) -> Result<Self, RecordLogError> {
+        Self::open_with_key_and_frame_limit(path, magic, derive, u32::MAX, visit)
+    }
+
+    /// Open with a bound on each stored encrypted frame, excluding the
+    /// four-byte length prefix. The same bound applies to replay and writes.
+    pub fn open_with_key_and_frame_limit(
+        path: &Path,
+        magic: &[u8; 6],
+        derive: impl FnOnce(&[u8; SALT_SIZE]) -> Result<EncryptionKey, crate::StorageError>,
+        max_frame_bytes: u32,
+        visit: impl FnMut(R) -> Result<(), RecordLogError>,
+    ) -> Result<Self, RecordLogError> {
+        if u64::from(max_frame_bytes) < FRAME_CRYPTO_OVERHEAD {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "record frame limit is too small",
+            )
+            .into());
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -176,13 +198,18 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             .open(path)
         {
             Ok(mut file) => {
+                let salt = generate_salt();
+                let key = match initialize_header(&mut file, magic, &salt, derive) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        drop(file);
+                        // This path was just created under the caller's exclusive lease.
+                        std::fs::remove_file(path)?;
+                        return Err(error);
+                    }
+                };
                 #[cfg(windows)]
                 let repair = OpenOptions::new().write(true).open(path)?;
-                let salt = generate_salt();
-                let key = derive(&salt)?;
-                file.write_all(magic)?;
-                file.write_all(&salt)?;
-                sync_file(&file)?;
                 sync_parent(path)?;
                 Ok(Self {
                     file,
@@ -197,6 +224,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                     magic: *magic,
                     path: path.to_path_buf(),
                     poisoned: false,
+                    max_frame_bytes,
                     needs_sync: AtomicBool::new(false),
                     rollback_boundary: 0,
                     #[cfg(any(test, feature = "test-observability"))]
@@ -207,7 +235,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                 })
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                Self::load(path, magic, derive, visit)
+                Self::load(path, magic, derive, max_frame_bytes, visit)
             }
             Err(e) => Err(e.into()),
         }
@@ -217,6 +245,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         path: &Path,
         magic: &[u8; 6],
         derive: impl FnOnce(&[u8; SALT_SIZE]) -> Result<EncryptionKey, crate::StorageError>,
+        max_frame_bytes: u32,
         visit: impl FnMut(R) -> Result<(), RecordLogError>,
     ) -> Result<Self, RecordLogError> {
         let mut file = OpenOptions::new().read(true).append(true).open(path)?;
@@ -234,7 +263,13 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         let key = derive(&salt)?;
 
         let body_len = file.metadata()?.len() - (6 + SALT_SIZE) as u64;
-        let valid = Self::parse_records(&mut BufReader::new(&mut file), body_len, &key, visit)?;
+        let valid = Self::parse_records(
+            &mut BufReader::new(&mut file),
+            body_len,
+            &key,
+            max_frame_bytes,
+            visit,
+        )?;
         if valid != body_len {
             #[cfg(windows)]
             let repair_file = &repair;
@@ -256,6 +291,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             magic: *magic,
             path: path.to_path_buf(),
             poisoned: false,
+            max_frame_bytes,
             // Reading an authenticated prefix, including repaired torn tails,
             // does not establish its durability for this reopened owner.
             needs_sync: AtomicBool::new(true),
@@ -274,6 +310,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         reader: &mut impl Read,
         body_len: u64,
         key: &EncryptionKey,
+        max_frame_bytes: u32,
         mut visit: impl FnMut(R) -> Result<(), RecordLogError>,
     ) -> Result<u64, RecordLogError> {
         let mut valid = 0;
@@ -291,6 +328,11 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             if len < NONCE_SIZE {
                 return Err(RecordLogError::CorruptFile(
                     "record shorter than nonce".into(),
+                ));
+            }
+            if len > max_frame_bytes as usize {
+                return Err(RecordLogError::CorruptFile(
+                    "record exceeds configured frame limit".into(),
                 ));
             }
             record.resize(len, 0);
@@ -312,11 +354,25 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
 
     /// Encrypt one record into its `[u32 len][nonce][ciphertext]` wire form.
     fn encode_record(&self, record: &R) -> Result<Vec<u8>, RecordLogError> {
+        if self.max_frame_bytes != u32::MAX {
+            let size = bincode::serialized_size(record)
+                .map_err(|error| RecordLogError::Serialization(error.to_string()))?;
+            if size > u64::from(self.max_frame_bytes) - FRAME_CRYPTO_OVERHEAD {
+                return Err(RecordLogError::Serialization(
+                    "record exceeds configured frame limit".into(),
+                ));
+            }
+        }
         let plaintext =
             bincode::serialize(record).map_err(|e| RecordLogError::Serialization(e.to_string()))?;
         let (ciphertext, nonce) = encrypt_data(&plaintext, &self.key)?;
         let record_len = u32::try_from(NONCE_SIZE + ciphertext.len())
             .map_err(|_| RecordLogError::Serialization("record exceeds u32 length".into()))?;
+        if record_len > self.max_frame_bytes {
+            return Err(RecordLogError::Serialization(
+                "record exceeds configured frame limit".into(),
+            ));
+        }
         let mut buf = Vec::with_capacity(4 + NONCE_SIZE + ciphertext.len());
         buf.extend_from_slice(&record_len.to_be_bytes());
         buf.extend_from_slice(&nonce);
@@ -541,6 +597,19 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
     }
 }
 
+fn initialize_header(
+    file: &mut File,
+    magic: &[u8; 6],
+    salt: &[u8; SALT_SIZE],
+    derive: impl FnOnce(&[u8; SALT_SIZE]) -> Result<EncryptionKey, crate::StorageError>,
+) -> Result<EncryptionKey, RecordLogError> {
+    let key = derive(salt)?;
+    file.write_all(magic)?;
+    file.write_all(salt)?;
+    sync_file(file)?;
+    Ok(key)
+}
+
 fn sync_file(file: &File) -> std::io::Result<()> {
     #[cfg(any(test, feature = "test-observability"))]
     sync_observations::before_file()?;
@@ -657,12 +726,17 @@ mod tests {
             largest_read: 0,
         };
         let mut records = Vec::new();
-        let valid =
-            EncryptedRecordLog::<Rec>::parse_records(&mut reader, body_len, &log.key, |record| {
+        let valid = EncryptedRecordLog::<Rec>::parse_records(
+            &mut reader,
+            body_len,
+            &log.key,
+            u32::MAX,
+            |record| {
                 records.push(record);
                 Ok(())
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(records, vec![rec(1, b"streamed"); 128]);
         assert_eq!(valid, (128 * frame_len) as u64);
         assert!(reader.largest_read <= frame_len);

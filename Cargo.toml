@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/mesh-talk-core", "crates/mesh-talk-integrations", "crates/mesh-talk-mcp", "src-tauri", "vendor/mesh-foundation/crates/mesh-blob", "vendor/mesh-foundation/crates/mesh-e2ee", "vendor/mesh-foundation/crates/mesh-identity", "vendor/mesh-foundation/crates/mesh-storage", "vendor/mesh-foundation/crates/mesh-connect", "vendor/mesh-foundation/crates/mesh-replication", "vendor/mesh-foundation/crates/mesh-mailbox"]
+members = ["crates/mesh-talk-core", "crates/mesh-talk-integrations", "crates/mesh-talk-mcp", "src-tauri"]
+exclude = ["vendor/mesh-foundation"]
 resolver = "3"
 
 # Layered workspace:
