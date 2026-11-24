@@ -3521,7 +3521,7 @@ pub async fn request_round_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite
     Ok(progress.0.total)
 }
 
-async fn request_legacy_turn_paged<
+pub(super) async fn request_legacy_turn_paged<
     S: NetworkSyncStore,
     IO: AsyncRead + AsyncWrite + Unpin + Send,
 >(

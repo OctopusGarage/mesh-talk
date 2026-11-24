@@ -63,8 +63,10 @@ The range primitive is adapted from Mesh Foundation commit
 checkpoint adapter for Send-compatible network futures and blocked-frontier
 scheduling. No new package release is part of this application change.
 
-File-manifest transfer retains its explicit legacy requester in the separate file
-transfer lane; these group-history limits do not claim to bound that protocol.
+Explicit direct DM exchanges for controls and attachment manifests use the
+bounded SDK legacy turn. The existing direct attachment recovery test verifies
+the manifest arrives before exact signed blocks are requested. The separate
+attachment-content lane keeps its dedicated file requester.
 
 `cargo clippy -p mesh-talk-core --all-targets --features fast-test-kdf -- -D warnings`
 passed using an isolated target and the development core optimization override.

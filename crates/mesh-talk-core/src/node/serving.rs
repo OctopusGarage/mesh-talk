@@ -6,7 +6,7 @@ use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
 use crate::node::conversation::account_conversation_id;
 use crate::node::session::{
-    Served, SessionError, request_range_round_paged as request_round,
+    Served, SessionError, request_legacy_turn_paged, request_range_round_paged,
     serve_wire_bytes_paged as serve_wire_bytes,
 };
 use crate::transport::SecureChannel;
@@ -305,6 +305,8 @@ impl Node {
         if peer.post_office {
             return Err(SessionError::UnexpectedMessage);
         }
+        let is_dm =
+            conv == super::conversation::dm_conversation_id(&self.identity.public(), &peer.public);
         for fresh in [false, true] {
             let (mut channel, reused) = if fresh {
                 self.privacy_dial(peer.addr, &peer.public)
@@ -319,15 +321,17 @@ impl Node {
             let _reception = self
                 .request_reception_scope(&store, &channel)
                 .ok_or(SessionError::UnexpectedMessage)?;
-            let result = request_round(&mut channel, &store, conv).await;
+            // Explicit DM control and manifest callers expect this exchange
+            // to finish within the existing compatibility-turn budget.
+            let result = if is_dm {
+                request_legacy_turn_paged(&mut channel, &store, conv).await
+            } else {
+                request_range_round_paged(&mut channel, &store, conv).await
+            };
             self.dispatch_received_sync_work(&store);
             match result {
                 Ok(_) => {
-                    if conv
-                        == super::conversation::dm_conversation_id(
-                            &self.identity.public(),
-                            &peer.public,
-                        )
+                    if is_dm
                         && !self.certified_sibling(&peer.public)
                         && self.file_identity_capability_due(peer.addr, &peer.public)
                     {
