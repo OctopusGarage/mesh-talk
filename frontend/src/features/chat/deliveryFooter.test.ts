@@ -128,7 +128,6 @@ describe("automatic delivery footer", () => {
       },
     ]) {
       expect(render(m)).toContain('data-delivery="awaiting"');
-      expect(render(m)).toContain('data-testid="delivery-pending-caption"');
       expect(render({ ...m, delivery: "delivered" })).toContain(
         'data-delivery="delivered"',
       );
@@ -260,17 +259,10 @@ it("shows a countdown for each expiring message, including grouped incoming mess
 it("shows confirmed post-office custody without claiming member delivery", async () => {
   await i18n.changeLanguage("en");
   const html = render({ ...base, replicas: 0, postOfficeCopies: 1 }, true);
-  expect(html).toContain('data-custody="0"');
+  expect(html).toContain('data-custody="1"');
   expect(html).toContain("Post office confirmed a stored copy");
-  expect(html).toContain("No member copy confirmed");
-  expect(html).toContain("post-office-copy-trigger");
+  expect(html).not.toContain("No member copy confirmed");
   expect(html).not.toContain("sending…");
-});
-
-it("shows unknown member custody independently of a post-office copy", () => {
-  const html = render({ ...base, postOfficeCopies: 1 }, true);
-  expect(html).toContain('data-custody="unknown"');
-  expect(html).toContain("post-office-copy-trigger");
 });
 
 it("keeps post-office confirmation visible alongside member copies", async () => {
@@ -280,7 +272,7 @@ it("keeps post-office confirmation visible alongside member copies", async () =>
     expect(html).toContain(
       replicas === 1
         ? "Last confirmed: 1 member copy"
-        : `Last confirmed: ${replicas} member copies`,
+        : "Last confirmed: 2+ member copies",
     );
     expect(html).toContain('aria-label="Post office confirmed a stored copy"');
     expect(html).toContain("lucide-copy");

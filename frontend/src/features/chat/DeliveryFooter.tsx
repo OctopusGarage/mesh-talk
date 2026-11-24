@@ -83,17 +83,23 @@ export function DeliveryFooter({
     message.id &&
     !message.pending &&
     !message.failed
-      ? (message.replicas ?? "unknown")
+      ? message.replicas === undefined && message.postOfficeCopies === undefined
+        ? "unknown"
+        : Math.min(message.replicas ?? 0, 2) ||
+          ((message.postOfficeCopies ?? 0) > 0 ? 1 : 0)
       : undefined;
+  const postOfficeOnly =
+    (message.replicas ?? 0) === 0 && (message.postOfficeCopies ?? 0) > 0;
   const custodyLabel =
     custody === undefined
       ? ""
       : custody === "unknown"
         ? t("message.custody.unknown")
-        : t(
-            `message.custody.${custody === 0 ? "local" : custody === 1 ? "one" : "multiple"}`,
-            { count: message.replicas },
-          );
+        : postOfficeOnly
+          ? t("message.custody.postOffice")
+          : t(
+              `message.custody.${custody === 0 ? "local" : custody === 1 ? "one" : "multiple"}`,
+            );
   const showSource =
     !message.fromMe &&
     !message.recalled &&
@@ -194,39 +200,57 @@ export function DeliveryFooter({
       )}
       {custody !== undefined && (
         <MessageStatus
-          key={`${detailsKey}:custody:${custody}`}
+          key={`${detailsKey}:custody:${custody}:${postOfficeOnly}`}
           label={custodyLabel}
           custody={custody}
-          icon={<Copy className="h-3 w-3" aria-hidden="true" />}
-          count={custody === "unknown" ? "?" : String(custody)}
+          icon={
+            postOfficeOnly ? (
+              <Inbox className="h-3 w-3" aria-hidden="true" />
+            ) : (
+              <Copy className="h-3 w-3" aria-hidden="true" />
+            )
+          }
+          count={
+            custody === "unknown"
+              ? "?"
+              : !postOfficeOnly && custody > 0
+                ? custody === 1
+                  ? "1"
+                  : "2+"
+                : undefined
+          }
         >
           {() => (
             <p>
               {t(
                 custody === "unknown"
                   ? "message.custody.unknownHelp"
-                  : "message.custody.help",
+                  : postOfficeOnly
+                    ? "message.custody.postOfficeHelp"
+                    : "message.custody.help",
               )}
               {message.file && ` ${t("message.custody.fileRecordHelp")}`}
             </p>
           )}
         </MessageStatus>
       )}
-      {custody !== undefined && (message.postOfficeCopies ?? 0) > 0 && (
-        <MessageStatus
-          key={`${detailsKey}:post-office`}
-          label={t("message.custody.postOffice")}
-          testId="post-office-copy"
-          icon={<Inbox className="h-3 w-3" aria-hidden="true" />}
-        >
-          {() => (
-            <p>
-              {t("message.custody.postOfficeHelp")}
-              {message.file && ` ${t("message.custody.fileRecordHelp")}`}
-            </p>
-          )}
-        </MessageStatus>
-      )}
+      {custody !== undefined &&
+        !postOfficeOnly &&
+        (message.postOfficeCopies ?? 0) > 0 && (
+          <MessageStatus
+            key={`${detailsKey}:post-office`}
+            label={t("message.custody.postOffice")}
+            custody={1}
+            icon={<Inbox className="h-3 w-3" aria-hidden="true" />}
+          >
+            {() => (
+              <p>
+                {t("message.custody.postOfficeHelp")}
+                {message.file && ` ${t("message.custody.fileRecordHelp")}`}
+              </p>
+            )}
+          </MessageStatus>
+        )}
     </div>
   );
 }

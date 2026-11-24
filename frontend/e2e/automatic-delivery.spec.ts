@@ -374,7 +374,6 @@ for (const kind of ["text", "sticker", "file card"] as const) {
       ).toBeVisible();
     }
     await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(1);
-    await expect(page.getByTestId("delivery-pending-caption")).toBeVisible();
     await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(0);
     const awaitingCard = page
       .getByTestId("message-bubble")
@@ -724,7 +723,7 @@ test("delivery recovery survives its receipt and returns focus safely, then reti
   await expect(page.getByTestId("chat-shell")).toHaveCount(0);
 });
 
-test("channel acceptance reconciles repeated text once and post-office custody appears separately from zero member copies", async ({
+test("channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator", async ({
   page,
 }) => {
   await enterChat(page);
@@ -767,8 +766,7 @@ test("channel acceptance reconciles repeated text once and post-office custody a
     (window as unknown as { __channelCustody: boolean }).__channelCustody =
       true;
   });
-  await expect(bubbles.locator('[data-custody="0"]')).toHaveCount(2);
-  await expect(bubbles.getByTestId("post-office-copy-trigger")).toHaveCount(2);
+  await expect(bubbles.locator('[data-custody="1"]')).toHaveCount(2);
   await expect(
     bubbles.getByRole("button", {
       name: "Post office confirmed a stored copy",
@@ -898,16 +896,13 @@ test("group image record discloses member and post-office copies separately from
   });
   await expect(member).toBeVisible();
   await expect(office).toBeVisible();
-  for (const [button, details] of [
-    [member, "message-status"],
-    [office, "post-office-copy"],
-  ] as const) {
+  for (const button of [member, office]) {
     await button.focus();
     await button.press("Enter");
-    await expect(bubble.getByTestId(details)).toContainText(
+    await expect(bubble.getByTestId("message-status")).toContainText(
       "file message record only",
     );
-    await expect(bubble.getByTestId(details)).toContainText(
+    await expect(bubble.getByTestId("message-status")).toContainText(
       "do not confirm that all image or file bytes are stored",
     );
     await button.press("Escape");

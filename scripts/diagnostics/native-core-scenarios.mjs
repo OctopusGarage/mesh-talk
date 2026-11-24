@@ -386,9 +386,6 @@ export async function receiptPhase(c, state, name, expected, historical = false,
     if (historical && index > 0) await revealHistoricalNativeMessage(c, label);
     else await revealLatestNativeMessage(c, label);
     await c.until(`native ${label} card is ${expected}`, () => c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e&&e.querySelectorAll('[data-delivery]').length===1&&e.querySelector('[data-delivery]')?.getAttribute('data-delivery')===arguments[1];", [label, expected]));
-    if (expected === "awaiting") {
-      await c.until(`native ${label} waiting caption is visible`, () => c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.querySelector('[data-testid=delivery-pending-caption]')?.getBoundingClientRect();return !!r&&r.width>0&&r.height>0;", [label]));
-    }
     iconObservedMs.push(Math.round(performance.now() - phaseStarted));
     captures.push(await c.captureReceiptCard(index === 2 ? name : `${name}-${index}`, { label, status: expected }));
   }

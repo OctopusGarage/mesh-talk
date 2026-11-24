@@ -38,15 +38,13 @@ function observationAge(
 export function DeliveryDetails({ message }: { message: ChatMessage }) {
   const { t, i18n } = useTranslation();
   const recover = useDeliveryRecovery();
-  const label = t(
-    message.file
-      ? "message.delivery.fileAwaiting"
-      : "message.delivery.awaiting",
-  );
   return (
     <MessageStatus
-      label={label}
-      caption={label}
+      label={t(
+        message.file
+          ? "message.delivery.fileAwaiting"
+          : "message.delivery.awaiting",
+      )}
       heading={t("message.delivery.detailsTitle")}
       delivery="awaiting"
       testId="delivery-details"
