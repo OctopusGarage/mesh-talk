@@ -1,0 +1,80 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M86Z7FHKSYMJAN1W1CG9NMGJ",
+  "strategy": "manual-commit",
+  "branch": "requirements-work",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "Cargo.lock",
+    "crates/mesh-talk-core/src/channel/model.rs",
+    "crates/mesh-talk-core/src/channel/model/checkpoint.rs",
+    "crates/mesh-talk-core/src/node/channel_account_bootstrap.rs",
+    "crates/mesh-talk-protocol/Cargo.toml",
+    "docs/sdk-business-boundary.md",
+    "vendor/mesh-foundation/SOURCE",
+    "vendor/mesh-foundation/crates/mesh-blob/src/lib.rs",
+    "vendor/mesh-foundation/crates/mesh-e2ee/README.md",
+    "vendor/mesh-foundation/crates/mesh-e2ee/src/sender_key.rs",
+    "vendor/mesh-foundation/crates/mesh-e2ee/src/sender_key/checkpoint.rs",
+    "vendor/mesh-foundation/crates/mesh-identity/README.md",
+    "vendor/mesh-foundation/crates/mesh-identity/src/account.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/Cargo.toml",
+    "vendor/mesh-foundation/crates/mesh-mailbox/README.md",
+    "vendor/mesh-foundation/crates/mesh-mailbox/examples/opaque_mailbox.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/examples/typed_mailbox.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/client.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/delta.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/lib.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/model.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/ports.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/rpc.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/service.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/spool.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/wire.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/tests/client.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/tests/opaque.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/tests/separation.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/tests/spool_policy.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/tests/tcp_spool.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/tests/wire_budgets.rs",
+    "vendor/mesh-foundation/crates/mesh-storage/src/lib.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 199688,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 54812672,
+    "output_tokens": 45532,
+    "api_call_count": 171,
+    "subagent_tokens": {
+      "input_tokens": 18414,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 2785408,
+      "output_tokens": 1684,
+      "api_call_count": 11
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 10349,
+    "layers": {
+      "betterleaks": 201,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 10165,
+      "key_context": 0,
+      "provider_token": 1,
+      "shell_stdin": 0
+    }
+  }
+}
