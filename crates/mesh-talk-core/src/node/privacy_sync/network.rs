@@ -1,6 +1,7 @@
 //! Production participant network adapter. A finite authorization selection lives
 //! in the encrypted profile DB; unchanged pages only check scalar revisions.
 //! Preparation advances bounded header/edge pages and yields in the session owner.
+mod recent_history;
 use super::prepared_views::Purpose;
 use super::*;
 use crate::eventlog::{
@@ -122,6 +123,7 @@ pub(in crate::node) struct ParticipantView {
     pub(super) pending: Vec<EventId>,
     export_have: Mutex<Option<[u8; 32]>>,
     range_export_phase: Mutex<u8>,
+    recent_ready: std::sync::atomic::AtomicBool,
     range_checkpoint: Mutex<Option<crate::eventlog::sync::range::index::Checkpoint>>,
     range_receiver: Mutex<crate::eventlog::sync::range::RangeBuild<ParticipantHaveCursor>>,
     range: Mutex<crate::eventlog::sync::range::RangeBuild<i64>>,
@@ -177,6 +179,28 @@ impl GuardedSyncStore<'_> {
     ) -> Result<(bool, PreparationStep), LogError> {
         budget.validate()?;
         self.validate_view(view)?;
+        // A fully qualified SQL export remains valid at its captured cutoff.
+        // Restoring its principal against a newer logical order can reject
+        // legitimate older-timestamp ancestors received during repair.
+        if view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .was_ready()
+            && *view.range_export_phase.lock().expect("range export phase") == 2
+        {
+            view.preparation
+                .lock()
+                .expect("view preparation lock")
+                .selection()?;
+            return Ok((
+                true,
+                PreparationStep {
+                    ready: true,
+                    ..Default::default()
+                },
+            ));
+        }
         view.preparation
             .lock()
             .expect("view preparation lock")
@@ -309,6 +333,19 @@ impl GuardedSyncStore<'_> {
                         .as_mut()
                         .ok_or(LogError::StaleCursor)?,
                 )?;
+            // Ordered repair acknowledges a finite source prefix against this
+            // captured local root. Ordinary appends must not discard its cursor.
+            let ordered_active = value
+                .view
+                .range_checkpoint
+                .lock()
+                .expect("range checkpoint")
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.ordered_cursor().is_some());
+            if ordered_active {
+                self.validate_view(&value.view)?;
+                return Ok(Some(value));
+            }
             if value.view.metadata_stamp.as_ref() != Some(&stamp) {
                 let (range_owner, was_ready) = {
                     let preparation = value.view.preparation.lock().expect("preparation");
@@ -322,7 +359,10 @@ impl GuardedSyncStore<'_> {
                         .expect("receiver")
                         .snapshot()
                         .is_none();
-                if range_owner && (!was_ready || index_pending) {
+                if range_owner
+                    && (!was_ready
+                        || (index_pending && !value.view.recent_ready.load(Ordering::Acquire)))
+                {
                     self.validate_view(&value.view)?;
                     return Ok(Some(value));
                 }
@@ -347,8 +387,7 @@ impl GuardedSyncStore<'_> {
                         snapshot
                             .index()
                             .summary(crate::eventlog::sync::range::index::Prefix::root())
-                            .count as u64
-                            == old_count
+                            .is_ok_and(|s| s.count as u64 == old_count)
                     });
                 let receiver_complete = value
                     .view
@@ -360,8 +399,7 @@ impl GuardedSyncStore<'_> {
                         snapshot
                             .index()
                             .summary(crate::eventlog::sync::range::index::Prefix::root())
-                            .count as u64
-                            == old_count
+                            .is_ok_and(|s| s.count as u64 == old_count)
                     });
                 let eligible = value.view.pending.is_empty()
                     && value
@@ -370,7 +408,9 @@ impl GuardedSyncStore<'_> {
                         .get_mut()
                         .expect("owned preparation")
                         .history_only()
-                    && (source_complete || receiver_complete);
+                    && (source_complete
+                        || receiver_complete
+                        || value.view.recent_ready.load(Ordering::Acquire));
                 if !eligible {
                     return Ok(None);
                 }
@@ -422,6 +462,7 @@ impl GuardedSyncStore<'_> {
                     *upload.view.range_receiver.get_mut().expect("receiver") = Default::default();
                 }
                 *upload.view.range_checkpoint.get_mut().expect("checkpoint") = None;
+                upload.view.recent_ready.store(false, Ordering::Release);
                 upload.view.metadata_stamp = Some(stamp);
                 value.view = upload.view;
             }
@@ -887,7 +928,13 @@ impl GuardedSyncStore<'_> {
                 .preparation
                 .lock()
                 .expect("view preparation lock");
-            preparation.restore_history_owner(self, &upload.view)?;
+            match preparation.restore_history_owner(self, &upload.view) {
+                Ok(()) => {}
+                // An incoming ancestor can replace the logical-order job.
+                // Requalify a new cutoff instead of reviving an obsolete job.
+                Err(LogError::StaleCursor) => return Ok(false),
+                Err(error) => return Err(error),
+            }
             if !preparation.resume_history(generation) {
                 return Ok(false);
             }
@@ -935,6 +982,7 @@ impl GuardedSyncStore<'_> {
                     preparation.selection()?,
                     &upload.view.repository,
                     after_rank,
+                    &[],
                     preparation
                         .history_generation()
                         .map_or(0, |generation| generation.count),
@@ -1316,6 +1364,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             pending,
             export_have: Mutex::new(None),
             range_export_phase: Mutex::new(0),
+            recent_ready: std::sync::atomic::AtomicBool::new(false),
             range_checkpoint: Mutex::new(None),
             range_receiver: Mutex::new(Default::default()),
             range: Mutex::new(Default::default()),
@@ -1384,15 +1433,23 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             let preparation = view.preparation.lock().expect("preparation");
             (preparation.history_only(), preparation.was_ready())
         };
-        let partial_range = range_owner
-            && (!was_ready
-                || (view.range.lock().expect("range").snapshot().is_none()
-                    && view
-                        .range_receiver
-                        .lock()
-                        .expect("receiver")
-                        .snapshot()
-                        .is_none()));
+        let ordered_active = view
+            .range_checkpoint
+            .lock()
+            .expect("range checkpoint")
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.ordered_cursor().is_some());
+        let partial_range = ordered_active
+            || range_owner
+                && (!was_ready
+                    || (!view.recent_ready.load(Ordering::Acquire)
+                        && view.range.lock().expect("range").snapshot().is_none()
+                        && view
+                            .range_receiver
+                            .lock()
+                            .expect("receiver")
+                            .snapshot()
+                            .is_none()));
         if !partial_range && (current.is_none() || current.as_ref() != view.metadata_stamp.as_ref())
         {
             self.node
@@ -1428,13 +1485,39 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         if !preparation.history_only() || !preparation.park_range() {
             return Ok(Some(view));
         }
-        let bytes = self
+        let sql_bytes = self
             .node
             .log
             .lock()
             .expect("log")
             .repository()?
             .selection_cache_bytes(preparation.selection()?)?;
+        let bytes = (64usize * 1024)
+            .saturating_add(
+                view.pending
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<EventId>()),
+            )
+            .saturating_add(view.range.lock().expect("range").retained_heap_bytes())
+            .saturating_add(
+                view.range_receiver
+                    .lock()
+                    .expect("receiver")
+                    .retained_heap_bytes(),
+            )
+            .saturating_add(
+                view.range_checkpoint
+                    .lock()
+                    .expect("checkpoint")
+                    .as_ref()
+                    .map_or(0, |checkpoint| checkpoint.heap_bytes()),
+            );
+        if !super::prepared_views::PreparedCache::<RetainedSelection>::accepts_bytes(bytes) {
+            // The active exchange may retain an oversized derived plan under
+            // its existing connection admission; never pretend the idle cache
+            // retained it and silently restart preparation every turn.
+            return Ok(Some(view));
+        }
         let stamp = self
             .history_sync_stamp(&view.conversation)?
             .unwrap_or(self.range_live_stamp(&view.conversation)?);
@@ -1445,19 +1528,25 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             .ok_or(LogError::StaleCursor)?
             .park();
         let scope = self.prepared_scope(view.conversation, Purpose::Ordinary);
-        let retired = self.node.prepared_sync_views.lock().expect("cache").insert(
-            scope,
-            stamp,
-            bytes,
-            RetainedSelection {
-                purpose: Purpose::Ordinary,
-                denied: self.denied,
-                inbound: self.inbound,
-                pull_only: self.pull_only,
-                view,
-            },
-            std::time::Instant::now(),
-        );
+        let retired = self
+            .node
+            .prepared_sync_views
+            .lock()
+            .expect("cache")
+            .insert_range(
+                scope,
+                stamp,
+                bytes,
+                sql_bytes,
+                RetainedSelection {
+                    purpose: Purpose::Ordinary,
+                    denied: self.denied,
+                    inbound: self.inbound,
+                    pull_only: self.pull_only,
+                    view,
+                },
+                std::time::Instant::now(),
+            );
         drop(retired);
         Ok(None)
     }
@@ -1826,6 +1915,38 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         }
         Ok(step)
     }
+    fn ordered_repair_page(
+        &self,
+        view: &Self::View,
+        after: i64,
+        anchors: &[EventId],
+        budget: ExportPageBudget,
+    ) -> Result<Option<(Vec<Event>, i64, bool)>, LogError> {
+        self.validate_view(view)?;
+        let (supported, work) = self.requested_prepare(view, PreparationBudget::default())?;
+        if !supported || !work.ready {
+            return Ok(None);
+        }
+        let result = {
+            let prep = view.preparation.lock().expect("view preparation lock");
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_upload_rank_page(
+                    prep.selection()?,
+                    &view.repository,
+                    after,
+                    anchors,
+                    prep.history_generation()
+                        .map_or(0, |generation| generation.count),
+                    budget,
+                )?
+        };
+        self.validate_view(view)?;
+        Ok(Some(result))
+    }
     fn requested_export(
         &self,
         view: &Self::View,
@@ -1929,12 +2050,22 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             examined: budget.examined,
         }))
     }
+    fn recent_page(
+        &self,
+        view: &Self::View,
+        cursor: Option<&[u8]>,
+        records: usize,
+        bytes: usize,
+    ) -> Result<crate::eventlog::sync::network::RecentPage, LogError> {
+        self.recent_history_page(view, cursor, records, bytes)
+    }
     fn range_prepare(
         &self,
         view: &Self::View,
     ) -> Result<crate::eventlog::sync::range::RangeProgress, LogError> {
         use crate::eventlog::sync::range::RangeProgress;
         let (supported, work) = self.requested_prepare(view, PreparationBudget::default())?;
+
         if !supported {
             return Ok(RangeProgress::Unsupported);
         }
@@ -1942,6 +2073,13 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             return Ok(RangeProgress::More);
         }
         let mut range = view.range.lock().expect("range build");
+        range.bind_sql(
+            view.preparation
+                .lock()
+                .expect("preparation")
+                .selection()?
+                .range_index(0),
+        )?;
         let result = range.advance(None, |cursor, budget| {
             self.requested_inventory_page(view, cursor.copied(), budget)?
                 .ok_or(LogError::StaleCursor)
@@ -1956,6 +2094,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             }
             result => result?,
         };
+
         self.validate_view(view)?;
         Ok(result)
     }
@@ -1965,6 +2104,14 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     ) -> Result<crate::eventlog::sync::range::RangeReceiverProgress, LogError> {
         use crate::eventlog::sync::range::{RangeProgress, RangeReceiverProgress};
         self.validate_view(view)?;
+        if let Some(snapshot) = view
+            .range_receiver
+            .lock()
+            .expect("receiver range build")
+            .snapshot()
+        {
+            return Ok(RangeReceiverProgress::Ready(snapshot));
+        }
         view.preparation
             .lock()
             .expect("preparation")
@@ -1982,6 +2129,13 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         }
         let _expected = self.metadata(view)?.count;
         let mut build = view.range_receiver.lock().expect("receiver range build");
+        build.bind_sql(
+            view.preparation
+                .lock()
+                .expect("preparation")
+                .selection()?
+                .range_index(1),
+        )?;
         let progress = build.advance(None, |cursor, budget| self.have_page(view, cursor, budget));
         if progress
             .as_ref()
@@ -2391,6 +2545,7 @@ mod tests {
                     count = snapshot
                         .index()
                         .summary(crate::eventlog::sync::range::index::Prefix::root())
+                        .unwrap()
                         .count;
                     break;
                 }
@@ -2414,6 +2569,7 @@ mod tests {
                         snapshot
                             .index()
                             .summary(crate::eventlog::sync::range::index::Prefix::root())
+                            .unwrap()
                             .count,
                     );
                     break;

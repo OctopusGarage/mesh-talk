@@ -705,7 +705,17 @@
     "emptyMedia": "尚無圖片或影片。",
     "emptyFiles": "尚無檔案。",
     "emptyLinks": "尚無連結。",
-    "noMatches": "在此對話中找不到符合的結果。"
+    "noMatches": "在此對話中找不到符合的結果。",
+    "loadOlder": "載入更早訊息",
+    "retryRemote": "重試歷史記錄請求",
+    "remote_loading": "攞緊最近訊息…",
+    "remote_page": "收到一頁歷史記錄。最多顯示 500 則本機訊息。",
+    "remote_preparing": "歷史記錄準備緊，請稍後手動再試。",
+    "remote_blocked": "部分歷史記錄暫時攞唔到。載入更早訊息後可能仲有缺漏；之後可以重新攞最近訊息。",
+    "remote_offline": "歷史記錄來源已離線，可以手動再試。",
+    "remote_reset": "歷史記錄範圍變咗，請再試以重新開始。",
+    "remote_unsupported": "呢個節點唔支援歷史記錄分頁。",
+    "retryRecent": "重新攞最近訊息"
   },
   "files": {
     "shortLabel": "檔案",

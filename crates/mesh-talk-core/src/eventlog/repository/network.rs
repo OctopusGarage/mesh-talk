@@ -9,7 +9,7 @@ use crate::eventlog::sync::network::{
 };
 use std::collections::HashSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct Binding {
     store_uuid: [u8; 16],
     domain: EventDomainId,

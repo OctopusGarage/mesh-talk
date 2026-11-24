@@ -601,7 +601,7 @@ impl super::Node {
                     let own_account = self.account.public().ed25519_pub;
                     let mut channels = Vec::new();
                     for row in self.list_channels()? {
-                        if !after.is_none_or(|after| row.id.as_bytes() > after.as_bytes()) {
+                        if after.is_some_and(|after| row.id.as_bytes() <= after.as_bytes()) {
                             continue;
                         }
                         let projection = self.account_group_projection(row.id)?;

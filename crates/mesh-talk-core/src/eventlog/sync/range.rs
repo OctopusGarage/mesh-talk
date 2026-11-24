@@ -7,6 +7,8 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 pub mod index;
+pub(crate) mod sql;
+use index::RangeRead;
 const INDEX_BYTES: usize = 32 * 1024 * 1024;
 const ID_BYTES: usize = 1024;
 pub(crate) fn is_index_capacity_error(error: &LogError) -> bool {
@@ -59,13 +61,34 @@ impl Drop for IndexReservation {
 struct OwnedIndex {
     index: index::RangeIndex,
     reservation: IndexReservation,
+    sql: Option<sql::SqlIndex>,
+}
+impl RangeRead for OwnedIndex {
+    type Error = LogError;
+    fn revision(&self) -> u64 {
+        self.sql
+            .as_ref()
+            .map_or(self.index.revision(), RangeRead::revision)
+    }
+    fn summary(&self, p: index::Prefix) -> Result<index::Summary, LogError> {
+        match &self.sql {
+            Some(sql) => sql.summary(p),
+            None => Ok(self.index.summary(p)),
+        }
+    }
+    fn contains(&self, id: &[u8; 32]) -> Result<bool, LogError> {
+        match &self.sql {
+            Some(sql) => sql.contains(id),
+            None => Ok(self.index.contains(id).unwrap()),
+        }
+    }
 }
 /// Immutable index lease. Accounting retires only after the final snapshot drops.
 #[derive(Clone)]
 pub struct RangeSnapshot(Arc<OwnedIndex>, [u8; 32]);
 impl RangeSnapshot {
-    pub fn index(&self) -> &index::RangeIndex {
-        &self.0.index
+    pub fn index(&self) -> &(dyn RangeRead<Error = LogError> + Send + Sync) {
+        &*self.0
     }
     pub fn token(&self) -> [u8; 32] {
         self.1
@@ -91,6 +114,7 @@ pub struct RangeBuild<C> {
     owned: Arc<OwnedIndex>,
     token: [u8; 32],
     ready: bool,
+    resetting: bool,
 }
 impl<C> Default for RangeBuild<C> {
     fn default() -> Self {
@@ -101,10 +125,32 @@ impl<C> Default for RangeBuild<C> {
             owned: Arc::new(OwnedIndex::default()),
             token,
             ready: false,
+            resetting: false,
         }
     }
 }
 impl<C> RangeBuild<C> {
+    /// SQL page caches belong to the shared encrypted pager, not this lease.
+    /// Memory-backend reservations remain conservatively charged to the owner.
+    pub(crate) fn retained_heap_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + std::mem::size_of::<OwnedIndex>() + self.owned.reservation.0
+    }
+
+    pub(crate) fn bind_sql(&mut self, index: sql::SqlIndex) -> Result<(), LogError> {
+        if let Some(bound) = &self.owned.sql {
+            return if bound.same_selection_lane(&index) {
+                Ok(())
+            } else {
+                Err(LogError::StaleCursor)
+            };
+        }
+        let owned = Arc::get_mut(&mut self.owned).ok_or(LogError::StaleCursor)?;
+        if owned.sql.is_none() && owned.index.summary(index::Prefix::root()).count == 0 {
+            owned.sql = Some(index);
+        }
+        Ok(())
+    }
+
     pub fn resume_after(&mut self, cursor: C) {
         self.cursor = Some(cursor);
         self.ready = false;
@@ -124,7 +170,14 @@ impl<C> RangeBuild<C> {
             .as_ref()
             .is_err_and(|error| !is_index_capacity_error(error))
         {
-            *self = Self::default();
+            if self.owned.sql.is_some() {
+                self.resetting = true;
+                self.ready = false;
+                self.cursor = None;
+                rand_core::OsRng.fill_bytes(&mut self.token);
+            } else {
+                *self = Self::default();
+            }
         }
         result
     }
@@ -133,6 +186,21 @@ impl<C> RangeBuild<C> {
         expected: Option<u64>,
         page: &mut impl FnMut(Option<&C>, IdPageBudget) -> Result<SyncPage<EventId, C>, LogError>,
     ) -> Result<RangeProgress, LogError> {
+        if self.resetting {
+            let Some(owned) = Arc::get_mut(&mut self.owned) else {
+                return Ok(RangeProgress::More);
+            };
+            if !owned
+                .sql
+                .as_mut()
+                .ok_or(LogError::StaleCursor)?
+                .clear_step()?
+            {
+                return Ok(RangeProgress::More);
+            }
+            self.resetting = false;
+            return Ok(RangeProgress::More);
+        }
         if !self.ready {
             let mut examined = 0;
             for _ in 0..4 {
@@ -156,17 +224,27 @@ impl<C> RangeBuild<C> {
                 let owned = Arc::get_mut(&mut self.owned).ok_or(LogError::StaleCursor)?;
                 // Reserve a whole page before mutating its index or cursor;
                 // capacity eviction may then safely retry this exact page.
-                owned.reservation.grow_by(next.items.len())?;
-                for id in next.items {
-                    if !owned.index.insert(*id.as_bytes()) {
-                        return Err(LogError::StaleCursor);
+                if let Some(sql) = &mut owned.sql {
+                    sql.insert_page(
+                        &next
+                            .items
+                            .iter()
+                            .map(|id| *id.as_bytes())
+                            .collect::<Vec<_>>(),
+                    )?;
+                } else {
+                    owned.reservation.grow_by(next.items.len())?;
+                    for id in next.items {
+                        if !owned.index.insert(*id.as_bytes()) {
+                            return Err(LogError::StaleCursor);
+                        }
                     }
                 }
                 self.cursor = next.next;
                 if self.cursor.is_none() {
-                    if expected.is_some_and(|n| {
-                        self.owned.index.summary(index::Prefix::root()).count as u64 != n
-                    }) {
+                    if let Some(n) = expected
+                        && self.owned.summary(index::Prefix::root())?.count as u64 != n
+                    {
                         return Err(LogError::StaleCursor);
                     }
                     self.ready = true;
@@ -177,10 +255,10 @@ impl<C> RangeBuild<C> {
         if !self.ready {
             return Ok(RangeProgress::More);
         }
-        let summary = self.owned.index.summary(index::Prefix::root());
+        let summary = self.owned.summary(index::Prefix::root())?;
         Ok(RangeProgress::Ready {
             token: self.token,
-            revision: self.owned.index.revision(),
+            revision: self.owned.revision(),
             count: summary.count as u64,
             digest: summary.digest,
         })
@@ -200,7 +278,10 @@ impl<C> RangeBuild<C> {
         if prefix.key() != key {
             return Err(LogError::InvalidPageBudget);
         }
-        Ok(self.owned.index.frame(scope, self.token, prefix).encode())
+        match &self.owned.sql {
+            Some(sql) => Ok(sql.frame(scope, self.token, prefix)?.encode()),
+            None => Ok(self.owned.index.frame(scope, self.token, prefix).encode()),
+        }
     }
 }
 
@@ -241,7 +322,14 @@ mod tests {
         ));
         assert_eq!(examined, 257);
         let snapshot = build.snapshot().unwrap();
-        assert_eq!(snapshot.index().summary(index::Prefix::root()).count, 257);
+        assert_eq!(
+            snapshot
+                .index()
+                .summary(index::Prefix::root())
+                .unwrap()
+                .count,
+            257
+        );
     }
     #[test]
     fn capacity_retry_preserves_prior_pages_without_partial_insertions() {

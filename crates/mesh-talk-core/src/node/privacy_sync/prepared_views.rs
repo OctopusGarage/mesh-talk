@@ -7,6 +7,24 @@ use std::{collections::VecDeque, time::Instant};
 const MAX_ENTRIES: usize = 64;
 // Other 32 MiB is reserved globally for prepared authorized range indexes.
 const MAX_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SQL_BYTES: usize = 512 * 1024 * 1024;
+#[cfg(test)]
+thread_local! {static REJECT_IDLE:std::cell::Cell<bool>=const {std::cell::Cell::new(false)};}
+#[cfg(test)]
+pub(in crate::node) struct RejectIdleCache;
+#[cfg(test)]
+impl RejectIdleCache {
+    pub(in crate::node) fn enter() -> Self {
+        REJECT_IDLE.with(|flag| flag.set(true));
+        Self
+    }
+}
+#[cfg(test)]
+impl Drop for RejectIdleCache {
+    fn drop(&mut self) {
+        REJECT_IDLE.with(|flag| flag.set(false));
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Purpose {
@@ -27,12 +45,14 @@ struct Entry<T> {
     scope: Scope,
     stamp: HistorySyncStamp,
     bytes: usize,
+    sql_bytes: usize,
     returned: Instant,
     value: T,
 }
 pub(in crate::node) struct PreparedCache<T> {
     entries: VecDeque<Entry<T>>,
     bytes: usize,
+    sql_bytes: usize,
     #[cfg(test)]
     test_elapsed: std::time::Duration,
 }
@@ -41,6 +61,7 @@ impl<T> Default for PreparedCache<T> {
         Self {
             entries: VecDeque::new(),
             bytes: 0,
+            sql_bytes: 0,
             #[cfg(test)]
             test_elapsed: std::time::Duration::ZERO,
         }
@@ -53,6 +74,10 @@ impl<T> PreparedCache<T> {
     }
 
     pub(super) fn accepts_bytes(bytes: usize) -> bool {
+        #[cfg(test)]
+        if REJECT_IDLE.with(|flag| flag.get()) {
+            return false;
+        }
         bytes <= MAX_BYTES
     }
     /// Extract one oldest idle owner. Destruction must happen after releasing
@@ -66,6 +91,7 @@ impl<T> PreparedCache<T> {
             .map(|(index, _)| index)?;
         let entry = self.entries.remove(index)?;
         self.bytes -= entry.bytes;
+        self.sql_bytes -= entry.sql_bytes;
         Some(entry.value)
     }
     fn extract(&mut self, mut remove: impl FnMut(&Entry<T>) -> bool, retired: &mut Vec<T>) {
@@ -74,6 +100,7 @@ impl<T> PreparedCache<T> {
             if remove(&self.entries[index]) {
                 let entry = self.entries.remove(index).expect("bounded prepared entry");
                 self.bytes -= entry.bytes;
+                self.sql_bytes -= entry.sql_bytes;
                 retired.push(entry.value);
             } else {
                 index += 1;
@@ -89,6 +116,7 @@ impl<T> PreparedCache<T> {
             .position(|entry| &entry.scope == scope)?;
         let entry = self.entries.remove(index)?;
         self.bytes -= entry.bytes;
+        self.sql_bytes -= entry.sql_bytes;
         Some(entry.value)
     }
     pub(super) fn take(&mut self, scope: &Scope, stamp: &HistorySyncStamp) -> (Option<T>, Vec<T>) {
@@ -107,6 +135,7 @@ impl<T> PreparedCache<T> {
                     .remove(index)
                     .expect("qualified prepared entry");
                 self.bytes -= entry.bytes;
+                self.sql_bytes -= entry.sql_bytes;
                 entry.value
             });
         (value, retired)
@@ -119,13 +148,31 @@ impl<T> PreparedCache<T> {
         value: T,
         now: Instant,
     ) -> Vec<T> {
+        self.insert_range(scope, stamp, bytes, 0, value, now)
+    }
+    /// RAM is a hard admission bound. SQL work is disk-backed and has a soft
+    /// idle quota: one oversized plan may remain so bounded turns can progress.
+    pub(super) fn insert_range(
+        &mut self,
+        scope: Scope,
+        stamp: HistorySyncStamp,
+        bytes: usize,
+        sql_bytes: usize,
+        value: T,
+        now: Instant,
+    ) -> Vec<T> {
         let mut retired = Vec::new();
         self.extract(|entry| entry.scope == scope, &mut retired);
-        if bytes > MAX_BYTES {
+        if !Self::accepts_bytes(bytes) {
             retired.push(value);
             return retired;
         }
-        while self.entries.len() >= MAX_ENTRIES || self.bytes > MAX_BYTES - bytes {
+        while self.entries.len() >= MAX_ENTRIES
+            || self.bytes > MAX_BYTES - bytes
+            || (sql_bytes > 0
+                && !self.entries.is_empty()
+                && self.sql_bytes.saturating_add(sql_bytes) > MAX_SQL_BYTES)
+        {
             let oldest = self
                 .entries
                 .iter()
@@ -135,13 +182,16 @@ impl<T> PreparedCache<T> {
                 .expect("nonempty bounded prepared cache");
             let entry = self.entries.remove(oldest).expect("oldest prepared entry");
             self.bytes -= entry.bytes;
+            self.sql_bytes -= entry.sql_bytes;
             retired.push(entry.value);
         }
         self.bytes += bytes;
+        self.sql_bytes += sql_bytes;
         self.entries.push_back(Entry {
             scope,
             stamp,
             bytes,
+            sql_bytes,
             returned: {
                 #[cfg(test)]
                 {
@@ -166,6 +216,7 @@ impl<T> PreparedCache<T> {
 
     pub(super) fn clear(&mut self) -> Vec<T> {
         self.bytes = 0;
+        self.sql_bytes = 0;
         std::mem::take(&mut self.entries)
             .into_iter()
             .map(|entry| entry.value)
@@ -263,5 +314,81 @@ mod tests {
         assert_eq!(cache.take(&second, &stamp(1)), (Some(22), vec![]));
         assert_eq!(cache.bytes, 0);
         assert_eq!(cache.retire_oldest(), None);
+    }
+}
+
+#[cfg(test)]
+mod range_budget_tests {
+    use super::*;
+    fn key(n: u8) -> Scope {
+        Scope {
+            peer: crate::identity::device::DeviceIdentity::generate().public(),
+            purpose: Purpose::Ordinary,
+            conversation: ConversationId::new([n; 32]),
+            inbound: false,
+            pull_only: false,
+            denied: false,
+        }
+    }
+    fn stamp() -> HistorySyncStamp {
+        HistorySyncStamp {
+            fingerprint: [1; 32],
+        }
+    }
+    #[test]
+    fn range_disk_soft_quota_retires_oldest_but_preserves_one_oversized_plan() {
+        let mut cache = PreparedCache::default();
+        let now = Instant::now();
+        let a = key(1);
+        let b = key(2);
+        let huge = key(3);
+        assert!(
+            cache
+                .insert_range(a.clone(), stamp(), 64 * 1024, MAX_SQL_BYTES / 2, 1, now)
+                .is_empty()
+        );
+        assert!(
+            cache
+                .insert_range(b.clone(), stamp(), 64 * 1024, MAX_SQL_BYTES / 2, 2, now)
+                .is_empty()
+        );
+        assert_eq!(cache.sql_bytes, MAX_SQL_BYTES);
+        assert_eq!(
+            cache.insert_range(huge.clone(), stamp(), 64 * 1024, MAX_SQL_BYTES + 1, 3, now),
+            vec![1, 2]
+        );
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.bytes, 64 * 1024);
+        assert_eq!(cache.sql_bytes, MAX_SQL_BYTES + 1);
+        assert_eq!(cache.take(&huge, &stamp()).0, Some(3));
+        assert_eq!(cache.bytes, 0);
+        assert_eq!(cache.sql_bytes, 0);
+        assert_eq!(
+            cache.insert_range(a, stamp(), MAX_BYTES + 1, 1, 4, now),
+            vec![4]
+        );
+        assert_eq!(cache.sql_bytes, 0);
+    }
+    #[test]
+    fn range_charge_counters_follow_every_retirement_and_checkout_path() {
+        let mut cache = PreparedCache::default();
+        let now = Instant::now();
+        let a = key(1);
+        let b = key(2);
+        cache.insert_range(a.clone(), stamp(), 10, 20, 1, now);
+        cache.insert_range(b.clone(), stamp(), 30, 40, 2, now);
+        assert_eq!(cache.retire_oldest(), Some(1));
+        assert_eq!((cache.bytes, cache.sql_bytes), (30, 40));
+        assert_eq!(cache.take_candidate(&b), Some(2));
+        assert_eq!((cache.bytes, cache.sql_bytes), (0, 0));
+        cache.insert_range(a.clone(), stamp(), 10, 20, 3, now);
+        let different = HistorySyncStamp {
+            fingerprint: [2; 32],
+        };
+        assert_eq!(cache.take(&a, &different), (None, vec![3]));
+        assert_eq!((cache.bytes, cache.sql_bytes), (0, 0));
+        cache.insert_range(a, stamp(), 10, 20, 4, now);
+        assert_eq!(cache.clear(), vec![4]);
+        assert_eq!((cache.bytes, cache.sql_bytes), (0, 0));
     }
 }

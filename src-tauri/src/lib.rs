@@ -477,6 +477,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::channel_activity,
                 crate::chat_commands::send_channel_message,
                 crate::chat_commands::channel_history,
+                crate::chat_commands::fetch_channel_history_page,
                 crate::chat_commands::send_file_dm,
                 crate::chat_commands::send_file_channel,
                 crate::chat_commands::save_file,

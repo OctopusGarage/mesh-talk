@@ -59,10 +59,13 @@ impl HistoryContext {
         let Some((offer_event, offer)) = self.first_offer(release.offer).await? else {
             return Ok(None);
         };
-        if (!account && offer.recipient != me.user_id())
-            || (account && self.lifetime_closed(&offer, Some(event.id)).await?)
-            || (!account && self.release(&event, &offer_event, &offer).await?.is_none())
-        {
+        let excluded = if account {
+            self.lifetime_closed(&offer, Some(event.id)).await?
+        } else {
+            offer.recipient != me.user_id()
+                || self.release(&event, &offer_event, &offer).await?.is_none()
+        };
+        if excluded {
             return Ok(None);
         }
         let Some(author) = self.author(event.id).await? else {

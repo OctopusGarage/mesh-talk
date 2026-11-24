@@ -15,6 +15,9 @@ impl Purpose {
         match self {
             Self::Selection => &[
                 b"participant_sync_views",
+                b"participant_sync_cache_charge",
+                b"participant_sync_range_ids",
+                b"participant_sync_range_nodes",
                 b"participant_sync_rows",
                 b"participant_sync_have",
                 b"participant_sync_ancestors",

@@ -11,14 +11,26 @@ is a separate bounded request. Source and receiver work each admit four pages,
 32 insertions and 250 examined rows per page. Operation counts are ceilings, not
 wall-clock latency guarantees.
 
-The first cold qualified preparation/index remains O(N) overall, spread across
-turns. Qualified ordinary appends reuse prepared prefixes. The in-memory index
-tier reserves 1,024 bytes per ID against a process-wide 32 MiB cap (32,768 total
-IDs), alongside a 32 MiB SQL prepared-view cache. Pressure evicts idle derived
-plans and retries on a later turn; unavailable capacity returns explicit Limited.
-A SQL-backed summary tier and a remote latest-200/history-window protocol are not
-implemented. The frontend already loads a 200-record history page. No seven-day
-retention or filtering of authorization/key/control records is introduced.
+The first cold qualified authorization preparation remains O(N) overall, spread
+across bounded turns. Qualified ordinary appends reuse prepared prefixes. The
+production full-history index now uses the existing encrypted disk-spilling
+participant scratch pager; the former 32 MiB/32,768-ID RAM admission ceiling no
+longer applies to production indexes. The bounded prepared-view cache remains.
+
+The negotiated recent-history profile returns at most 200 selected Message
+records, further bounded by 60 KiB of encoded event bodies and the transport
+frame. Older pages require an explicit opaque continuation. The foreground node
+API and desktop group-history action use it; page coverage remains separate from
+full repair. No seven-day retention or filtering of authorization/key/control
+records is introduced.
+
+Recent records still obey strict causal admission. A page whose external parents
+are missing returns Blocked and an explicit gap-navigation continuation; that
+continuation is not a durable acknowledgement for rejected bodies. Once needed
+parents arrive through older pages or existing bounded repair, a fresh page can
+commit. This does not promise instant cold recent rendering without ancestor
+closure. SQL scratch is derived and requalified after process restart, not a
+persistent cache of permissions.
 
 `More` preserves local commit reports and uses fair continuation without failure
 backoff. `Limited` parks without equality or custody claims. Interrupted legacy
@@ -74,3 +86,60 @@ passed using an isolated target and the development core optimization override.
 Repository hygiene and standards checks also passed (1,240 source inputs and 182
 contracts checked). This is targeted synchronization verification, not a claim
 that every core or desktop integration test was executed.
+
+## Recent-history and stored-range follow-up
+
+The recent profile limits a page to 200 messages, 60 KiB and 1,000 examined
+rows; a foreground request makes at most four exchanges and never drains older
+continuations automatically. Source-pinned descending keyset pages preserve the
+qualified snapshot. Blocked pages expose navigation gaps without acknowledging
+rejected child records. The dialog keeps its separate 500-message display limit.
+
+The derived range tree now uses the encrypted scratch SQLite pager. Retained
+heap has a hard 32 MiB budget; derived SQL storage has a 512 MiB soft LRU quota
+with one oversized plan admitted for progress. Per-selection conservative charge
+counters make cache admission O(1), without scanning the cached tree each turn.
+Failed builds reuse their namespace after bounded retirement. Navigation and
+blocked frontiers stop at 4,096 entries rather than growing without bound.
+
+Negotiated v2 ordered repair seeks ascending source-rank windows near at most
+32 missing-parent anchors, preserving strict admission and ordinary turn limits.
+An exhausted repair page resets Merkle verification; it cannot directly claim
+whole-group equality. The existing protocol remains available to older peers.
+
+The current SQL/index regressions exercise 32,769 IDs, canonical digest equality,
+rollback, source-rank seeks, failed-builder retirement, cache charge accounting,
+source-pinned 200+1 pages and active progress when idle caching is declined.
+Cold authorization can still examine O(N) headers in bounded units; derived
+permission selections are reconstructed after restart. No production latency
+or throughput claim is made.
+
+The additional focused run passed 24 distinct tests (25 filter executions, with
+SQL charge cases intentionally overlapping): keyset/anchor queries, recent wire
+and real two-node page behavior, SQL tree/reset, charge/retirement accounting,
+bounded frontiers and source/receiver incremental reuse. The 32,769-ID case
+passed in the unoptimized isolated test profile; that duration is not a benchmark.
+Frontend history tests passed five cases and TypeScript checking passed.
+
+A real two-node regression uses a 201-message parent chain, concurrent appends on
+successive bounded turns and a later pooled-connection refresh. Its longer test
+continuation allowance accommodates cold authorization replay of the newly
+created tail; runtime budgets are unchanged. The observed reducer cursor advances
+through the finite source rather than restarting. Ordered forward repair defers
+reverse preparation until its dependency closure exits, then the same test
+verifies transfer in both directions. Existing qualified SQL views and completed
+receiver snapshots can continue without reconstructing an obsolete principal;
+policy/destructive fences are still checked. An unreconstructible old principal
+invalidates append reuse and starts qualification again; storage errors propagate.
+A separate live-lease test covers idempotent rebinding of the same SQL index and
+rejection of a different selection/lane while the original snapshot remains valid.
+
+Final clean-source checks passed: the complete `node::session::` unit filter
+passed 111 tests with the existing scale rehearsal ignored; the late-initial-key
+history repair regression passed; core all-target Clippy denied warnings; and
+`cargo +1.99.0 check -p mesh-talk --lib` passed. Repository gates checked 1,241
+source inputs and 183 contracts, plus formatting and staged source hygiene.
+These checks do not claim the ignored scale rehearsal or all desktop integration
+scenarios were executed.
+The clean-source long-chain production regression also passed three randomized
+runs, alongside the live-snapshot SQL rebinding regression.

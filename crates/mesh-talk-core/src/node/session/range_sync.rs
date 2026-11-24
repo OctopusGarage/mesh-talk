@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 fn marker() -> [u8; 32] {
-    Sha256::digest(b"mesh-talk-range-profile-v1-capability").into()
+    Sha256::digest(b"mesh-talk-range-profile-v2-capability").into()
 }
 fn probe(bytes: &[u8]) -> Option<ConversationId> {
     match decode(bytes).ok()? {
@@ -20,7 +20,11 @@ fn probe(bytes: &[u8]) -> Option<ConversationId> {
         | SyncWire::FpRequestV3(r)
         | SyncWire::FpRequestV4(r)
         | SyncWire::FpRequestV5(r)
-            if r.fingerprint == marker() =>
+            if r.fingerprint == marker()
+                || r.fingerprint
+                    == <[u8; 32]>::from(Sha256::digest(
+                        b"mesh-talk-range-profile-v1-capability",
+                    )) =>
         {
             Some(r.conversation)
         }
@@ -33,6 +37,7 @@ pub(in crate::node) struct Service<V> {
     sent: SyncTurnBudget,
     requests: usize,
     continuing: bool,
+    ordered: bool,
 }
 impl<V> Default for Service<V> {
     fn default() -> Self {
@@ -45,6 +50,7 @@ impl<V> Default for Service<V> {
             },
             requests: 0,
             continuing: true,
+            ordered: true,
         }
     }
 }
@@ -105,7 +111,12 @@ pub(in crate::node) async fn serve<S: NetworkSyncStore, IO: AsyncRead + AsyncWri
         return Ok(Some(Served::Handled(conversation)));
     }
     let open = probe(bytes);
-    let range = bytes.starts_with(b"MRB1")
+    if open.is_some() {
+        state.ordered =
+            matches!(decode(bytes), Ok(SyncWire::FpRequest(r)) if r.fingerprint == marker());
+    }
+    let range = bytes.starts_with(b"MRT1")
+        || bytes.starts_with(b"MRB1")
         || bytes.starts_with(b"MRGQ")
         || bytes.starts_with(b"MRD1")
         || bytes.starts_with(b"MRV1")
@@ -184,6 +195,7 @@ pub(in crate::node) async fn serve<S: NetworkSyncStore, IO: AsyncRead + AsyncWri
             view,
             remote_token,
             remote_revision,
+            state.ordered,
             2,
             100,
             512 * 1024,
@@ -233,6 +245,62 @@ pub(in crate::node) async fn serve<S: NetworkSyncStore, IO: AsyncRead + AsyncWri
                     }
                 },
             }
+        } else if bytes.starts_with(b"MRT1") {
+            if !state.ordered || bytes.len() < 83 {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            let token: [u8; 32] = bytes[36..68].try_into().unwrap();
+            let after = i64::from_le_bytes(bytes[68..76].try_into().unwrap());
+            let count = u16::from_le_bytes(bytes[76..78].try_into().unwrap()) as usize;
+            let limit = u32::from_le_bytes(bytes[78..82].try_into().unwrap()) as usize;
+            if state.token != Some(token)
+                || after < -1
+                || count == 0
+                || count > 100
+                || count > state.sent.records
+                || limit == 0
+                || limit > 57 * 1024
+                || limit > state.sent.body_bytes
+            {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            let anchor_count = bytes[82] as usize;
+            if anchor_count > 32 || bytes.len() != 83 + anchor_count * 32 {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            let anchors: Vec<_> = bytes[83..]
+                .as_chunks::<32>()
+                .0
+                .iter()
+                .map(|b| EventId::new(*b))
+                .collect();
+            let (events, next, complete) = source
+                .ordered_repair_page(
+                    view,
+                    after,
+                    &anchors,
+                    ExportPageBudget {
+                        examined: 1000,
+                        events: count,
+                        encoded_bytes: limit,
+                        allocated_bytes: limit.saturating_mul(4),
+                    },
+                )?
+                .ok_or(SessionError::ResourceUnavailable)?;
+            state.sent.charge_events(&events)?;
+            let payload = bincode::serialize(&OrderedRecords {
+                scope: conversation,
+                token,
+                after,
+                next,
+                complete,
+                events,
+            })
+            .map_err(|e| SessionError::Serialization(e.to_string()))?;
+            if payload.len() + 4 > MAX_PLAINTEXT {
+                return Err(SessionError::ResourceUnavailable);
+            }
+            [b"MRU1".as_slice(), &payload].concat()
         } else if bytes.starts_with(b"MRGQ") {
             source.range_summary(view, bytes)?
         } else {
@@ -358,15 +426,21 @@ pub(in crate::node) async fn request<S: NetworkSyncStore, IO: AsyncRead + AsyncW
         &view,
         token,
         revision,
+        true,
         2,
         100,
         512 * 1024,
     )
     .await;
+    let ordered_active = store
+        .lock()
+        .expect("store lock")
+        .range_checkpoint(&view)?
+        .is_some_and(|checkpoint| checkpoint.ordered_cursor().is_some());
     drop(store.lock().expect("store lock").retain_range_view(view));
     let forward = forward?;
     let reverse_required = store.lock().expect("store lock").range_reverse_required();
-    if !reverse_required {
+    if !reverse_required || ordered_active {
         let status = match &forward {
             Turn::Complete(_) => 1,
             Turn::Limited(_) => 2,
@@ -465,6 +539,7 @@ async fn request_ready<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
     view: &S::View,
     token: [u8; 32],
     revision: u64,
+    allow_ordered: bool,
     summary_rpcs: usize,
     record_limit: usize,
     byte_limit: usize,
@@ -481,31 +556,96 @@ async fn request_ready<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
         .lock()
         .expect("store lock")
         .range_checkpoint(view)?
+        .map(Ok)
         .unwrap_or_else(|| {
-            Checkpoint::for_remote(
+            Checkpoint::for_reader(
                 *conversation.as_bytes(),
                 snapshot.token(),
                 snapshot.index(),
                 revision,
             )
-        });
-    if !checkpoint.valid_remote_binding(
+        })?;
+    if !checkpoint.valid_reader_binding(
         snapshot.index(),
         *conversation.as_bytes(),
         token,
         snapshot.token(),
         revision,
-    ) {
+    )? {
         store.lock().expect("store lock").retain_range_checkpoint(
             view,
-            Checkpoint::for_remote(
+            Checkpoint::for_reader(
                 *conversation.as_bytes(),
                 snapshot.token(),
                 snapshot.index(),
                 revision,
-            ),
+            )?,
         )?;
         return Ok(Turn::More(ApplyReport::default()));
+    }
+
+    if let Some(after) = checkpoint.ordered_cursor() {
+        if !allow_ordered {
+            return Err(SessionError::ResourceUnavailable);
+        }
+        let limit = byte_limit.min(57 * 1024);
+        channel
+            .send(
+                &[
+                    b"MRT1".as_slice(),
+                    conversation.as_bytes(),
+                    &token,
+                    &after.to_le_bytes(),
+                    &(record_limit as u16).to_le_bytes(),
+                    &(limit as u32).to_le_bytes(),
+                    &[checkpoint.ordered_anchors().len() as u8],
+                    checkpoint.ordered_anchors().as_flattened(),
+                ]
+                .concat(),
+            )
+            .await?;
+        let reply = channel.recv().await?;
+        if !reply.starts_with(b"MRU1") || reply.len() > MAX_PLAINTEXT {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        let response: OrderedRecords = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(MAX_PLAINTEXT as u64)
+            .reject_trailing_bytes()
+            .deserialize(&reply[4..])
+            .map_err(|e| SessionError::Serialization(e.to_string()))?;
+        validate_ordered_records(&response, conversation, token, after)?;
+        SyncTurnBudget {
+            records: record_limit,
+            body_bytes: limit,
+        }
+        .charge_events(&response.events)?;
+        let mut source = store.lock().expect("store lock");
+        source.validate_view(view)?;
+        let mut missing_parents = Vec::new();
+        let report =
+            crate::eventlog::sync::network::apply_received_events(&response.events, |event| {
+                let result = source.ingest(event);
+                if let Err(crate::eventlog::LogError::MissingParents(ids)) = &result {
+                    missing_parents.extend(
+                        ids.iter()
+                            .take(32usize.saturating_sub(missing_parents.len()))
+                            .map(|id| *id.as_bytes()),
+                    );
+                }
+                result
+            })?;
+        if checkpoint.ordered_is_warm() && report.applied > 0 {
+            checkpoint.acknowledge_ordered_page(response.next, true);
+        } else if !missing_parents.is_empty() {
+            checkpoint.begin_ordered_repair_with_anchors(&missing_parents);
+        } else if !report.rejected.is_empty() {
+            return Err(SessionError::ResourceUnavailable);
+        } else {
+            checkpoint.acknowledge_ordered_page(response.next, response.complete);
+        }
+        source.retain_range_checkpoint(view, checkpoint)?;
+        return Ok(Turn::More(report));
     }
     let mut missing = Vec::new();
     // The probe and optional body fetch consume the other two turn RPCs.
@@ -527,24 +667,24 @@ async fn request_ready<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
         store.lock().expect("store lock").validate_view(view)?;
         let frame = SummaryFrame::decode(&reply, *conversation.as_bytes(), token)
             .ok_or(SessionError::UnexpectedMessage)?;
-        match checkpoint.accept_query(
+        match checkpoint.accept_reader(
             snapshot.index(),
             *conversation.as_bytes(),
             token,
             snapshot.token(),
             revision,
             frame,
-        ) {
+        )? {
             Ok(ids) => missing.extend(ids),
             Err(crate::eventlog::sync::range::index::RemoteError::Invalidated) => {
                 store.lock().expect("store lock").retain_range_checkpoint(
                     view,
-                    Checkpoint::for_remote(
+                    Checkpoint::for_reader(
                         *conversation.as_bytes(),
                         snapshot.token(),
                         snapshot.index(),
                         revision,
-                    ),
+                    )?,
                 )?;
                 return Ok(Turn::More(ApplyReport::default()));
             }
@@ -585,13 +725,30 @@ async fn request_ready<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
             body_bytes: byte_limit,
         };
         budget.charge_events(&response.events)?;
+        let mut missing_parents = Vec::new();
         {
             let mut source = store.lock().expect("store lock");
             source.validate_view(view)?;
             report =
                 crate::eventlog::sync::network::apply_received_events(&response.events, |event| {
-                    source.ingest(event)
+                    let result = source.ingest(event);
+                    if let Err(crate::eventlog::LogError::MissingParents(ids)) = &result {
+                        missing_parents.extend(
+                            ids.iter()
+                                .take(32usize.saturating_sub(missing_parents.len()))
+                                .map(|id| *id.as_bytes()),
+                        );
+                    }
+                    result
                 })?;
+        }
+        if !missing_parents.is_empty() && allow_ordered {
+            checkpoint.begin_ordered_repair_with_anchors(&missing_parents);
+            store
+                .lock()
+                .expect("store lock")
+                .retain_range_checkpoint(view, checkpoint)?;
+            return Ok(Turn::More(report));
         }
         let unavailable: Vec<_> = response
             .unavailable
@@ -776,6 +933,12 @@ mod production_tests {
         let left_message = left
             .append_event_with_profile_parent(group, EventKind::Message, vec![1], None)
             .unwrap();
+        // More than a body window of strict parent-linked events forces repair
+        // when ID-prefix discovery encounters a child before its ancestor.
+        for _ in 0..201 {
+            left.append_event_with_profile_parent(group, EventKind::Message, vec![5], None)
+                .unwrap();
+        }
         let right_message = right
             .append_event_with_profile_parent(group, EventKind::Message, vec![2], None)
             .unwrap();
@@ -844,8 +1007,12 @@ mod production_tests {
         let later = left
             .append_event_with_profile_parent(group, EventKind::Message, vec![3], None)
             .unwrap();
+
         complete = false;
-        for _ in 0..1024 {
+        // The first phase appends on every bounded More turn. Its cold
+        // authority replay can leave hundreds of additional records for this
+        // pooled refresh, each still processed under the normal turn budget.
+        for _ in 0..8192 {
             if matches!(
                 request(&mut channel, &store, group).await.unwrap(),
                 Turn::Complete(_)
@@ -961,5 +1128,62 @@ mod limited_frontier_tests {
         checkpoint.defer_missing(&[[2; 32], [1; 32]]);
         assert!(checkpoint.has_unblocked_pending());
         assert_eq!(checkpoint.next_query().unwrap().key(), [2; 32]);
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OrderedRecords {
+    scope: ConversationId,
+    token: [u8; 32],
+    after: i64,
+    next: i64,
+    complete: bool,
+    events: Vec<crate::eventlog::Event>,
+}
+
+fn validate_ordered_records(
+    response: &OrderedRecords,
+    conversation: ConversationId,
+    token: [u8; 32],
+    after: i64,
+) -> Result<(), SessionError> {
+    let mut seen = HashSet::new();
+    if response.scope != conversation
+        || response.token != token
+        || response.after != after
+        || response.next < after
+        || ((!response.complete || !response.events.is_empty()) && response.next == after)
+        || response
+            .events
+            .iter()
+            .any(|e| e.conversation_id != conversation || !seen.insert(e.id))
+    {
+        return Err(SessionError::UnexpectedMessage);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod ordered_wire_tests {
+    use super::*;
+    #[test]
+    fn rejects_nonadvancing_and_wrong_binding() {
+        let scope = ConversationId::new([1; 32]);
+        let mut page = OrderedRecords {
+            scope,
+            token: [2; 32],
+            after: -1,
+            next: -1,
+            complete: false,
+            events: vec![],
+        };
+        assert!(validate_ordered_records(&page, scope, [2; 32], -1).is_err());
+        page.next = 99;
+        assert!(validate_ordered_records(&page, scope, [2; 32], -1).is_ok());
+        assert!(validate_ordered_records(&page, scope, [3; 32], -1).is_err());
+        assert!(validate_ordered_records(&page, scope, [2; 32], 99).is_err());
+        page.complete = true;
+        page.next = -2;
+        assert!(validate_ordered_records(&page, scope, [2; 32], -1).is_err());
     }
 }

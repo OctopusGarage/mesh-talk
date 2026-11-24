@@ -30,7 +30,7 @@ pub(crate) use retirement::ConversationChargeMetadata;
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct EventDomainId(pub [u8; 16]);
 
 /// No parent Vec or body allocation is hidden in a header. Edges have their own pages.
@@ -102,7 +102,7 @@ pub(crate) struct EventRepository {
 }
 
 #[derive(Clone)]
-enum RepositoryOwner {
+pub(crate) enum RepositoryOwner {
     Profile(Arc<crate::storage::profile::context::ProfileStorage>),
     #[cfg(test)]
     Fixture(Arc<EncryptedDatabase>),

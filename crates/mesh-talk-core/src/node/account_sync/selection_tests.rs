@@ -7033,7 +7033,7 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
             // releasing its predecessor's terminal result. The old active task
             // retains this peer's attachment slot until that release.
             while handoff_generation.load(Ordering::SeqCst) <= original_generation
-                || !source_status().is_some_and(|status| status.pending_attachments == 1)
+                || source_status().is_none_or(|status| status.pending_attachments != 1)
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }

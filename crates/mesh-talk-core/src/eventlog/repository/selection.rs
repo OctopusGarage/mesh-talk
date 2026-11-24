@@ -13,10 +13,14 @@ use std::collections::HashSet;
 mod export;
 mod metadata;
 mod preparation;
+mod recent_history;
 pub(crate) use preparation::{AncestryProgress, SelectionRow};
+pub(crate) use recent_history::RecentCursor;
 
 const STEP: usize = 512;
 const DDL: &str = "
+CREATE TABLE IF NOT EXISTS participant_sync_range_ids(view BLOB NOT NULL,lane BLOB NOT NULL,id BLOB NOT NULL CHECK(length(id)=32),PRIMARY KEY(view,lane,id)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS participant_sync_range_nodes(view BLOB NOT NULL,lane BLOB NOT NULL,bits INTEGER NOT NULL,key BLOB NOT NULL,count INTEGER NOT NULL,digest BLOB NOT NULL,PRIMARY KEY(view,lane,bits,key)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS participant_sync_views(
  id BLOB PRIMARY KEY CHECK(length(id)=16), owner BLOB NOT NULL CHECK(length(owner)=16),
  domain BLOB NOT NULL CHECK(length(domain)=16), retired INTEGER NOT NULL DEFAULT 0 CHECK(retired IN (0,1))
@@ -94,6 +98,9 @@ pub(crate) struct Selection {
     admission_limit: usize,
 }
 impl Selection {
+    pub(crate) fn range_index(&self, lane: u8) -> crate::eventlog::sync::range::sql::SqlIndex {
+        crate::eventlog::sync::range::sql::SqlIndex::new(self.database.clone(), self.id, lane)
+    }
     /// Idle derived indexes do not consume an active query permit.
     pub(crate) fn park(&mut self) {
         drop(self.admission.take());
@@ -150,6 +157,40 @@ fn initialize_selection_schema(c: &Connection, storage: SelectionStorage) -> Res
             &format!("IF NOT EXISTS {}.participant_sync_", storage.schema()),
         ))?;
     }
+    if matches!(storage, SelectionStorage::Runtime) {
+        initialize_runtime_charge(c)?;
+    }
+    Ok(())
+}
+
+/// Runtime-only scalar charges. Trigger work is constant per admitted row;
+/// retirement performs no counter writes and charges stay conservative after
+/// deletes or smaller contexts. MAIN schema/legacy authority is unchanged.
+fn initialize_runtime_charge(c: &Connection) -> Result<(), LogError> {
+    c.execute_batch("CREATE TABLE IF NOT EXISTS participant_work.participant_sync_cache_charge(view BLOB PRIMARY KEY, bytes INTEGER NOT NULL CHECK(typeof(bytes)='integer' AND bytes>=65536)) WITHOUT ROWID;
+        CREATE TRIGGER IF NOT EXISTS participant_work.participant_sync_charge_view AFTER INSERT ON participant_sync_views BEGIN INSERT INTO participant_sync_cache_charge(view,bytes) VALUES(NEW.id,65536); END;")?;
+    for (table, keys) in [
+        ("rows", "view,id"),
+        ("have", "view,id"),
+        ("receipts", "view,id"),
+        ("ancestors", "view,id"),
+        ("departures", "view,pass,member,event"),
+        ("authors", "view,author"),
+        ("export_work", "view"),
+        ("range_ids", "view,lane,id"),
+        ("range_nodes", "view,lane,bits,key"),
+    ] {
+        let predicate = keys
+            .split(',')
+            .map(|key| format!("{key}=NEW.{key}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        c.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS participant_work.participant_sync_charge_{table} BEFORE INSERT ON participant_sync_{table} WHEN NOT EXISTS(SELECT 1 FROM participant_sync_{table} WHERE {predicate}) BEGIN UPDATE participant_sync_cache_charge SET bytes=bytes+256 WHERE view=NEW.view; END;"))?;
+    }
+    // BEFORE also covers INSERT OR REPLACE; UPSERT may conservatively charge a
+    // growth twice, but must never omit a newly larger context.
+    c.execute_batch("CREATE TRIGGER IF NOT EXISTS participant_work.participant_sync_charge_progress BEFORE INSERT ON participant_sync_progress BEGIN UPDATE participant_sync_cache_charge SET bytes=bytes+max(0,length(NEW.context)-coalesce((SELECT length(context) FROM participant_sync_progress WHERE view=NEW.view),-256)) WHERE view=NEW.view; END;")?;
+    c.execute_batch("CREATE TRIGGER IF NOT EXISTS participant_work.participant_sync_charge_context AFTER UPDATE OF context ON participant_sync_progress WHEN length(NEW.context)>length(OLD.context) BEGIN UPDATE participant_sync_cache_charge SET bytes=bytes+length(NEW.context)-length(OLD.context) WHERE view=NEW.view; END;")?;
     Ok(())
 }
 
@@ -191,6 +232,8 @@ fn cleanup_storage_on(
     };
     let mut remaining = limit;
     for (table, key) in [
+        ("participant_sync_range_ids", "lane,id"),
+        ("participant_sync_range_nodes", "lane,bits,key"),
         ("participant_sync_rows", "id"),
         ("participant_sync_have", "id"),
         ("participant_sync_receipts", "id"),
@@ -200,6 +243,15 @@ fn cleanup_storage_on(
     ] {
         let removed = c.execute(&format!("DELETE FROM {schema}.{table} WHERE view=?1 AND ({key}) IN (SELECT {key} FROM {schema}.{table} WHERE view=?1 LIMIT ?2)"), params![&id, remaining as i64])?;
         remaining -= removed;
+        if remaining == 0 {
+            return Ok(true);
+        }
+    }
+    if matches!(storage, SelectionStorage::Runtime) {
+        remaining -= c.execute(
+            "DELETE FROM participant_work.participant_sync_cache_charge WHERE view=?1",
+            [&id],
+        )?;
         if remaining == 0 {
             return Ok(true);
         }
@@ -298,21 +350,9 @@ impl EventRepository {
     pub(crate) fn selection_cache_bytes(&self, selection: &Selection) -> Result<usize, LogError> {
         self.database.read(|c| {
             self.require_selection_on(c, selection)?;
-            // Conservative fixed page/index overhead per cached projection.
-            let mut bytes = 64_usize * 1024;
-            for table in ["participant_work.participant_sync_rows", "participant_work.participant_sync_have", "participant_work.participant_sync_receipts",
-                "participant_work.participant_sync_ancestors", "participant_work.participant_sync_departures", "participant_work.participant_sync_authors",
-                "participant_work.participant_sync_export_work", "participant_work.participant_sync_progress"] {
-                let rows: i64 = c.query_row(&format!("SELECT count(*) FROM {table} WHERE view=?1"),
-                    [selection.id.as_slice()], |r| r.get(0))?;
-                let charge = usize::try_from(rows).ok().and_then(|rows| rows.checked_mul(256))
-                    .ok_or(LogError::RepositoryCounterExhausted)?;
-                bytes = bytes.checked_add(charge).ok_or(LogError::RepositoryCounterExhausted)?;
-            }
-            let context: i64 = c.query_row("SELECT coalesce(sum(length(context)),0) FROM participant_work.participant_sync_progress WHERE view=?1",
-                [selection.id.as_slice()], |r| r.get(0))?;
-            bytes.checked_add(usize::try_from(context).map_err(|_| LogError::RepositoryCounterExhausted)?)
-                .ok_or(LogError::RepositoryCounterExhausted)
+            let bytes:i64=c.prepare_cached("SELECT bytes FROM participant_work.participant_sync_cache_charge WHERE view=?1")?
+                .query_row([selection.id.as_slice()],|r|r.get(0))?;
+            usize::try_from(bytes).map_err(|_|LogError::RepositoryCounterExhausted)
         })
     }
 
@@ -485,12 +525,12 @@ impl EventRepository {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn selected_upload_rank_page(
         &self,
         selection: &Selection,
         view: &NetworkView,
         after_rank: i64,
+        anchors: &[EventId],
         upper: u64,
         budget: ExportPageBudget,
     ) -> Result<(Vec<Event>, i64, bool), LogError> {
@@ -502,6 +542,17 @@ impl EventRepository {
         self.database.read(|c| {
             self.require_selection_on(c, selection)?;
             self.validate_network_on(c, view)?;
+            if anchors.len() > 32 { return Err(LogError::InvalidPageBudget); }
+            let mut after_rank = after_rank;
+            if !anchors.is_empty() {
+                if after_rank != -1 { return Err(LogError::StaleCursor); }
+                let mut first: Option<i64> = None;
+                for id in anchors {
+                    let rank: Option<i64> = c.query_row("SELECT rank FROM participant_work.participant_sync_rows WHERE view=?1 AND id=?2 AND outgoing=1 AND rank<?3", params![selection.id.as_slice(),id.as_bytes().as_slice(),upper], |r| r.get(0)).optional()?;
+                    if let Some(rank) = rank { first = Some(first.map_or(rank, |old| old.min(rank))); }
+                }
+                after_rank = first.ok_or(LogError::StaleCursor)?.saturating_sub(budget.events as i64).max(-1);
+            }
             let mut stmt = c.prepare_cached("SELECT id,rank,outgoing FROM participant_work.participant_sync_rows WHERE view=?1 AND rank>?2 AND rank<?3 ORDER BY rank LIMIT ?4")?;
             let mut rows = stmt.query(params![selection.id.as_slice(),after_rank,upper,crate::eventlog::sync::network::scan_limit(budget.examined)?])?;
             let mut events = Vec::new();
@@ -757,7 +808,7 @@ mod retirement_tests {
             }
         }
         let mut retired = 0;
-        while retired < 6 {
+        while retired < 7 {
             let before = c.total_changes();
             assert!(cleanup_pending_on(&c, domain, current, 2).unwrap());
             let removed = c.total_changes() - before;
@@ -767,7 +818,7 @@ mod retirement_tests {
             );
             retired += removed;
         }
-        assert_eq!(retired, 6);
+        assert_eq!(retired, 7);
         let before = c.total_changes();
         assert!(!cleanup_pending_on(&c, domain, current, 2).unwrap());
         assert_eq!(
@@ -840,9 +891,9 @@ mod retirement_tests {
                 )
                 .unwrap();
             }
-            // 18 child rows plus export, progress, and the parent: every
+            // 18 child rows plus charge, export, progress, and parent: every
             // physical row, including final singleton cleanup, is charged.
-            let mut remaining = 21u64;
+            let mut remaining = 22u64;
             let mut turns = 0;
             while remaining > 0 {
                 let before = c.total_changes();
@@ -860,10 +911,11 @@ mod retirement_tests {
                     .unwrap();
                 assert_eq!(exists, remaining != 0);
             }
-            assert_eq!(turns, 21usize.div_ceil(limit));
+            assert_eq!(turns, 22usize.div_ceil(limit));
             assert!(!cleanup_on(&c, domain, owner, limit).unwrap());
             let mut retained = 0i64;
             for (table, key) in [
+                ("participant_work.participant_sync_cache_charge", "view"),
                 ("participant_work.participant_sync_rows", "view"),
                 ("participant_work.participant_sync_have", "view"),
                 ("participant_work.participant_sync_receipts", "view"),
@@ -882,7 +934,349 @@ mod retirement_tests {
                     )
                     .unwrap();
             }
-            assert_eq!(retained, 21, "an active view must never be retired");
+            assert_eq!(retained, 22, "an active view must never be retired");
         }
+    }
+}
+
+#[cfg(test)]
+mod sql_range_tests {
+    use super::super::tests::{database, event};
+    use super::*;
+    use crate::eventlog::sync::{
+        network::NetworkSyncStore,
+        range::index::{Prefix, RangeIndex, RangeRead},
+    };
+    #[test]
+    fn sql_range_matches_canonical_tree_and_rolls_back_failed_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = database(&directory);
+        let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let e = event(
+            &crate::identity::device::DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repository.append(&e).unwrap();
+        let view = repository.open_view(&e.conversation_id).unwrap();
+        let selection = repository.begin_selection(&view, 1, 512).unwrap().unwrap();
+        let mut sql = selection.range_index(0);
+        let mut memory = RangeIndex::default();
+        let ids: Vec<_> = (0..65u64)
+            .map(|n| {
+                let mut id = [0; 32];
+                id[..8].copy_from_slice(&n.to_be_bytes());
+                id
+            })
+            .collect();
+        for page in ids.chunks(32) {
+            sql.insert_page(page).unwrap();
+            for id in page {
+                memory.insert(*id);
+            }
+            assert_eq!(
+                sql.summary(Prefix::root()).unwrap(),
+                memory.summary(Prefix::root())
+            );
+        }
+        let prior = sql.summary(Prefix::root()).unwrap();
+        let mut fresh = [9; 32];
+        fresh[0] = 7;
+        assert!(sql.insert_page(&[fresh, ids[0]]).is_err());
+        assert!(!sql.contains(&fresh).unwrap());
+        assert_eq!(sql.summary(Prefix::root()).unwrap(), prior);
+        let second = selection.range_index(1);
+        assert_eq!(second.summary(Prefix::root()).unwrap().count, 0);
+        drop(selection);
+        assert!(sql.summary(Prefix::root()).is_err());
+    }
+    #[test]
+    fn sql_range_exceeds_previous_memory_admission_without_index_reservations() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository =
+            EventRepository::new(database(&directory), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let e = event(
+            &crate::identity::device::DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repository.append(&e).unwrap();
+        let view = repository.open_view(&e.conversation_id).unwrap();
+        let selection = repository.begin_selection(&view, 1, 512).unwrap().unwrap();
+        let mut sql = selection.range_index(0);
+        // Sequential IDs stress the maximum shared prefix, not just random shallow branches.
+        for start in (0..32769u64).step_by(32) {
+            let ids: Vec<_> = (start..(start + 32).min(32769))
+                .map(|n| {
+                    let mut id = [0; 32];
+                    id[24..].copy_from_slice(&n.to_be_bytes());
+                    id
+                })
+                .collect();
+            sql.insert_page(&ids).unwrap();
+        }
+        assert_eq!(sql.summary(Prefix::root()).unwrap().count, 32769);
+    }
+}
+
+#[cfg(test)]
+mod sql_range_reset_tests {
+    use super::super::tests::{database, event};
+    use super::*;
+    use crate::eventlog::sync::{
+        network::NetworkSyncStore,
+        range::{RangeBuild, RangeProgress},
+    };
+    #[test]
+    fn sql_range_rebind_with_live_snapshot_preserves_binding_and_summary() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = database(&directory);
+        let repo = EventRepository::new(db, EventDomainId([1; 16])).unwrap();
+        repo.initialize_selections().unwrap();
+        let event = event(
+            &crate::identity::device::DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repo.append(&event).unwrap();
+        let view = repo.open_view(&event.conversation_id).unwrap();
+        let selection = repo.begin_selection(&view, 1, 512).unwrap().unwrap();
+        let mut build = RangeBuild::<usize>::default();
+        build.bind_sql(selection.range_index(0)).unwrap();
+        build
+            .advance(None, |_, _| {
+                Ok(SyncPage {
+                    items: vec![event.id],
+                    next: None,
+                    examined: 1,
+                })
+            })
+            .unwrap();
+        let snapshot = build.snapshot().unwrap();
+        let before = snapshot
+            .index()
+            .summary(crate::eventlog::sync::range::index::Prefix::root())
+            .unwrap();
+        build.bind_sql(selection.range_index(0)).unwrap();
+        assert!(matches!(
+            build.bind_sql(selection.range_index(1)),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(
+            before,
+            snapshot
+                .index()
+                .summary(crate::eventlog::sync::range::index::Prefix::root())
+                .unwrap()
+        );
+    }
+    #[test]
+    fn sql_range_failed_builder_reuses_namespace_after_bounded_retirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = database(&directory);
+        let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+        repo.initialize_selections().unwrap();
+        let event = event(
+            &crate::identity::device::DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repo.append(&event).unwrap();
+        let view = repo.open_view(&event.conversation_id).unwrap();
+        let selection = repo.begin_selection(&view, 1, 512).unwrap().unwrap();
+        let mut build = RangeBuild::<usize>::default();
+        build.bind_sql(selection.range_index(0)).unwrap();
+        assert!(matches!(
+            build
+                .advance(None, |after, budget| {
+                    let start = after.copied().unwrap_or(0);
+                    let end = start + budget.ids;
+                    Ok(SyncPage {
+                        items: (start..end)
+                            .map(|n| {
+                                let mut id = [0; 32];
+                                id[..8].copy_from_slice(&(n as u64).to_be_bytes());
+                                EventId::new(id)
+                            })
+                            .collect(),
+                        next: Some(end),
+                        examined: budget.ids,
+                    })
+                })
+                .unwrap(),
+            RangeProgress::More
+        ));
+        let count = || {
+            db.read(|c|c.query_row("SELECT count(*) FROM participant_work.participant_sync_range_ids WHERE view=?1",[selection.id.as_slice()],|r|r.get::<_,i64>(0)).map_err(LogError::from)).unwrap()
+        };
+        assert_eq!(count(), 128);
+        assert!(
+            build
+                .advance(None, |_, _| Err(LogError::StaleCursor))
+                .is_err()
+        );
+        assert!(build.snapshot().is_none());
+        let mut prior = count();
+        let mut rebuilt = false;
+        for _ in 0..8 {
+            let result = build
+                .advance(Some(0), |_, _| {
+                    rebuilt = true;
+                    Ok(SyncPage {
+                        items: vec![],
+                        next: None,
+                        examined: 0,
+                    })
+                })
+                .unwrap();
+            let current = count();
+            assert!(current <= prior);
+            assert!(prior - current <= 128);
+            prior = current;
+            if rebuilt {
+                assert!(matches!(result, RangeProgress::Ready { count: 0, .. }));
+                break;
+            }
+        }
+        assert!(rebuilt);
+        assert_eq!(count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod cache_charge_tests {
+    use super::*;
+    fn fixture() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("ATTACH ':memory:' AS participant_work")
+            .unwrap();
+        initialize_selection_schema(&c, SelectionStorage::Runtime).unwrap();
+        c.execute(
+            "INSERT INTO participant_work.participant_sync_views(id,owner,domain) VALUES(?1,?2,?3)",
+            params![
+                [1u8; 16].as_slice(),
+                [2u8; 16].as_slice(),
+                [3u8; 16].as_slice()
+            ],
+        )
+        .unwrap();
+        c
+    }
+    fn charge(c: &Connection) -> i64 {
+        c.query_row(
+            "SELECT bytes FROM participant_work.participant_sync_cache_charge WHERE view=?1",
+            [[1u8; 16].as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn cache_charge_is_indexed_scalar_and_conservative_across_context_growth_and_delete() {
+        let c = fixture();
+        assert_eq!(charge(&c), 65536);
+        c.execute(
+            "INSERT INTO participant_work.participant_sync_have VALUES(?1,?2)",
+            params![[1u8; 16].as_slice(), [4u8; 32].as_slice()],
+        )
+        .unwrap();
+        assert_eq!(charge(&c), 65536 + 256);
+        c.execute(
+            "INSERT OR REPLACE INTO participant_work.participant_sync_have VALUES(?1,?2)",
+            params![[1u8; 16].as_slice(), [4u8; 32].as_slice()],
+        )
+        .unwrap();
+        assert_eq!(
+            charge(&c),
+            65536 + 256,
+            "replacing the same scalar row does not grow its charge"
+        );
+        c.execute(
+            "INSERT INTO participant_work.participant_sync_progress VALUES(?1,zeroblob(10))",
+            [[1u8; 16].as_slice()],
+        )
+        .unwrap();
+        let initial = charge(&c);
+        assert_eq!(initial, 65536 + 512 + 10);
+        c.execute("UPDATE participant_work.participant_sync_progress SET context=zeroblob(100) WHERE view=?1",[[1u8;16].as_slice()]).unwrap();
+        assert_eq!(charge(&c), initial + 90);
+        c.execute("INSERT OR REPLACE INTO participant_work.participant_sync_progress VALUES(?1,zeroblob(1000))",[[1u8;16].as_slice()]).unwrap();
+        assert!(charge(&c) >= 65536 + 512 + 1000);
+        let prior = charge(&c);
+        c.execute(
+            "UPDATE participant_work.participant_sync_progress SET context=x'00' WHERE view=?1",
+            [[1u8; 16].as_slice()],
+        )
+        .unwrap();
+        c.execute(
+            "DELETE FROM participant_work.participant_sync_have WHERE view=?1",
+            [[1u8; 16].as_slice()],
+        )
+        .unwrap();
+        assert_eq!(charge(&c), prior);
+        let plan:String=c.query_row("EXPLAIN QUERY PLAN SELECT bytes FROM participant_work.participant_sync_cache_charge WHERE view=?1",[[1u8;16].as_slice()],|r|r.get(3)).unwrap();
+        assert!(
+            plan.contains("SEARCH") && plan.contains("PRIMARY KEY"),
+            "{plan}"
+        );
+        assert!(!plan.contains("SCAN"), "{plan}");
+    }
+    #[test]
+    fn cache_charge_covers_sql_range_rows_without_recharging_replaced_nodes() {
+        let c = fixture();
+        let id = [4u8; 32];
+        let lane = [5u8; 16];
+        c.execute(
+            "INSERT INTO participant_work.participant_sync_range_ids VALUES(?1,?2,?3)",
+            params![[1u8; 16].as_slice(), lane.as_slice(), id.as_slice()],
+        )
+        .unwrap();
+        for _ in 0..4 {
+            c.execute("INSERT OR REPLACE INTO participant_work.participant_sync_range_nodes VALUES(?1,?2,0,?3,1,?3)",params![[1u8;16].as_slice(),lane.as_slice(),id.as_slice()]).unwrap();
+        }
+        assert_eq!(charge(&c), 65536 + 512);
+    }
+    #[test]
+    fn cache_charge_schema_is_runtime_only_and_retired_with_its_view() {
+        let c = fixture();
+        initialize_selection_schema(&c, SelectionStorage::LegacyMain).unwrap();
+        let main:i64=c.query_row("SELECT count(*) FROM main.sqlite_master WHERE name LIKE 'participant_sync_charge_%' OR name='participant_sync_cache_charge'",[],|r|r.get(0)).unwrap();
+        assert_eq!(main, 0);
+        c.execute(
+            "UPDATE participant_work.participant_sync_views SET retired=1 WHERE id=?1",
+            [[1u8; 16].as_slice()],
+        )
+        .unwrap();
+        let before = c.total_changes();
+        assert!(cleanup_on(&c, EventDomainId([3; 16]), [2; 16], 1).unwrap());
+        assert_eq!(c.total_changes() - before, 1);
+        let charges: i64 = c
+            .query_row(
+                "SELECT count(*) FROM participant_work.participant_sync_cache_charge",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(charges, 0);
+        let views: i64 = c
+            .query_row(
+                "SELECT count(*) FROM participant_work.participant_sync_views",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            views, 1,
+            "one-row cleanup budget leaves the view for the next turn"
+        );
     }
 }

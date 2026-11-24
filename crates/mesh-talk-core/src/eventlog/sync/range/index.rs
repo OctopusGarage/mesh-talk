@@ -10,13 +10,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub use mesh_replication::range::{Prefix, RemoteError, Summary, SummaryFrame};
 
-fn empty() -> Summary {
+pub(super) fn empty() -> Summary {
     Summary {
         count: 0,
         digest: Sha256::digest(b"mesh-range-empty-v1").into(),
     }
 }
-fn combine(bits: u16, a: Summary, b: Summary) -> Summary {
+pub(super) fn combine(bits: u16, a: Summary, b: Summary) -> Summary {
     let mut h = Sha256::new();
     h.update(b"mesh-range-node-v1");
     h.update(bits.to_le_bytes());
@@ -137,7 +137,13 @@ pub struct Checkpoint {
     remote: u64,
     pending: Vec<Prefix>,
     remote_view: Option<[u8; 32]>,
+    repair_after: Option<i64>,
+    repair_anchors: Vec<EventId>,
+    repair_warm: bool,
+    overlap_known: u64,
+    overlap_missing: u64,
     blocked: BTreeSet<EventId>,
+    saturated: bool,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Progress {
@@ -167,7 +173,13 @@ impl Checkpoint {
             remote: remote.revision,
             pending: vec![Prefix::root()],
             remote_view: None,
+            repair_after: None,
+            repair_anchors: Vec::new(),
+            repair_warm: false,
+            overlap_known: 0,
+            overlap_missing: 0,
             blocked: BTreeSet::new(),
+            saturated: false,
         }
     }
     /// Compare at most `nodes` cached summaries. Each emitted ID is present in
@@ -205,14 +217,13 @@ impl Checkpoint {
                 continue;
             }
             if let Some([left, right]) = p.children() {
-                self.pending.push(right);
-                self.pending.push(left);
+                self.push_children(left, right);
             } else if a.count == 0 {
                 missing.push(p.key());
             }
         }
         Difference {
-            progress: if self.pending.is_empty() {
+            progress: if self.pending.is_empty() && !self.saturated {
                 Progress::Complete
             } else {
                 Progress::More
@@ -329,8 +340,7 @@ impl Checkpoint {
                 continue;
             }
             if let Some([left, right]) = prefix.children() {
-                self.pending.push(right);
-                self.pending.push(left);
+                self.push_children(left, right);
             } else if b.count != 1 {
                 return Err(RemoteError::InvalidFrame);
             } else if a.count == 0 {
@@ -338,7 +348,7 @@ impl Checkpoint {
             }
         }
         Ok(Difference {
-            progress: if self.pending.is_empty() {
+            progress: if self.pending.is_empty() && !self.saturated {
                 Progress::Complete
             } else {
                 Progress::More
@@ -365,7 +375,13 @@ impl Checkpoint {
             remote: remote_revision,
             pending: vec![Prefix::root()],
             remote_view: None,
+            repair_after: None,
+            repair_anchors: Vec::new(),
+            repair_warm: false,
+            overlap_known: 0,
+            overlap_missing: 0,
             blocked: BTreeSet::new(),
+            saturated: false,
         }
     }
     /// Only call after these exact IDs have committed durably. External mutations
@@ -428,15 +444,24 @@ impl RangeIndex {
 }
 impl Checkpoint {
     pub fn next_query(&self) -> Option<Prefix> {
-        self.pending.last().copied()
+        (!self.saturated)
+            .then(|| self.pending.last().copied())
+            .flatten()
     }
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+        self.repair_after.is_some() || self.saturated || !self.pending.is_empty()
     }
     pub fn defer_missing(&mut self, ids: &[[u8; 32]]) {
         for id in ids {
+            if self.saturated {
+                break;
+            }
             let prefix = Prefix::new(256, *id).unwrap();
             if !self.pending.contains(&prefix) {
+                if self.pending.len() >= 4096 {
+                    self.saturated = true;
+                    break;
+                }
                 self.pending.insert(0, prefix);
             }
         }
@@ -487,8 +512,11 @@ impl Checkpoint {
             });
         }
         if let Some([left, right]) = prefix.children() {
-            self.pending.push(right);
-            self.pending.push(left);
+            if self.pending.len() > 4094 {
+                self.saturated = true;
+            } else {
+                self.push_children(left, right);
+            }
             Ok(vec![])
         } else if frame.summary.count == 1 {
             Ok(vec![prefix.key()])
@@ -500,12 +528,24 @@ impl Checkpoint {
 
 impl Checkpoint {
     pub fn mark_unavailable(&mut self, ids: &[EventId]) {
-        self.blocked.extend(ids.iter().copied());
+        for id in ids {
+            if self.blocked.contains(id) {
+                continue;
+            }
+            if self.blocked.len() >= 4096 {
+                self.saturated = true;
+                break;
+            }
+            self.blocked.insert(*id);
+        }
     }
     pub fn has_unblocked_pending(&self) -> bool {
-        self.pending
-            .iter()
-            .any(|prefix| prefix.bits() != 256 || !self.blocked.contains(&prefix.key()))
+        self.repair_after.is_some()
+            || !self.saturated
+                && self
+                    .pending
+                    .iter()
+                    .any(|prefix| prefix.bits() != 256 || !self.blocked.contains(&prefix.key()))
     }
 }
 
@@ -524,5 +564,319 @@ impl Checkpoint {
             && self.authority == authority
             && self.remote == revision
             && self.remote_view.is_none_or(|pinned| pinned == view)
+    }
+}
+
+/// Fallible reads for a disk-backed authorized snapshot. Storage failure is
+/// separate from protocol invalidation and must never be treated as equality.
+pub trait RangeRead {
+    type Error;
+    fn revision(&self) -> u64;
+    fn summary(&self, prefix: Prefix) -> Result<Summary, Self::Error>;
+    fn contains(&self, id: &EventId) -> Result<bool, Self::Error>;
+}
+impl RangeRead for RangeIndex {
+    type Error = std::convert::Infallible;
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+    fn summary(&self, prefix: Prefix) -> Result<Summary, Self::Error> {
+        Ok(self.summary(prefix))
+    }
+    fn contains(&self, id: &EventId) -> Result<bool, Self::Error> {
+        Ok(self.ids.contains(id))
+    }
+}
+impl Checkpoint {
+    pub fn for_reader<R: RangeRead + ?Sized>(
+        scope: [u8; 32],
+        authority: [u8; 32],
+        local: &R,
+        remote_revision: u64,
+    ) -> Result<Self, R::Error> {
+        Ok(Self {
+            scope,
+            authority,
+            local: local.revision(),
+            local_root: local.summary(Prefix::root())?,
+            remote_root: None,
+            remote: remote_revision,
+            pending: vec![Prefix::root()],
+            remote_view: None,
+            repair_after: None,
+            repair_anchors: Vec::new(),
+            repair_warm: false,
+            overlap_known: 0,
+            overlap_missing: 0,
+            blocked: BTreeSet::new(),
+            saturated: false,
+        })
+    }
+    pub fn valid_reader_binding<R: RangeRead + ?Sized>(
+        &self,
+        local: &R,
+        scope: [u8; 32],
+        view: [u8; 32],
+        authority: [u8; 32],
+        revision: u64,
+    ) -> Result<bool, R::Error> {
+        Ok(self.local_root == local.summary(Prefix::root())?
+            && self.local == local.revision()
+            && self.scope == scope
+            && self.authority == authority
+            && self.remote == revision
+            && self.remote_view.is_none_or(|v| v == view))
+    }
+    /// Reads all needed local facts before mutating discovery state. A failed
+    /// SQL read therefore retains the exact prefix for retry.
+    pub fn accept_reader<R: RangeRead + ?Sized>(
+        &mut self,
+        local: &R,
+        scope: [u8; 32],
+        view: [u8; 32],
+        authority: [u8; 32],
+        revision: u64,
+        frame: SummaryFrame,
+    ) -> Result<Result<Vec<EventId>, RemoteError<()>>, R::Error> {
+        if !self.valid_reader_binding(local, scope, view, authority, revision)? {
+            return Ok(Err(RemoteError::Invalidated));
+        }
+        let Some(prefix) = self.next_query() else {
+            return Ok(Err(RemoteError::InvalidFrame));
+        };
+        if frame.scope != scope
+            || frame.view != view
+            || frame.prefix != prefix
+            || !frame.valid_leaves()
+        {
+            return Ok(Err(RemoteError::InvalidFrame));
+        }
+        let equal = local.summary(prefix)? == frame.summary || frame.summary.count == 0;
+        if equal && frame.summary.count > 0 {
+            self.overlap_known = self
+                .overlap_known
+                .saturating_add(frame.summary.count as u64);
+        }
+        let mut missing = Vec::new();
+        if !equal {
+            for id in frame.leaves.iter().copied().chain(frame.singleton) {
+                if !local.contains(&id)? {
+                    self.overlap_missing = self.overlap_missing.saturating_add(1);
+                    missing.push(id);
+                } else {
+                    self.overlap_known = self.overlap_known.saturating_add(1);
+                }
+            }
+            if frame.leaves.is_empty()
+                && frame.singleton.is_none()
+                && prefix.bits() == 256
+                && frame.summary.count != 1
+            {
+                return Ok(Err(RemoteError::InvalidFrame));
+            }
+        }
+        if prefix.bits() == 0 {
+            self.remote_root = Some(frame.summary);
+        }
+        self.remote_view = Some(view);
+        self.pending.pop();
+        if !equal && frame.leaves.is_empty() && frame.singleton.is_none() {
+            if let Some([left, right]) = prefix.children() {
+                self.push_children(left, right);
+            } else {
+                missing.push(prefix.key());
+            }
+        }
+        Ok(Ok(missing))
+    }
+}
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    struct Reader {
+        index: RangeIndex,
+        fail: std::cell::Cell<bool>,
+    }
+    impl RangeRead for Reader {
+        type Error = &'static str;
+        fn revision(&self) -> u64 {
+            self.index.revision()
+        }
+        fn summary(&self, p: Prefix) -> Result<Summary, Self::Error> {
+            if self.fail.get() {
+                Err("storage unavailable")
+            } else {
+                Ok(self.index.summary(p))
+            }
+        }
+        fn contains(&self, id: &EventId) -> Result<bool, Self::Error> {
+            if self.fail.get() {
+                Err("storage unavailable")
+            } else {
+                Ok(self.index.ids.contains(id))
+            }
+        }
+    }
+    #[test]
+    fn failed_reader_does_not_consume_frontier_or_claim_equality() {
+        let local = Reader {
+            index: RangeIndex::default(),
+            fail: std::cell::Cell::new(false),
+        };
+        let mut remote = RangeIndex::default();
+        remote.insert([3; 32]);
+        let mut checkpoint =
+            Checkpoint::for_reader([1; 32], [2; 32], &local, remote.revision()).unwrap();
+        let frame = remote.frame([1; 32], [4; 32], Prefix::root());
+        local.fail.set(true);
+        assert!(
+            checkpoint
+                .accept_reader(
+                    &local,
+                    [1; 32],
+                    [4; 32],
+                    [2; 32],
+                    remote.revision(),
+                    frame.clone()
+                )
+                .is_err()
+        );
+        assert_eq!(checkpoint.next_query(), Some(Prefix::root()));
+        local.fail.set(false);
+        assert_eq!(
+            checkpoint
+                .accept_reader(&local, [1; 32], [4; 32], [2; 32], remote.revision(), frame)
+                .unwrap()
+                .unwrap(),
+            vec![[3; 32]]
+        );
+    }
+}
+
+impl Checkpoint {
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.pending
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Prefix>())
+            .saturating_add(self.blocked.len().saturating_mul(128))
+            .saturating_add(
+                std::mem::size_of::<Self>() + self.repair_anchors.capacity().saturating_mul(32),
+            )
+    }
+}
+
+impl Checkpoint {
+    fn push_children(&mut self, left: Prefix, right: Prefix) {
+        if self.pending.len() > 4094 {
+            self.saturated = true;
+        } else {
+            self.pending.push(right);
+            self.pending.push(left);
+        }
+    }
+}
+#[cfg(test)]
+mod bounded_frontier_tests {
+    use super::*;
+    #[test]
+    fn saturated_blocked_frontier_never_claims_completion_or_exceeds_bounds() {
+        let local = RangeIndex::default();
+        let mut cp = Checkpoint::for_remote([1; 32], [2; 32], &local, 0);
+        let ids: Vec<_> = (0..4097u64)
+            .map(|n| {
+                let mut id = [0; 32];
+                id[..8].copy_from_slice(&n.to_be_bytes());
+                id
+            })
+            .collect();
+        cp.mark_unavailable(&ids);
+        cp.defer_missing(&ids);
+        assert_eq!(cp.blocked.len(), 4096);
+        assert!(cp.pending.len() <= 4096);
+        assert!(cp.has_pending());
+        assert!(!cp.has_unblocked_pending());
+        assert!(cp.next_query().is_none());
+        cp.pending.clear();
+        assert!(
+            cp.has_pending(),
+            "saturation must not become an empty/equal proof"
+        );
+        assert!(cp.heap_bytes() >= 4096 * 128);
+    }
+    #[test]
+    fn pending_frontier_itself_saturates_without_unbounded_navigation_state() {
+        let local = RangeIndex::default();
+        let mut cp = Checkpoint::for_remote([1; 32], [2; 32], &local, 0);
+        let ids: Vec<_> = (0..5000u64)
+            .map(|n| {
+                let mut id = [0; 32];
+                id[..8].copy_from_slice(&n.to_be_bytes());
+                id
+            })
+            .collect();
+        cp.defer_missing(&ids);
+        assert_eq!(cp.pending.len(), 4096);
+        assert!(cp.has_pending());
+        assert!(!cp.has_unblocked_pending());
+    }
+}
+
+impl Checkpoint {
+    pub fn ordered_anchors(&self) -> &[EventId] {
+        &self.repair_anchors
+    }
+    pub fn ordered_is_warm(&self) -> bool {
+        self.repair_warm
+    }
+    pub fn begin_ordered_repair_with_anchors(&mut self, anchors: &[EventId]) {
+        self.begin_ordered_repair();
+        self.repair_anchors = anchors.iter().copied().take(32).collect();
+        self.repair_warm =
+            self.overlap_known >= 8 && self.overlap_known >= self.overlap_missing.saturating_mul(2);
+    }
+    pub fn begin_ordered_repair(&mut self) {
+        self.pending.clear();
+        self.blocked.clear();
+        self.saturated = false;
+        self.repair_after = Some(-1);
+    }
+    pub fn ordered_cursor(&self) -> Option<i64> {
+        self.repair_after
+    }
+    pub fn acknowledge_ordered_page(&mut self, next: i64, complete: bool) {
+        self.repair_anchors.clear();
+        self.repair_after = if complete { None } else { Some(next) };
+        if complete {
+            // Rank traversal is repair, not proof of the advertised Merkle root.
+            self.blocked.clear();
+            self.saturated = false;
+            self.pending = vec![Prefix::root()];
+        }
+    }
+}
+
+#[cfg(test)]
+mod ordered_repair_tests {
+    use super::*;
+    #[test]
+    fn ordered_progress_requires_acknowledgment_and_clears_blocked_frontier() {
+        let local = RangeIndex::default();
+        let mut cp = Checkpoint::for_remote([1; 32], [2; 32], &local, 0);
+        cp.overlap_known = 31;
+        cp.overlap_missing = 1;
+        cp.begin_ordered_repair_with_anchors(&[[4; 32]; 40]);
+        assert_eq!(cp.ordered_anchors().len(), 32);
+        assert!(cp.ordered_is_warm());
+        cp.mark_unavailable(&[[3; 32]]);
+        cp.begin_ordered_repair();
+        assert_eq!(cp.ordered_cursor(), Some(-1));
+        assert!(cp.has_pending() && cp.has_unblocked_pending());
+        let interrupted = cp.clone();
+        cp.acknowledge_ordered_page(99, false);
+        assert_eq!(interrupted.ordered_cursor(), Some(-1));
+        assert_eq!(cp.ordered_cursor(), Some(99));
+        cp.acknowledge_ordered_page(200, true);
+        assert_eq!(cp.ordered_cursor(), None);
+        assert!(cp.has_pending());
     }
 }

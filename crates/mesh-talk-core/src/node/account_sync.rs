@@ -4293,7 +4293,7 @@ impl Node {
                         attachment_owners.remove(&task);
                         active_attachments.remove(&id);
                         let generation = sibling_attachment_generations.remove(&task);
-                        if generation.is_some() && !sibling_attachments.get(&id).is_some_and(|selection| Some(selection.generation) == generation) {
+                        if generation.is_some() && sibling_attachments.get(&id).is_none_or(|selection| Some(selection.generation) != generation) {
                             #[cfg(test)]
                             let pending_before = self.account_sync_status.lock().unwrap()
                                 .get(&id).map(|status| status.pending_attachments);

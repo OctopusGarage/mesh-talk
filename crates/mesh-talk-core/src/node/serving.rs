@@ -855,8 +855,7 @@ impl Node {
                     )
                 });
                 if let Ok(channel) = accepted {
-                    node.serve_connection_with_capacity(channel, Some(capacity))
-                        .await;
+                    Box::pin(node.serve_connection_with_capacity(channel, Some(capacity))).await;
                 }
                 #[cfg(test)]
                 node.trace_account_client(&node.identity.public(), || {
@@ -873,7 +872,7 @@ impl Node {
     /// Direct protocol hosts own their own concurrent connection admission.
     /// The production listener supplies its retained semaphore capacity below.
     pub async fn serve_connection(self: &Arc<Self>, channel: SecureChannel<TcpStream>) {
-        self.serve_connection_with_capacity(channel, None).await;
+        Box::pin(self.serve_connection_with_capacity(channel, None)).await;
     }
 
     async fn serve_connection_with_capacity(
@@ -1134,7 +1133,18 @@ impl Node {
         // streamed have-chunks — so it needs the same idle timeout as the loop, or a peer that
         // sends one Request then stalls would pin this task (and its connection permit) forever.
         let mut range_state = super::session::range_sync::Service::default();
+        let mut recent_state = super::session::recent_history::Service::default();
         let result = tokio::time::timeout(SERVE_IDLE_TIMEOUT, async {
+            if let Some(result) = Box::pin(super::session::recent_history::serve(
+                &mut channel,
+                &store,
+                &mut recent_state,
+                &first,
+            ))
+            .await?
+            {
+                return Ok(result);
+            }
             if let Some(result) = Box::pin(super::session::range_sync::serve(
                 &mut channel,
                 &store,
@@ -1152,6 +1162,7 @@ impl Node {
         self.dispatch_received_sync_work(&store);
         if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
             range_state.retire(&store);
+            recent_state.retire(&store);
             return;
         }
         for _ in 0..MAX_SERVE_ROUNDS {
@@ -1163,6 +1174,16 @@ impl Node {
                     Ok(bytes) => bytes,
                     Err(_) => return Ok(Served::Closed),
                 };
+                if let Some(result) = Box::pin(super::session::recent_history::serve(
+                    &mut channel,
+                    &store,
+                    &mut recent_state,
+                    &bytes,
+                ))
+                .await?
+                {
+                    return Ok(result);
+                }
                 if let Some(result) = Box::pin(super::session::range_sync::serve(
                     &mut channel,
                     &store,
@@ -1183,6 +1204,7 @@ impl Node {
             }
         }
         range_state.retire(&store);
+        recent_state.retire(&store);
     }
 
     pub(in crate::node) fn request_reception_scope<'a, 'node>(
@@ -2636,8 +2658,9 @@ impl Node {
                 self.trace_account_client(&self.identity.public(), || {
                     format!("channel_recovery_plaintext_selected {channel:?}")
                 });
-                if let Err(error) = self.process_channel_recovery_local(channel) {
-                    local_failed = true;
+                let result = self.process_channel_recovery_local(channel);
+                local_failed = result.is_err();
+                if let Err(error) = result {
                     log::warn!("channel local recovery deferred: {error}");
                 }
             }

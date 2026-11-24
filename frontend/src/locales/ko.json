@@ -705,7 +705,17 @@
     "emptyMedia": "아직 사진이나 동영상이 없습니다.",
     "emptyFiles": "아직 파일이 없습니다.",
     "emptyLinks": "아직 링크가 없습니다.",
-    "noMatches": "이 대화에 일치하는 결과가 없습니다."
+    "noMatches": "이 대화에 일치하는 결과가 없습니다.",
+    "loadOlder": "Load older messages",
+    "retryRemote": "Retry history request",
+    "remote_loading": "Fetching recent messages…",
+    "remote_page": "Remote page received. Showing up to 500 local messages.",
+    "remote_preparing": "History is preparing. Retry when ready.",
+    "remote_blocked": "Some history is unavailable. Retry to continue; older pages may leave a gap.",
+    "remote_offline": "History source is offline. You can retry.",
+    "remote_reset": "History scope changed. Retry to start fresh.",
+    "remote_unsupported": "This peer does not support history paging.",
+    "retryRecent": "Retry recent messages"
   },
   "files": {
     "shortLabel": "파일",

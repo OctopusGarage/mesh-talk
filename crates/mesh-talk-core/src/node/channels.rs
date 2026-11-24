@@ -2734,10 +2734,10 @@ impl Node {
         if let Some(event) = transfer {
             let projection = self.account_group_projection(channel)?;
             if projection.ownership != Some(event)
-                || !projection
+                || projection
                     .state
                     .as_ref()
-                    .is_some_and(|state| state.owner() == new_owner)
+                    .is_none_or(|state| state.owner() != new_owner)
             {
                 return Err(NodeError::Channel(
                     "channel membership changed before ownership transfer completed".into(),

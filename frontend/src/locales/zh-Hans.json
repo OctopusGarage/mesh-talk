@@ -705,7 +705,17 @@
     "emptyMedia": "还没有图片或视频。",
     "emptyFiles": "还没有文件。",
     "emptyLinks": "还没有链接。",
-    "noMatches": "本会话中没有匹配项。"
+    "noMatches": "本会话中没有匹配项。",
+    "loadOlder": "加载更早消息",
+    "retryRemote": "重试历史记录请求",
+    "remote_loading": "正在获取最近消息…",
+    "remote_page": "已收到一页历史记录。最多显示 500 条本地消息。",
+    "remote_preparing": "历史记录正在准备中，请稍后手动重试。",
+    "remote_blocked": "部分历史记录暂不可用。加载更早消息可能仍有缺失；之后可重新获取最近消息。",
+    "remote_offline": "历史记录来源已离线，可手动重试。",
+    "remote_reset": "历史记录范围已变更，请重试以重新开始。",
+    "remote_unsupported": "此节点不支持历史记录分页。",
+    "retryRecent": "重新获取最近消息"
   },
   "files": {
     "shortLabel": "文件",

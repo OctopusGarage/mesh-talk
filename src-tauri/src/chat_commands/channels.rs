@@ -822,3 +822,27 @@ mod inventory_display_tests {
         );
     }
 }
+
+/// Explicit source-scoped recent/older history; never starts a full archive drain.
+#[tauri::command]
+pub async fn fetch_channel_history_page(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+    cursor: Option<String>,
+) -> Result<mesh_talk_core::node::RemoteHistoryPage, CommandError> {
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let page = runtime
+                    .handle()
+                    .fetch_channel_history_page(channel, cursor.as_deref())
+                    .await
+                    .map_err(CommandError::from)?;
+                admission.checked(runtime, || Ok(page))
+            })
+        })
+        .await
+}

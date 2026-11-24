@@ -101,3 +101,31 @@ Legacy budget exhaustion can interrupt an old-peer exchange; that channel is
 retired and follows the existing transport retry policy. It is not recycled as a
 clean `Limited` range turn. New-profile `More`/`Limited` retain the explicit fair
 continuation/sparse-repair behavior described above.
+
+### Separate recent navigation from causal completeness
+
+Remote recent/older pages use a distinct negotiated profile and the already
+qualified outgoing Message selection. Default 200 records are capped further by
+body bytes; membership, keys and dependency repair keep their existing lanes.
+A recent page never establishes whole-group equality or custody. Missing external
+parents keep canonical DAG admission strict: Blocked can expose older navigation
+across a reported gap, without acknowledging rejected records as durably present.
+The UI preserves the gap until an explicit fresh recent retry succeeds.
+
+Disk-spilling encrypted SQL range summaries remove the full-history RAM index
+barrier. They remain derived scoped data under selection lifetime, not cached
+permission authority across restart. All local reads succeed before a checkpoint
+frontier is advanced; storage errors are neither empty sets nor equality.
+
+Group range repair negotiates a v2 ordered dependency lane. Random ID discovery
+can encounter children before parents; ascending qualified source ranks repair
+those gaps without weakening DAG admission. Bounded parent anchors seek near
+the missing dependency, while an acknowledged page cursor preserves progress.
+Finishing that lane restarts Merkle comparison rather than asserting equality.
+The encrypted derived index uses a soft SQL quota separately from the hard RAM
+quota, so a large authorized group is not permanently excluded by idle caching.
+
+While an ordered forward repair is active, defer reverse preparation for that
+turn. This preserves its captured dependency prefix and avoids reconstructing an
+unfinished reverse plan against a newer logical generation. Resume the reverse
+lane after repair; neither deferral nor an exhausted repair page proves equality.

@@ -38,7 +38,7 @@ impl IndexedRelayState {
             let durable_cutoff = durable_cutoff.map(decode_time).transpose()?;
             scopes.iter().map(|conv| {
                 let metadata = self.mailbox_on(c, conv)?;
-                let first_seen = metadata.filter(|m| !m.retained.retiring && !durable_cutoff.is_some_and(|cutoff|m.first_seen<=cutoff) && m.first_seen.saturating_add(crate::postoffice::MAX_RELAY_AGE.as_secs()) > now).map(|m|m.first_seen);
+                let first_seen = metadata.filter(|m| !m.retained.retiring && durable_cutoff.is_none_or(|cutoff|m.first_seen>cutoff) && m.first_seen.saturating_add(crate::postoffice::MAX_RELAY_AGE.as_secs()) > now).map(|m|m.first_seen);
                 let (epoch,revision): (i64,i64) = c.prepare_cached("SELECT destructive_epoch,revision FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![RELAY_EVENTS.0.as_slice(),conv.as_bytes().as_slice()], |r|Ok((r.get(0)?,r.get(1)?))).optional()?.unwrap_or((0,0));
                 if epoch < 0 || revision < 0 { return Err(invalid("negative mailbox watch authority")); }
                 Ok(MailboxWatchToken { store_uuid, conversation:*conv, epoch, first_seen, revision })

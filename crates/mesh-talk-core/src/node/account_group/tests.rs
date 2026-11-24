@@ -25,10 +25,11 @@ pub(in crate::node) use selected_same_source_control_latency::ControlTestPages;
 // Cold authenticated fixture arrival is established before operation admission.
 // Keep its existing 30-second owner budget separate from the held 8-second
 // operation/progress assertions; this helper does not drive additional traffic.
-async fn cold_account_setup<T>(
+fn cold_account_setup<T>(
     future: impl std::future::Future<Output = T>,
-) -> Result<T, tokio::time::error::Elapsed> {
-    tokio::time::timeout(std::time::Duration::from_secs(30), future).await
+) -> impl std::future::Future<Output = Result<T, tokio::time::error::Elapsed>> {
+    // Box at construction so large fixture futures do not expand every caller.
+    tokio::time::timeout(std::time::Duration::from_secs(30), Box::pin(future))
 }
 
 // Functional provenance/convergence watchdog shared with explicit message

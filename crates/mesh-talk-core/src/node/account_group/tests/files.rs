@@ -1625,10 +1625,10 @@ async fn file_result_roundtrip(mode: u8) {
     );
     source.flush_channel_file(group, file).await;
     tokio::time::timeout(Duration::from_secs(8), async {
-        while !external
+        while external
             .file_progress(file)
             .unwrap()
-            .is_some_and(|progress| progress.done == progress.total)
+            .is_none_or(|progress| progress.done != progress.total)
         {
             // The native participant's separate file-pull producer drives this
             // same consent-checked public API; the accept loop does not own it.

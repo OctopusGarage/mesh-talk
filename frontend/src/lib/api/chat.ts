@@ -661,6 +661,13 @@ export const chat = {
       replyTo,
       expiresAtMs,
     }),
+  fetchChannelHistoryPage: (channelId: string, cursor: string | null = null) =>
+    invoke<{
+      status:
+        "page" | "preparing" | "blocked" | "unsupported" | "reset" | "offline";
+      applied: number;
+      cursor: string | null;
+    }>("fetch_channel_history_page", { channelId, cursor }),
   channelHistory: (channelId: string, limit: number) =>
     invoke<HistoryItem[]>("channel_history", { channelId, limit }),
   reactChannel: (

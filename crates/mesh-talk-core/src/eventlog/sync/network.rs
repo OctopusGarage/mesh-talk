@@ -301,6 +301,15 @@ pub trait NetworkSyncStore {
         after: Option<&Self::HaveCursor>,
         budget: IdPageBudget,
     ) -> Result<SyncPage<EventId, Self::HaveCursor>, LogError>;
+    fn ordered_repair_page(
+        &self,
+        _view: &Self::View,
+        _after: i64,
+        _anchors: &[EventId],
+        _budget: ExportPageBudget,
+    ) -> Result<Option<(Vec<Event>, i64, bool)>, LogError> {
+        Ok(None)
+    }
     fn requested_export(
         &self,
         _view: &Self::View,
@@ -323,6 +332,16 @@ pub trait NetworkSyncStore {
         _budget: IdPageBudget,
     ) -> Result<Option<SyncPage<EventId, i64>>, LogError> {
         Err(LogError::InvalidPageBudget)
+    }
+    /// One finite recent-message page, never whole-conversation equality.
+    fn recent_page(
+        &self,
+        _view: &Self::View,
+        _cursor: Option<&[u8]>,
+        _records: usize,
+        _bytes: usize,
+    ) -> Result<RecentPage, LogError> {
+        Ok(RecentPage::status(RecentStatus::Unsupported))
     }
     fn range_prepare(
         &self,
@@ -502,5 +521,31 @@ mod tests {
         };
         assert!(page.items.is_empty());
         assert!(page.next.is_some());
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RecentStatus {
+    Ready,
+    More,
+    Blocked,
+    Unsupported,
+    Reset,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RecentPage {
+    pub status: RecentStatus,
+    pub events: Vec<Event>,
+    pub next: Option<Vec<u8>>,
+    pub examined: usize,
+}
+impl RecentPage {
+    pub fn status(status: RecentStatus) -> Self {
+        Self {
+            status,
+            events: vec![],
+            next: None,
+            examined: 0,
+        }
     }
 }

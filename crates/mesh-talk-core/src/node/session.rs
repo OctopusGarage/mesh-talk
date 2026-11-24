@@ -22,6 +22,7 @@ mod have_budget;
 pub(crate) mod mailbox;
 pub(crate) mod mailbox_watch;
 pub(in crate::node) mod range_sync;
+pub(in crate::node) mod recent_history;
 use backend::*;
 use bincode::Options;
 pub use have_budget::RemoteHaveBudget;
@@ -306,6 +307,10 @@ fn decode(bytes: &[u8]) -> Result<SyncWire, SessionError> {
 const ATTACHMENT_WIRE_BASE: u32 = 32;
 
 #[derive(Serialize, Deserialize)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Names identify the existing signed-chunk compatibility profile"
+)]
 enum AttachmentWire {
     SignedChunkRequest {
         file: ConversationId,

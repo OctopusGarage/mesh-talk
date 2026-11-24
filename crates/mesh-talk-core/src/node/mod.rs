@@ -231,3 +231,6 @@ pub use favorites::{
     FavoriteFile, FavoriteInspection, FavoriteMessage, FavoriteMetadata, FavoriteSource,
     LanReviewText, MessageFavorite, MessageFavoriteList,
 };
+
+mod remote_history;
+pub use remote_history::{RemoteHistoryPage, RemoteHistoryStatus};

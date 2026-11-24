@@ -597,15 +597,24 @@ and at most 256 synchronous index insertions per host turn. These are operation
 ceilings, not measured wall-clock latency promises. Preparation that consumes
 rows returns continuation before starting the separate index phase.
 
-Derived range indexes reserve a conservative 1,024 bytes per admitted ID against
-a process-wide 32 MiB allowance (at most 32,768 IDs across all such indexes, not
-per group). SQL prepared-view cache admission is reduced to 32 MiB so the original
-64 MiB per-owner envelope is not silently doubled. Immutable snapshot Arc leases
-retain their reservation until the last reader retires; invalidated builders reset
-partial state. Capacity exhaustion is explicit limited work, never an unbounded
-legacy fallback or an empty/equal summary. This in-memory tier does not claim
-unlimited historical-group indexing; a future SQL-backed summary tier must honor
-the same view authorization and bounded query contracts.
+Production authorized range indexes now live in encrypted, disk-spilling
+participant SQL scratch, using its existing 8 MiB page cache instead of a full
+Rust ID tree. Canonical compressed branching/leaf rows are bounded by 2*N-1.
+A page inserts at most 32 IDs in one transaction; failure leaves the prior root
+unchanged. Queries use indexed key/first/last/leaf seeks, not full-set scans.
+Selection retirement and failed-builder reset reclaim rows in bounded slices;
+failed builders reuse their namespace instead of accumulating orphan generations.
+The prior process-wide 32 MiB RAM index admission ceiling therefore does not apply
+to production SQL indexes. The in-memory primitive still has explicit admission.
+
+Recent pages select at most 200 authorized Message IDs with descending indexed
+rank keysets and an immutable source cutoff, independently capped at 1,000 rows
+examined and 60 KiB encoded bodies. No OFFSET or full-history sort is used. The
+foreground action admits at most four preparation/page exchanges (eight RPCs)
+and stops at the first page, never follows older pages automatically. Preparing
+and missing-dependency states signal the existing recovery owner, not a new timer.
+No cold-start O(delta), unlimited disk or immediate ancestor-free rendering claim
+is made; source authorization preparation and causal repair remain required.
 
 Validation selectors: `range_` (including real production GuardedSyncStore and
 SecureChannel bidirectional/pool-refresh tests), `node::session::range_sync::tests`,
@@ -618,3 +627,15 @@ continuation/sparse-repair behavior described above.
 
 See [bounded synchronization verification](bounded-sync-verification.md) for the
 verified runtime scope, test profile and remaining cold-index limitations.
+
+Retained range plans account heap separately from derived SQL storage: enforce
+32 MiB idle heap, use a 512 MiB soft disk LRU and permit one oversized SQL plan
+to progress. Cache charges must be indexed scalar lookups, not repeated COUNT
+or SUM scans. Cap pending and blocked range frontiers at 4,096. Negotiated
+ordered causal repair uses at most 32 dependency anchors and bounded ascending
+source-rank windows; it must not replay an entire old prefix for every warm gap
+or declare equality before a fresh Merkle check.
+Cold authority replay may require many continuations when the fixture or real
+source appends during preparation. Measure actual cursor advancement separately
+from the number of More responses; increasing a test's convergence allowance
+must never increase production per-turn limits.
