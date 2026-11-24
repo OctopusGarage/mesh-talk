@@ -2316,8 +2316,10 @@ impl Node {
             destination,
             conversation,
             super::session_pool::AuthenticationAdmission::Backpressure,
+            None,
         )
         .await
+        .0
     }
 
     async fn transfer_delivery_destination_with_admission(
@@ -2326,7 +2328,8 @@ impl Node {
         destination: &DeliveryDestination,
         conversation: ConversationId,
         admission: super::session_pool::AuthenticationAdmission,
-    ) -> bool {
+        receipt_ready: Option<&tokio::sync::Notify>,
+    ) -> (bool, bool) {
         for fresh in [false, true] {
             let started = std::time::Instant::now();
             let dial = if fresh {
@@ -2338,7 +2341,7 @@ impl Node {
                     .await
             };
             let Ok((mut channel, reused)) = dial else {
-                return false;
+                return (false, false);
             };
             if !self.delivery_destination_allowed(destination)
                 || channel.peer_announcement().is_some_and(|p| {
@@ -2350,7 +2353,7 @@ impl Node {
                     .expect("delivery lock not poisoned")
                     .contains_work_event(destination.event.id)
             {
-                return false;
+                return (false, false);
             }
             let exchange = async {
                 let store = self.sync_store(channel.peer_identity());
@@ -2378,16 +2381,55 @@ impl Node {
             match exchange {
                 Ok(held) => {
                     self.observe_control_exchange(&channel, started);
+                    let held = held && self.delivery_destination_allowed(destination);
+                    if let Some(ready) = receipt_ready.filter(|_| held) {
+                        // Finish original reception promptly even if the early
+                        // control round is still in flight.
+                        self.emit_new_messages(conversation);
+                        ready.notified().await;
+                    }
+                    let follow_receipt = held
+                        && receipt_ready.is_some()
+                        && self.delivery_destination_allowed(destination)
+                        && self
+                            .delivery
+                            .lock()
+                            .expect("delivery lock not poisoned")
+                            .contains_work_event(destination.event.id);
+                    if follow_receipt {
+                        // Keep the exact authenticated stream after positive Have.
+                        // The enclosing attempt still owns its original deadline.
+                        let control = super::delivery_receipt::delivery_conversation_id(
+                            &self.identity.public(),
+                            &destination.device,
+                        );
+                        let store = self.sync_store(channel.peer_identity());
+                        let Some(_reception) = self.request_reception_scope(&store, &channel)
+                        else {
+                            return (held, false);
+                        };
+                        let result =
+                            super::session::request_round_paged(&mut channel, &store, control)
+                                .await;
+                        self.dispatch_received_sync_work(&store);
+                        self.emit_new_messages(control);
+                        if result.is_err() {
+                            return (held, false);
+                        }
+                    }
                     if held || conversation != destination.event.conversation_id {
                         self.recycle_sync_channel(channel);
                     }
-                    return held && self.delivery_destination_allowed(destination);
+                    return (
+                        held && self.delivery_destination_allowed(destination),
+                        follow_receipt,
+                    );
                 }
                 Err(error) if reused && super::session_pool::retryable_sync_error(&error) => {}
-                Err(_) => return false,
+                Err(_) => return (false, false),
             }
         }
-        false
+        (false, false)
     }
 
     pub(in crate::node) async fn replicate_delivery_destination(
@@ -3382,6 +3424,10 @@ impl Node {
             if let Some(peer) = direct_peer {
                 let outcome = self
                     .adaptive_control_timeout(&peer.public, async {
+                        let receipt_ready = tokio::sync::Notify::new();
+                        if !independent_receipts {
+                            receipt_ready.notify_one();
+                        }
                         let messages = async {
                             let held = self
                                 .transfer_delivery_destination_with_admission(
@@ -3389,9 +3435,12 @@ impl Node {
                                     destination,
                                     destination.event.conversation_id,
                                     super::session_pool::AuthenticationAdmission::RouteProgress,
+                                    Some(&receipt_ready),
                                 )
                                 .await;
-                            self.emit_new_messages(destination.event.conversation_id);
+                            if !held.0 {
+                                self.emit_new_messages(destination.event.conversation_id);
+                            }
                             held
                         };
                         let receipts = || async {
@@ -3404,6 +3453,7 @@ impl Node {
                                 destination,
                                 control,
                                 super::session_pool::AuthenticationAdmission::RouteProgress,
+                                None,
                             ))
                             .await;
                             self.emit_new_messages(control);
@@ -3415,8 +3465,13 @@ impl Node {
                             // by this one deadline/cancellation boundary and
                             // the shared TCP capacity. Only receipt validation
                             // may retire this exact destination as delivered.
-                            let held = tokio::join!(Box::pin(messages), receipts()).0;
+                            let (held, followed) = tokio::join!(Box::pin(messages), async {
+                                receipts().await;
+                                receipt_ready.notify_one();
+                            })
+                            .0;
                             if held
+                                && !followed
                                 && self
                                     .delivery
                                     .lock()
@@ -3433,8 +3488,8 @@ impl Node {
                         } else {
                             // Immediate flushes, own copies and receipt transfers
                             // keep their payload-before-control exchange contract.
-                            let held = messages.await;
-                            if held {
+                            let (held, followed) = messages.await;
+                            if held && !followed {
                                 receipts().await;
                             }
                             held

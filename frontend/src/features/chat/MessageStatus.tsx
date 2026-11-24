@@ -12,6 +12,7 @@ export function MessageStatus({
   label,
   icon,
   count,
+  caption,
   delivery,
   custody,
   testId = "message-status",
@@ -21,6 +22,7 @@ export function MessageStatus({
   label: string;
   icon: ReactNode;
   count?: string;
+  caption?: string;
   delivery?: string;
   custody?: number | "unknown";
   testId?: string;
@@ -54,7 +56,7 @@ export function MessageStatus({
         aria-controls={open ? id : undefined}
         onClick={() => setOpen((value) => !value)}
         onKeyDown={escape}
-        className="inline-flex min-h-6 min-w-6 shrink-0 items-center justify-center gap-0.5 rounded-sm px-1 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="inline-flex min-h-6 min-w-6 max-w-full shrink-0 items-center justify-center gap-0.5 rounded-sm px-1 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {icon}
         {count && (
@@ -62,7 +64,14 @@ export function MessageStatus({
             {count}
           </span>
         )}
-        <span className="sr-only">{label}</span>
+        {caption && (
+          <span
+            data-testid="delivery-pending-caption"
+            className="min-w-0 text-left [overflow-wrap:anywhere]"
+          >
+            {caption}
+          </span>
+        )}
       </button>
       {/* Reserve the scroll track before WebKit measures the wrapped flex row. */}
       {open && (

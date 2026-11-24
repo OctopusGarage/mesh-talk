@@ -558,7 +558,10 @@ existing retained-destination recovery owner, so either scope may complete while
 is blocked. Only exact authenticated recipient receipts establish Delivered;
 ordinary Have and opaque relay custody remain separate evidence. An empty early
 receipt round cannot settle a fresh send: after positive original custody, retain
-the existing bounded post-original control pull while that exact work remains.
+the bounded post-original control pull while that exact work remains. When the
+independent control round has already completed, the original exchange can issue
+that pull on its authenticated stream immediately after positive Have. An
+unavailable continuation falls back to the existing bounded control pull.
 Immediate best-effort flush retains payload-custody-before-control ordering,
 including file offers: a failed payload cannot start a receipt-control exchange.
 Retained automatic recovery independently polls all receipt-eligible originals,

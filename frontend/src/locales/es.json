@@ -367,7 +367,7 @@
       "postOffice": "La oficina de correos confirmó una copia almacenada",
       "local": "Ninguna copia de miembro confirmada",
       "one": "Última confirmación: 1 copia de un miembro",
-      "multiple": "Última confirmación: 2 o más copias de miembros",
+      "multiple": "Última confirmación: {{count}} copias de miembros",
       "unknown": "Estado de copias no disponible",
       "unknownHelp": "Este dispositivo aún no ha recibido datos de confirmación. Otro dispositivo vinculado puede tener información más reciente.",
       "help": "Una copia confirmada significa que un miembro externo informó de almacenamiento duradero a uno de tus dispositivos vinculados. Las copias pueden perderse después; no confirma entrega ni lectura."

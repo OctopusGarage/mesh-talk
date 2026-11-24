@@ -12051,6 +12051,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
     let held_requests = Arc::new(AtomicUsize::new(0));
     let control_requests = Arc::new(AtomicUsize::new(0));
     let empty_controls = Arc::new(AtomicUsize::new(0));
+    let same_stream_followup = Arc::new(AtomicBool::new(false));
     let exact_have = Arc::new(AtomicUsize::new(0));
     let empty_ready = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -12059,6 +12060,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
     // never runs a delivery producer or makes a reverse connection.
     let mut recipient_host = IndependentPeerRuntime::start_multithreaded_with(
         recipient.clone(), recipient_listener, {
+            let same_stream_followup = same_stream_followup.clone();
             let armed = armed.clone(); let held_requests = held_requests.clone();
             let control_requests = control_requests.clone(); let release = release.clone(); let entered = entered.clone();
             let empty_controls = empty_controls.clone(); let exact_have = exact_have.clone(); let empty_ready = empty_ready.clone();
@@ -12069,6 +12071,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                         accepted = listener.accept() => {
                             let (stream, _) = accepted.unwrap();
                             let node = node.clone(); let armed = armed.clone();
+                            let same_stream_followup = same_stream_followup.clone();
                             let held_requests = held_requests.clone(); let control_requests = control_requests.clone();
                             let release = release.clone(); let entered = entered.clone();
                             let empty_controls = empty_controls.clone(); let exact_have = exact_have.clone(); let empty_ready = empty_ready.clone();
@@ -12077,6 +12080,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                                 let Ok(mut channel) = node.privacy_accept(stream).await else { return; };
                                 let store = node.sync_store(channel.peer_identity());
                                 let Some(_reception) = node.request_reception_scope(&store, &channel) else { return; };
+                                let mut confirmed_original = false;
                                 while let Ok(bytes) = channel.recv().await {
                                     let scope = super::session::fingerprint_request_conversation(&bytes)
                                         .or_else(|| super::session::round_request_conversation(&bytes));
@@ -12090,7 +12094,12 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                                             ready.await;
                                         }
                                     }
-                                    if scope == Some(control) { control_requests.fetch_add(1, Ordering::SeqCst); }
+                                    if scope == Some(control) {
+                                        control_requests.fetch_add(1, Ordering::SeqCst);
+                                        if active && confirmed_original {
+                                            same_stream_followup.store(true, Ordering::SeqCst);
+                                        }
+                                    }
                                     if active && ((scope == Some(dm) && holds_messages)
                                         || (scope == Some(control) && case == ReceiptScopeCase::HeldReceipts)) {
                                         held_requests.fetch_add(1, Ordering::SeqCst);
@@ -12118,6 +12127,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                                                 empty_ready.notify_waiters();
                                             }
                                             if have.is_some_and(|(scope, event)| scope == dm && node.log.lock().unwrap().get(&event).unwrap().is_some()) {
+                                                confirmed_original = true;
                                                 exact_have.fetch_add(1, Ordering::SeqCst);
                                             }
                                         }
@@ -12246,6 +12256,8 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
             assert_eq!(sender.log.lock().unwrap().get(&receipt.destination.event.id).unwrap().unwrap(), receipt.destination.event);
             if case == ReceiptScopeCase::EmptyReceiptsFirst {
                 assert_eq!(empty_controls.load(Ordering::SeqCst), 1);
+                assert!(same_stream_followup.load(Ordering::SeqCst),
+                    "the post-original receipt query must reuse the connection that proved Have");
                 assert!(control_requests.load(Ordering::SeqCst) >= controls_before + 2,
                     "a first empty control result must be followed by a bounded post-original receipt round");
             }
