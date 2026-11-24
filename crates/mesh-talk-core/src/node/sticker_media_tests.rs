@@ -1014,23 +1014,21 @@ fn sticker_wire_server(
                 };
                 let store = node.serve_sync_store(channel.peer_identity());
                 while let Ok(frame) = channel.recv().await {
-                    let (proof, payload) = super::session::sticker_test_frame(&frame, file);
-                    payload_counter.fetch_add(payload, Ordering::Relaxed);
-                    // A recovery file-round request asks the source for image bytes.
-                    // Count it as traffic as well, so zero excludes both directions.
-                    let requests_body =
-                        super::session::round_request_conversation(&frame) == Some(file);
-                    if requests_body {
-                        payload_counter.fetch_add(1, Ordering::Relaxed);
+                    let kind = super::session::sticker_test_frame(&frame, file);
+                    if kind.proof {
+                        proof_counter.fetch_add(1, Ordering::Relaxed);
                     }
-                    if deny_image_body && (requests_body || payload > 0) {
+                    if legacy && (kind.proof || kind.signed_chunk_request) {
                         return;
                     }
-                    if proof {
-                        proof_counter.fetch_add(1, Ordering::Relaxed);
-                        if legacy {
-                            return;
-                        }
+                    // Both paged file rounds and exact signed chunk requests
+                    // obtain bytes. Availability and proof frames do not.
+                    payload_counter.fetch_add(
+                        kind.payload_bytes + usize::from(kind.requests_body),
+                        Ordering::Relaxed,
+                    );
+                    if deny_image_body && (kind.requests_body || kind.payload_bytes > 0) {
+                        return;
                     }
                     match super::session::serve_wire_bytes_paged(&mut channel, &store, &frame).await
                     {

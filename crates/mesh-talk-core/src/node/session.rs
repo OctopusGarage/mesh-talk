@@ -214,31 +214,67 @@ pub(in crate::node) fn fingerprint_request_conversation(bytes: &[u8]) -> Option<
 }
 
 #[cfg(test)]
-pub(super) fn sticker_test_frame(bytes: &[u8], file: ConversationId) -> (bool, usize) {
-    let (proof, events) = match decode(bytes) {
-        Ok(SyncWire::StickerFileConsentRequest { headers, .. }) => (true, headers),
-        Ok(SyncWire::StickerFileProofRequest { .. }) => (true, vec![]),
-        Ok(SyncWire::StickerFileProofResponse { headers, .. }) => {
-            (true, headers.unwrap_or_default())
+#[derive(Default)]
+pub(super) struct StickerTestFrame {
+    pub proof: bool,
+    pub payload_bytes: usize,
+    pub requests_body: bool,
+    pub signed_chunk_request: bool,
+}
+
+#[cfg(test)]
+pub(super) fn sticker_test_frame(bytes: &[u8], file: ConversationId) -> StickerTestFrame {
+    let mut frame = StickerTestFrame::default();
+    let events = match decode(bytes) {
+        Ok(SyncWire::StickerFileConsentRequest { headers, .. }) => {
+            frame.proof = true;
+            headers
         }
-        Ok(SyncWire::Response(response)) => (false, response.events),
+        Ok(SyncWire::StickerFileProofRequest { .. }) => {
+            frame.proof = true;
+            return frame;
+        }
+        Ok(SyncWire::StickerFileProofResponse { headers, .. }) => {
+            frame.proof = true;
+            headers.unwrap_or_default()
+        }
+        Ok(SyncWire::Response(response)) => response.events,
         Ok(
-            SyncWire::Followup(frame)
-            | SyncWire::FollowupV2(frame)
-            | SyncWire::FollowupV3(frame)
-            | SyncWire::FollowupV4(frame)
-            | SyncWire::FollowupV5(frame),
-        ) => (false, frame.events),
-        _ => return (false, 0),
+            SyncWire::Followup(followup)
+            | SyncWire::FollowupV2(followup)
+            | SyncWire::FollowupV3(followup)
+            | SyncWire::FollowupV4(followup)
+            | SyncWire::FollowupV5(followup),
+        ) => followup.events,
+        Ok(
+            SyncWire::Request(request)
+            | SyncWire::RequestV2(request)
+            | SyncWire::RequestV3(request)
+            | SyncWire::RequestV4(request)
+            | SyncWire::RequestV5(request),
+        ) => {
+            frame.requests_body = request.conversation == file;
+            return frame;
+        }
+        Ok(SyncWire::SignedChunkRequest {
+            file: requested, ..
+        }) => {
+            frame.signed_chunk_request = true;
+            frame.requests_body = requested == file;
+            return frame;
+        }
+        Ok(SyncWire::SignedChunkAvailabilityRequest { .. }) => {
+            frame.signed_chunk_request = true;
+            return frame;
+        }
+        _ => return frame,
     };
-    (
-        proof,
-        events
-            .iter()
-            .filter(|event| event.conversation_id == file)
-            .map(|event| event.ciphertext.len())
-            .sum(),
-    )
+    frame.payload_bytes = events
+        .iter()
+        .filter(|event| event.conversation_id == file)
+        .map(|event| event.ciphertext.len())
+        .sum();
+    frame
 }
 
 #[cfg(test)]
