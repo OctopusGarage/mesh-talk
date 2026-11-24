@@ -98,7 +98,7 @@ impl TranscriptRepository {
         ordinal: i64,
     ) -> Result<Option<StoredRow>, LogError> {
         self.profile.database().read(|c| {
-            let mut statement = c.prepare(&format!(
+            let mut statement = c.prepare_cached(&format!(
                 "SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND ordinal=?2"
             ))?;
             let mut rows = statement.query(params![self.kind, ordinal])?;

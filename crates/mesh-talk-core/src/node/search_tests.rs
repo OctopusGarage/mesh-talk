@@ -896,24 +896,23 @@ fn recent_search_global_limit_matches_full_order_across_conversations() {
         }
     }
     let all = node.search_recent("token").unwrap();
-    let limited = node.search_recent_limited("token", 4).unwrap();
-    assert_eq!(
-        limited
-            .hits
-            .iter()
-            .map(|hit| (&hit.reference, hit.hit.wall_clock))
-            .collect::<Vec<_>>(),
-        all.hits[..4]
-            .iter()
-            .map(|hit| (&hit.reference, hit.hit.wall_clock))
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        node.search_recent_limited("token", 0)
-            .unwrap()
-            .hits
-            .is_empty()
-    );
+    assert_eq!(all.hits.len(), 6);
+    for limit in 0..=all.hits.len() + 1 {
+        let limited = node.search_recent_limited("token", limit).unwrap();
+        assert_eq!(
+            limited
+                .hits
+                .iter()
+                .map(|hit| (&hit.reference, hit.hit.wall_clock))
+                .collect::<Vec<_>>(),
+            all.hits
+                .iter()
+                .take(limit)
+                .map(|hit| (&hit.reference, hit.hit.wall_clock))
+                .collect::<Vec<_>>(),
+            "global prefix must preserve equal-timestamp ordering at limit {limit}"
+        );
+    }
 }
 
 #[tokio::test]

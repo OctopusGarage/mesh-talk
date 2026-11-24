@@ -1532,10 +1532,13 @@ case-insensitively. Accepted pending transactions and sibling-copy deduplication
 follow the owning history projection. Returned matches sort newest wall-clock
 first; ties within a conversation retain reverse canonical history order.
 Missing matches do not establish absence from all retained or remote history.
-Canonical history scans borrowed retained metadata and copies message content
-only for the selected window. Identity deduplication and channel causal ordering
-still require metadata proportional to retention; this is not a constant-cost,
-paged or complete retained-history search.
+Canonical history uses persistent ranks to select the recent window before
+loading transcript bodies. Point reads reuse the connection's prepared SQL
+for ordinal and body lookups. Each execution reads and validates the current
+row. Initial or invalidated rank preparation can still
+traverse broader history to establish identity deduplication and causal order.
+This is a recent-window search. Its cost depends on the number of eligible
+conversations, selected bodies and whether their ranks are ready.
 
 `Node::search_context` resolves an exact reference through the same conversation
 eligibility and canonical history owners. Missing, zero, expired or recalled
@@ -1543,8 +1546,8 @@ targets are unavailable. A found context contains the target and up to 25
 neighbors on each side in canonical order, plus the number of entries after the
 target. Recalled neighbors retain only their tombstone; their re-edit plaintext
 is omitted. Context reads do not change cache coverage, unread state or delivery.
-The output window contains at most 51 decoded history rows. Retained identity
-selection and ordering have the same metadata traversal cost as recent search.
+The output window contains at most 51 decoded history rows and uses the same
+canonical rank owner as recent search.
 
 Desktop `owner_search_recent` and `owner_search_context` capture explicit session
 ownership before queued work and recheck it before publication. References are
@@ -1554,12 +1557,13 @@ Queries accept at most 4,096 UTF-8 bytes. Search returns a newest-first prefix
 with at most 200 hits and 1 MiB of serialized output, setting `truncated` when
 either result budget omits matches. The desktop uses
 `Node::search_recent_limited` with a 201-hit budget so one extra match establishes
-truncation without accumulating every conversation's matching plaintext. The
-current conversation's 2,000-entry projection is processed separately; retained
-metadata scans still cover eligible conversations. Context returns at most 51 rows and 1 MiB;
-a response exceeding its byte budget becomes unavailable with no rows. Limits
-do not establish complete retained-history coverage. Keys, raw errors and
-message content do not enter diagnostics.
+truncation. The capped search retains at most 201 results during collection
+and skips text matching if a row cannot beat the current cutoff. Equal
+timestamps preserve conversation traversal and reverse canonical order.
+Each eligible conversation still resolves its own history window. Context
+returns at most 51 rows and 1 MiB. A response exceeding its byte budget becomes
+unavailable with no rows. Keys, raw errors and message content do not enter
+diagnostics.
 
 The desktop SearchDialog uses these owner-scoped commands through typed adapters.
 Each selected result retains its namespace and canonical message ID. Exact

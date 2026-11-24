@@ -1238,7 +1238,7 @@
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
           },
           {
-            "name": "Recent search and exact context decode only selected canonical rows while preserving deduplication, pending acceptance, recovery, expiry and recall; retained metadata scans do not imply constant-cost or complete search",
+            "name": "Recent search and exact context hydrate selected canonical ranks while preserving deduplication, pending acceptance, recovery, expiry and recall. Capped search retains the same stable prefix as uncapped search while bounding accumulated hits.",
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
           },
           {

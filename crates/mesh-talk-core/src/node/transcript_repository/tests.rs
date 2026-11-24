@@ -1391,6 +1391,42 @@ fn warm_metadata_reads_reuse_statements_and_observe_current_rows() {
         1
     );
     assert_eq!(repository.body_reads(), 0);
+
+    let existing = repository
+        .header_scan_page(Some(&conv(1)), None, TranscriptPageLimit::default())
+        .unwrap()
+        .rows[0]
+        .ordinal;
+    let removed = current.rows[0].ordinal;
+    owner
+        .database()
+        .read(|c| {
+            c.flush_prepared_statement_cache();
+            Ok(())
+        })
+        .unwrap();
+    for _ in 0..4 {
+        let row = repository.row_by_ordinal(existing).unwrap().unwrap();
+        assert_eq!(row.header.sequence, 1);
+        assert!(repository.row_by_ordinal(removed).unwrap().is_none());
+    }
+    assert_eq!(repository.body_reads(), 4);
+    let ordinal_statement =
+        format!("SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND ordinal=?2");
+    let runs = owner
+        .database()
+        .read(|c| {
+            Ok([
+                c.prepare_cached(&ordinal_statement)?
+                    .get_status(StatementStatus::Run),
+                c.prepare_cached(
+                    "SELECT sender,plaintext FROM transcript_bodies WHERE ordinal=?1",
+                )?
+                .get_status(StatementStatus::Run),
+            ])
+        })
+        .unwrap();
+    assert_eq!(runs, [8, 4], "point reads must reuse both SQL programs");
 }
 
 #[test]
