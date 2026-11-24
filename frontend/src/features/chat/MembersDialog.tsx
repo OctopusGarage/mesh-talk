@@ -375,6 +375,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
         <Button
           variant="ghost"
           size="icon"
+          aria-label={t("members.trigger")}
           title={t("members.trigger")}
           data-testid="members-trigger"
         >

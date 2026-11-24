@@ -88,6 +88,7 @@ export function CallButtons({
           size="icon"
           disabled={!canCall}
           data-testid="conversation-call-voice"
+          aria-label={t("call.voice")}
           title={canCall ? t("call.voice") : t("call.offlineHint")}
           onClick={(event) => start(false, event.currentTarget)}
         >
@@ -98,6 +99,7 @@ export function CallButtons({
           size="icon"
           disabled={!canCall}
           data-testid="conversation-call-video"
+          aria-label={t("call.video")}
           title={canCall ? t("call.video") : t("call.offlineHint")}
           onClick={(event) => start(true, event.currentTarget)}
         >
@@ -409,6 +411,7 @@ export function CallDialog() {
                           variant="secondary"
                           size="icon"
                           onClick={() => toggleMic()}
+                          aria-label={micOn ? t("call.mute") : t("call.unmute")}
                           title={micOn ? t("call.mute") : t("call.unmute")}
                           data-testid="call-toggle-mic"
                         >
@@ -423,6 +426,9 @@ export function CallDialog() {
                             variant="secondary"
                             size="icon"
                             onClick={() => toggleCam()}
+                            aria-label={
+                              camOn ? t("call.cameraOff") : t("call.cameraOn")
+                            }
                             title={
                               camOn ? t("call.cameraOff") : t("call.cameraOn")
                             }

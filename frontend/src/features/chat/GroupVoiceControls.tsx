@@ -1,4 +1,4 @@
-import { Phone, PhoneIncoming } from "lucide-react";
+import { Mic, MicOff, Phone, PhoneIncoming } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -96,20 +96,28 @@ export function GroupVoiceControls() {
   const { t } = useTranslation();
   const { active, audio, muted, error } = useGroupVoice();
   if (!active && !error) return null;
+  const muteAction = t(muted ? "groupVoice.unmute" : "groupVoice.mute");
+  const MicIcon = muted ? MicOff : Mic;
   return (
     <section
       aria-label={t("groupVoice.title")}
-      className="absolute bottom-6 right-6 z-40 rounded-lg border bg-popover p-4 text-popover-foreground shadow-elevation"
+      className="absolute bottom-6 right-6 z-40 max-w-[calc(100%-3rem)] space-y-2 rounded-lg border bg-popover p-3 text-popover-foreground shadow-elevation"
     >
       {active && (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span role="status">
             {active.joining ? t("groupVoice.joining") : t("groupVoice.title")}
           </span>
-          <Button onClick={muteGroupVoice} aria-pressed={muted}>
-            {muted ? t("groupVoice.unmute") : t("groupVoice.mute")}
+          <Button
+            variant="secondary"
+            size="icon"
+            onClick={muteGroupVoice}
+            aria-label={muteAction}
+            title={muteAction}
+          >
+            <MicIcon aria-hidden="true" />
           </Button>
-          <Button onClick={() => stopGroupVoice(true)}>
+          <Button variant="secondary" onClick={() => stopGroupVoice(true)}>
             {t("groupVoice.leave")}
           </Button>
           {active.host && (
@@ -123,8 +131,10 @@ export function GroupVoiceControls() {
         </div>
       )}
       {error && (
-        <div className="flex items-center gap-2">
-          <span role="alert">{t(error)}</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span role="alert" className="min-w-0 break-words">
+            {t(error)}
+          </span>
           <Button onClick={() => useGroupVoice.setState({ error: null })}>
             {t("groupVoice.dismiss")}
           </Button>
