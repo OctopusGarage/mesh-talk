@@ -1,0 +1,61 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M86H8P95KEVSZRCGVS9JW1YH",
+  "strategy": "manual-commit",
+  "branch": "integrate/session-20261124",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "crates/mesh-talk-core/src/eventlog/repository/network.rs",
+    "crates/mesh-talk-core/src/eventlog/repository/network/tests.rs",
+    "crates/mesh-talk-core/src/eventlog/sync.rs",
+    "crates/mesh-talk-core/src/eventlog/sync/network.rs",
+    "crates/mesh-talk-core/src/eventlog/sync/range.rs",
+    "crates/mesh-talk-core/src/eventlog/sync/range/index.rs",
+    "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
+    "crates/mesh-talk-core/src/node/channels.rs",
+    "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+    "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs",
+    "crates/mesh-talk-core/src/node/privacy_sync/network.rs",
+    "crates/mesh-talk-core/src/node/privacy_sync/prepared_views.rs",
+    "crates/mesh-talk-core/src/node/privacy_sync/principal.rs",
+    "crates/mesh-talk-core/src/node/serving.rs",
+    "crates/mesh-talk-core/src/node/session.rs",
+    "crates/mesh-talk-core/src/node/session/backend.rs",
+    "crates/mesh-talk-core/src/node/session/mailbox.rs",
+    "crates/mesh-talk-core/src/node/session/paged_tests.rs",
+    "crates/mesh-talk-core/src/node/session/range_sync.rs",
+    "docs/bounded-sync-verification.md",
+    "docs/decisions.md",
+    "docs/performance-requirements.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1347,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 160384,
+    "output_tokens": 423,
+    "api_call_count": 1
+  },
+  "redaction": {
+    "replacements": 753,
+    "layers": {
+      "betterleaks": 53,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 75,
+      "credentialed_uri": 0,
+      "entropy": 627,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
