@@ -1,0 +1,79 @@
+这个应该用图标吧，怎么用文字这么丑，分析清楚改掉吧，continue；continue；continue；continue；continue；continue；continue；continue；
+
+[Attached image "55555.jpg" is saved at: /Users/kingsonwu/.t3/userdata/attachments/9fbeff35-b275-4d28-827e-0793705b1548-21f5b88f-8c76-464d-aee8-853ea9f3a4b0.jpg]
+
+---
+
+提交了没，continue；continue；continue；continue；
+
+---
+
+全面分析一下整个app的界面按钮和交互，看看哪些不合理不优雅不专业的，都修掉，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+optimise all of them
+
+---
+
+提交，continue；continue；continue；continue；
+
+---
+
+重新看下全部30个需求，看看接下来做哪一个需求，analyze；analyze；analyze；analyze；analyze；
+
+---
+
+start next requirement
+
+---
+
+按照建议实现，continue；continue；continue；continue；continue；
+
+---
+
+If finish continue next requirement
+
+---
+
+If all finish. verify and commit and then continue next requirement
+
+---
+
+REQ-026 是什么需求？analyze；analyze；analyze；
+
+---
+
+REQ-026 整理一下需求，然后放到roadmap吧，以后再实现，continue，next one;next one;next one;next one;next one;
+
+---
+
+REQ-027（移动端 PWA） 整理一下需求，然后放到roadmap吧，以后再实现，continue，next one;next one;next one;next one;next one;
+
+---
+
+REQ-028「贡献激励与资源优先级」 整理一下需求，然后放到roadmap吧，以后再实现，continue，next one;next one;next one;next one;next one;
+
+---
+
+REQ-030 是什么需求？analyze；analyze；analyze；
+
+---
+
+REQ-030等下再看，还有其他需求没处理吗，analyst；analyst；analyst；analyst；analyst；analyst；
+
+---
+
+REQ-009
+
+---
+
+所以做完了？？analyze；analyze；analyze；
+
+---
+
+还有其他需求没处理吗，analyst；analyst；analyst；analyst；analyst；analyst；
+
+---
+
+commit and see next one
