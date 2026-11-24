@@ -5,7 +5,7 @@ use crate::legacy_event::{ConversationId, Event, EventId};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 
-const MAX_PLAINTEXT: usize = 65_519;
+pub(crate) const MAX_PLAINTEXT: usize = 65_519;
 
 /// Sent by the peer initiating sync: "for this conversation, here are the ids I have."
 #[derive(Debug, Clone, Serialize, Deserialize)]

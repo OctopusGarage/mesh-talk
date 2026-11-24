@@ -7,7 +7,7 @@ use crate::legacy_wire::{
     self, FpRequest, FpResponse, HaveChunk, SyncFollowup, SyncRequest, SyncWire,
 };
 use crate::legacy_wire::{FileConsentStatus, SyncResponse};
-use crate::session::ReconciliationSession;
+use crate::session::{self, HaveError, HaveLimits, HaveSource, ReconciliationSession};
 use std::collections::HashSet;
 use std::ops::Deref;
 
@@ -24,11 +24,61 @@ pub enum RoundFault {
 }
 
 fn encode_frame(wire: &SyncWire) -> Result<Vec<u8>, RoundFault> {
-    legacy_wire::encode(wire).map_err(RoundFault::Wire)
+    let bytes = legacy_wire::encode(wire).map_err(RoundFault::Wire)?;
+    if bytes.len() > legacy_wire::MAX_PLAINTEXT {
+        return Err(RoundFault::Wire("oversized sync frame".into()));
+    }
+    Ok(bytes)
 }
 
 fn decode_frame(bytes: &[u8]) -> Result<SyncWire, RoundFault> {
     legacy_wire::decode(bytes).map_err(RoundFault::Wire)
+}
+
+/// The sender of an inventory stream in a legacy reconciliation exchange.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HaveSender {
+    Requester,
+    Responder,
+}
+
+impl HaveSender {
+    pub fn encode(
+        self,
+        scope: ConversationId,
+        page: crate::session::HaveFrame<EventId>,
+    ) -> Result<Vec<u8>, RoundFault> {
+        let chunk = HaveChunk {
+            conversation: scope,
+            ids: page.ids,
+            more: page.more,
+        };
+        encode_frame(&match self {
+            Self::Requester => SyncWire::ReqHave(chunk),
+            Self::Responder => SyncWire::RespHave(chunk),
+        })
+    }
+
+    /// Reject a stream page from the other role or a different conversation.
+    pub fn decode(
+        self,
+        scope: ConversationId,
+        bytes: &[u8],
+    ) -> Result<crate::session::HaveFrame<EventId>, RoundFault> {
+        let chunk = match (self, decode_frame(bytes)?) {
+            (Self::Requester, SyncWire::ReqHave(chunk))
+            | (Self::Responder, SyncWire::RespHave(chunk))
+                if chunk.conversation == scope =>
+            {
+                chunk
+            }
+            _ => return Err(RoundFault::UnexpectedMessage),
+        };
+        Ok(crate::session::HaveFrame {
+            ids: chunk.ids,
+            more: chunk.more,
+        })
+    }
 }
 
 /// Scalar metadata from a finite owned view or an exactly qualified probe cache.
@@ -92,20 +142,23 @@ pub trait RoundBackend<E> {
     ) -> Result<bool, E>;
     fn quiet_comparison_token(&self, view: &Self::View) -> Result<Option<[u8; 32]>, E>;
     fn retain_quiet_comparison(&self, view: &Self::View, hint: QuietComparison) -> Result<(), E>;
-    async fn send_have_pages(
+    type HaveReservation;
+    type HaveCursor;
+
+    fn have_limits(&self) -> HaveLimits;
+    fn have_source<'a>(
+        &'a self,
+        view: &'a Self::View,
+    ) -> impl HaveSource<Id = EventId, Cursor = Self::HaveCursor, Error = E> + 'a;
+    fn reserve_remote_have(&self) -> Result<Self::HaveReservation, E>;
+    fn collect_remote_have(
         &self,
-        session: &mut impl ReconciliationSession<Peer = Self::Peer, Error = E>,
-        view: &Self::View,
-        conversation: ConversationId,
-        wrap: fn(HaveChunk) -> SyncWire,
-    ) -> Result<(), E>;
-    async fn receive_have(
-        &self,
-        session: &mut impl ReconciliationSession<Peer = Self::Peer, Error = E>,
-        conversation: ConversationId,
-        requester: bool,
+        ids: Vec<EventId>,
+        reservation: Self::HaveReservation,
         compare: bool,
     ) -> Result<Self::RemoteHave, E>;
+    fn have_error(&self, error: HaveError<E>) -> E;
+    async fn yield_inventory_work(&self);
     async fn intersection_count(
         &self,
         view: &Self::View,
@@ -114,13 +167,89 @@ pub trait RoundBackend<E> {
     fn comparison_fingerprint(&self, remote: &Self::RemoteHave) -> Option<[u8; 32]>;
     fn apply(&self, events: &[Event]) -> Result<ApplyReport, E>;
     fn admission_denied(&self) -> bool;
-    async fn select_export_frames(
+    /// Select bounded event batches from the currently authorized view.
+    async fn select_export_batches(
         &self,
         view: &Self::View,
-        scope: ConversationId,
         remote: &Self::RemoteHave,
         max_frames: usize,
-    ) -> Result<Vec<SyncFollowup>, E>;
+        encoded_per_frame: usize,
+    ) -> Result<Vec<Vec<Event>>, E>;
+}
+
+/// Maximum encoded event bytes common to a legacy Response and Followup.
+/// Compute the envelope overhead from the wire codec so storage adapters do
+/// not need to know the framing or reserve bytes for the wrong variant.
+pub fn event_frame_budget(scope: ConversationId) -> Result<usize, RoundFault> {
+    let overhead = encode_frame(&SyncWire::Response(SyncResponse {
+        conversation: scope,
+        events: vec![],
+        have: vec![],
+    }))?
+    .len();
+    Ok(legacy_wire::MAX_PLAINTEXT - overhead)
+}
+
+fn validate_export(
+    scope: ConversationId,
+    batches: &[Vec<Event>],
+    max_frames: usize,
+) -> Result<(), RoundFault> {
+    if batches.len() > max_frames
+        || batches
+            .iter()
+            .flatten()
+            .any(|event| event.conversation_id != scope)
+    {
+        return Err(RoundFault::UnexpectedMessage);
+    }
+    Ok(())
+}
+
+async fn send_have_pages<B, S, E>(
+    backend: &B,
+    channel: &mut S,
+    view: &B::View,
+    scope: ConversationId,
+    sender: HaveSender,
+) -> Result<(), E>
+where
+    B: RoundBackend<E>,
+    S: ReconciliationSession<Peer = B::Peer, Error = E>,
+    E: From<RoundFault>,
+{
+    let expected = backend.have_count(backend.advertised_count(view)? as u64)?;
+    session::send_have(
+        channel,
+        &mut backend.have_source(view),
+        expected,
+        backend.have_limits(),
+        |frame| sender.encode(scope, frame).map_err(E::from),
+        || backend.yield_inventory_work(),
+    )
+    .await
+    .map_err(|error| backend.have_error(error))
+}
+
+async fn receive_have<B, S, E>(
+    backend: &B,
+    channel: &mut S,
+    scope: ConversationId,
+    sender: HaveSender,
+    compare: bool,
+) -> Result<B::RemoteHave, E>
+where
+    B: RoundBackend<E>,
+    S: ReconciliationSession<Peer = B::Peer, Error = E>,
+    E: From<RoundFault>,
+{
+    let reservation = backend.reserve_remote_have()?;
+    let ids = session::receive_have(channel, backend.have_limits(), |bytes| {
+        sender.decode(scope, bytes).map_err(E::from)
+    })
+    .await
+    .map_err(|error| backend.have_error(error))?;
+    backend.collect_remote_have(ids, reservation, compare)
 }
 
 pub type Probe<View> = (SyncMetadata, Option<View>);
@@ -317,9 +446,14 @@ impl SyncProgress {
                 SyncWire::Request(request)
             })?)
             .await?;
-        backend
-            .send_have_pages(channel, &have_view, conversation, SyncWire::ReqHave)
-            .await?;
+        send_have_pages(
+            backend,
+            channel,
+            &have_view,
+            conversation,
+            HaveSender::Requester,
+        )
+        .await?;
 
         // Response carries the (bounded) events; the responder's have is streamed after.
         let response = match decode_frame(&channel.recv().await?)? {
@@ -344,14 +478,14 @@ impl SyncProgress {
             return Err(RoundFault::UnexpectedMessage.into());
         }
         self.received_wire_total += response.events.len();
-        let remote_have = backend
-            .receive_have(
-                channel,
-                conversation,
-                false,
-                comparison_token.is_some() && self.received_wire_total == 0,
-            )
-            .await?;
+        let remote_have = receive_have(
+            backend,
+            channel,
+            conversation,
+            HaveSender::Responder,
+            comparison_token.is_some() && self.received_wire_total == 0,
+        )
+        .await?;
         self.remote_have_count = Some(backend.intersection_count(&have_view, &remote_have).await?);
         let report = backend.apply(&response.events)?;
         if backend.admission_denied() {
@@ -367,26 +501,32 @@ impl SyncProgress {
             backend.open_prepared_view(&conversation).await?
         };
         let mut followups = backend
-            .select_export_frames(&outgoing_view, conversation, &remote_have, max_followups)
+            .select_export_batches(
+                &outgoing_view,
+                &remote_have,
+                max_followups,
+                event_frame_budget(conversation)?,
+            )
             .await?;
+        validate_export(conversation, &followups, max_followups)?;
         let made_progress = report.applied > 0;
         // New controls may arrive after the fingerprint probe. Complete this
         // round empty and restart with the required capability before sending.
         let needs_v3 = followups
             .iter()
-            .flat_map(|frame| &frame.events)
+            .flatten()
             .any(|event| !supports_event_kind(event.kind, true, false, false, false));
         let needs_v4 = followups
             .iter()
-            .flat_map(|frame| &frame.events)
+            .flatten()
             .any(|event| !supports_event_kind(event.kind, true, true, false, false));
         let needs_v5 = followups
             .iter()
-            .flat_map(|frame| &frame.events)
+            .flatten()
             .any(|event| event.kind == EventKind::ChannelMetadata);
         let unsupported = followups
             .iter()
-            .flat_map(|frame| &frame.events)
+            .flatten()
             .any(|event| !supports_event_kind(event.kind, self.v2, self.v3, self.v4, self.v5));
         if unsupported {
             let empty = SyncFollowup {
@@ -430,21 +570,16 @@ impl SyncProgress {
             return Err(RoundFault::NoProgress.into());
         }
         let more_to_push = !followups.is_empty();
-        self.pushed_total += followups
-            .iter()
-            .map(|frame| frame.events.len())
-            .sum::<usize>();
-        self.previous_push = followups
-            .iter()
-            .flat_map(|frame| frame.events.iter().map(|event| event.id))
-            .collect();
+        self.pushed_total += followups.iter().map(Vec::len).sum::<usize>();
+        self.previous_push = followups.iter().flatten().map(|event| event.id).collect();
         if followups.is_empty() {
-            followups.push(SyncFollowup {
-                conversation,
-                events: Vec::new(),
-            });
+            followups.push(Vec::new());
         }
-        for followup in followups {
+        for events in followups {
+            let followup = SyncFollowup {
+                conversation,
+                events,
+            };
             backend.validate_view(&outgoing_view)?;
             channel
                 .send(&encode_frame(&if self.v5 {
@@ -561,6 +696,17 @@ fn unsupported_metadata(m: SyncMetadata, v2: bool, v3: bool, v4: bool, v5: bool)
     (!v2 && m.channel_v2) || (!v3 && m.channel_v3) || (!v4 && m.channel_v4) || (!v5 && m.channel_v5)
 }
 
+/// Capability version implied by a decoded legacy request envelope.
+fn request_version(wire: &SyncWire) -> u8 {
+    match wire {
+        SyncWire::RequestV5(_) | SyncWire::FollowupV5(_) | SyncWire::FpRequestV5(_) => 5,
+        SyncWire::RequestV4(_) | SyncWire::FollowupV4(_) | SyncWire::FpRequestV4(_) => 4,
+        SyncWire::RequestV3(_) | SyncWire::FollowupV3(_) | SyncWire::FpRequestV3(_) => 3,
+        SyncWire::RequestV2(_) | SyncWire::FollowupV2(_) | SyncWire::FpRequestV2(_) => 2,
+        _ => 1,
+    }
+}
+
 pub async fn serve<B, S, E>(channel: &mut S, backend: &B, bytes: &[u8]) -> Result<ConversationId, E>
 where
     B: ResponderBackend<E>,
@@ -568,7 +714,10 @@ where
     E: From<RoundFault>,
 {
     backend.bind_session_peer(channel.peer_identity());
-    match decode_frame(bytes)? {
+    let wire = decode_frame(bytes)?;
+    let version = request_version(&wire);
+    let (v2, v3, v4, v5) = (version >= 2, version >= 3, version >= 4, version >= 5);
+    match wire {
         SyncWire::FileMessageIdentitiesRequest { requests, offers } => {
             if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
                 return Err(RoundFault::UnexpectedMessage.into());
@@ -679,15 +828,10 @@ where
         | SyncWire::RequestV4(request)
         | SyncWire::RequestV5(request) => {
             let conversation = request.conversation;
-            let v5 = matches!(decode_frame(bytes)?, SyncWire::RequestV5(_));
-            let v4 = v5 || matches!(decode_frame(bytes)?, SyncWire::RequestV4(_));
-            let v3 = v4 || matches!(decode_frame(bytes)?, SyncWire::RequestV3(_));
-            let v2 = v3 || matches!(decode_frame(bytes)?, SyncWire::RequestV2(_));
             // The Request's inline have is empty on the networked path; read the
             // requester's streamed have, then answer.
-            let have = backend
-                .receive_have(channel, conversation, true, false)
-                .await?;
+            let have =
+                receive_have(backend, channel, conversation, HaveSender::Requester, false).await?;
             // Transfer the existing connection-owned lease before awaiting.
             // Incomplete responses drop it; only a fully sent response is retained.
             let view = match backend.take_custody_view(&conversation)? {
@@ -700,9 +844,10 @@ where
                 None
             } else {
                 let mut frames = backend
-                    .select_export_frames(&view, conversation, &have, 1)
+                    .select_export_batches(&view, &have, 1, event_frame_budget(conversation)?)
                     .await?;
-                let events = frames.pop().map_or_else(Vec::new, |frame| frame.events);
+                validate_export(conversation, &frames, 1)?;
+                let events = frames.pop().unwrap_or_default();
                 events
                     .iter()
                     .all(|event| supports_event_kind(event.kind, v2, v3, v4, v5))
@@ -722,9 +867,7 @@ where
                     have: Vec::new(),
                 }))?)
                 .await?;
-            backend
-                .send_have_pages(channel, &view, conversation, SyncWire::RespHave)
-                .await?;
+            send_have_pages(backend, channel, &view, conversation, HaveSender::Responder).await?;
             drop(backend.retain_custody_view(view)?);
             Ok(conversation)
         }
@@ -734,10 +877,6 @@ where
         | SyncWire::FollowupV4(followup)
         | SyncWire::FollowupV5(followup) => {
             let conversation = followup.conversation;
-            let v5 = matches!(decode_frame(bytes)?, SyncWire::FollowupV5(_));
-            let v4 = v5 || matches!(decode_frame(bytes)?, SyncWire::FollowupV4(_));
-            let v3 = v4 || matches!(decode_frame(bytes)?, SyncWire::FollowupV3(_));
-            let v2 = v3 || matches!(decode_frame(bytes)?, SyncWire::FollowupV2(_));
             if followup.events.iter().any(|event| {
                 event.conversation_id != conversation
                     || !supports_event_kind(event.kind, v2, v3, v4, v5)
@@ -758,10 +897,6 @@ where
             // Compare the requester's whole-set digest to ours. On match the requester
             // skips the full exchange; on mismatch it follows up with a normal Request.
             let conversation = req.conversation;
-            let v5 = matches!(decode_frame(bytes)?, SyncWire::FpRequestV5(_));
-            let v4 = v5 || matches!(decode_frame(bytes)?, SyncWire::FpRequestV4(_));
-            let v3 = v4 || matches!(decode_frame(bytes)?, SyncWire::FpRequestV3(_));
-            let v2 = v3 || matches!(decode_frame(bytes)?, SyncWire::FpRequestV2(_));
             let (metadata, probe_view) = backend.prepared_probe(&conversation).await?;
             let matched = if unsupported_metadata(metadata, v2, v3, v4, v5) {
                 None

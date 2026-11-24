@@ -599,7 +599,7 @@ impl ChannelState {
             .sender_chains
             .get_mut(&(hdr.sender.clone(), hdr.epoch))?;
         let prepared = chain.prepare_open(hdr.n, ct, hdr_bytes).ok()?;
-        Some(prepared.install(chain))
+        prepared.install(chain).ok()
     }
 }
 

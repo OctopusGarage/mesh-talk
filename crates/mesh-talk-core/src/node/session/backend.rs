@@ -763,32 +763,6 @@ impl<B: SessionBackend> mesh_replication::session::HaveSource for SessionHaveSou
     }
 }
 
-pub(super) async fn send_have_pages<B: SessionBackend>(
-    channel: &mut impl ReconciliationSession,
-    backend: &B,
-    view: &B::View,
-    conversation: ConversationId,
-    wrap: fn(HaveChunk) -> SyncWire,
-) -> Result<(), SessionError> {
-    let expected_count = have_count(backend.advertised_count(view)?)?;
-    mesh_replication::session::send_have(
-        channel,
-        &mut SessionHaveSource { backend, view },
-        expected_count,
-        HAVE_LIMITS,
-        |frame| {
-            encode(&wrap(HaveChunk {
-                conversation,
-                ids: frame.ids,
-                more: frame.more,
-            }))
-        },
-        tokio::task::yield_now,
-    )
-    .await?;
-    Ok(())
-}
-
 pub(super) async fn intersection_count<B: SessionBackend>(
     backend: &B,
     view: &B::View,
@@ -812,17 +786,6 @@ pub(super) async fn intersection_count<B: SessionBackend>(
         }
         tokio::task::yield_now().await;
     }
-}
-// Largest common event payload fits Response (52-byte empty envelope) and
-// Followup (44 bytes). Compute framing through the unchanged codec, not guesses.
-fn event_frame_budget(conversation: ConversationId) -> Result<usize, SessionError> {
-    let overhead = encode(&SyncWire::Response(SyncResponse {
-        conversation,
-        events: vec![],
-        have: vec![],
-    }))?
-    .len();
-    Ok(MAX_PLAINTEXT - overhead)
 }
 struct SessionExportSource<'a, B: SessionBackend> {
     backend: &'a B,
@@ -909,13 +872,13 @@ pub(super) async fn prepare_outgoing_selection<B: SessionBackend>(
     Ok(())
 }
 
-pub(super) async fn select_export_frames<B: SessionBackend>(
+pub(super) async fn select_export_batches<B: SessionBackend>(
     backend: &B,
     view: &B::View,
-    conversation: ConversationId,
     have: &HashSet<EventId>,
     max_frames: usize,
-) -> Result<Vec<SyncFollowup>, SessionError> {
+    encoded_per_frame: usize,
+) -> Result<Vec<Vec<Event>>, SessionError> {
     prepare_outgoing_selection(backend, view, have).await?;
     use mesh_replication::session::{ExportError, ExportLimits};
 
@@ -923,10 +886,10 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
         frames: max_frames,
         examined: 512,
         events_per_frame: 512,
-        encoded_per_frame: event_frame_budget(conversation)?,
+        encoded_per_frame,
         allocated_per_frame: 4 * 1024 * 1024,
     };
-    let frames = mesh_replication::session::select_export_frames(
+    mesh_replication::session::select_export_frames(
         &mut SessionExportSource {
             backend,
             view,
@@ -940,14 +903,7 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
     .map_err(|error| match error {
         ExportError::Source(error) | ExportError::PageTooSmall(error) => SessionError::from(error),
         ExportError::Limit => SessionError::UnexpectedMessage,
-    })?;
-    Ok(frames
-        .into_iter()
-        .map(|events| SyncFollowup {
-            conversation,
-            events,
-        })
-        .collect())
+    })
 }
 
 pub(super) struct RoundStoreAdapter<'a, B>(pub &'a B);
@@ -1019,31 +975,53 @@ impl<B: SessionBackend> legacy_round::RoundBackend<SessionError> for RoundStoreA
         Ok(self.0.retain_quiet_comparison(view, hint)?)
     }
 
-    async fn send_have_pages(
-        &self,
-        session: &mut impl SdkSession<Peer = Self::Peer, Error = SessionError>,
-        view: &Self::View,
-        scope: ConversationId,
-        wrap: fn(HaveChunk) -> SyncWire,
-    ) -> Result<(), SessionError> {
-        send_have_pages(session, self.0, view, scope, wrap).await
+    type HaveReservation = Option<tokio::sync::OwnedSemaphorePermit>;
+    type HaveCursor = B::HaveCursor;
+
+    fn have_limits(&self) -> HaveLimits {
+        HAVE_LIMITS
     }
 
-    async fn receive_have(
+    fn have_source<'a>(
+        &'a self,
+        view: &'a Self::View,
+    ) -> impl mesh_replication::session::HaveSource<
+        Id = EventId,
+        Cursor = Self::HaveCursor,
+        Error = SessionError,
+    > + 'a {
+        SessionHaveSource {
+            backend: self.0,
+            view,
+        }
+    }
+
+    fn reserve_remote_have(&self) -> Result<Self::HaveReservation, SessionError> {
+        self.0
+            .remote_have_budget()
+            .map(RemoteHaveBudget::try_admit)
+            .transpose()
+    }
+
+    fn collect_remote_have(
         &self,
-        session: &mut impl SdkSession<Peer = Self::Peer, Error = SessionError>,
-        scope: ConversationId,
-        requester: bool,
+        ids: Vec<EventId>,
+        permit: Self::HaveReservation,
         compare: bool,
     ) -> Result<Self::RemoteHave, SessionError> {
-        recv_have_owned(
-            session,
-            requester,
-            scope,
-            self.0.remote_have_budget(),
-            compare,
-        )
-        .await
+        if compare {
+            have_budget::ReceivedHave::from_vec_for_comparison(ids, permit, true)
+        } else {
+            have_budget::ReceivedHave::from_vec(ids, permit)
+        }
+    }
+
+    fn have_error(&self, error: HaveError<SessionError>) -> SessionError {
+        error.into()
+    }
+
+    async fn yield_inventory_work(&self) {
+        tokio::task::yield_now().await;
     }
 
     async fn intersection_count(
@@ -1066,14 +1044,14 @@ impl<B: SessionBackend> legacy_round::RoundBackend<SessionError> for RoundStoreA
         self.0.admission_denied()
     }
 
-    async fn select_export_frames(
+    async fn select_export_batches(
         &self,
         view: &Self::View,
-        scope: ConversationId,
         remote: &Self::RemoteHave,
         frames: usize,
-    ) -> Result<Vec<SyncFollowup>, SessionError> {
-        select_export_frames(self.0, view, scope, remote, frames).await
+        encoded_per_frame: usize,
+    ) -> Result<Vec<Vec<Event>>, SessionError> {
+        select_export_batches(self.0, view, remote, frames, encoded_per_frame).await
     }
 }
 impl<B: SessionBackend> legacy_round::ResponderBackend<SessionError> for RoundStoreAdapter<'_, B> {

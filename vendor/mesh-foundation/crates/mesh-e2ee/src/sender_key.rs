@@ -11,7 +11,10 @@ use bincode::Options;
 use rand_core::OsRng;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 mod checkpoint;
@@ -27,6 +30,7 @@ pub enum SenderKeyError {
     Encrypt,
     Decrypt,
     TooManySkipped,
+    StaleReceiverCandidate,
     Malformed(String),
 }
 
@@ -162,6 +166,7 @@ impl SenderKeyDistribution {
 
 /// A receiver's view of one sender's chain.
 pub struct SenderChain {
+    generation: Arc<()>,
     chain_key: [u8; 32],
     n: u32,
     skipped: HashMap<u32, [u8; 32]>,
@@ -171,22 +176,29 @@ pub struct SenderChain {
 /// Crypto preparation only: not a durable receive transaction. Dropping an
 /// abandoned candidate wipes its chain and plaintext through their owners.
 pub struct PreparedReceiverOpen {
+    base: Arc<()>,
     next: SenderChain,
     plaintext: Zeroizing<Vec<u8>>,
 }
 type OpenCheckpoint = (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>, u32);
 
 impl PreparedReceiverOpen {
+    /// For durable receive transactions. The host must validate that its
+    /// persisted base still matches before committing the candidate.
     pub fn into_checkpoint(self) -> Result<OpenCheckpoint, SenderKeyError> {
         Ok((self.next.encode_checkpoint()?, self.plaintext, self.next.n))
     }
-    pub fn install(self, chain: &mut SenderChain) -> Vec<u8> {
+    pub fn install(self, chain: &mut SenderChain) -> Result<Vec<u8>, SenderKeyError> {
+        if !Arc::ptr_eq(&self.base, &chain.generation) {
+            return Err(SenderKeyError::StaleReceiverCandidate);
+        }
         let Self {
+            base: _,
             next,
             mut plaintext,
         } = self;
         *chain = next;
-        std::mem::take(&mut *plaintext)
+        Ok(std::mem::take(&mut *plaintext))
     }
 }
 
@@ -211,7 +223,11 @@ impl SenderChain {
         let mut next = Self::decode_checkpoint(&self.encode_checkpoint()?)?;
         let key = Zeroizing::new(next.message_key(target)?);
         let plaintext = Zeroizing::new(open_message(&key, ciphertext, aad)?);
-        Ok(PreparedReceiverOpen { next, plaintext })
+        Ok(PreparedReceiverOpen {
+            base: Arc::clone(&self.generation),
+            next,
+            plaintext,
+        })
     }
     /// Recover a gap the normal ratchet cannot cross. Routine out-of-order
     /// messages keep their original receive position and this device's buffered
@@ -219,6 +235,7 @@ impl SenderChain {
     /// receiver; its own unconsumed skipped keys survive and consumed keys do not.
     pub fn refresh_distribution(&mut self, skd: &SenderKeyDistribution) {
         if skd.n.saturating_sub(self.n) > MAX_SKIP {
+            Arc::make_mut(&mut self.generation);
             self.chain_key.zeroize();
             self.chain_key = skd.chain_key;
             self.n = skd.n;
@@ -227,6 +244,7 @@ impl SenderChain {
 
     pub fn from_distribution(skd: &SenderKeyDistribution) -> Self {
         SenderChain {
+            generation: Arc::default(),
             chain_key: skd.chain_key,
             n: skd.n,
             skipped: HashMap::new(),
@@ -257,6 +275,7 @@ impl SenderChain {
             // it (the MAX_SKIPPED_TOTAL cap only bounds the map). Kept in sync,
             // `order.len() == skipped.len()` always (mirrors the DM ratchet).
             self.order.retain(|k| *k != target);
+            Arc::make_mut(&mut self.generation);
             return Ok(mk);
         }
         if target < self.n {
@@ -295,6 +314,7 @@ impl SenderChain {
         self.chain_key.zeroize();
         self.chain_key = *next;
         self.n = next_n;
+        Arc::make_mut(&mut self.generation);
         Ok(mk)
     }
 }
@@ -370,6 +390,25 @@ mod tests {
         drop(candidate);
         assert_eq!(*receiver.encode_checkpoint().unwrap(), *before);
         assert!(receiver.prepare_open(0, &ciphertext, b"aad").is_ok());
+    }
+
+    #[test]
+    fn installing_an_old_candidate_cannot_restore_a_consumed_skipped_key() {
+        let mut sender = SenderKey::generate();
+        let mut receiver = SenderChain::from_distribution(&sender.distribution());
+        let ciphertexts: Vec<_> = (0..3)
+            .map(|_| {
+                let (_, key) = sender.try_ratchet().unwrap();
+                seal_message(&Zeroizing::new(key), b"message", b"aad").unwrap()
+            })
+            .collect();
+        receiver.message_key(2).unwrap();
+        let first = receiver.prepare_open(0, &ciphertexts[0], b"aad").unwrap();
+        let second = receiver.prepare_open(1, &ciphertexts[1], b"aad").unwrap();
+        assert_eq!(first.install(&mut receiver).unwrap(), b"message");
+        assert!(second.install(&mut receiver).is_err());
+        assert!(receiver.prepare_open(0, &ciphertexts[0], b"aad").is_err());
+        assert!(receiver.prepare_open(1, &ciphertexts[1], b"aad").is_ok());
     }
 
     #[test]

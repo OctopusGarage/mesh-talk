@@ -243,7 +243,7 @@ impl Announce {
         }
         // If a cert is present it must be for THIS device and validly account-signed.
         if let Some(cert) = &self.account_cert
-            && (cert.device_ed25519_pub != self.ed25519_pub || !cert.verify())
+            && !cert.verify_for_device(&self.ed25519_pub)
         {
             return false;
         }

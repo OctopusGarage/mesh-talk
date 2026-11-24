@@ -29,6 +29,9 @@ use rand_core::RngCore;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+mod receive;
+pub use receive::BlobVerifier;
+
 const KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;

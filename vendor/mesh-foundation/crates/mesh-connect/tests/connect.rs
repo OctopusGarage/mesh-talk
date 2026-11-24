@@ -56,3 +56,82 @@ async fn oversized_outbound_frame_is_rejected_before_writing() {
     assert!(matches!(error, TransportError::FrameTooLarge(n) if n == MAX_FRAME + 1));
     assert!(output.is_empty());
 }
+
+#[tokio::test]
+async fn cancelling_backpressured_send_retires_the_session() {
+    let (client, server) = tokio::io::duplex(256);
+    let server_key = public([22; 32]);
+    let (client, server) = tokio::join!(
+        PeerSession::connect(client, &[11; 32], &server_key),
+        PeerSession::accept(server, &[22; 32], |_| true),
+    );
+    let mut client = client.unwrap();
+    let _server = server.unwrap();
+    let payload = [7; 1024];
+    {
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+        };
+        let mut send = std::pin::pin!(client.send(&payload));
+        poll_fn(|cx| {
+            assert!(send.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+    let mut retry = std::pin::pin!(client.send(b"retry"));
+    poll_fn(|cx| {
+        assert!(matches!(
+            retry.as_mut().poll(cx),
+            Poll::Ready(Err(TransportError::Io(error)))
+                if error.kind() == std::io::ErrorKind::NotConnected
+        ));
+        Poll::Ready(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cancelling_partial_receive_closes_the_stream() {
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+
+    let (client, server) = tokio::io::duplex(256);
+    let server_key = public([22; 32]);
+    let (client, server) = tokio::join!(
+        PeerSession::connect(client, &[11; 32], &server_key),
+        PeerSession::accept(server, &[22; 32], |_| true),
+    );
+    let mut client = client.unwrap();
+    let mut server = server.unwrap();
+    assert!(matches!(
+        client.send(&vec![0; mesh_connect::MAX_PLAINTEXT + 1]).await,
+        Err(TransportError::PlaintextTooLarge(_))
+    ));
+    client.send(b"healthy").await.unwrap();
+    assert_eq!(server.recv().await.unwrap(), b"healthy");
+
+    let payload = [7; 1024];
+    let mut send = std::pin::pin!(client.send(&payload));
+    {
+        let mut recv = std::pin::pin!(server.recv());
+        poll_fn(|cx| {
+            assert!(send.as_mut().poll(cx).is_pending());
+            assert!(recv.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+    assert!(matches!(
+        server.recv().await,
+        Err(TransportError::Io(error)) if error.kind() == std::io::ErrorKind::NotConnected
+    ));
+    assert!(matches!(send.await, Err(TransportError::Io(_))));
+}

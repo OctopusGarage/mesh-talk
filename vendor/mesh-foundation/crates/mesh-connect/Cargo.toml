@@ -25,3 +25,5 @@ hex = "0.4"
 mesh-identity = { path = "../mesh-identity", features = ["test-observability"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 x25519-dalek = { version = "3", features = ["static_secrets"] }
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Networking_WinSock"] }

@@ -8,7 +8,7 @@ use crate::eventlog::{
         pages::{PageBudget, PageCursor},
     },
 };
-use sha2::{Digest, Sha256};
+use mesh_blob::BlobVerifier;
 use std::io::{Cursor, Read};
 
 const HEADER_ROWS: usize = 32;
@@ -109,9 +109,7 @@ pub(super) struct PlaintextChunks<'a> {
     manifest: &'a crate::file::AnyManifest,
     ids: ChunkIds<'a>,
     pending: Cursor<Vec<u8>>,
-    index: u64,
-    size: u64,
-    checksum: Sha256,
+    verification: BlobVerifier,
     finished: bool,
 }
 
@@ -129,9 +127,12 @@ impl<'a> PlaintextChunks<'a> {
             manifest,
             ids,
             pending: Cursor::new(Vec::new()),
-            index: 0,
-            size: 0,
-            checksum: Sha256::new(),
+            verification: BlobVerifier::new(
+                manifest.chunk_count(),
+                manifest.size(),
+                manifest.checksum(),
+            )
+            .map_err(|error| NodeError::File(error.to_string()))?,
             finished: false,
         })
     }
@@ -160,10 +161,7 @@ impl Read for PlaintextChunks<'_> {
                 return Ok(0);
             }
             let Some(id) = self.ids.next() else {
-                let actual: [u8; 32] = self.checksum.clone().finalize().into();
-                if self.size != self.manifest.size() || actual != self.manifest.checksum() {
-                    return Err(std::io::Error::other("file size or checksum mismatch"));
-                }
+                self.verification.finish().map_err(std::io::Error::other)?;
                 self.finished = true;
                 return Ok(0);
             };
@@ -171,18 +169,12 @@ impl Read for PlaintextChunks<'_> {
                 .node
                 .chunk_ciphertext(id.map_err(std::io::Error::other)?)
                 .map_err(std::io::Error::other)?;
-            let index = u32::try_from(self.index).map_err(std::io::Error::other)?;
+            let index = self.verification.next_index();
             let plaintext = crate::file::open_chunk_for(self.manifest, index, &ciphertext)
                 .map_err(std::io::Error::other)?;
-            self.index += 1;
-            self.size = self
-                .size
-                .checked_add(plaintext.len() as u64)
-                .ok_or_else(|| std::io::Error::other("file size overflow"))?;
-            if self.size > self.manifest.size() {
-                return Err(std::io::Error::other("file size mismatch"));
-            }
-            self.checksum.update(&plaintext);
+            self.verification
+                .push(index, &plaintext)
+                .map_err(std::io::Error::other)?;
             self.pending = Cursor::new(plaintext);
         }
     }

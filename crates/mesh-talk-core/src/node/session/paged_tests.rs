@@ -1509,12 +1509,19 @@ async fn paged_export_uses_actual_frame_framing_and_rejects_one_byte_oversize() 
         let store = Mutex::new(store);
         let backend = PagedNetworkBackend(&store, None);
         let view = backend.open_view(&c).unwrap();
-        let result = select_export_frames(&backend, &view, c, &HashSet::new(), 1).await;
+        let result = select_export_batches(
+            &backend,
+            &view,
+            &HashSet::new(),
+            1,
+            legacy_round::event_frame_budget(c).unwrap(),
+        )
+        .await;
         if excess == 0 {
             let frame = result.unwrap().pop().unwrap();
             let bytes = encode(&SyncWire::Response(SyncResponse {
                 conversation: c,
-                events: frame.events,
+                events: frame,
                 have: vec![],
             }))
             .unwrap();
@@ -1585,15 +1592,25 @@ async fn paged_file_burst_fills_four_bounded_frames_across_tiny_scan_pages() {
     let store = Mutex::new(store);
     let backend = PagedNetworkBackend(&store, None);
     let view = backend.open_view(&c).unwrap();
-    let frames = select_export_frames(&backend, &view, c, &HashSet::new(), FILE_FOLLOWUP_BURST)
-        .await
-        .unwrap();
+    let frames = select_export_batches(
+        &backend,
+        &view,
+        &HashSet::new(),
+        FILE_FOLLOWUP_BURST,
+        legacy_round::event_frame_budget(c).unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(frames.len(), 4);
     let mut oracle = EventLog::default();
-    for frame in frames {
-        assert_eq!(frame.events.len(), 1);
-        assert!(encode(&SyncWire::Followup(frame.clone())).unwrap().len() <= MAX_PLAINTEXT);
-        for event in frame.events {
+    for events in frames {
+        assert_eq!(events.len(), 1);
+        let frame = SyncFollowup {
+            conversation: c,
+            events: events.clone(),
+        };
+        assert!(encode(&SyncWire::Followup(frame)).unwrap().len() <= MAX_PLAINTEXT);
+        for event in events {
             oracle.append(event).unwrap();
         }
     }

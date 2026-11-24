@@ -143,3 +143,23 @@ fn bad_scope_and_signature_do_not_consume_spool_capacity() {
     ));
     assert_eq!(spool.deposit(event, 2).unwrap(), Deposit::Stored);
 }
+
+#[test]
+fn spool_rejects_second_writer_and_releases_lease_on_drop() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mailbox");
+    let open = || {
+        Spool::open(
+            &path,
+            "test password",
+            ConversationId::new([3; 32]),
+            CapacityLimits::new(2, 0, 128 * 1024, 0).unwrap(),
+            NonZeroU64::new(10).unwrap(),
+        )
+    };
+
+    let first = open().unwrap();
+    assert!(open().is_err(), "two writers opened the same spool");
+    drop(first);
+    assert!(open().is_ok());
+}

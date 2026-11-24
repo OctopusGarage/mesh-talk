@@ -1,6 +1,6 @@
 //! Durable, bounded mailbox spool for hosts without an indexed relay store.
-//! The host holds an exclusive path lease and owns authenticated admission,
-//! the clock, and when to invoke expiry. No background task is created here.
+//! The spool owns its exclusive path lease. The host owns authenticated
+//! admission, the clock, and when to invoke expiry.
 
 use crate::{
     capacity::{Admission, CapacityLimits},
@@ -13,7 +13,12 @@ use mesh_replication::legacy_event::{ConversationId, Event, EventId};
 use mesh_storage::record_log::{EncryptedRecordLog, RecordLogError};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, num::NonZeroU64, path::Path};
+use std::{
+    collections::HashMap,
+    fs::{self, File, OpenOptions},
+    num::NonZeroU64,
+    path::{Path, PathBuf},
+};
 
 const MAGIC: &[u8; 6] = b"MTMSP1";
 
@@ -70,6 +75,7 @@ pub struct Spool {
     bytes: u64,
     limits: CapacityLimits,
     max_age_secs: NonZeroU64,
+    _lease: File,
 }
 
 fn encoded_size(event: &Event) -> Result<u64, SpoolError> {
@@ -84,7 +90,9 @@ fn valid_envelope(scope: ConversationId, event: &Event) -> bool {
 }
 
 impl Spool {
-    /// Reopen under an exclusive path lease. The count and wire-byte envelope
+    /// Acquire the exclusive lease before replaying records. Keep the persistent
+    /// `.mesh-spool-lock` sidecar in place and use a single path for the spool.
+    /// The count and wire-byte envelope
     /// limits also bound replay; a file exceeding the configured limits fails
     /// explicitly and remains available for offline recovery.
     pub fn open(
@@ -94,6 +102,26 @@ impl Spool {
         limits: CapacityLimits,
         max_age_secs: NonZeroU64,
     ) -> Result<Self, SpoolError> {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(".mesh-spool-lock");
+        let lock_path = PathBuf::from(sidecar);
+        if let Some(parent) = lock_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(RecordLogError::from)?;
+        }
+        let lease = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .map_err(RecordLogError::from)?;
+        lease
+            .try_lock()
+            .map_err(|error| RecordLogError::Io(error.into()))?;
+
         let mut loaded = None;
         let mut entries = Vec::new();
         let mut positions = HashMap::new();
@@ -179,6 +207,7 @@ impl Spool {
             bytes,
             limits,
             max_age_secs,
+            _lease: lease,
         })
     }
 

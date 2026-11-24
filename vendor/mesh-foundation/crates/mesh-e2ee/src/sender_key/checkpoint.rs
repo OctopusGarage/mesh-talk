@@ -55,6 +55,7 @@ impl SenderChain {
         }
         let key = Zeroizing::new(<[u8; 32]>::try_from(&bytes[5..37]).map_err(|_| invalid())?);
         let mut chain = Self {
+            generation: Default::default(),
             chain_key: *key,
             n,
             skipped: HashMap::with_capacity(count),

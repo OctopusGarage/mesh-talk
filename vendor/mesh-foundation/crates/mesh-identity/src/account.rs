@@ -177,6 +177,12 @@ impl DeviceCertificate {
         DeviceIdentity::verify(&self.account_ed25519_pub, &msg, &self.signature)
     }
 
+    /// Check intrinsic proof for the expected device signing key. The application
+    /// still decides whether it trusts the issuing account.
+    pub fn verify_for_device(&self, expected_device: &[u8; 32]) -> bool {
+        &self.device_ed25519_pub == expected_device && self.verify()
+    }
+
     /// The account id this cert binds to (only meaningful if `verify()` is true).
     pub fn account_id(&self) -> String {
         AccountPublic {
@@ -241,6 +247,19 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn a_valid_certificate_cannot_attest_another_device() {
+        let account = Account::generate();
+        let owner = DeviceIdentity::generate();
+        let other = DeviceIdentity::generate();
+        let cert = account.certify(&owner.public().ed25519_pub);
+        assert!(cert.verify_for_device(&owner.public().ed25519_pub));
+        assert!(!cert.verify_for_device(&other.public().ed25519_pub));
+        let mut tampered = cert;
+        tampered.signature[0] ^= 1;
+        assert!(!tampered.verify_for_device(&owner.public().ed25519_pub));
     }
 
     #[test]

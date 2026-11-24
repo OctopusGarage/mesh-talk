@@ -1242,8 +1242,7 @@ fn crash_after_metadata_before_secret_scrub_replays_without_duplicate_history() 
         DmRatchet::new(RatchetSessions::open(&dir.path().join("sessions"), "pw").unwrap());
     let mut sent = SentLog::open(&dir.path().join("sent"), "pw").unwrap();
     let mut received = ReceivedLog::open(&dir.path().join("received"), "pw").unwrap();
-    let blocker = dir.path().join("delivery-transactions.compact-tmp");
-    std::fs::create_dir(&blocker).unwrap();
+    store.journal.fail_replacements_for_test(true);
     assert!(
         store
             .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
@@ -1256,7 +1255,6 @@ fn crash_after_metadata_before_secret_scrub_replays_without_duplicate_history() 
         .len();
     drop(store);
     drop(ratchet);
-    std::fs::remove_dir(&blocker).unwrap();
     let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
     let mut ratchet =
         DmRatchet::new(RatchetSessions::open(&dir.path().join("sessions"), "pw").unwrap());

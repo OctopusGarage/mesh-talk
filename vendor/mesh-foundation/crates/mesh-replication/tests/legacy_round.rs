@@ -3,14 +3,16 @@ use mesh_replication::legacy_round::{ResponderBackend, serve};
 use mesh_replication::{
     legacy_event::{ConversationId, Event, EventId, EventKind},
     legacy_round::{
-        ApplyReport, Probe, QuietComparison, RoundBackend, RoundFault, SyncMetadata, SyncProgress,
+        ApplyReport, HaveSender, Probe, QuietComparison, RoundBackend, RoundFault, SyncMetadata,
+        SyncProgress,
     },
-    legacy_wire::{self, FpResponse, HaveChunk, SyncFollowup, SyncResponse, SyncWire},
-    session::ReconciliationSession,
+    legacy_wire::{self, FpResponse, HaveChunk, SyncResponse, SyncWire},
+    session::{HaveError, HaveLimits, HavePage, HaveSource, ReconciliationSession},
 };
 use std::{
     cell::RefCell,
     collections::{HashSet, VecDeque},
+    rc::Rc,
 };
 
 #[derive(Default)]
@@ -41,7 +43,35 @@ struct Replica {
     fingerprint: Option<[u8; 32]>,
     accepted: RefCell<HashSet<EventId>>,
     exports: Vec<Event>,
+    deny_inventory: bool,
+    reservation: Rc<()>,
 }
+struct FixtureHave(Vec<EventId>);
+
+impl HaveSource for FixtureHave {
+    type Id = EventId;
+    type Cursor = usize;
+    type Error = RoundFault;
+
+    fn page(
+        &mut self,
+        cursor: Option<&usize>,
+        limit: usize,
+        _: usize,
+    ) -> Result<HavePage<EventId, usize>, RoundFault> {
+        let start = cursor.copied().unwrap_or(0);
+        let end = (start + limit).min(self.0.len());
+        Ok(HavePage {
+            ids: self.0[start..end].to_vec(),
+            next: (end < self.0.len()).then_some(end),
+        })
+    }
+
+    fn validate(&self) -> Result<(), RoundFault> {
+        Ok(())
+    }
+}
+
 impl RoundBackend<RoundFault> for Replica {
     type Peer = ();
     type View = ();
@@ -92,40 +122,49 @@ impl RoundBackend<RoundFault> for Replica {
     fn retain_quiet_comparison(&self, _: &(), _: QuietComparison) -> Result<(), RoundFault> {
         Ok(())
     }
-    async fn send_have_pages(
-        &self,
-        session: &mut impl ReconciliationSession<Peer = (), Error = RoundFault>,
-        _: &(),
-        scope: ConversationId,
-        wrap: fn(HaveChunk) -> SyncWire,
-    ) -> Result<(), RoundFault> {
-        let ids = self.accepted.borrow().iter().copied().collect();
-        let frame = legacy_wire::encode(&wrap(HaveChunk {
-            conversation: scope,
-            ids,
-            more: false,
-        }))
-        .map_err(RoundFault::Wire)?;
-        session.send(&frame).await
-    }
-    async fn receive_have(
-        &self,
-        session: &mut impl ReconciliationSession<Peer = (), Error = RoundFault>,
-        scope: ConversationId,
-        requester: bool,
-        _: bool,
-    ) -> Result<Self::RemoteHave, RoundFault> {
-        let bytes = session.recv().await?;
-        match legacy_wire::decode(&bytes).map_err(RoundFault::Wire)? {
-            SyncWire::ReqHave(page) if requester && page.conversation == scope && !page.more => {
-                Ok(Box::new(page.ids.into_iter().collect()))
-            }
-            SyncWire::RespHave(page) if !requester && page.conversation == scope && !page.more => {
-                Ok(Box::new(page.ids.into_iter().collect()))
-            }
-            _ => Err(RoundFault::UnexpectedMessage),
+    type HaveReservation = Rc<()>;
+    type HaveCursor = usize;
+
+    fn have_limits(&self) -> HaveLimits {
+        HaveLimits {
+            ids_per_frame: 32,
+            frames: 8,
+            total_ids: 256,
         }
     }
+
+    fn have_source<'a>(
+        &'a self,
+        _: &'a (),
+    ) -> impl HaveSource<Id = EventId, Cursor = Self::HaveCursor, Error = RoundFault> + 'a {
+        FixtureHave(self.accepted.borrow().iter().copied().collect())
+    }
+
+    fn reserve_remote_have(&self) -> Result<Self::HaveReservation, RoundFault> {
+        if self.deny_inventory {
+            return Err(RoundFault::NoProgress);
+        }
+        Ok(Rc::clone(&self.reservation))
+    }
+
+    fn collect_remote_have(
+        &self,
+        ids: Vec<EventId>,
+        _: Self::HaveReservation,
+        _: bool,
+    ) -> Result<Self::RemoteHave, RoundFault> {
+        Ok(Box::new(ids.into_iter().collect()))
+    }
+
+    fn have_error(&self, error: HaveError<RoundFault>) -> RoundFault {
+        match error {
+            HaveError::Exchange(error) => error,
+            _ => RoundFault::UnexpectedMessage,
+        }
+    }
+
+    async fn yield_inventory_work(&self) {}
+
     async fn intersection_count(
         &self,
         _: &(),
@@ -153,13 +192,13 @@ impl RoundBackend<RoundFault> for Replica {
     fn admission_denied(&self) -> bool {
         false
     }
-    async fn select_export_frames(
+    async fn select_export_batches(
         &self,
         _: &(),
-        scope: ConversationId,
         have: &Self::RemoteHave,
         _: usize,
-    ) -> Result<Vec<SyncFollowup>, RoundFault> {
+        _: usize,
+    ) -> Result<Vec<Vec<Event>>, RoundFault> {
         let events = self
             .exports
             .iter()
@@ -169,10 +208,7 @@ impl RoundBackend<RoundFault> for Replica {
         Ok(if events.is_empty() {
             vec![]
         } else {
-            vec![SyncFollowup {
-                conversation: scope,
-                events,
-            }]
+            vec![events]
         })
     }
 }
@@ -335,4 +371,104 @@ async fn responder_exports_only_missing_ids_and_finishes_its_inventory() {
         have.ids.iter().copied().collect::<HashSet<_>>(),
         HashSet::from([first.id, missed.id])
     );
+}
+
+#[test]
+fn have_codec_checks_role_and_scope() {
+    let scope = ConversationId::new([1; 32]);
+    let foreign = ConversationId::new([2; 32]);
+    let sender = HaveSender::Responder;
+    let bytes = sender
+        .encode(
+            scope,
+            mesh_replication::session::HaveFrame {
+                ids: Vec::new(),
+                more: true,
+            },
+        )
+        .unwrap();
+    assert!(sender.decode(scope, &bytes).unwrap().more);
+    assert!(matches!(
+        sender.decode(foreign, &bytes),
+        Err(RoundFault::UnexpectedMessage)
+    ));
+    assert!(matches!(
+        HaveSender::Requester.decode(scope, &bytes),
+        Err(RoundFault::UnexpectedMessage)
+    ));
+}
+
+#[tokio::test]
+async fn responder_reserves_before_reading_and_releases_on_invalid_inventory() {
+    use mesh_replication::legacy_wire::SyncRequest;
+
+    let scope = ConversationId::new([7; 32]);
+    let request = legacy_wire::encode(&SyncWire::Request(SyncRequest {
+        conversation: scope,
+        have: vec![],
+    }))
+    .unwrap();
+    let mut channel = incoming([SyncWire::RespHave(HaveChunk {
+        conversation: scope,
+        ids: vec![],
+        more: false,
+    })]);
+    let mut replica = Replica {
+        deny_inventory: true,
+        ..Replica::default()
+    };
+
+    assert_eq!(
+        serve(&mut channel, &replica, &request).await,
+        Err(RoundFault::NoProgress)
+    );
+    assert_eq!(channel.incoming.len(), 1);
+    assert!(channel.sent.is_empty());
+
+    replica.deny_inventory = false;
+    assert_eq!(
+        serve(&mut channel, &replica, &request).await,
+        Err(RoundFault::UnexpectedMessage)
+    );
+    assert!(channel.incoming.is_empty());
+    assert!(channel.sent.is_empty());
+    assert_eq!(Rc::strong_count(&replica.reservation), 1);
+}
+
+#[tokio::test]
+async fn responder_rejects_an_export_from_another_scope_before_sending() {
+    use mesh_replication::legacy_wire::SyncRequest;
+
+    let scope = ConversationId::new([7; 32]);
+    let foreign = ConversationId::new([8; 32]);
+    let author = DeviceIdentity::generate();
+    let event = Event::new(
+        &author,
+        foreign,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![1],
+    );
+    let replica = Replica {
+        exports: vec![event],
+        ..Replica::default()
+    };
+    let mut channel = incoming([SyncWire::ReqHave(HaveChunk {
+        conversation: scope,
+        ids: vec![],
+        more: false,
+    })]);
+    let request = legacy_wire::encode(&SyncWire::Request(SyncRequest {
+        conversation: scope,
+        have: vec![],
+    }))
+    .unwrap();
+    assert_eq!(
+        serve(&mut channel, &replica, &request).await,
+        Err(RoundFault::UnexpectedMessage)
+    );
+    assert!(channel.sent.is_empty());
 }

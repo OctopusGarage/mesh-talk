@@ -29,9 +29,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use mesh_replication::session::{
-    HaveError, HaveFrame, HaveLimits, ReconciliationSession as SdkSession, receive_have,
-};
+use mesh_replication::session::{HaveError, HaveLimits, ReconciliationSession as SdkSession};
+
+#[cfg(test)]
+use mesh_replication::session::receive_have;
 
 type ReconciliationPeer = crate::identity::device::PublicIdentity;
 
@@ -81,7 +82,9 @@ const MAX_HAVE_CHUNKS: usize = 1000;
 /// caps it at ~6 MB while staying far above any realistic conversation's id-set.
 pub(super) const MAX_HAVE_IDS_TOTAL: usize = 200_000;
 
-use mesh_replication::legacy_wire::{self, HaveChunk, SyncWire};
+#[cfg(test)]
+use mesh_replication::legacy_wire::HaveChunk;
+use mesh_replication::legacy_wire::{self, SyncWire};
 
 use mesh_replication::legacy_round::{self, RoundFault};
 
@@ -579,24 +582,21 @@ where
 /// Receive a streamed `have` id-set (chunk frames until `more == false`), accepting
 /// only the expected variant (`want_req` → `ReqHave`, else `RespHave`). Bounded by
 /// `MAX_HAVE_CHUNKS` so a peer can't stream forever.
+#[cfg(test)]
 async fn recv_have(
     channel: &mut impl ReconciliationSession,
     want_req: bool,
     conversation: ConversationId,
 ) -> Result<Vec<EventId>, SessionError> {
+    let sender = if want_req {
+        legacy_round::HaveSender::Requester
+    } else {
+        legacy_round::HaveSender::Responder
+    };
     receive_have(channel, HAVE_LIMITS, |bytes| {
-        let chunk = match decode(bytes)? {
-            SyncWire::ReqHave(chunk) if want_req => chunk,
-            SyncWire::RespHave(chunk) if !want_req => chunk,
-            _ => return Err(SessionError::UnexpectedMessage),
-        };
-        if chunk.conversation != conversation {
-            return Err(SessionError::UnexpectedMessage);
-        }
-        Ok(HaveFrame {
-            ids: chunk.ids,
-            more: chunk.more,
-        })
+        sender
+            .decode(conversation, bytes)
+            .map_err(SessionError::from)
     })
     .await
     .map_err(SessionError::from)
@@ -622,6 +622,7 @@ impl From<HaveError<SessionError>> for SessionError {
     }
 }
 
+#[cfg(test)]
 async fn recv_have_owned(
     channel: &mut impl ReconciliationSession,
     want_req: bool,

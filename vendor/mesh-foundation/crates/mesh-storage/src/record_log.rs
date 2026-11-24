@@ -70,6 +70,9 @@ impl From<crate::StorageError> for RecordLogError {
     }
 }
 
+#[cfg(any(test, feature = "test-observability"))]
+type BeforeReplace = Box<dyn FnOnce(&Path) + Send + Sync>;
+
 /// An append-only, password-encrypted record log generic over a serializable
 /// record type `R`. Owns the live file handle, the derived key, the header salt,
 /// the magic, and the path (retained so the log can be rewritten in place).
@@ -96,7 +99,9 @@ pub struct EncryptedRecordLog<R> {
     // Confirmed prefix before an append whose rollback could not finish.
     rollback_boundary: u64,
     #[cfg(any(test, feature = "test-observability"))]
-    pub before_rewrite_rename: Option<Box<dyn FnOnce() + Send + Sync>>,
+    pub before_rewrite_rename: Option<BeforeReplace>,
+    #[cfg(any(test, feature = "test-observability"))]
+    fail_replacements: bool,
     _marker: PhantomData<R>,
 }
 
@@ -196,6 +201,8 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                     rollback_boundary: 0,
                     #[cfg(any(test, feature = "test-observability"))]
                     before_rewrite_rename: None,
+                    #[cfg(any(test, feature = "test-observability"))]
+                    fail_replacements: false,
                     _marker: PhantomData,
                 })
             }
@@ -255,6 +262,8 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             rollback_boundary: 0,
             #[cfg(any(test, feature = "test-observability"))]
             before_rewrite_rename: None,
+            #[cfg(any(test, feature = "test-observability"))]
+            fail_replacements: false,
             _marker: PhantomData,
         })
     }
@@ -442,32 +451,74 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                 "record log requires reopen".into(),
             ));
         }
-        let tmp = self.path.with_extension("compact-tmp");
-        {
-            let f = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)?;
-            let mut writer = BufWriter::new(f);
-            writer.write_all(&self.magic)?;
-            writer.write_all(&self.salt)?;
+        self.replace_with(|log, writer| {
+            writer.write_all(&log.magic)?;
+            writer.write_all(&log.salt)?;
             for record in records {
-                writer.write_all(&self.encode_record(record)?)?;
+                writer.write_all(&log.encode_record(record)?)?;
             }
-            let f = writer
-                .into_inner()
-                .map_err(|error| RecordLogError::Io(error.into_error()))?;
-            sync_file(&f)?;
+            Ok(())
+        })
+    }
+
+    /// Append a causally closed batch as one filesystem replacement. Existing
+    /// encrypted records are copied verbatim in file order.
+    pub fn append_batch_atomic(&mut self, records: &[R]) -> Result<(), RecordLogError> {
+        if self.poisoned {
+            return Err(RecordLogError::CorruptFile(
+                "record log requires reopen".into(),
+            ));
         }
-        // Reopen before replacing the live path. If this fails, the original log is
-        // untouched and the caller can safely retry the compaction.
+        if records.is_empty() {
+            return Ok(());
+        }
+        self.replace_with(|log, writer| {
+            let mut source = File::open(&log.path)?;
+            std::io::copy(&mut source, writer)?;
+            for record in records {
+                writer.write_all(&log.encode_record(record)?)?;
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(any(test, feature = "test-observability"))]
+    pub fn fail_replacements_for_test(&mut self, enabled: bool) {
+        self.fail_replacements = enabled;
+    }
+
+    fn replace_with(
+        &mut self,
+        write: impl FnOnce(&Self, &mut BufWriter<&File>) -> Result<(), RecordLogError>,
+    ) -> Result<(), RecordLogError> {
+        #[cfg(any(test, feature = "test-observability"))]
+        if self.fail_replacements {
+            return Err(std::io::Error::other("injected record log replacement failure").into());
+        }
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        // A normal file avoids Windows NamedTempFile persistence changing
+        // file attributes while the replacement handles are already open.
+        let staging = tempfile::tempdir_in(parent)?;
+        let tmp = staging.path().join("records");
+        let staging_file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut writer = BufWriter::new(&staging_file);
+        write(self, &mut writer)?;
+        writer.flush()?;
+        sync_file(&staging_file)?;
+        drop(writer);
+        drop(staging_file);
+
+        // Acquire handles before rename so failure leaves the original open.
         let f = OpenOptions::new().read(true).append(true).open(&tmp)?;
         #[cfg(windows)]
         let repair = OpenOptions::new().write(true).open(&tmp)?;
         #[cfg(any(test, feature = "test-observability"))]
         if let Some(hook) = self.before_rewrite_rename.take() {
-            hook();
+            hook(&tmp);
         }
         std::fs::rename(&tmp, &self.path)?;
         self.needs_sync.store(true, Ordering::Release);
@@ -481,58 +532,6 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         }
         // Replacement has committed. Reporting failure here would leave callers'
         // indexes describing the old file. Directory sync is best effort after rename.
-        if sync_parent(&self.path).is_err() {
-            log::warn!("record log replacement directory sync failed");
-        } else {
-            self.needs_sync.store(false, Ordering::Release);
-        }
-        Ok(())
-    }
-
-    /// Append a causally closed batch as one filesystem replacement. A crash
-    /// before rename leaves none of the batch; a crash after rename leaves all
-    /// of it. Existing encrypted records are copied verbatim in file order.
-    pub fn append_batch_atomic(&mut self, records: &[R]) -> Result<(), RecordLogError> {
-        if self.poisoned {
-            return Err(RecordLogError::CorruptFile(
-                "record log requires reopen".into(),
-            ));
-        }
-        if records.is_empty() {
-            return Ok(());
-        }
-        let tmp = self.path.with_extension("compact-tmp");
-        {
-            let mut source = File::open(&self.path)?;
-            let target = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)?;
-            let mut writer = BufWriter::new(target);
-            std::io::copy(&mut source, &mut writer)?;
-            for record in records {
-                writer.write_all(&self.encode_record(record)?)?;
-            }
-            let target = writer
-                .into_inner()
-                .map_err(|error| RecordLogError::Io(error.into_error()))?;
-            sync_file(&target)?;
-        }
-        let file = OpenOptions::new().read(true).append(true).open(&tmp)?;
-        #[cfg(windows)]
-        let repair = OpenOptions::new().write(true).open(&tmp)?;
-        #[cfg(any(test, feature = "test-observability"))]
-        if let Some(hook) = self.before_rewrite_rename.take() {
-            hook();
-        }
-        std::fs::rename(&tmp, &self.path)?;
-        self.needs_sync.store(true, Ordering::Release);
-        self.file = file;
-        #[cfg(windows)]
-        {
-            self.repair = repair;
-        }
         if sync_parent(&self.path).is_err() {
             log::warn!("record log replacement directory sync failed");
         } else {

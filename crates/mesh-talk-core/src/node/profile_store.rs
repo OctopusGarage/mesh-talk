@@ -374,10 +374,10 @@ mod tests {
         for revision in 1..=66 {
             store.record("alice", revision, None).unwrap();
         }
-        std::fs::create_dir(path.with_extension("compact-tmp")).unwrap();
+        store.file.fail_replacements_for_test(true);
         assert!(store.record("alice", 67, Some(b"new".to_vec())).is_err());
         assert_eq!(store.updated_at("alice"), Some(66));
-        std::fs::remove_dir(path.with_extension("compact-tmp")).unwrap();
+        store.file.fail_replacements_for_test(false);
         assert!(store.record("alice", 67, Some(b"new".to_vec())).unwrap());
     }
 

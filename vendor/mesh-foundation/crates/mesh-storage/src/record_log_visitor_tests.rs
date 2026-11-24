@@ -367,12 +367,28 @@ fn durability_failed_rewrite_cannot_confirm_the_old_nondurable_prefix() {
     let path = dir.path().join("sync.log");
     let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
     log.append(&rec(1, b"old pending")).unwrap();
-    let temporary = path.with_extension("compact-tmp");
-    log.before_rewrite_rename = Some(Box::new(move || std::fs::remove_file(temporary).unwrap()));
+    log.before_rewrite_rename = Some(Box::new(|temporary| std::fs::remove_file(temporary).unwrap()));
     assert!(log.rewrite(&[rec(2, b"not committed")]).is_err());
     sync_observations::reset();
     log.sync().unwrap();
     assert_eq!(sync_observations::counts(), (1, 1));
     let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
     assert_eq!(records, vec![rec(1, b"old pending")]);
+}
+
+#[test]
+fn sibling_logs_can_replace_independently_with_different_extensions() {
+    const MAGIC: &[u8; 6] = b"MTTEST";
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("events.local");
+    let second = root.path().join("events.remote");
+    let (mut local, _) = EncryptedRecordLog::<u64>::open(&first, "test password", MAGIC).unwrap();
+    let (mut remote, _) = EncryptedRecordLog::<u64>::open(&second, "test password", MAGIC).unwrap();
+    local.before_rewrite_rename = Some(Box::new(move |_| remote.append_batch_atomic(&[7]).unwrap()));
+    local.rewrite(&[3]).unwrap();
+
+    let (_, records) = EncryptedRecordLog::<u64>::open(&first, "test password", MAGIC).unwrap();
+    assert_eq!(records, [3]);
+    let (_, records) = EncryptedRecordLog::<u64>::open(&second, "test password", MAGIC).unwrap();
+    assert_eq!(records, [7]);
 }

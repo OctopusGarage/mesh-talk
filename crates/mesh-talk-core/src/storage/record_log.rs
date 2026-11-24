@@ -94,8 +94,13 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
     }
 
     #[cfg(test)]
+    pub(crate) fn fail_replacements_for_test(&mut self, enabled: bool) {
+        self.0.fail_replacements_for_test(enabled);
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_before_rewrite_rename(&mut self, hook: Box<dyn FnOnce() + Send + Sync>) {
-        self.0.before_rewrite_rename = Some(hook);
+        self.0.before_rewrite_rename = Some(Box::new(|_| hook()));
     }
 }
 
