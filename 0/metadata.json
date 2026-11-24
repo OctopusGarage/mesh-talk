@@ -1,0 +1,80 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M85MDH1F6FKX0XG2VW6Z1DX1",
+  "session_id": "01a208ba-edbb-73e0-af15-57710ea547c3",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-24T01:58:39.551192Z",
+  "branch": "refactor/mesh-sdk-depth",
+  "checkpoints_count": 24,
+  "files_touched": [
+    "Cargo.lock",
+    "crates/mesh-talk-core/src/channel/model.rs",
+    "crates/mesh-talk-core/src/eventlog/persist/legacy.rs",
+    "crates/mesh-talk-core/src/node/account_documents/custody.rs",
+    "crates/mesh-talk-core/src/node/delivery_store_tests.rs",
+    "crates/mesh-talk-core/src/node/files/chunks.rs",
+    "crates/mesh-talk-core/src/node/profile_store.rs",
+    "crates/mesh-talk-core/src/node/ratchet_sessions.rs",
+    "crates/mesh-talk-core/src/node/session.rs",
+    "crates/mesh-talk-core/src/node/session/backend.rs",
+    "crates/mesh-talk-core/src/node/session/paged_tests.rs",
+    "crates/mesh-talk-core/src/storage/record_log.rs",
+    "vendor/mesh-foundation/README.md",
+    "vendor/mesh-foundation/crates/mesh-blob/src/lib.rs",
+    "vendor/mesh-foundation/crates/mesh-blob/src/receive.rs",
+    "vendor/mesh-foundation/crates/mesh-blob/tests/receive.rs",
+    "vendor/mesh-foundation/crates/mesh-connect/Cargo.toml",
+    "vendor/mesh-foundation/crates/mesh-connect/src/discovery/announce.rs",
+    "vendor/mesh-foundation/crates/mesh-connect/src/lib.rs",
+    "vendor/mesh-foundation/crates/mesh-connect/tests/connect.rs",
+    "vendor/mesh-foundation/crates/mesh-e2ee/src/sender_key.rs",
+    "vendor/mesh-foundation/crates/mesh-e2ee/src/sender_key/checkpoint.rs",
+    "vendor/mesh-foundation/crates/mesh-identity/src/account.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/src/spool.rs",
+    "vendor/mesh-foundation/crates/mesh-mailbox/tests/spool.rs",
+    "vendor/mesh-foundation/crates/mesh-replication/src/legacy_round.rs",
+    "vendor/mesh-foundation/crates/mesh-replication/src/legacy_wire.rs",
+    "vendor/mesh-foundation/crates/mesh-replication/tests/legacy_round.rs",
+    "vendor/mesh-foundation/crates/mesh-storage/Cargo.toml",
+    "vendor/mesh-foundation/crates/mesh-storage/src/record_log.rs",
+    "vendor/mesh-foundation/crates/mesh-storage/src/record_log_visitor_tests.rs"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.2-sol",
+  "turn_id": "f8c6bb817f35",
+  "checkpoint_transcript_start": 3679,
+  "transcript_lines_at_start": 3679,
+  "compact_transcript_start": 563,
+  "token_usage": {
+    "input_tokens": 725070,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 71184384,
+    "output_tokens": 63529,
+    "api_call_count": 335,
+    "subagent_tokens": {
+      "input_tokens": 6207,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 536832,
+      "output_tokens": 730,
+      "api_call_count": 4
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 664,
+    "layers": {
+      "betterleaks": 34,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 46,
+      "credentialed_uri": 0,
+      "entropy": 585,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 42
+  }
+}
