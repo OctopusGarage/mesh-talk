@@ -19,6 +19,7 @@ mod backend;
 mod have_budget;
 pub(crate) mod mailbox;
 pub(crate) mod mailbox_watch;
+pub(in crate::node) mod range_sync;
 use backend::*;
 use bincode::Options;
 pub use have_budget::RemoteHaveBudget;
@@ -557,16 +558,26 @@ where
 /// Receive a streamed `have` id-set (chunk frames until `more == false`), accepting
 /// only the expected variant (`want_req` → `ReqHave`, else `RespHave`). Bounded by
 /// `MAX_HAVE_CHUNKS` so a peer can't stream forever.
-async fn recv_have<IO>(
+#[cfg(test)]
+async fn recv_have<IO: AsyncRead + AsyncWrite + Unpin>(
     channel: &mut SecureChannel<IO>,
     want_req: bool,
     conversation: ConversationId,
+) -> Result<Vec<EventId>, SessionError> {
+    recv_have_limited(channel, want_req, conversation, false).await
+}
+
+async fn recv_have_limited<IO>(
+    channel: &mut SecureChannel<IO>,
+    want_req: bool,
+    conversation: ConversationId,
+    limited: bool,
 ) -> Result<Vec<EventId>, SessionError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let mut have = Vec::new();
-    for _ in 0..MAX_HAVE_CHUNKS {
+    for _ in 0..if limited { 8 } else { MAX_HAVE_CHUNKS } {
         let chunk = match decode(&channel.recv().await?)? {
             SyncWire::ReqHave(c) if want_req => c,
             SyncWire::RespHave(c) if !want_req => c,
@@ -582,17 +593,17 @@ where
             return Err(SessionError::UnexpectedMessage);
         }
         // Direct cap on accumulated ids (not just per-chunk × chunk-count), bounding relay memory.
-        if have.len() + chunk.ids.len() > MAX_HAVE_IDS_TOTAL {
+        if have.len() + chunk.ids.len() > if limited { 2000 } else { MAX_HAVE_IDS_TOTAL } {
             return Err(SessionError::UnexpectedMessage);
         }
         let required = have.len() + chunk.ids.len();
         if required > have.capacity() {
             let target = required
                 .max(have.capacity().saturating_mul(2))
-                .min(MAX_HAVE_IDS_TOTAL);
+                .min(if limited { 2000 } else { MAX_HAVE_IDS_TOTAL });
             have.try_reserve_exact(target - have.len())
                 .map_err(|_| SessionError::ResourceUnavailable)?;
-            if have.capacity() > MAX_HAVE_IDS_TOTAL {
+            if have.capacity() > if limited { 2000 } else { MAX_HAVE_IDS_TOTAL } {
                 return Err(SessionError::ResourceUnavailable);
             }
         }
@@ -610,11 +621,12 @@ async fn recv_have_owned<IO: AsyncRead + AsyncWrite + Unpin>(
     conversation: ConversationId,
     budget: Option<&RemoteHaveBudget>,
     comparison: bool,
+    limited: bool,
 ) -> Result<have_budget::ReceivedHave, SessionError> {
     // Never await admission: requester/responder endpoints may already be in
     // opposite network phases while holding other resources.
     let permit = budget.map(RemoteHaveBudget::try_admit).transpose()?;
-    let ids = recv_have(channel, want_req, conversation).await?;
+    let ids = recv_have_limited(channel, want_req, conversation, limited).await?;
     if comparison {
         have_budget::ReceivedHave::from_vec_for_comparison(ids, permit, true)
     } else {
@@ -629,7 +641,7 @@ async fn recv_have_owned<IO: AsyncRead + AsyncWrite + Unpin>(
 /// SDK callers own the authenticated channel, selected conversation and store;
 /// they must enforce their own disclosure/admission policy before invoking it.
 /// This compatibility entrypoint explicitly uses the legacy collecting adapter;
-/// bounded source consumers call [`request_round_paged`].
+/// production bounded consumers call [`request_sync_turn_paged`].
 pub async fn request_round<S, IO>(
     channel: &mut SecureChannel<IO>,
     store: &Mutex<S>,
@@ -640,7 +652,7 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let mut progress = SyncProgress::default();
-    while !progress.step(channel, store, conversation).await? {}
+    while !Box::pin(progress.step(channel, store, conversation)).await? {}
     log::debug!(
         target: "mesh_talk::sync",
         "sync conv={} have={} have_kib={} applied={} dup={} pushed={} diff={} rounds={}",
@@ -656,11 +668,56 @@ where
     Ok(progress.total)
 }
 
+/// Aggregate compatibility-turn admission. Exhaustion is explicitly deferred,
+/// never interpreted as a completed inventory or successful convergence.
+#[derive(Clone, Copy)]
+struct SyncTurnBudget {
+    records: usize,
+    body_bytes: usize,
+}
+impl Default for SyncTurnBudget {
+    fn default() -> Self {
+        Self {
+            records: 200,
+            body_bytes: 1024 * 1024,
+        }
+    }
+}
+impl SyncTurnBudget {
+    fn charge(&mut self, records: usize, body_bytes: usize) -> Result<(), SessionError> {
+        let records = self
+            .records
+            .checked_sub(records)
+            .ok_or(SessionError::ResourceUnavailable)?;
+        let body_bytes = self
+            .body_bytes
+            .checked_sub(body_bytes)
+            .ok_or(SessionError::ResourceUnavailable)?;
+        self.records = records;
+        self.body_bytes = body_bytes;
+        Ok(())
+    }
+    fn charge_events(&mut self, events: &[crate::eventlog::Event]) -> Result<(), SessionError> {
+        let mut bytes = 0usize;
+        for event in events {
+            let encoded = bincode::serialized_size(event)
+                .map_err(|error| SessionError::Serialization(error.to_string()))?;
+            let encoded =
+                usize::try_from(encoded).map_err(|_| SessionError::ResourceUnavailable)?;
+            bytes = bytes
+                .checked_add(encoded)
+                .ok_or(SessionError::ResourceUnavailable)?;
+        }
+        self.charge(events.len(), bytes)
+    }
+}
+
 /// Resume only between complete protocol exchanges, never midway through
 /// a Noise frame. A caller timing out a step must discard its channel and state.
 #[derive(Default)]
 pub(in crate::node) struct SyncProgress {
     started: bool,
+    turn_budget: Option<SyncTurnBudget>,
     v2: bool,
     v3: bool,
     v4: bool,
@@ -751,7 +808,11 @@ impl SyncProgress {
         // only skip a diff — never corrupt — so this is safe.)
         if !self.started {
             self.started = true;
-            let (metadata, probe_view) = backend::prepared_probe(backend, &conversation).await?;
+            let (metadata, probe_view) = if self.turn_budget.is_some() {
+                backend::bounded_probe(backend, &conversation).await?
+            } else {
+                backend::prepared_probe(backend, &conversation).await?
+            };
             let local_count = usize::try_from(metadata.count)
                 .map_err(|_| crate::eventlog::LogError::RepositoryCounterExhausted)?;
             let (local_v2, local_v3, local_v4, local_v5) = (
@@ -854,7 +915,15 @@ impl SyncProgress {
         // metadata cost is O(N) per round. Capture N, the diff, and the round count so we can
         // evaluate reconciliation scaling (e.g. range-based / Negentropy) on real workloads.
         let round = self.rounds;
-        let have_view = backend::open_prepared_view(backend, &conversation).await?;
+        let have_view = if self.turn_budget.is_some() {
+            backend::bounded_view(backend, &conversation).await?
+        } else {
+            backend::open_prepared_view(backend, &conversation).await?
+        };
+        if self.turn_budget.is_some() && backend.advertised_count(&have_view)? > 2000 {
+            drop(backend.retain_limited_view(have_view)?);
+            return Err(SessionError::ResourceUnavailable);
+        }
         let local_count = have_count(backend.advertised_count(&have_view)?)?;
         if round == 0 {
             self.first_have = local_count;
@@ -888,12 +957,13 @@ impl SyncProgress {
                 SyncWire::Request(request)
             })?)
             .await?;
-        send_have_pages(
+        send_have_pages_limited(
             channel,
             backend,
             &have_view,
             conversation,
             SyncWire::ReqHave,
+            self.turn_budget.is_some(),
         )
         .await?;
 
@@ -919,6 +989,9 @@ impl SyncProgress {
         {
             return Err(SessionError::UnexpectedMessage);
         }
+        if let Some(budget) = self.turn_budget.as_mut() {
+            budget.charge_events(&response.events)?;
+        }
         self.received_wire_total += response.events.len();
         let remote_have = recv_have_owned(
             channel,
@@ -926,6 +999,7 @@ impl SyncProgress {
             conversation,
             backend.remote_have_budget(),
             comparison_token.is_some() && self.received_wire_total == 0,
+            self.turn_budget.is_some(),
         )
         .await?;
         self.remote_have_count = Some(intersection_count(backend, &have_view, &remote_have).await?);
@@ -940,7 +1014,11 @@ impl SyncProgress {
             have_view
         } else {
             drop(have_view);
-            backend::open_prepared_view(backend, &conversation).await?
+            if self.turn_budget.is_some() {
+                backend::bounded_view(backend, &conversation).await?
+            } else {
+                backend::open_prepared_view(backend, &conversation).await?
+            }
         };
         let mut followups = select_export_frames(
             backend,
@@ -948,8 +1026,15 @@ impl SyncProgress {
             conversation,
             &remote_have,
             max_followups,
+            self.turn_budget.map_or(512, |b| b.records),
+            self.turn_budget.map_or(MAX_PLAINTEXT, |b| b.body_bytes),
         )
         .await?;
+        if let Some(budget) = self.turn_budget.as_mut() {
+            for frame in &followups {
+                budget.charge_events(&frame.events)?;
+            }
+        }
         let made_progress = report.applied > 0;
         // New controls may arrive after the fingerprint probe. Complete this
         // round empty and restart with the required capability before sending.
@@ -1259,6 +1344,7 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
                 conversation,
                 backend.remote_have_budget(),
                 false,
+                false,
             )
             .await?;
             // Transfer the existing connection-owned lease before awaiting.
@@ -1272,8 +1358,16 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             let response = if unsupported_metadata(metadata, v2, v3, v4, v5) {
                 None
             } else {
-                let mut frames =
-                    select_export_frames(backend, &view, conversation, &have, 1).await?;
+                let mut frames = select_export_frames(
+                    backend,
+                    &view,
+                    conversation,
+                    &have,
+                    1,
+                    512,
+                    MAX_PLAINTEXT,
+                )
+                .await?;
                 let events = frames.pop().map_or_else(Vec::new, |frame| frame.events);
                 events
                     .iter()
@@ -3792,8 +3886,79 @@ mod tests {
 #[cfg(test)]
 mod paged_tests;
 
-/// Direct mandatory paged requester. On cancellation/error discard the channel;
-/// a partially streamed exchange cannot be reused.
+pub(crate) struct SyncTurnOutcome {
+    pub report: ApplyReport,
+    pub complete: bool,
+    pub limited: bool,
+}
+impl std::ops::Deref for SyncTurnOutcome {
+    type Target = ApplyReport;
+    fn deref(&self) -> &ApplyReport {
+        &self.report
+    }
+}
+/// Background owners recycle a clean deferred session and requeue fairly;
+/// budget exhaustion is not a transport failure or a convergence proof.
+pub(crate) async fn request_sync_turn_paged<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+) -> Result<SyncTurnOutcome, SessionError> {
+    match Box::pin(range_sync::request(channel, store, conversation)).await? {
+        range_sync::Turn::Unsupported => {
+            Box::pin(request_legacy_turn_paged(channel, store, conversation))
+                .await
+                .map(|report| SyncTurnOutcome {
+                    report,
+                    complete: true,
+                    limited: false,
+                })
+        }
+        range_sync::Turn::Limited(report) => Ok(SyncTurnOutcome {
+            report,
+            complete: false,
+            limited: true,
+        }),
+        range_sync::Turn::More(report) => Ok(SyncTurnOutcome {
+            report,
+            complete: false,
+            limited: false,
+        }),
+        range_sync::Turn::Complete(report) => Ok(SyncTurnOutcome {
+            report,
+            complete: true,
+            limited: false,
+        }),
+    }
+}
+
+/// Production range-aware requester. New-profile limits never trigger an
+/// automatic full-Have downgrade; only an explicit unsupported peer does.
+pub(crate) async fn request_range_round_paged<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+) -> Result<ApplyReport, SessionError> {
+    match Box::pin(range_sync::request(channel, store, conversation)).await? {
+        range_sync::Turn::Unsupported => {
+            Box::pin(request_legacy_turn_paged(channel, store, conversation)).await
+        }
+        range_sync::Turn::More(_) | range_sync::Turn::Limited(_) => {
+            Err(SessionError::ResourceUnavailable)
+        }
+        range_sync::Turn::Complete(report) => Ok(report),
+    }
+}
+
+/// Explicit legacy drain requester, retained for compatibility callers.
+/// Production background owners use `request_sync_turn_paged` for bounded turns.
+/// On cancellation/error discard the partially streamed channel.
 #[allow(dead_code)] // Direct callers land in the separate SQL runtime cutover.
 pub async fn request_round_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
     channel: &mut SecureChannel<IO>,
@@ -3801,11 +3966,36 @@ pub async fn request_round_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite
     conversation: ConversationId,
 ) -> Result<ApplyReport, SessionError> {
     let mut progress = SyncProgress::default();
+    let backend = PagedNetworkBackend(store, None);
     while !progress
-        .step_backend(channel, &PagedNetworkBackend(store, None), conversation, 1)
+        .step_backend(channel, &backend, conversation, 1)
         .await?
     {}
     Ok(progress.total)
+}
+
+async fn request_legacy_turn_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+) -> Result<ApplyReport, SessionError> {
+    let mut progress = SyncProgress {
+        turn_budget: Some(SyncTurnBudget::default()),
+        ..Default::default()
+    };
+    let backend = PagedNetworkBackend(store, None);
+    for _ in 0..8 {
+        if progress
+            .step_backend(channel, &backend, conversation, 1)
+            .await?
+        {
+            return Ok(progress.total);
+        }
+        tokio::task::yield_now().await;
+    }
+    // Retain committed store progress, discard this session, and let the host's
+    // existing retry/fair scheduling owner acquire a fresh authorized view.
+    Err(SessionError::ResourceUnavailable)
 }
 pub(in crate::node) async fn request_file_round_paged<
     S: NetworkSyncStore,
@@ -3888,4 +4078,29 @@ pub(crate) async fn serve_one_budgeted<S: NetworkSyncStore, IO: AsyncRead + Asyn
         Err(_) => return Ok(Served::Closed),
     };
     serve_wire_bytes_budgeted(channel, store, &bytes, budget).await
+}
+
+#[cfg(test)]
+mod turn_budget_tests {
+    use super::*;
+    #[test]
+    fn bounded_turn_aggregates_batches_and_rejects_201_without_mutating_budget() {
+        let mut budget = SyncTurnBudget::default();
+        budget.charge(100, 32).unwrap();
+        budget.charge(100, 32).unwrap();
+        assert!(matches!(
+            budget.charge(1, 0),
+            Err(SessionError::ResourceUnavailable)
+        ));
+        assert_eq!(budget.records, 0);
+    }
+    #[test]
+    fn byte_exhaustion_is_independent_and_atomic() {
+        let mut budget = SyncTurnBudget::default();
+        assert!(budget.charge(1, 1024 * 1024 + 1).is_err());
+        assert_eq!(budget.records, 200);
+        budget.charge(1, 1024 * 1024).unwrap();
+        assert!(budget.charge(1, 1).is_err());
+        assert_eq!(budget.records, 199);
+    }
 }

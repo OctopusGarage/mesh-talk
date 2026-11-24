@@ -121,6 +121,10 @@ pub(in crate::node) struct ParticipantView {
     // Staged invitations already have an 8 MiB owner budget.
     pub(super) pending: Vec<EventId>,
     export_have: Mutex<Option<[u8; 32]>>,
+    range_export_phase: Mutex<u8>,
+    range_checkpoint: Mutex<Option<crate::eventlog::sync::range::index::Checkpoint>>,
+    range_receiver: Mutex<crate::eventlog::sync::range::RangeBuild<ParticipantHaveCursor>>,
+    range: Mutex<crate::eventlog::sync::range::RangeBuild<i64>>,
     sibling_closure: bool,
     metadata_stamp: Option<HistorySyncStamp>,
     // Keep only active finite cuts stable against physical Profile reclamation.
@@ -138,6 +142,89 @@ pub(in crate::node) struct ParticipantExportCursor {
     have: [u8; 32],
 }
 impl GuardedSyncStore<'_> {
+    fn evict_idle_range_pressure(&self) -> bool {
+        let retired = {
+            let mut cache = self
+                .node
+                .prepared_sync_views
+                .lock()
+                .expect("prepared sync cache");
+            (0..8)
+                .filter_map(|_| cache.retire_oldest())
+                .collect::<Vec<_>>()
+        };
+        let evicted = !retired.is_empty();
+        // SQL selection retirement and last Arc index reservations run outside
+        // the cache lock. Active views/snapshots are never forcibly retired.
+        drop(retired);
+        evicted
+    }
+    fn range_live_stamp(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<HistorySyncStamp, LogError> {
+        use sha2::Digest;
+        let bytes = bincode::serialize(&self.network_observation(conversation)?)
+            .map_err(|e| LogError::Serialization(e.to_string()))?;
+        Ok(HistorySyncStamp {
+            fingerprint: sha2::Sha256::digest(bytes).into(),
+        })
+    }
+    fn requested_prepare(
+        &self,
+        view: &ParticipantView,
+        budget: PreparationBudget,
+    ) -> Result<(bool, PreparationStep), LogError> {
+        budget.validate()?;
+        self.validate_view(view)?;
+        view.preparation
+            .lock()
+            .expect("view preparation lock")
+            .enable_history_upload();
+        if !view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .ready()
+        {
+            let mut step = self.prepare_view_step(view, budget)?;
+            if !step.ready || step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+                step.ready = false;
+                return Ok((true, step));
+            }
+        }
+        if self.export_preparation_needs_have(view)? {
+            return Ok((false, PreparationStep::default()));
+        }
+        let mut phase = view.range_export_phase.lock().expect("range export phase");
+        if *phase == 2 {
+            return Ok((
+                true,
+                PreparationStep {
+                    ready: true,
+                    ..Default::default()
+                },
+            ));
+        }
+        let step = if *phase == 0 {
+            let step = self.reset_export_step(view, budget)?;
+            if step.ready {
+                *phase = 1;
+            }
+            PreparationStep {
+                ready: false,
+                ..step
+            }
+        } else {
+            let step = self.prepare_export_step(view, &HashSet::new(), budget)?;
+            if step.ready {
+                *phase = 2;
+            }
+            step
+        };
+        self.validate_view(view)?;
+        Ok((true, step))
+    }
     fn prepared_scope(
         &self,
         conversation: ConversationId,
@@ -178,8 +265,10 @@ impl GuardedSyncStore<'_> {
         let compaction_lease = (purpose == Purpose::Ordinary)
             .then(|| self.node.acquire_profile_compaction_lease())
             .transpose()?;
-        let Some(stamp) = self.history_sync_stamp(conversation)? else {
-            return Ok(None);
+        let stamp = match self.history_sync_stamp(conversation)? {
+            Some(stamp) => stamp,
+            None if purpose == Purpose::Ordinary => self.range_live_stamp(conversation)?,
+            None => return Ok(None),
         };
         let (value, retired) = {
             let mut cache = self
@@ -190,7 +279,14 @@ impl GuardedSyncStore<'_> {
             if self.node.runtime_work.is_closed() {
                 return Ok(None);
             }
-            cache.take(&self.prepared_scope(*conversation, purpose), &stamp)
+            if purpose == Purpose::Ordinary {
+                (
+                    cache.take_candidate(&self.prepared_scope(*conversation, purpose)),
+                    Vec::new(),
+                )
+            } else {
+                cache.take(&self.prepared_scope(*conversation, purpose), &stamp)
+            }
         };
         drop(retired);
         if let Some(mut value) = value {
@@ -213,6 +309,122 @@ impl GuardedSyncStore<'_> {
                         .as_mut()
                         .ok_or(LogError::StaleCursor)?,
                 )?;
+            if value.view.metadata_stamp.as_ref() != Some(&stamp) {
+                let (range_owner, was_ready) = {
+                    let preparation = value.view.preparation.lock().expect("preparation");
+                    (preparation.history_only(), preparation.was_ready())
+                };
+                let index_pending = value.view.range.lock().expect("range").snapshot().is_none()
+                    && value
+                        .view
+                        .range_receiver
+                        .lock()
+                        .expect("receiver")
+                        .snapshot()
+                        .is_none();
+                if range_owner && (!was_ready || index_pending) {
+                    self.validate_view(&value.view)?;
+                    return Ok(Some(value));
+                }
+
+                let old_count = value
+                    .view
+                    .preparation
+                    .get_mut()
+                    .expect("owned preparation")
+                    .history_generation()
+                    .map(|g| g.count);
+                let Some(old_count) = old_count else {
+                    return Ok(None);
+                };
+                let source_complete = value
+                    .view
+                    .range
+                    .get_mut()
+                    .expect("owned range")
+                    .snapshot()
+                    .is_some_and(|snapshot| {
+                        snapshot
+                            .index()
+                            .summary(crate::eventlog::sync::range::index::Prefix::root())
+                            .count as u64
+                            == old_count
+                    });
+                let receiver_complete = value
+                    .view
+                    .range_receiver
+                    .get_mut()
+                    .expect("owned receiver")
+                    .snapshot()
+                    .is_some_and(|snapshot| {
+                        snapshot
+                            .index()
+                            .summary(crate::eventlog::sync::range::index::Prefix::root())
+                            .count as u64
+                            == old_count
+                    });
+                let eligible = value.view.pending.is_empty()
+                    && value
+                        .view
+                        .preparation
+                        .get_mut()
+                        .expect("owned preparation")
+                        .history_only()
+                    && (source_complete || receiver_complete);
+                if !eligible {
+                    return Ok(None);
+                }
+                let old_have_end = value.view.repository.have_end_cursor();
+                let mut upload = HistoryUpload {
+                    binding: value.view.repository.history_binding.clone(),
+                    view: value.view,
+                    peer: self.peer.clone(),
+                    denied: self.denied,
+                    inbound: self.inbound,
+                    pull_only: self.pull_only,
+                    cache_eligible: true,
+                    export_initialized: Mutex::new(true),
+                    export_ready: Mutex::new(true),
+                };
+                if !self.resume_history_upload(&mut upload)? {
+                    return Ok(None);
+                }
+                if source_complete {
+                    upload
+                        .view
+                        .range
+                        .get_mut()
+                        .expect("owned range")
+                        .resume_after(
+                            i64::try_from(old_count)
+                                .map_err(|_| LogError::RepositoryCounterExhausted)?
+                                - 1,
+                        );
+                } else {
+                    *upload.view.range.get_mut().expect("owned range") = Default::default();
+                }
+                *upload
+                    .view
+                    .range_export_phase
+                    .get_mut()
+                    .expect("exportphase") = if source_complete { 1 } else { 0 };
+                if receiver_complete {
+                    let cursor = ParticipantHaveCursor::Retained(
+                        upload.view.repository.extend_have_cursor(&old_have_end)?,
+                    );
+                    upload
+                        .view
+                        .range_receiver
+                        .get_mut()
+                        .expect("receiver")
+                        .resume_after(cursor);
+                } else {
+                    *upload.view.range_receiver.get_mut().expect("receiver") = Default::default();
+                }
+                *upload.view.range_checkpoint.get_mut().expect("checkpoint") = None;
+                upload.view.metadata_stamp = Some(stamp);
+                value.view = upload.view;
+            }
             Ok(Some(value))
         } else {
             Ok(None)
@@ -224,13 +436,19 @@ impl GuardedSyncStore<'_> {
         purpose: Purpose,
     ) -> Result<Option<ParticipantView>, LogError> {
         // Pending uninvited ancestry remains operation-owned, never node-wide.
+        let history = purpose == Purpose::History
+            || view
+                .preparation
+                .get_mut()
+                .expect("owned preparation")
+                .history_only();
         if !view.pending.is_empty()
             || !self.pending_channels.is_empty()
             || !view
                 .preparation
                 .get_mut()
                 .expect("owned view preparation")
-                .compact_for_cache(purpose == Purpose::History)
+                .compact_for_cache(history)
         {
             return Ok(Some(view));
         }
@@ -669,6 +887,7 @@ impl GuardedSyncStore<'_> {
                 .preparation
                 .lock()
                 .expect("view preparation lock");
+            preparation.restore_history_owner(self, &upload.view)?;
             if !preparation.resume_history(generation) {
                 return Ok(false);
             }
@@ -1096,6 +1315,10 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             observed: Mutex::new(observed),
             pending,
             export_have: Mutex::new(None),
+            range_export_phase: Mutex::new(0),
+            range_checkpoint: Mutex::new(None),
+            range_receiver: Mutex::new(Default::default()),
+            range: Mutex::new(Default::default()),
             sibling_closure,
             metadata_stamp,
             compaction_lease: Some(compaction_lease),
@@ -1157,7 +1380,21 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             return Ok(None);
         }
         let current = self.history_sync_stamp(conversation)?;
-        if current.is_none() || current.as_ref() != view.metadata_stamp.as_ref() {
+        let (range_owner, was_ready) = {
+            let preparation = view.preparation.lock().expect("preparation");
+            (preparation.history_only(), preparation.was_ready())
+        };
+        let partial_range = range_owner
+            && (!was_ready
+                || (view.range.lock().expect("range").snapshot().is_none()
+                    && view
+                        .range_receiver
+                        .lock()
+                        .expect("receiver")
+                        .snapshot()
+                        .is_none()));
+        if !partial_range && (current.is_none() || current.as_ref() != view.metadata_stamp.as_ref())
+        {
             self.node
                 .observe_mailbox_work(query_reason::QUERY_STAMP_MISS, None);
             return Ok(None);
@@ -1175,6 +1412,54 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             }
             Err(error) => Err(error),
         }
+    }
+    fn range_reverse_required(&self) -> bool {
+        !self.pull_only
+    }
+    fn retain_range_view(&mut self, mut view: Self::View) -> Result<Option<Self::View>, LogError> {
+        self.validate_view(&view)?;
+        if !self.use_node_preparation
+            || !view.pending.is_empty()
+            || !self.pending_channels.is_empty()
+        {
+            return Ok(Some(view));
+        }
+        let preparation = view.preparation.get_mut().expect("owned preparation");
+        if !preparation.history_only() || !preparation.park_range() {
+            return Ok(Some(view));
+        }
+        let bytes = self
+            .node
+            .log
+            .lock()
+            .expect("log")
+            .repository()?
+            .selection_cache_bytes(preparation.selection()?)?;
+        let stamp = self
+            .history_sync_stamp(&view.conversation)?
+            .unwrap_or(self.range_live_stamp(&view.conversation)?);
+        drop(view.compaction_lease.take());
+        preparation
+            .selection
+            .as_mut()
+            .ok_or(LogError::StaleCursor)?
+            .park();
+        let scope = self.prepared_scope(view.conversation, Purpose::Ordinary);
+        let retired = self.node.prepared_sync_views.lock().expect("cache").insert(
+            scope,
+            stamp,
+            bytes,
+            RetainedSelection {
+                purpose: Purpose::Ordinary,
+                denied: self.denied,
+                inbound: self.inbound,
+                pull_only: self.pull_only,
+                view,
+            },
+            std::time::Instant::now(),
+        );
+        drop(retired);
+        Ok(None)
     }
     fn retain_custody_view(
         &mut self,
@@ -1458,6 +1743,214 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         }
         Ok(step)
     }
+    fn requested_export(
+        &self,
+        view: &Self::View,
+        targets: &[EventId],
+        budget: ExportPageBudget,
+        preparation: PreparationBudget,
+    ) -> Result<crate::eventlog::sync::network::RequestedExport, LogError> {
+        use crate::eventlog::sync::network::{RequestedExport, RequestedExportStatus as Status};
+        budget.validate()?;
+        if targets.len() > 200 || targets.iter().collect::<HashSet<_>>().len() != targets.len() {
+            return Err(LogError::InvalidPageBudget);
+        }
+        let (supported, work) = self.requested_prepare(view, preparation)?;
+        let mut result = RequestedExport {
+            status: if !supported {
+                Status::Unsupported
+            } else if !work.ready {
+                Status::Preparing
+            } else {
+                Status::More
+            },
+            events: vec![],
+            unavailable: vec![],
+            consumed: 0,
+            work,
+        };
+        if !supported || !work.ready {
+            return Ok(result);
+        }
+        let selected = view.preparation.lock().expect("view preparation lock");
+        let log = self.node.log.lock().expect("log lock");
+        let repo = log.repository()?;
+        let mut remaining = budget.encoded_bytes.min(budget.allocated_bytes);
+        for id in targets.iter().take(budget.examined).take(budget.events) {
+            if remaining == 0 {
+                break;
+            }
+            match repo.selected_upload_event(
+                selected.selection()?,
+                &view.repository,
+                *id,
+                i64::MAX as u64,
+                remaining,
+            ) {
+                Ok(Some(event)) => {
+                    remaining =
+                        remaining.saturating_sub(crate::eventlog::sync::encoded_event_size(&event));
+                    result.events.push(event);
+                }
+                Ok(None) => result.unavailable.push(*id),
+                Err(LogError::PageBudgetTooSmall { .. }) => {
+                    // Explicitly defer this target without acknowledging it as
+                    // synchronized; unrelated fitting targets may still advance.
+                    result.unavailable.push(*id);
+                }
+                Err(error) => return Err(error),
+            }
+            result.consumed += 1;
+        }
+        drop(log);
+        drop(selected);
+        self.validate_view(view)?;
+        if result.consumed == targets.len() {
+            result.status = Status::Complete;
+        }
+        Ok(result)
+    }
+    fn requested_inventory_page(
+        &self,
+        view: &Self::View,
+        after: Option<i64>,
+        budget: IdPageBudget,
+    ) -> Result<Option<SyncPage<EventId, i64>>, LogError> {
+        budget.validate()?;
+        let (supported, work) = self.requested_prepare(view, PreparationBudget::default())?;
+        if !supported {
+            return Err(LogError::InvalidPageBudget);
+        }
+        if !work.ready {
+            return Ok(None);
+        }
+        let preparation = view.preparation.lock().expect("view preparation lock");
+        let (ids, next, complete) = self
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .selected_upload_id_rank_page(
+                preparation.selection()?,
+                &view.repository,
+                after.unwrap_or(-1),
+                i64::MAX as u64,
+                budget,
+            )?;
+        drop(preparation);
+        self.validate_view(view)?;
+        Ok(Some(SyncPage {
+            items: ids,
+            next: (!complete).then_some(next),
+            examined: budget.examined,
+        }))
+    }
+    fn range_prepare(
+        &self,
+        view: &Self::View,
+    ) -> Result<crate::eventlog::sync::range::RangeProgress, LogError> {
+        use crate::eventlog::sync::range::RangeProgress;
+        let (supported, work) = self.requested_prepare(view, PreparationBudget::default())?;
+        if !supported {
+            return Ok(RangeProgress::Unsupported);
+        }
+        if !work.ready || work.rows != 0 || work.edges != 0 || work.bytes != 0 {
+            return Ok(RangeProgress::More);
+        }
+        let mut range = view.range.lock().expect("range build");
+        let result = range.advance(None, |cursor, budget| {
+            self.requested_inventory_page(view, cursor.copied(), budget)?
+                .ok_or(LogError::StaleCursor)
+        });
+        drop(range);
+        let result = match result {
+            Err(error)
+                if crate::eventlog::sync::range::is_index_capacity_error(&error)
+                    && self.evict_idle_range_pressure() =>
+            {
+                RangeProgress::More
+            }
+            result => result?,
+        };
+        self.validate_view(view)?;
+        Ok(result)
+    }
+    fn range_receiver_prepare(
+        &self,
+        view: &Self::View,
+    ) -> Result<crate::eventlog::sync::range::RangeReceiverProgress, LogError> {
+        use crate::eventlog::sync::range::{RangeProgress, RangeReceiverProgress};
+        self.validate_view(view)?;
+        view.preparation
+            .lock()
+            .expect("preparation")
+            .enable_history_upload();
+        if !view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .ready()
+        {
+            let step = self.prepare_view_step(view, PreparationBudget::default())?;
+            if !step.ready || step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+                return Ok(RangeReceiverProgress::More);
+            }
+        }
+        let _expected = self.metadata(view)?.count;
+        let mut build = view.range_receiver.lock().expect("receiver range build");
+        let progress = build.advance(None, |cursor, budget| self.have_page(view, cursor, budget));
+        if progress
+            .as_ref()
+            .is_err_and(crate::eventlog::sync::range::is_index_capacity_error)
+        {
+            drop(build);
+            if self.evict_idle_range_pressure() {
+                self.validate_view(view)?;
+                return Ok(RangeReceiverProgress::More);
+            }
+            return Err(progress.err().expect("capacity error"));
+        }
+        let result = match progress? {
+            RangeProgress::Ready { .. } => {
+                RangeReceiverProgress::Ready(build.snapshot().ok_or(LogError::StaleCursor)?)
+            }
+            _ => RangeReceiverProgress::More,
+        };
+        drop(build);
+        self.validate_view(view)?;
+        Ok(result)
+    }
+    fn range_checkpoint(
+        &self,
+        view: &Self::View,
+    ) -> Result<Option<crate::eventlog::sync::range::index::Checkpoint>, LogError> {
+        self.validate_view(view)?;
+        Ok(view
+            .range_checkpoint
+            .lock()
+            .expect("range checkpoint")
+            .clone())
+    }
+    fn retain_range_checkpoint(
+        &self,
+        view: &Self::View,
+        checkpoint: crate::eventlog::sync::range::index::Checkpoint,
+    ) -> Result<(), LogError> {
+        self.validate_view(view)?;
+        *view.range_checkpoint.lock().expect("range checkpoint") = Some(checkpoint);
+        self.validate_view(view)
+    }
+    fn range_summary(&self, view: &Self::View, request: &[u8]) -> Result<Vec<u8>, LogError> {
+        self.validate_view(view)?;
+        let bytes = view
+            .range
+            .lock()
+            .expect("range build")
+            .answer(*view.conversation.as_bytes(), request)?;
+        self.validate_view(view)?;
+        Ok(bytes)
+    }
     fn export_page(
         &self,
         view: &Self::View,
@@ -1721,6 +2214,269 @@ mod tests {
             }
         }
         result
+    }
+
+    #[tokio::test]
+    async fn range_source_reuses_qualified_index_after_ordinary_append() {
+        use crate::eventlog::sync::range::RangeProgress;
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("Range append", vec![peer.public()])
+            .await
+            .unwrap();
+        for _ in 0..128 {
+            node.append_event(channel, EventKind::Message, vec![7])
+                .unwrap();
+        }
+        node.await_channel_metadata(channel).await.unwrap();
+        let owner = node.sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        NetworkSyncStore::bind_session_peer(&mut *store, &peer.public());
+        drop(open_prepared(&store, &channel));
+        let view = NetworkSyncStore::open_view(&*store, &channel).unwrap();
+        let mut count = 0;
+        for _ in 0..10000 {
+            match store.range_prepare(&view).unwrap() {
+                RangeProgress::Ready { count: n, .. } => {
+                    count = n;
+                    break;
+                }
+                RangeProgress::More => {}
+                RangeProgress::Unsupported => panic!("group must support ranges"),
+            }
+        }
+        assert!(count >= 128);
+        assert!(store.retain_custody_view(view).unwrap().is_none());
+        node.append_event(channel, EventKind::Message, vec![8])
+            .unwrap();
+        let view = store
+            .take_custody_view(&channel)
+            .unwrap()
+            .expect("qualified append reuses cached source index");
+        let mut final_count = None;
+        for _ in 0..10000 {
+            match store.range_prepare(&view).unwrap() {
+                RangeProgress::Ready { count, .. } => {
+                    final_count = Some(count);
+                    break;
+                }
+                RangeProgress::More => {}
+                RangeProgress::Unsupported => panic!("append changed capability"),
+            }
+        }
+        assert_eq!(final_count, Some(count + 1));
+    }
+
+    #[tokio::test]
+    async fn range_receiver_extends_qualified_prefix_after_durable_commit() {
+        use crate::eventlog::sync::range::RangeReceiverProgress;
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("Receiver append", vec![peer.public()])
+            .await
+            .unwrap();
+        for _ in 0..128 {
+            node.append_event(channel, EventKind::Message, vec![7])
+                .unwrap();
+        }
+        node.await_channel_metadata(channel).await.unwrap();
+        let owner = node.sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        NetworkSyncStore::bind_session_peer(&mut *store, &peer.public());
+        drop(open_prepared(&store, &channel));
+        let view = NetworkSyncStore::open_view(&*store, &channel).unwrap();
+        let mut count = 0;
+        for _ in 0..10000 {
+            match store.range_receiver_prepare(&view).unwrap() {
+                RangeReceiverProgress::Ready(snapshot) => {
+                    count = snapshot
+                        .index()
+                        .summary(crate::eventlog::sync::range::index::Prefix::root())
+                        .count;
+                    break;
+                }
+                RangeReceiverProgress::More => {}
+                _ => panic!("receiver unsupported"),
+            }
+        }
+        assert!(count >= 128);
+        assert!(store.retain_range_view(view).unwrap().is_none());
+        node.append_event(channel, EventKind::Message, vec![9])
+            .unwrap();
+        let view = store
+            .take_custody_view(&channel)
+            .unwrap()
+            .expect("receiver prefix must survive qualified append");
+        let mut after = None;
+        for _ in 0..10000 {
+            match store.range_receiver_prepare(&view).unwrap() {
+                RangeReceiverProgress::Ready(snapshot) => {
+                    after = Some(
+                        snapshot
+                            .index()
+                            .summary(crate::eventlog::sync::range::index::Prefix::root())
+                            .count,
+                    );
+                    break;
+                }
+                RangeReceiverProgress::More => {}
+                _ => panic!("receiver unsupported"),
+            }
+        }
+        assert_eq!(after, Some(count + 1));
+    }
+
+    #[tokio::test]
+    async fn range_partial_preparation_survives_reconnection() {
+        use crate::eventlog::sync::range::RangeProgress;
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("Cold reconnect", vec![peer.public()])
+            .await
+            .unwrap();
+        for _ in 0..129 {
+            node.append_event(channel, EventKind::Message, vec![7])
+                .unwrap();
+        }
+        node.await_channel_metadata(channel).await.unwrap();
+        let mut ready = false;
+        let mut resumed = false;
+        for _ in 0..10000 {
+            let owner = node.sync_store(&peer.public());
+            let mut store = owner.lock().unwrap();
+            store.bind_session_peer(&peer.public());
+            let view = match store.take_custody_view(&channel).unwrap() {
+                Some(view) => {
+                    resumed = true;
+                    view
+                }
+                None => store.open_view(&channel).unwrap(),
+            };
+            let result = store.range_prepare(&view).unwrap();
+            store.retain_range_view(view).unwrap();
+            if matches!(result, RangeProgress::Ready { .. }) {
+                ready = true;
+                break;
+            }
+        }
+        assert!(
+            ready && resumed,
+            "cold finite preparation must progress across reconnects"
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_group_export_checks_selection_and_bounds_bodies() {
+        use crate::eventlog::sync::network::RequestedExportStatus;
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("Targeted", vec![peer.public()])
+            .await
+            .unwrap();
+        node.append_event(channel, EventKind::Message, vec![7])
+            .unwrap();
+        node.append_event(channel, EventKind::Message, vec![7; 4096])
+            .unwrap();
+        node.append_event(channel, EventKind::Message, vec![8])
+            .unwrap();
+        node.await_channel_metadata(channel).await.unwrap();
+        let events = node.log.lock().unwrap().events(&channel).unwrap();
+        let target = events.last().unwrap().id;
+        let oversized = events
+            .iter()
+            .max_by_key(|event| event.ciphertext.len())
+            .unwrap()
+            .id;
+        let absent = EventId::new([222; 32]);
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = open_prepared(&store, &channel);
+        let mut result = None;
+        for _ in 0..10000 {
+            let page = store
+                .requested_export(
+                    &view,
+                    &[target, absent],
+                    upload_page_budget(),
+                    PreparationBudget {
+                        rows: 2,
+                        edges: 8,
+                        bytes: 65536,
+                    },
+                )
+                .unwrap();
+            assert!(page.work.rows <= 2 && page.work.edges <= 8);
+            if page.status != RequestedExportStatus::Preparing {
+                result = Some(page);
+                break;
+            }
+        }
+        let page = result.expect("bounded preparation finishes");
+        assert_eq!(page.status, RequestedExportStatus::Complete);
+        assert_eq!(page.consumed, 2);
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].id, target);
+        assert_eq!(page.unavailable, vec![absent]);
+        let mut small_budget = upload_page_budget();
+        small_budget.encoded_bytes = 1024;
+        small_budget.allocated_bytes = 1024;
+        let page = store
+            .requested_export(
+                &view,
+                &[oversized, target],
+                small_budget,
+                PreparationBudget::default(),
+            )
+            .unwrap();
+        assert_eq!(page.status, RequestedExportStatus::Complete);
+        assert_eq!(page.consumed, 2);
+        assert_eq!(page.unavailable, vec![oversized]);
+        assert_eq!(
+            page.events.iter().map(|event| event.id).collect::<Vec<_>>(),
+            vec![target]
+        );
+        assert!(
+            store
+                .requested_export(
+                    &view,
+                    &[target, target],
+                    upload_page_budget(),
+                    PreparationBudget::default()
+                )
+                .is_err()
+        );
     }
 
     #[test]

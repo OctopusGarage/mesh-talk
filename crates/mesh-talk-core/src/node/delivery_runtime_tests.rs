@@ -5861,7 +5861,7 @@ async fn sync_delivery_test_stage(
         source.emit_new_messages(conversation);
         timing.finish();
     };
-    tokio::join!(accept, send);
+    tokio::join!(Box::pin(accept), Box::pin(send));
     timing.finish();
 }
 
@@ -6987,10 +6987,12 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
 #[ignore = "requires installed mac2015 post office on the same LAN"]
 async fn mac2015_post_office_delivers_file_bytes_after_both_peers_go_offline() {
     let service = std::env::var("MESH_TALK_E2E_MAC2015_SERVICE").ok();
-    installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
-        "MESH_TALK_E2E_MAC2015_RELAY_ID",
-        "mac2015",
-        MacRelayService::parse(service.as_deref()).restart_command(),
+    Box::pin(
+        installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+            "MESH_TALK_E2E_MAC2015_RELAY_ID",
+            "mac2015",
+            MacRelayService::parse(service.as_deref()).restart_command(),
+        ),
     )
     .await;
 }
@@ -7046,11 +7048,11 @@ fn mac_relay_service_selector_preserves_legacy_and_requires_explicit_system() {
 #[tokio::test]
 #[ignore = "requires installed windows10 post office on the same LAN"]
 async fn windows10_post_office_delivers_file_bytes_after_both_peers_go_offline() {
-    installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+    Box::pin(installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         "MESH_TALK_E2E_WINDOWS10_RELAY_ID",
         "windows10",
         "powershell -NoProfile -Command \"Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice\"",
-    )
+    ))
     .await;
 }
 

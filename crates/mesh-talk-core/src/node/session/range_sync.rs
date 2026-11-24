@@ -1,0 +1,965 @@
+//! Negotiated bounded range service. Old peers see an ordinary unmatched probe.
+use super::*;
+use crate::eventlog::sync::{
+    network::{ExportPageBudget, PreparationBudget, RequestedExportStatus},
+    range::{
+        RangeProgress, RangeReceiverProgress,
+        index::{Checkpoint, SummaryFrame},
+    },
+};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+
+fn marker() -> [u8; 32] {
+    Sha256::digest(b"mesh-talk-range-profile-v1-capability").into()
+}
+fn probe(bytes: &[u8]) -> Option<ConversationId> {
+    match decode(bytes).ok()? {
+        SyncWire::FpRequest(r)
+        | SyncWire::FpRequestV2(r)
+        | SyncWire::FpRequestV3(r)
+        | SyncWire::FpRequestV4(r)
+        | SyncWire::FpRequestV5(r)
+            if r.fingerprint == marker() =>
+        {
+            Some(r.conversation)
+        }
+        _ => None,
+    }
+}
+pub(in crate::node) struct Service<V> {
+    view: Option<(ConversationId, V)>,
+    token: Option<[u8; 32]>,
+    sent: SyncTurnBudget,
+    requests: usize,
+    continuing: bool,
+}
+impl<V> Default for Service<V> {
+    fn default() -> Self {
+        Self {
+            view: None,
+            token: None,
+            sent: SyncTurnBudget {
+                records: 100,
+                body_bytes: 512 * 1024,
+            },
+            requests: 0,
+            continuing: true,
+        }
+    }
+}
+impl<V> Service<V> {
+    pub(in crate::node) fn retire<S: NetworkSyncStore<View = V>>(&mut self, store: &Mutex<S>) {
+        if let Some((_, view)) = self.view.take() {
+            drop(store.lock().expect("store lock").retain_range_view(view));
+        }
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Records {
+    scope: ConversationId,
+    token: [u8; 32],
+    status: u8,
+    events: Vec<crate::eventlog::Event>,
+    unavailable: Vec<EventId>,
+    consumed: usize,
+}
+fn scope(bytes: &[u8]) -> Option<ConversationId> {
+    bytes
+        .get(4..36)
+        .and_then(|s| s.try_into().ok())
+        .map(ConversationId::new)
+}
+
+pub(in crate::node) async fn serve<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    state: &mut Service<S::View>,
+    bytes: &[u8],
+) -> Result<Option<Served>, SessionError> {
+    if let Ok(SyncWire::DurableHaveRequest {
+        conversation,
+        event_id,
+    }) = decode(bytes)
+        && let Some((scope, view)) = &state.view
+        && *scope == conversation
+    {
+        let stored = {
+            let source = store.lock().expect("store lock");
+            source.validate_view(view)?;
+            let stored = if state.token.is_some() {
+                source.durable_have_in_view(view, &conversation, &event_id)?
+            } else {
+                false
+            };
+            source.validate_view(view)?;
+            stored
+        };
+        channel
+            .send(&encode(&SyncWire::DurableHaveResponse {
+                conversation,
+                event_id,
+                stored,
+            })?)
+            .await?;
+        return Ok(Some(Served::Handled(conversation)));
+    }
+    let open = probe(bytes);
+    let range = bytes.starts_with(b"MRB1")
+        || bytes.starts_with(b"MRGQ")
+        || bytes.starts_with(b"MRD1")
+        || bytes.starts_with(b"MRV1")
+        || bytes.starts_with(b"MRF1");
+    if open.is_none() && !range {
+        return Ok(None);
+    }
+    let conversation = open
+        .or_else(|| scope(bytes))
+        .ok_or(SessionError::UnexpectedMessage)?;
+    // Each probe opens a freshly requalified finite snapshot. Qualified cached
+    // preparation can resume, but a previous completed snapshot is never reused
+    // blindly on a pooled connection after appends or policy changes.
+    let keep_building = open.is_some()
+        && state.continuing
+        && state.view.as_ref().is_some_and(|(scope, view)| {
+            *scope == conversation
+                && store
+                    .lock()
+                    .expect("store lock")
+                    .validate_view(view)
+                    .is_ok()
+        });
+    if open.is_some() && !keep_building {
+        state.retire(store);
+        let mut source = store.lock().expect("store lock");
+        source.bind_session_peer(channel.peer_identity());
+        let view = match source.take_custody_view(&conversation)? {
+            Some(view) => view,
+            None => source.open_view(&conversation)?,
+        };
+        state.view = Some((conversation, view));
+        state.token = None;
+        state.sent = SyncTurnBudget {
+            records: 100,
+            body_bytes: 512 * 1024,
+        };
+        state.requests = 0;
+        state.continuing = true;
+    }
+    if open.is_some() {
+        state.requests = 0;
+        state.sent = SyncTurnBudget {
+            records: 100,
+            body_bytes: 512 * 1024,
+        };
+    }
+    let (bound, view) = state.view.as_ref().ok_or(SessionError::UnexpectedMessage)?;
+    if *bound != conversation {
+        return Err(SessionError::UnexpectedMessage);
+    }
+    state.requests += 1;
+    if state.requests > 5 {
+        return Err(SessionError::ResourceUnavailable);
+    }
+    if bytes.starts_with(b"MRF1") {
+        if bytes.len() != 37 || bytes[36] > 2 {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        state.continuing = bytes[36] != 1;
+        channel
+            .send(&[b"MRA1".as_slice(), conversation.as_bytes()].concat())
+            .await?;
+        return Ok(Some(Served::Handled(conversation)));
+    }
+    if bytes.starts_with(b"MRV1") {
+        if bytes.len() != 77 || bytes[76] > 2 {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        let remote_token: [u8; 32] = bytes[36..68].try_into().unwrap();
+        let remote_revision = u64::from_le_bytes(bytes[68..76].try_into().unwrap());
+        let result = request_ready(
+            channel,
+            store,
+            conversation,
+            view,
+            remote_token,
+            remote_revision,
+            2,
+            100,
+            512 * 1024,
+        )
+        .await?;
+        let status = match result {
+            Turn::Complete(_) => 1,
+            Turn::Limited(_) => 2,
+            _ => 0,
+        };
+        state.continuing = !(status == 1 && bytes[76] == 1);
+        channel
+            .send(&[b"MRE1".as_slice(), conversation.as_bytes(), &[status]].concat())
+            .await?;
+        return Ok(Some(Served::Handled(conversation)));
+    }
+    let response = {
+        let source = store.lock().expect("store lock");
+        source.validate_view(view)?;
+        let response = if open.is_some() || bytes.starts_with(b"MRB1") {
+            match source.range_prepare(view) {
+                Err(error) if crate::eventlog::sync::range::is_index_capacity_error(&error) => {
+                    [b"MRL1".as_slice(), conversation.as_bytes()].concat()
+                }
+                Err(error) => return Err(error.into()),
+                Ok(progress) => match progress {
+                    RangeProgress::Unsupported => {
+                        encode(&SyncWire::FpResponse(FpResponse { matched: false }))?
+                    }
+                    RangeProgress::More => [b"MRP1".as_slice(), conversation.as_bytes()].concat(),
+                    RangeProgress::Ready {
+                        token,
+                        revision,
+                        count,
+                        digest,
+                    } => {
+                        state.token = Some(token);
+                        [
+                            b"MRR1".as_slice(),
+                            conversation.as_bytes(),
+                            &token,
+                            &revision.to_le_bytes(),
+                            &count.to_le_bytes(),
+                            &digest,
+                        ]
+                        .concat()
+                    }
+                },
+            }
+        } else if bytes.starts_with(b"MRGQ") {
+            source.range_summary(view, bytes)?
+        } else {
+            if bytes.len() < 74 {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            let token: [u8; 32] = bytes[36..68].try_into().unwrap();
+            let count = usize::from(u16::from_le_bytes(bytes[68..70].try_into().unwrap()));
+            let budget = u32::from_le_bytes(bytes[70..74].try_into().unwrap()) as usize;
+            if state.token != Some(token)
+                || count == 0
+                || count > 100
+                || budget == 0
+                || budget > 1024 * 1024
+                || bytes.len() != 74 + count * 32
+            {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            let targets: Vec<_> = bytes[74..]
+                .as_chunks::<32>()
+                .0
+                .iter()
+                .map(|b| EventId::new(*b))
+                .collect();
+            let budget = budget
+                .min(MAX_PLAINTEXT.saturating_sub(1024 + count * 32))
+                .min(state.sent.body_bytes);
+            if count > state.sent.records || budget == 0 {
+                return Err(SessionError::ResourceUnavailable);
+            }
+            let page = source.requested_export(
+                view,
+                &targets,
+                ExportPageBudget {
+                    examined: 2000,
+                    events: count,
+                    encoded_bytes: budget,
+                    allocated_bytes: budget,
+                },
+                PreparationBudget::default(),
+            )?;
+            state.sent.charge_events(&page.events)?;
+            let status = match page.status {
+                RequestedExportStatus::Unsupported => 0,
+                RequestedExportStatus::Preparing => 1,
+                RequestedExportStatus::More => 2,
+                RequestedExportStatus::Complete => 3,
+            };
+            let payload = bincode::serialize(&Records {
+                scope: conversation,
+                token,
+                status,
+                events: page.events,
+                unavailable: page.unavailable,
+                consumed: page.consumed,
+            })
+            .map_err(|e| SessionError::Serialization(e.to_string()))?;
+            if payload.len() + 4 > MAX_PLAINTEXT {
+                return Err(SessionError::ResourceUnavailable);
+            }
+            [b"MRS1".as_slice(), &payload].concat()
+        };
+        source.validate_view(view)?;
+        response
+    };
+    channel.send(&response).await?;
+    Ok(Some(Served::Handled(conversation)))
+}
+
+pub(in crate::node) enum Turn {
+    Unsupported,
+    More(ApplyReport),
+    Limited(ApplyReport),
+    Complete(ApplyReport),
+}
+/// One bounded client turn; local preparations and checkpoints stay with the
+/// qualified store view. The caller retains/recycles the authenticated session.
+pub(in crate::node) async fn request<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+) -> Result<Turn, SessionError> {
+    store
+        .lock()
+        .expect("store lock")
+        .bind_session_peer(channel.peer_identity());
+    channel
+        .send(&encode(&SyncWire::FpRequest(FpRequest {
+            conversation,
+            fingerprint: marker(),
+        }))?)
+        .await?;
+    let reply = channel.recv().await?;
+    if matches!(
+        decode(&reply),
+        Ok(SyncWire::FpResponse(FpResponse { matched: false }))
+    ) || matches!(decode(&reply), Ok(SyncWire::UpgradeRequired { conversation: scope }) if scope==conversation)
+    {
+        return Ok(Turn::Unsupported);
+    }
+    if reply.len() == 36 && reply.starts_with(b"MRL1") && scope(&reply) == Some(conversation) {
+        return Ok(Turn::Limited(ApplyReport::default()));
+    }
+    if reply.len() == 36 && reply.starts_with(b"MRP1") && scope(&reply) == Some(conversation) {
+        return Ok(Turn::More(ApplyReport::default()));
+    }
+    if reply.len() != 116 || !reply.starts_with(b"MRR1") || scope(&reply) != Some(conversation) {
+        return Err(SessionError::UnexpectedMessage);
+    }
+    let token: [u8; 32] = reply[36..68].try_into().unwrap();
+    let revision = u64::from_le_bytes(reply[68..76].try_into().unwrap());
+    let view = {
+        let mut source = store.lock().expect("store lock");
+        match source.take_custody_view(&conversation)? {
+            Some(view) => view,
+            None => source.open_view(&conversation)?,
+        }
+    };
+    let forward = request_ready(
+        channel,
+        store,
+        conversation,
+        &view,
+        token,
+        revision,
+        2,
+        100,
+        512 * 1024,
+    )
+    .await;
+    drop(store.lock().expect("store lock").retain_range_view(view));
+    let forward = forward?;
+    let reverse_required = store.lock().expect("store lock").range_reverse_required();
+    if !reverse_required {
+        let status = match &forward {
+            Turn::Complete(_) => 1,
+            Turn::Limited(_) => 2,
+            _ => 0,
+        };
+        channel
+            .send(&[b"MRF1".as_slice(), conversation.as_bytes(), &[status]].concat())
+            .await?;
+        let ack = channel.recv().await?;
+        if ack != [b"MRA1".as_slice(), conversation.as_bytes()].concat() {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        return Ok(forward);
+    }
+    let mut service = Service::default();
+    let (source_view, ready) = {
+        let mut source = store.lock().expect("store lock");
+        let source_view = match source.take_custody_view(&conversation)? {
+            Some(view) => view,
+            None => source.open_view(&conversation)?,
+        };
+        let ready = source.range_prepare(&source_view)?;
+        (source_view, ready)
+    };
+    service.view = Some((conversation, source_view));
+    let (source_token, source_revision) = match ready {
+        RangeProgress::Ready {
+            token, revision, ..
+        } => (token, revision),
+        _ => {
+            service.retire(store);
+            return Ok(match forward {
+                Turn::Complete(report) | Turn::More(report) => Turn::More(report),
+                Turn::Limited(report) => Turn::Limited(report),
+                Turn::Unsupported => Turn::Unsupported,
+            });
+        }
+    };
+    service.token = Some(source_token);
+    channel
+        .send(
+            &[
+                b"MRV1".as_slice(),
+                conversation.as_bytes(),
+                &source_token,
+                &source_revision.to_le_bytes(),
+                &[match &forward {
+                    Turn::Complete(_) => 1,
+                    Turn::Limited(_) => 2,
+                    _ => 0,
+                }],
+            ]
+            .concat(),
+        )
+        .await?;
+    let reverse = async {
+        // Two summary queries and one body request at most; terminal frame
+        // confirms only completion, never message custody or read state.
+        for _ in 0..4 {
+            let bytes = channel.recv().await?;
+            if bytes.len() == 37
+                && bytes.starts_with(b"MRE1")
+                && scope(&bytes) == Some(conversation)
+            {
+                if bytes[36] > 2 {
+                    return Err(SessionError::UnexpectedMessage);
+                }
+                return Ok::<u8, SessionError>(bytes[36]);
+            }
+            if bytes.starts_with(b"MRV1") || probe(&bytes).is_some() {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            if serve(channel, store, &mut service, &bytes).await?.is_none() {
+                return Err(SessionError::UnexpectedMessage);
+            }
+        }
+        Err(SessionError::ResourceUnavailable)
+    }
+    .await;
+    service.retire(store);
+    let reverse = reverse?;
+    let result = match (forward, reverse) {
+        (Turn::Limited(report), _) | (Turn::Complete(report) | Turn::More(report), 2) => {
+            Turn::Limited(report)
+        }
+        (Turn::Complete(report), 1) => Turn::Complete(report),
+        (Turn::Complete(report) | Turn::More(report), _) => Turn::More(report),
+        (Turn::Unsupported, _) => Turn::Unsupported,
+    };
+    Ok(result)
+}
+async fn request_ready<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+    view: &S::View,
+    token: [u8; 32],
+    revision: u64,
+    summary_rpcs: usize,
+    record_limit: usize,
+    byte_limit: usize,
+) -> Result<Turn, SessionError> {
+    let snapshot = {
+        let source = store.lock().expect("store lock");
+        match source.range_receiver_prepare(view)? {
+            RangeReceiverProgress::Ready(s) => s,
+            RangeReceiverProgress::More => return Ok(Turn::More(ApplyReport::default())),
+            RangeReceiverProgress::Unsupported => return Err(SessionError::ResourceUnavailable),
+        }
+    };
+    let mut checkpoint = store
+        .lock()
+        .expect("store lock")
+        .range_checkpoint(view)?
+        .unwrap_or_else(|| {
+            Checkpoint::for_remote(
+                *conversation.as_bytes(),
+                snapshot.token(),
+                snapshot.index(),
+                revision,
+            )
+        });
+    if !checkpoint.valid_remote_binding(
+        snapshot.index(),
+        *conversation.as_bytes(),
+        token,
+        snapshot.token(),
+        revision,
+    ) {
+        store.lock().expect("store lock").retain_range_checkpoint(
+            view,
+            Checkpoint::for_remote(
+                *conversation.as_bytes(),
+                snapshot.token(),
+                snapshot.index(),
+                revision,
+            ),
+        )?;
+        return Ok(Turn::More(ApplyReport::default()));
+    }
+    let mut missing = Vec::new();
+    // The probe and optional body fetch consume the other two turn RPCs.
+    for _ in 0..summary_rpcs {
+        let Some(prefix) = checkpoint.next_query() else {
+            break;
+        };
+        store.lock().expect("store lock").validate_view(view)?;
+        let request = [
+            b"MRGQ".as_slice(),
+            conversation.as_bytes(),
+            &token,
+            &prefix.bits().to_le_bytes(),
+            &prefix.key(),
+        ]
+        .concat();
+        channel.send(&request).await?;
+        let reply = channel.recv().await?;
+        store.lock().expect("store lock").validate_view(view)?;
+        let frame = SummaryFrame::decode(&reply, *conversation.as_bytes(), token)
+            .ok_or(SessionError::UnexpectedMessage)?;
+        match checkpoint.accept_query(
+            snapshot.index(),
+            *conversation.as_bytes(),
+            token,
+            snapshot.token(),
+            revision,
+            frame,
+        ) {
+            Ok(ids) => missing.extend(ids),
+            Err(crate::eventlog::sync::range::index::RemoteError::Invalidated) => {
+                store.lock().expect("store lock").retain_range_checkpoint(
+                    view,
+                    Checkpoint::for_remote(
+                        *conversation.as_bytes(),
+                        snapshot.token(),
+                        snapshot.index(),
+                        revision,
+                    ),
+                )?;
+                return Ok(Turn::More(ApplyReport::default()));
+            }
+            Err(_) => return Err(SessionError::UnexpectedMessage),
+        }
+    }
+
+    let mut report = ApplyReport::default();
+    if !missing.is_empty() {
+        if missing.len() > record_limit {
+            return Err(SessionError::ResourceUnavailable);
+        }
+        let mut request = [
+            b"MRD1".as_slice(),
+            conversation.as_bytes(),
+            &token,
+            &(missing.len() as u16).to_le_bytes(),
+            &((MAX_PLAINTEXT.saturating_sub(8192).min(byte_limit)) as u32).to_le_bytes(),
+        ]
+        .concat();
+        for id in &missing {
+            request.extend_from_slice(id);
+        }
+        channel.send(&request).await?;
+        let reply = channel.recv().await?;
+        if !reply.starts_with(b"MRS1") || reply.len() > MAX_PLAINTEXT {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        let response: Records = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit((1024 * 1024 + 16 * 1024) as u64)
+            .reject_trailing_bytes()
+            .deserialize(&reply[4..])
+            .map_err(|e| SessionError::Serialization(e.to_string()))?;
+        let mut deferred = validate_records(&response, conversation, token, &missing)?;
+        let mut budget = SyncTurnBudget {
+            records: record_limit,
+            body_bytes: byte_limit,
+        };
+        budget.charge_events(&response.events)?;
+        {
+            let mut source = store.lock().expect("store lock");
+            source.validate_view(view)?;
+            report =
+                crate::eventlog::sync::network::apply_received_events(&response.events, |event| {
+                    source.ingest(event)
+                })?;
+        }
+        let unavailable: Vec<_> = response
+            .unavailable
+            .iter()
+            .map(|id| *id.as_bytes())
+            .chain(report.rejected.iter().map(|(id, _)| *id.as_bytes()))
+            .collect();
+        for (id, _) in &report.rejected {
+            deferred.push(*id.as_bytes());
+        }
+        checkpoint.mark_unavailable(&unavailable);
+        checkpoint.defer_missing(&deferred);
+    }
+    store
+        .lock()
+        .expect("store lock")
+        .retain_range_checkpoint(view, checkpoint.clone())?;
+    if !checkpoint.has_pending() {
+        Ok(Turn::Complete(report))
+    } else if !checkpoint.has_unblocked_pending() {
+        Ok(Turn::Limited(report))
+    } else {
+        Ok(Turn::More(report))
+    }
+}
+
+fn validate_records(
+    response: &Records,
+    conversation: ConversationId,
+    token: [u8; 32],
+    requested: &[[u8; 32]],
+) -> Result<Vec<[u8; 32]>, SessionError> {
+    if response.scope != conversation
+        || response.token != token
+        || response.events.len() > 200
+        || response.consumed > requested.len()
+    {
+        return Err(SessionError::UnexpectedMessage);
+    }
+    if response.status == 0 {
+        return Err(SessionError::ResourceUnavailable);
+    }
+    if response.status > 3 || (response.status == 3 && response.consumed != requested.len()) {
+        return Err(SessionError::UnexpectedMessage);
+    }
+    let expected: HashSet<_> = requested[..response.consumed].iter().copied().collect();
+    let mut seen = HashSet::new();
+    for event in &response.events {
+        if event.conversation_id != conversation
+            || !expected.contains(event.id.as_bytes())
+            || !seen.insert(*event.id.as_bytes())
+        {
+            return Err(SessionError::UnexpectedMessage);
+        }
+    }
+    let mut deferred = requested[response.consumed..].to_vec();
+    for id in &response.unavailable {
+        if !expected.contains(id.as_bytes()) || !seen.insert(*id.as_bytes()) {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        deferred.push(*id.as_bytes());
+    }
+    if seen != expected {
+        return Err(SessionError::UnexpectedMessage);
+    }
+    Ok(deferred)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn event(seq: u64) -> crate::eventlog::Event {
+        crate::eventlog::Event::new(
+            &crate::identity::device::DeviceIdentity::generate(),
+            ConversationId::new([7; 32]),
+            seq,
+            vec![],
+            seq,
+            0,
+            EventKind::Message,
+            vec![1; 32],
+        )
+    }
+    #[test]
+    fn duplicate_records_cannot_acknowledge_missing_target() {
+        let a = event(1);
+        let b = event(2);
+        let request = [*a.id.as_bytes(), *b.id.as_bytes()];
+        let response = Records {
+            scope: a.conversation_id,
+            token: [1; 32],
+            status: 3,
+            events: vec![a.clone(), a.clone()],
+            unavailable: vec![],
+            consumed: 2,
+        };
+        assert!(validate_records(&response, a.conversation_id, [1; 32], &request).is_err());
+    }
+    #[test]
+    fn partial_body_page_defers_only_uncommitted_targets() {
+        let a = event(1);
+        let b = event(2);
+        let request = [*a.id.as_bytes(), *b.id.as_bytes()];
+        let response = Records {
+            scope: a.conversation_id,
+            token: [1; 32],
+            status: 2,
+            events: vec![a.clone()],
+            unavailable: vec![],
+            consumed: 1,
+        };
+        assert_eq!(
+            validate_records(&response, a.conversation_id, [1; 32], &request).unwrap(),
+            vec![*b.id.as_bytes()]
+        );
+    }
+    #[test]
+    fn unavailable_targets_stay_pending_and_scope_is_checked() {
+        let a = event(1);
+        let request = [*a.id.as_bytes()];
+        let response = Records {
+            scope: a.conversation_id,
+            token: [1; 32],
+            status: 3,
+            events: vec![],
+            unavailable: vec![a.id],
+            consumed: 1,
+        };
+        assert_eq!(
+            validate_records(&response, a.conversation_id, [1; 32], &request).unwrap(),
+            request
+        );
+        assert!(
+            validate_records(&response, ConversationId::new([8; 32]), [1; 32], &request).is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod production_tests {
+    use super::*;
+    use crate::{
+        discovery::Announce,
+        identity::{account::Account, device::DeviceIdentity},
+    };
+    use std::sync::Arc;
+    #[tokio::test]
+    async fn range_production_group_turns_converge_both_directions_and_refresh_pooled_view() {
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let left_id = DeviceIdentity::generate();
+        let left_account = Account::generate();
+        let right_id = DeviceIdentity::generate();
+        let right_account = Account::generate();
+        let left_proof = Announce::new_with_account(&left_id, &left_account, "Left", 9);
+        let right_proof = Announce::new_with_account(&right_id, &right_account, "Right", 9);
+        let (left, _, _) = crate::node::test_support::node_with_files(
+            dirs[0].path(),
+            left_id,
+            left_account,
+            &right_proof,
+        );
+        let (right, _, _) = crate::node::test_support::node_with_files(
+            dirs[1].path(),
+            right_id,
+            right_account,
+            &left_proof,
+        );
+        left.cached_peer_snapshot_async().await.unwrap();
+        right.cached_peer_snapshot_async().await.unwrap();
+        let group = left
+            .create_channel("Range production", vec![right.identity.public()])
+            .await
+            .unwrap();
+        left.await_channel_metadata(group).await.unwrap();
+        // Bootstrap signed group authority before content transfer; the range
+        // protocol must never infer membership from an advertised message ID.
+        let authority = left.log.lock().unwrap().events(&group).unwrap();
+        for event in authority {
+            right.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        crate::node::test_support::settle_group_metadata(&right, group);
+        let left_message = left
+            .append_event_with_profile_parent(group, EventKind::Message, vec![1], None)
+            .unwrap();
+        let right_message = right
+            .append_event_with_profile_parent(group, EventKind::Message, vec![2], None)
+            .unwrap();
+        let (a, b) = tokio::io::duplex(256 * 1024);
+        let server = Arc::clone(&left);
+        let task = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &server.identity).await.unwrap();
+            let store = server.serve_sync_store(channel.peer_identity());
+            let mut state = Service::default();
+            while let Ok(bytes) = channel.recv().await {
+                if serve(&mut channel, &store, &mut state, &bytes)
+                    .await
+                    .unwrap()
+                    .is_none()
+                {
+                    panic!("range fixture must not downgrade to full Have");
+                }
+            }
+            state.retire(&store);
+        });
+        let mut channel = SecureChannel::connect(a, &right.identity, Some(&left.identity.public()))
+            .await
+            .unwrap();
+        let store = right.sync_store(channel.peer_identity());
+        let mut complete = false;
+        let mut concurrent_appends = Vec::new();
+        for _ in 0..1024 {
+            match request(&mut channel, &store, group).await.unwrap() {
+                Turn::Complete(_) => {
+                    complete = true;
+                    break;
+                }
+                Turn::More(_) => {
+                    let (_, id) = left
+                        .append_event_with_profile_parent(group, EventKind::Message, vec![4], None)
+                        .unwrap();
+                    concurrent_appends.push(id);
+                    tokio::task::yield_now().await;
+                }
+                Turn::Unsupported => panic!("production group source must negotiate ranges"),
+                Turn::Limited(_) => panic!("small fixture must not hit policy limits"),
+            }
+        }
+        assert!(
+            complete,
+            "a captured cut must finish despite concurrent appends"
+        );
+        assert!(!concurrent_appends.is_empty());
+        assert!(
+            right
+                .log
+                .lock()
+                .unwrap()
+                .get(&left_message.1)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            left.log
+                .lock()
+                .unwrap()
+                .get(&right_message.1)
+                .unwrap()
+                .is_some()
+        );
+        let later = left
+            .append_event_with_profile_parent(group, EventKind::Message, vec![3], None)
+            .unwrap();
+        complete = false;
+        for _ in 0..1024 {
+            if matches!(
+                request(&mut channel, &store, group).await.unwrap(),
+                Turn::Complete(_)
+            ) {
+                complete = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(complete);
+        assert!(
+            right.log.lock().unwrap().get(&later.1).unwrap().is_some(),
+            "a completed pooled snapshot must not hide a later append"
+        );
+        for id in concurrent_appends {
+            assert!(
+                right.log.lock().unwrap().get(&id).unwrap().is_some(),
+                "the next fresh pooled snapshot must include concurrent appends"
+            );
+        }
+        drop(store);
+        drop(channel);
+        task.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod limited_frontier_tests {
+    use super::*;
+    use crate::eventlog::sync::range::index::RangeIndex;
+    #[test]
+    fn completed_checkpoint_revalidates_new_remote_ready_before_skipping_queries() {
+        let local = RangeIndex::default();
+        let mut remote = RangeIndex::default();
+        let mut checkpoint = Checkpoint::for_remote([7; 32], [9; 32], &local, remote.revision());
+        let prefix = checkpoint.next_query().unwrap();
+        checkpoint
+            .accept_query(
+                &local,
+                [7; 32],
+                [8; 32],
+                [9; 32],
+                remote.revision(),
+                remote.frame([7; 32], [8; 32], prefix),
+            )
+            .unwrap();
+        assert!(!checkpoint.has_pending());
+        assert!(checkpoint.valid_remote_binding(
+            &local,
+            [7; 32],
+            [8; 32],
+            [9; 32],
+            remote.revision()
+        ));
+        assert!(!checkpoint.valid_remote_binding(
+            &local,
+            [7; 32],
+            [6; 32],
+            [9; 32],
+            remote.revision()
+        ));
+        remote.insert([1; 32]);
+        assert!(!checkpoint.valid_remote_binding(
+            &local,
+            [7; 32],
+            [8; 32],
+            [9; 32],
+            remote.revision()
+        ));
+    }
+    #[test]
+    fn unavailable_only_frontier_is_limited_without_claiming_completion() {
+        let local = RangeIndex::default();
+        let mut remote = RangeIndex::default();
+        remote.insert([1; 32]);
+        let mut checkpoint = Checkpoint::for_remote([7; 32], [9; 32], &local, remote.revision());
+        let prefix = checkpoint.next_query().unwrap();
+        let missing = checkpoint
+            .accept_query(
+                &local,
+                [7; 32],
+                [8; 32],
+                [9; 32],
+                remote.revision(),
+                remote.frame([7; 32], [8; 32], prefix),
+            )
+            .unwrap();
+        checkpoint.mark_unavailable(&missing);
+        checkpoint.defer_missing(&missing);
+        assert!(checkpoint.has_pending());
+        assert!(!checkpoint.has_unblocked_pending());
+    }
+    #[test]
+    fn unavailable_target_does_not_displace_unconsumed_targets() {
+        let local = RangeIndex::default();
+        let mut remote = RangeIndex::default();
+        remote.insert([1; 32]);
+        remote.insert([2; 32]);
+        let mut checkpoint = Checkpoint::for_remote([7; 32], [9; 32], &local, remote.revision());
+        let prefix = checkpoint.next_query().unwrap();
+        checkpoint
+            .accept_query(
+                &local,
+                [7; 32],
+                [8; 32],
+                [9; 32],
+                remote.revision(),
+                remote.frame([7; 32], [8; 32], prefix),
+            )
+            .unwrap();
+        checkpoint.mark_unavailable(&[[1; 32]]);
+        // Body-page continuation defers its unconsumed suffix before unavailable IDs.
+        checkpoint.defer_missing(&[[2; 32], [1; 32]]);
+        assert!(checkpoint.has_unblocked_pending());
+        assert_eq!(checkpoint.next_query().unwrap().key(), [2; 32]);
+    }
+}

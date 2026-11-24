@@ -1509,7 +1509,8 @@ async fn paged_export_uses_actual_frame_framing_and_rejects_one_byte_oversize() 
         let store = Mutex::new(store);
         let backend = PagedNetworkBackend(&store, None);
         let view = backend.open_view(&c).unwrap();
-        let result = select_export_frames(&backend, &view, c, &HashSet::new(), 1).await;
+        let result =
+            select_export_frames(&backend, &view, c, &HashSet::new(), 1, 512, MAX_PLAINTEXT).await;
         if excess == 0 {
             let frame = result.unwrap().pop().unwrap();
             let bytes = encode(&SyncWire::Response(SyncResponse {
@@ -1585,9 +1586,17 @@ async fn paged_file_burst_fills_four_bounded_frames_across_tiny_scan_pages() {
     let store = Mutex::new(store);
     let backend = PagedNetworkBackend(&store, None);
     let view = backend.open_view(&c).unwrap();
-    let frames = select_export_frames(&backend, &view, c, &HashSet::new(), FILE_FOLLOWUP_BURST)
-        .await
-        .unwrap();
+    let frames = select_export_frames(
+        &backend,
+        &view,
+        c,
+        &HashSet::new(),
+        FILE_FOLLOWUP_BURST,
+        512,
+        MAX_PLAINTEXT,
+    )
+    .await
+    .unwrap();
     assert_eq!(frames.len(), 4);
     let mut oracle = EventLog::default();
     for frame in frames {
@@ -2321,6 +2330,7 @@ async fn budgeted_round_saturation_cancellation_and_healthy_retry_release_reserv
         true,
         ConversationId::new([7; 32]),
         Some(&budget),
+        false,
         false,
     );
     assert!(
@@ -3598,6 +3608,12 @@ async fn legacy_optional_custody_close_does_not_defer_completed_control_fanout()
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut connection = SecureChannel::accept_with_presence(stream, &holder, Some(&server_proof), |_| true).await.unwrap();
+            assert!(matches!(decode(&connection.recv().await.unwrap()).unwrap(),
+                SyncWire::FpRequest(_) | SyncWire::FpRequestV2(_) | SyncWire::FpRequestV3(_)
+                | SyncWire::FpRequestV4(_) | SyncWire::FpRequestV5(_)));
+            // An old peer treats the domain-separated capability marker as an
+            // ordinary mismatching fingerprint, then receives the real probe.
+            connection.send(&encode(&SyncWire::FpResponse(FpResponse { matched: false })).unwrap()).await.unwrap();
             assert!(matches!(decode(&connection.recv().await.unwrap()).unwrap(),
                 SyncWire::FpRequest(_) | SyncWire::FpRequestV2(_) | SyncWire::FpRequestV3(_)
                 | SyncWire::FpRequestV4(_) | SyncWire::FpRequestV5(_)));

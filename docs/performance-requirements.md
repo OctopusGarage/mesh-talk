@@ -572,3 +572,49 @@ Primary references: [WebView2 performance](https://learn.microsoft.com/en-us/mic
 [Apple timer guidance](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/Timers.html),
 [Matrix incremental sync](https://spec.matrix.org/v1.19/client-server-api/#syncing),
 [TDLib cache reclamation](https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1optimize_storage.html).
+
+### Compatibility group recovery budget
+
+Production `node::session::request_sync_turn_paged` negotiates bounded range turns.
+Only unsupported old peers use private `request_legacy_turn_paged`, capped at 200
+transferred events, 1 MiB encoded bodies and eight steps. Preparation yields after
+four bounded steps; mismatched Have inventory is limited to 2,000 IDs/eight frames.
+Cached equal fingerprints can finish without exchanging Have. Oversized responses
+are rejected before apply; interrupted legacy channels retire without completion
+evidence. The public `request_round_paged` is an explicit legacy drain API and is
+not the production default. No remote latest-200 or seven-day history window is
+implemented: the frontend's existing 200-record page is a separate presentation
+limit. Cold authorized preparation and index construction remain O(N) overall,
+spread across bounded turns; subsequent qualified ordinary appends reuse prefixes.
+
+### Indexed range preparation and continuation
+
+The new range profile owns no timer or perpetual task. Existing group recovery,
+delivery, metadata and network-input owners schedule its explicit More/Limited
+results. Source and receiver preparation each admit at most four pages with 250
+examined rows and 32 index insertions per page: together eight pages, 2,000 scans
+and at most 256 synchronous index insertions per host turn. These are operation
+ceilings, not measured wall-clock latency promises. Preparation that consumes
+rows returns continuation before starting the separate index phase.
+
+Derived range indexes reserve a conservative 1,024 bytes per admitted ID against
+a process-wide 32 MiB allowance (at most 32,768 IDs across all such indexes, not
+per group). SQL prepared-view cache admission is reduced to 32 MiB so the original
+64 MiB per-owner envelope is not silently doubled. Immutable snapshot Arc leases
+retain their reservation until the last reader retires; invalidated builders reset
+partial state. Capacity exhaustion is explicit limited work, never an unbounded
+legacy fallback or an empty/equal summary. This in-memory tier does not claim
+unlimited historical-group indexing; a future SQL-backed summary tier must honor
+the same view authorization and bounded query contracts.
+
+Validation selectors: `range_` (including real production GuardedSyncStore and
+SecureChannel bidirectional/pool-refresh tests), `node::session::range_sync::tests`,
+`turn_budget_tests`, `bounded_sync_retry_tests` and `delta_transition_tests`.
+
+Legacy budget exhaustion can interrupt an old-peer exchange; that channel is
+retired and follows the existing transport retry policy. It is not recycled as a
+clean `Limited` range turn. New-profile `More`/`Limited` retain the explicit fair
+continuation/sparse-repair behavior described above.
+
+See [bounded synchronization verification](bounded-sync-verification.md) for the
+verified runtime scope, test profile and remaining cold-index limitations.

@@ -36,6 +36,35 @@ pub(crate) struct ExportCursor {
     after: i64,
     id: [u8; 32],
 }
+impl NetworkView {
+    /// Finite commit boundary only; this marker grants no authorization.
+    pub(crate) fn have_end_cursor(&self) -> HaveCursor {
+        HaveCursor {
+            binding: self.binding,
+            after: self.binding.cutoff - 1,
+            id: [255; 32],
+        }
+    }
+    /// Rebind only an append-only boundary in the same retained source. Runtime
+    /// callers additionally requalify their policy and causal-order prefix.
+    pub(crate) fn extend_have_cursor(&self, old: &HaveCursor) -> Result<HaveCursor, LogError> {
+        if old.binding.store_uuid != self.binding.store_uuid
+            || old.binding.domain != self.binding.domain
+            || old.binding.conversation != self.binding.conversation
+            || old.binding.epoch != self.binding.epoch
+            || old.binding.cutoff > self.binding.cutoff
+            || old.after != old.binding.cutoff - 1
+            || old.id != [255; 32]
+        {
+            return Err(LogError::StaleCursor);
+        }
+        Ok(HaveCursor {
+            binding: self.binding,
+            after: old.after,
+            id: old.id,
+        })
+    }
+}
 // Index shape is part of this owner: no ID-order postfilter, sorting or temp keyset.
 const SELECT_COMMIT_IDS: &str = "SELECT commit_ordinal,id FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2 AND commit_ordinal>=?3 AND commit_ordinal<?4 AND (commit_ordinal,id)>(?5,?6) ORDER BY commit_ordinal,id LIMIT ?7";
 

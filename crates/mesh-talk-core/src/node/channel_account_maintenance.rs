@@ -533,23 +533,32 @@ impl Node {
                                 self.privacy_sync_dial(peer.addr, &peer.public).await.ok()?;
                             let store = self.pull_sync_store(connection.peer_identity());
                             let _reception = self.request_reception_scope(&store, &connection)?;
-                            let round = super::session::request_round_paged(
+                            let round = super::session::request_sync_turn_paged(
                                 &mut connection,
                                 &store,
                                 channel,
                             )
                             .await;
                             let received = self.dispatch_received_sync_work(&store);
-                            round.ok()?;
+                            let outcome = round.ok()?;
                             self.recycle_sync_channel(connection);
+                            if outcome.limited {
+                                // Discovery's normal refresh (or changed input)
+                                // retries limited histories without a hot queue.
+                                return Some(false);
+                            }
+                            if !outcome.complete {
+                                return None;
+                            }
                             if !received {
                                 self.process_channel(channel);
                             }
-                            Some(())
+                            Some(true)
                         })
                         .await;
                         let maintained = self.maintain_one_account_channel(channel, work).await;
-                        if (!matches!(pulled, Ok(Some(()))) || !maintained)
+                        if !matches!(pulled, Ok(Some(false)))
+                            && (!matches!(pulled, Ok(Some(true))) || !maintained)
                             && let Some(value) = work.peers.get_mut(&peer.public.user_id())
                             && value.generation == generation
                         {
@@ -1812,6 +1821,21 @@ mod tests {
             .find(|row| row.text == b"after inheritance before first keys")
             .unwrap()
             .id;
+        // Delivery is now a bounded continuation. Drive the real group lane
+        // while the independent initial-key history response remains gated.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if target.log.lock().unwrap().get(&message).unwrap().is_some() {
+                    break;
+                }
+                source
+                    .distribute_channel(channel, &[target.identity.public()])
+                    .await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bounded delivery must transfer ciphertext before keys");
         let (epoch, author, position): (u64, String, u32) = {
             let log = target.log.lock().unwrap();
             let event = log
@@ -1825,6 +1849,7 @@ mod tests {
                 .deserialize(&event.ciphertext[2..2 + size])
                 .unwrap()
         };
+        crate::node::test_support::settle_group_metadata(target, channel);
         assert!(
             target
                 .account_group_projection(channel)
@@ -1882,8 +1907,10 @@ mod tests {
             snapshots.iter().all(|n| *n > position),
             "first real snapshot must be later than the existing ciphertext"
         );
-        let keys_arrived = tokio::time::timeout(Duration::from_secs(8), async {
+        let keys_arrived = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
+                source.maintain_account_channels(&mut source_work).await;
+                crate::node::test_support::settle_group_metadata(target, channel);
                 let selected = (|| -> Result<bool, LogError> {
                     let Some(binding) = target.channel_checkpoints.source_binding(channel)? else {
                         return Ok(false);

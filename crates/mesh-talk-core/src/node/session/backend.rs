@@ -52,6 +52,9 @@ pub(super) trait SessionBackend {
     fn retain_custody_view(&self, view: Self::View) -> Result<Option<Self::View>, LogError> {
         Ok(Some(view))
     }
+    fn retain_limited_view(&self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        self.retain_custody_view(view)
+    }
     fn prepare_view_step(
         &self,
         view: &Self::View,
@@ -442,6 +445,9 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .expect("store mutex not poisoned")
             .take_custody_view(c)
     }
+    fn retain_limited_view(&self, view: S::View) -> Result<Option<S::View>, LogError> {
+        self.0.lock().expect("store lock").retain_range_view(view)
+    }
     fn retain_custody_view(&self, view: S::View) -> Result<Option<S::View>, LogError> {
         self.0
             .lock()
@@ -675,6 +681,50 @@ pub(super) async fn prepared_probe<B: SessionBackend>(
     Ok((metadata, view))
 }
 
+pub(super) async fn bounded_view<B: SessionBackend>(
+    backend: &B,
+    conversation: &ConversationId,
+) -> Result<B::View, SessionError> {
+    let view = match backend.take_custody_view(conversation)? {
+        Some(view) => view,
+        None => backend.open_view(conversation)?,
+    };
+    for _ in 0..4 {
+        if backend
+            .prepare_view_step(&view, PreparationBudget::default())?
+            .ready
+        {
+            backend.validate_view(&view)?;
+            return Ok(view);
+        }
+        tokio::task::yield_now().await;
+    }
+    drop(backend.retain_limited_view(view)?);
+    Err(SessionError::ResourceUnavailable)
+}
+pub(super) async fn bounded_probe<B: SessionBackend>(
+    backend: &B,
+    conversation: &ConversationId,
+) -> Result<(SyncMetadata, Option<B::View>), SessionError> {
+    let (metadata, view) = backend.probe_metadata(conversation)?;
+    if let (Some(metadata), None) = (&metadata, &view) {
+        return Ok((*metadata, None));
+    }
+    let view = view.ok_or_else(|| LogError::CorruptFile("probe has no metadata or view".into()))?;
+    for _ in 0..4 {
+        if backend
+            .prepare_view_step(&view, PreparationBudget::default())?
+            .ready
+        {
+            backend.validate_view(&view)?;
+            return Ok((backend.metadata(&view)?, Some(view)));
+        }
+        tokio::task::yield_now().await;
+    }
+    drop(backend.retain_limited_view(view)?);
+    Err(SessionError::ResourceUnavailable)
+}
+
 pub(super) fn have_count(count: u64) -> Result<usize, SessionError> {
     let count = usize::try_from(count).map_err(|_| SessionError::UnexpectedMessage)?;
     if count > MAX_HAVE_IDS_TOTAL {
@@ -692,14 +742,23 @@ pub(super) fn unsupported_metadata(
     (!v2 && m.channel_v2) || (!v3 && m.channel_v3) || (!v4 && m.channel_v4) || (!v5 && m.channel_v5)
 }
 
-pub(super) async fn send_have_pages<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpin>(
+pub(super) async fn send_have_pages_limited<
+    B: SessionBackend,
+    IO: AsyncRead + AsyncWrite + Unpin,
+>(
     channel: &mut SecureChannel<IO>,
     backend: &B,
     view: &B::View,
     conversation: ConversationId,
     wrap: fn(HaveChunk) -> SyncWire,
+    limited: bool,
 ) -> Result<(), SessionError> {
     let expected_count = have_count(backend.advertised_count(view)?)?;
+    if limited && expected_count > 2000 {
+        return Err(SessionError::ResourceUnavailable);
+    }
+    let mut examined = 0usize;
+    let mut pages = 0usize;
     let mut cursor = None;
     let mut ids = 0usize;
     let mut chunks = 0usize;
@@ -714,6 +773,13 @@ pub(super) async fn send_have_pages<B: SessionBackend, IO: AsyncRead + AsyncWrit
             examined: HAVE_IDS_PER_CHUNK,
         };
         let page = backend.have_page(view, cursor.as_ref(), budget)?;
+        examined = examined
+            .checked_add(page.examined)
+            .ok_or(SessionError::ResourceUnavailable)?;
+        pages += 1;
+        if limited && (examined > 2000 || pages > 8) {
+            return Err(SessionError::ResourceUnavailable);
+        }
         ids = ids
             .checked_add(page.items.len())
             .ok_or(SessionError::UnexpectedMessage)?;
@@ -801,9 +867,19 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
     conversation: ConversationId,
     have: &HashSet<EventId>,
     max_frames: usize,
+    max_events: usize,
+    max_bytes: usize,
 ) -> Result<Vec<SyncFollowup>, SessionError> {
+    if max_events == 0 || max_bytes == 0 {
+        return Err(SessionError::ResourceUnavailable);
+    }
+    let mut preparation_steps = 0usize;
     if !backend.reusable_export(view, have)? {
         loop {
+            preparation_steps += 1;
+            if max_events <= 200 && preparation_steps > 4 {
+                return Err(SessionError::ResourceUnavailable);
+            }
             if backend
                 .reset_export_step(view, PreparationBudget::default())?
                 .ready
@@ -827,6 +903,10 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
             }
         }
         loop {
+            preparation_steps += 1;
+            if max_events <= 200 && preparation_steps > 4 {
+                return Err(SessionError::ResourceUnavailable);
+            }
             if backend
                 .prepare_export_step(view, have, PreparationBudget::default())?
                 .ready
@@ -836,7 +916,7 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
             tokio::task::yield_now().await;
         }
     }
-    let frame_budget = event_frame_budget(conversation)?;
+    let frame_budget = event_frame_budget(conversation)?.min(max_bytes);
     let mut frames = Vec::new();
     let mut cursor = None;
     let mut frame = Vec::new();
@@ -845,7 +925,7 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
     loop {
         let budget = ExportPageBudget {
             examined: 512,
-            events: 512 - frame.len(),
+            events: max_events.min(512) - frame.len(),
             encoded_bytes: frame_budget - encoded,
             allocated_bytes: 4 * 1024 * 1024 - allocated,
         };
@@ -862,7 +942,7 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
         }
         let budget = ExportPageBudget {
             examined: 512,
-            events: 512 - frame.len(),
+            events: max_events.min(512) - frame.len(),
             encoded_bytes: frame_budget - encoded,
             allocated_bytes: 4 * 1024 * 1024 - allocated,
         };
@@ -914,4 +994,14 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
         }
         tokio::task::yield_now().await;
     }
+}
+
+pub(super) async fn send_have_pages<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    backend: &B,
+    view: &B::View,
+    conversation: ConversationId,
+    wrap: fn(HaveChunk) -> SyncWire,
+) -> Result<(), SessionError> {
+    send_have_pages_limited(channel, backend, view, conversation, wrap, false).await
 }
