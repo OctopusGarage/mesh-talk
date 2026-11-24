@@ -337,6 +337,7 @@ pub struct Node {
     pub(in crate::node) opaque_upload_cache: Mutex<super::opaque_relay::incremental::UploadCache>,
     pub(in crate::node) opaque_receive_cache:
         Mutex<super::opaque_receive_cache::OpaqueReceiveCache>,
+    pub(in crate::node) opaque_body_requests: super::opaque_relay::incremental::BodyRequests,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
     // private to the `node` module (no wider exposure).
@@ -1508,6 +1509,7 @@ impl Node {
             post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
             opaque_receive_cache: Mutex::new(opaque_receive_cache),
+            opaque_body_requests: Default::default(),
             opaque_upload_cache: Mutex::new(Default::default()),
             preferred_routes: Mutex::new(super::route_timing::PreferredRoutes::default()),
             received: Mutex::new(received),

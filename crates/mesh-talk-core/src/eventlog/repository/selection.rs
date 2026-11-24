@@ -362,6 +362,45 @@ impl EventRepository {
         }
         Ok(())
     }
+    /// Exact signed file block lookup against a prepared outgoing selection.
+    /// Availability and body replies use the same outgoing authorization.
+    pub(crate) fn selected_file_chunk_header(
+        &self,
+        selection: &Selection,
+        view: &NetworkView,
+        author: Author,
+        index: u32,
+    ) -> Result<Option<EventHeader>, LogError> {
+        self.database.read(|c| {
+            self.require_selection_on(c, selection)?;
+            self.validate_network_on(c, view)?;
+            let id: Option<Vec<u8>> = c
+                .query_row(
+                    "SELECT e.id FROM retained_events e
+                 JOIN participant_work.participant_sync_rows r ON r.view=?1 AND r.id=e.id
+                 WHERE e.domain=?2 AND e.conversation=?3 AND e.author=?4 AND e.seq=?5
+                   AND e.commit_ordinal<?6 AND r.outgoing=1",
+                    params![
+                        selection.id.as_slice(),
+                        self.domain.0.as_slice(),
+                        view.binding.conversation.as_bytes().as_slice(),
+                        author.ed25519_pub().as_slice(),
+                        (u64::from(index) + 1).to_be_bytes().as_slice(),
+                        view.binding.cutoff,
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(id) = id else { return Ok(None) };
+            let id = EventId::new(
+                id.try_into()
+                    .map_err(|_| corrupt("invalid selected event ID"))?,
+            );
+            let header = self.network_header_on(c, &id)?;
+            Ok((header.kind == EventKind::Message).then_some(header))
+        })
+    }
+
     pub(crate) fn selected_export_page(
         &self,
         selection: &Selection,
@@ -586,6 +625,52 @@ mod retirement_tests {
             reprepare(false),
             0,
             "empty recovery must not force fresh SQL compilation"
+        );
+    }
+
+    #[test]
+    fn exact_chunk_lookup_requires_outgoing_authority() {
+        use super::super::tests::{database, event};
+        use crate::eventlog::sync::network::NetworkSyncStore;
+        let directory = tempfile::tempdir().unwrap();
+        let repository =
+            EventRepository::new(database(&directory), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let identity = crate::identity::device::DeviceIdentity::generate();
+        let chunk = event(&identity, 1, vec![], 1, EventKind::Message);
+        repository.append(&chunk).unwrap();
+        let view = NetworkSyncStore::open_view(&repository, &chunk.conversation_id).unwrap();
+        let selection = repository.begin_selection(&view, 1, 512).unwrap().unwrap();
+        let lookup = || {
+            repository
+                .selected_file_chunk_header(&selection, &view, chunk.author, 0)
+                .unwrap()
+        };
+        repository
+            .database
+            .selection_work_transaction(|c| {
+                c.execute(
+                    "INSERT INTO participant_work.participant_sync_rows
+                 (view,id,rank,candidate,selected,own,outgoing) VALUES(?1,?2,0,1,1,0,0)",
+                    params![selection.id.as_slice(), chunk.id.as_bytes().as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(lookup().is_none());
+        repository.database.selection_work_transaction(|c| {
+            c.execute(
+                "UPDATE participant_work.participant_sync_rows SET outgoing=1 WHERE view=?1 AND id=?2",
+                params![selection.id.as_slice(), chunk.id.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(lookup().unwrap().id, chunk.id);
+        assert!(
+            repository
+                .selected_file_chunk_header(&selection, &view, chunk.author, 1)
+                .unwrap()
+                .is_none()
         );
     }
 

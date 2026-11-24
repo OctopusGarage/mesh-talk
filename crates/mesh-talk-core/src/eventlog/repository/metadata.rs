@@ -177,6 +177,33 @@ impl EventRepository {
             rows.next()?.map(read_header).transpose()
         })
     }
+    /// Look up one signed file chunk using the manifest's exact file scope and
+    /// author. This is a storage selection only; callers must qualify export
+    /// authority for the authenticated peer before serving it.
+    pub(crate) fn authored_file_chunk(
+        &self,
+        file: &ConversationId,
+        author: Author,
+        index: u32,
+        allocation_budget: usize,
+    ) -> Result<Option<Event>, LogError> {
+        let sequence = u64::from(index) + 1;
+        let Some(header) = self.authored_header(file, author, sequence)? else {
+            return Ok(None);
+        };
+        if header.kind != EventKind::Message {
+            return Ok(None);
+        }
+        Ok(self
+            .get_bounded(&header.id, allocation_budget)?
+            .filter(|event| {
+                event.conversation_id == *file
+                    && event.author == author
+                    && event.seq == sequence
+                    && event.kind == EventKind::Message
+            }))
+    }
+
     pub(crate) fn author_max(
         &self,
         conv: &ConversationId,

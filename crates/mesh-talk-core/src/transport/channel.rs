@@ -610,6 +610,27 @@ mod admission_tests;
 #[path = "presence_tests.rs"]
 mod presence_tests;
 
+impl<S: AsyncRead + AsyncWrite + Unpin> mesh_blob::session::BlobSession for SecureChannel<S> {
+    async fn send(&mut self, frame: &[u8]) -> Result<(), mesh_connect::TransportError> {
+        SecureChannel::send(self, frame)
+            .await
+            .map_err(blob_transport_error)
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>, mesh_connect::TransportError> {
+        SecureChannel::recv(self)
+            .await
+            .map_err(blob_transport_error)
+    }
+}
+
+fn blob_transport_error(error: TransportError) -> mesh_connect::TransportError {
+    match error {
+        TransportError::Io(error) => mesh_connect::TransportError::Io(error),
+        error => mesh_connect::TransportError::Io(std::io::Error::other(error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,6 +743,62 @@ mod tests {
         assert_eq!(got, b"pong");
 
         server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn authenticated_talk_channel_carries_sdk_chunk_requests() {
+        use mesh_blob::{
+            ChunkSource,
+            session::{AuthenticatedChunkSource, respond_to_request},
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let reader = DeviceIdentity::generate();
+        let holder = DeviceIdentity::generate();
+        let reader_public = reader.public();
+        let holder_public = holder.public();
+        let object = [7; 32];
+
+        let server = async {
+            let mut channel = SecureChannel::accept(server_io, &holder).await.unwrap();
+            for _ in 0..2 {
+                let request = channel.recv().await.unwrap();
+                let reply = respond_to_request(
+                    &request,
+                    channel.peer_identity(),
+                    |peer, id, index, length| {
+                        assert_eq!((peer, id, index, length), (&reader_public, object, 0, 2));
+                        Some(b"ok".to_vec())
+                    },
+                    |peer, id, start, count| {
+                        assert_eq!((peer, id, start, count), (&reader_public, object, 0, 1));
+                        Some(vec![true])
+                    },
+                )
+                .unwrap();
+                channel.send(&reply).await.unwrap();
+            }
+        };
+        let client = async {
+            let channel = SecureChannel::connect(client_io, &reader, Some(&holder_public))
+                .await
+                .unwrap();
+            let source = AuthenticatedChunkSource::discover(
+                object,
+                1,
+                1,
+                channel,
+                std::time::Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+            assert_eq!(source.fetch(0, 2).await.unwrap(), b"ok");
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(client, server);
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

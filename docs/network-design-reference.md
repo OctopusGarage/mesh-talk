@@ -1146,6 +1146,14 @@ transient chunks after its durable local copy is verified.
 
 ### Ordinary file custody
 
+Direct attachment recovery assigns bounded, disjoint sequence attempts to
+authorized device sources. An exact response must match the requested file,
+signed author and sequence before normal event admission. A relay continues to
+serve opaque mailbox bodies by their outer IDs. When one of those bodies adds
+a retained attachment block, it wakes the direct recovery owner, which checks
+the same durable log before issuing further requests. Competing relays defer an
+already active mailbox-body request without consuming its cursor.
+
 The group-file retry owner distinguishes paid bounded preparation from an
 unavailable dependency. A stale checkpoint preserves the launch backoff;
 preparation advances through its existing four-view owner. Waiting is registered

@@ -3,7 +3,7 @@
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::LogError;
-use crate::eventlog::event::{Author, ConversationId, EventId};
+use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
 use crate::node::conversation::account_conversation_id;
 use crate::node::session::{
     Served, SessionError, request_round_paged as request_round, serve_one_paged as serve_one,
@@ -16,6 +16,37 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
 mod mailbox_watch;
+
+type ChunkClaims = std::sync::Mutex<std::collections::HashSet<(Author, u32)>>;
+type PendingChunks = std::sync::Mutex<
+    std::collections::BTreeMap<
+        (u32, [u8; 32]),
+        (
+            crate::identity::device::PublicIdentity,
+            crate::eventlog::Event,
+        ),
+    >,
+>;
+
+#[derive(Default)]
+struct ChunkRound {
+    claims: ChunkClaims,
+    pending: PendingChunks,
+}
+
+struct ChunkClaim<'a> {
+    claims: &'a ChunkClaims,
+    key: (Author, u32),
+}
+
+impl Drop for ChunkClaim<'_> {
+    fn drop(&mut self) {
+        self.claims
+            .lock()
+            .expect("chunk claims lock")
+            .remove(&self.key);
+    }
+}
 
 /// Per-connection round ceiling for an inbound serve loop (matches the requester-side
 /// `MAX_SYNC_ROUNDS`); a real reconciliation converges far below this.
@@ -1430,8 +1461,16 @@ impl Node {
                                 }
                             };
                             let mut received = self.file_progress(fc)?.map(|progress| progress.done);
-                            let mut pulls = stream::iter(candidates)
-                                .map(|peer| async move {
+                            // A replica can hold the original author's signed
+                            // blocks even though it did not issue its own offer.
+                            let signed_author = self.incoming_offer(fc, None, None)?
+                                .map(|(_, _, _, source)| Author::from_ed25519(source.ed25519_pub));
+                            let source_count = candidates.len() as u32;
+                            let chunk_base = received.unwrap_or(0);
+                            let round = ChunkRound::default();
+                            let round = &round;
+                            let mut pulls = stream::iter(candidates.into_iter().enumerate())
+                                .map(|(source, peer)| async move {
                                     let _ = tokio::time::timeout(
                                         super::delivery_runtime::FILE_EXCHANGE_TIMEOUT,
                                         async {
@@ -1498,6 +1537,36 @@ impl Node {
                                             }
                                         }
                                     }
+                                            match self.try_pull_signed_file_chunk(
+                                                &mut channel, &store, fc, signed_author,
+                                                (chunk_base, source as u32, source_count, round),
+                                            ).await {
+                                                Ok(true) => {
+                                                    self.recycle_sync_channel(channel);
+                                                    return;
+                                                }
+                                                Ok(false) => {}
+                                                Err(error) => {
+                                                    log::debug!("signed chunk request deferred: {error}");
+                                                    drop(channel);
+                                                    let Ok(reconnected) = self.privacy_sync_dial(peer.addr, &peer.public).await else {
+                                                        return;
+                                                    };
+                                                    channel = reconnected;
+                                                }
+                                            }
+                                            if !matches!(
+                                                self.attachment_consent_status(fc),
+                                                Ok(Some(super::attachment_consent::ReceiveDecision::Accepted))
+                                            ) {
+                                                return;
+                                            }
+                                            if self.file_progress(fc).is_ok_and(|progress| {
+                                                progress.is_some_and(|progress| progress.done >= progress.total)
+                                            }) {
+                                                self.recycle_sync_channel(channel);
+                                                return;
+                                            }
                                             if super::session::request_file_round_paged(
                                                 &mut channel,
                                                 &store,
@@ -1526,6 +1595,10 @@ impl Node {
                                 if progress.is_some_and(|p| p.done >= p.total) {
                                     break;
                                 }
+                            }
+                            drop(pulls);
+                            if let Err(error) = self.retry_round_file_chunks(fc, round) {
+                                log::debug!("staged signed chunks deferred: {error}");
                             }
                         }
                         if self.file_progress(fc)?.is_some_and(|p| p.done >= p.total) {
@@ -1560,6 +1633,185 @@ impl Node {
         if let Err(error) = result {
             log::warn!("pull_pending_files deferred after storage failure: {error}");
         }
+    }
+
+    async fn try_pull_signed_file_chunk<
+        IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    >(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        store: &std::sync::Mutex<impl crate::eventlog::sync::network::NetworkSyncStore>,
+        file: ConversationId,
+        author: Option<Author>,
+        lane: (u32, u32, u32, &ChunkRound),
+    ) -> Result<bool, SessionError> {
+        let Some(author) = author else {
+            return Ok(false);
+        };
+        let Some(progress) = self
+            .file_progress(file)
+            .map_err(|_| SessionError::UnexpectedMessage)?
+        else {
+            return Ok(false);
+        };
+        if progress.done >= progress.total {
+            return Ok(false);
+        }
+        let (base, source, source_count, round) = lane;
+        let claims = &round.claims;
+        let count = progress.total.saturating_sub(base).min(source_count * 4);
+        if count == 0 {
+            return Ok(false);
+        }
+        let Some(availability) =
+            super::session::request_signed_chunk_availability(channel, file, author, base, count)
+                .await?
+        else {
+            return Ok(false);
+        };
+        let preferred = (source..count).step_by(source_count as usize);
+        let alternatives = (0..count).filter(|offset| offset % source_count != source);
+        let mut requested = 0;
+        for offset in preferred.chain(alternatives) {
+            if requested == 4 {
+                break;
+            }
+            if !availability[offset as usize] {
+                continue;
+            }
+            let index = base + offset;
+            let key = (author, index);
+            let pending_key = (index, *author.ed25519_pub());
+            if round
+                .pending
+                .lock()
+                .expect("pending chunk lock")
+                .contains_key(&pending_key)
+            {
+                continue;
+            }
+            if !claims.lock().expect("chunk claims lock").insert(key) {
+                continue;
+            }
+            let _claim = ChunkClaim { claims, key };
+
+            if self
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .authored_header(&file, author, u64::from(index) + 1)?
+                .is_some_and(|header| header.kind == EventKind::Message)
+            {
+                continue;
+            }
+            if !matches!(
+                self.attachment_consent_status(file)?,
+                Some(super::attachment_consent::ReceiveDecision::Accepted)
+            ) {
+                break;
+            }
+            requested += 1;
+            let Some(event) =
+                super::session::request_signed_chunk(channel, file, author, index).await?
+            else {
+                continue;
+            };
+            if !matches!(
+                self.attachment_consent_status(file)?,
+                Some(super::attachment_consent::ReceiveDecision::Accepted)
+            ) {
+                break;
+            }
+            // The ordinary image admission expects chunk one first. Keep a
+            // verified later block in the same finite window until its exact
+            // predecessor arrives, then apply normal admission unchanged.
+            if let [parent] = event.parents.as_slice()
+                && !self.log.lock().expect("log lock").has(parent)?
+                && event.is_canonical()
+                && event.verify_integrity()
+                && event.verify_signature()
+                && self.attachment_chunk_author_allowed(file, author.ed25519_pub())?
+            {
+                round
+                    .pending
+                    .lock()
+                    .expect("pending chunk lock")
+                    .insert(pending_key, (channel.peer_identity().clone(), event));
+                continue;
+            }
+            let admission = store.lock().expect("sync store lock").ingest(event.clone());
+            match admission {
+                Ok(_) => self.retry_round_file_chunks(file, round)?,
+                Err(LogError::MissingParents(_))
+                    if event.is_canonical()
+                        && event.verify_integrity()
+                        && event.verify_signature() =>
+                {
+                    round
+                        .pending
+                        .lock()
+                        .expect("pending chunk lock")
+                        .insert(pending_key, (channel.peer_identity().clone(), event));
+                }
+                Err(error) if error.is_peer_rejection() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.retry_round_file_chunks(file, round)?;
+        self.file_progress(file)
+            .map(|current| current.is_some_and(|current| current.done > progress.done))
+            .map_err(|_| SessionError::UnexpectedMessage)
+    }
+
+    fn retry_round_file_chunks(
+        &self,
+        file: ConversationId,
+        round: &ChunkRound,
+    ) -> Result<(), SessionError> {
+        use crate::eventlog::sync::network::NetworkSyncStore;
+        // Drain the finite window in author/sequence order. Keeping the round
+        // guard serializes competing replays without holding it during I/O.
+        let mut pending = round.pending.lock().expect("pending chunk lock");
+        let mut failure = None;
+        pending.retain(|_, (peer, event)| {
+            if failure.is_some() {
+                return true;
+            }
+            match self.attachment_consent_status(file) {
+                Ok(Some(super::attachment_consent::ReceiveDecision::Accepted)) => {}
+                Ok(_) => return false,
+                Err(error) => {
+                    failure = Some(error);
+                    return true;
+                }
+            }
+            if let [parent] = event.parents.as_slice() {
+                match self.log.lock().expect("log lock").has(parent) {
+                    Ok(true) => {}
+                    Ok(false) => return true,
+                    Err(error) => {
+                        failure = Some(error);
+                        return true;
+                    }
+                }
+            }
+            let store = self.sync_store(peer);
+            let admission = NetworkSyncStore::ingest(
+                &mut *store.lock().expect("sync store lock"),
+                event.clone(),
+            );
+            match admission {
+                Ok(_) => false,
+                Err(LogError::MissingParents(_)) => true,
+                Err(error) if error.is_peer_rejection() => false,
+                Err(error) => {
+                    failure = Some(error);
+                    true
+                }
+            }
+        });
+        failure.map_or(Ok(()), |error| Err(error.into()))
     }
 
     fn file_recovery_sources(

@@ -7773,6 +7773,7 @@ async fn recipient_pulls_file_chunks_directly_when_push_missed() {
     let bob = DeviceIdentity::generate();
     let alice_public = alice.public();
     let bob_public = bob.public();
+    let bob_secret = bob.secret_bytes();
     let dir = tempfile::tempdir().unwrap();
 
     // ALICE listens — Bob will pull from her. Alice's roster has Bob at a DEAD port, so her
@@ -7802,7 +7803,7 @@ async fn recipient_pulls_file_chunks_directly_when_push_missed() {
     .unwrap();
     let bob_node = Node::open(
         bob,
-        bob_roster,
+        bob_roster.clone(),
         b_dm,
         b_ch,
         b_f,
@@ -7849,6 +7850,71 @@ async fn recipient_pulls_file_chunks_directly_when_push_missed() {
         prog.done,
         prog.total
     );
+
+    // Exercise the exact request through the production accept loop separately
+    // from recovery, which can also converge using the older paged protocol.
+    let mut exact = bob_node
+        .privacy_sync_dial(alice_peer.addr, &alice_peer.public)
+        .await
+        .unwrap();
+    let author = crate::eventlog::Author::from_ed25519(alice_public.ed25519_pub);
+    let available = crate::node::session::request_signed_chunk_availability(
+        &mut exact, file_conv, author, 0, prog.total,
+    )
+    .await
+    .unwrap()
+    .expect("sender advertises its authorized file scope");
+    assert_eq!(available, vec![true; prog.total as usize]);
+    let other_author = crate::eventlog::Author::from_ed25519(bob_public.ed25519_pub);
+    let unavailable = crate::node::session::request_signed_chunk_availability(
+        &mut exact,
+        file_conv,
+        other_author,
+        0,
+        prog.total,
+    )
+    .await
+    .unwrap()
+    .expect("known scope can answer an unselected author");
+    assert_eq!(unavailable, vec![false; prog.total as usize]);
+    let tail =
+        crate::node::session::request_signed_chunk(&mut exact, file_conv, author, prog.total - 1)
+            .await
+            .unwrap()
+            .expect("authorized sender serves the last signed chunk independently");
+    assert_eq!(tail.seq, u64::from(prog.total));
+    assert!(tail.verify_integrity() && tail.verify_signature());
+    let first = crate::node::session::request_signed_chunk(&mut exact, file_conv, author, 0)
+        .await
+        .unwrap()
+        .expect("first signed chunk");
+    {
+        let store = bob_node.sync_store(exact.peer_identity());
+        crate::eventlog::sync::network::NetworkSyncStore::ingest(
+            &mut *store.lock().unwrap(),
+            first,
+        )
+        .unwrap();
+    }
+    drop(exact);
+    assert_eq!(bob_node.file_progress(file_conv).unwrap().unwrap().done, 1);
+    drop(bob_node);
+    let (dm, _dm_rx) = mpsc::unbounded_channel();
+    let (channel, _channel_rx) = mpsc::unbounded_channel();
+    let (files, _files_rx) = mpsc::unbounded_channel();
+    let bob_node = Node::open(
+        DeviceIdentity::from_secret_bytes(bob_secret.0, bob_secret.1),
+        bob_roster,
+        dm,
+        channel,
+        files,
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    bob_node.set_attachment_global_auto(true).unwrap();
+    assert_eq!(bob_node.file_progress(file_conv).unwrap().unwrap().done, 1);
 
     // The fix: the recipient pulls the chunks DIRECTLY from peers (no post office) and saves.
     let dest = dir.path().join("got.bin");
@@ -8638,6 +8704,28 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
         .set_channel_replica_enabled(channel, true)
         .await
         .unwrap();
+    // Check the exact wire path against the replica while the author is offline.
+    let mut replica = carol_node
+        .privacy_sync_dial(
+            SocketAddr::from(([127, 0, 0, 1], bob_port)),
+            &bob_node.identity.public(),
+        )
+        .await
+        .unwrap();
+    let author = crate::eventlog::Author::from_ed25519(alice_node.identity.public().ed25519_pub);
+    assert_eq!(
+        crate::node::session::request_signed_chunk_availability(&mut replica, file, author, 0, 2)
+            .await
+            .unwrap(),
+        Some(vec![true, true]),
+    );
+    let tail = crate::node::session::request_signed_chunk(&mut replica, file, author, 1)
+        .await
+        .unwrap()
+        .expect("replica can serve the original author's signed tail");
+    assert_eq!(tail.seq, 2);
+    assert!(tail.verify_integrity() && tail.verify_signature());
+    drop(replica);
     let carol_dest = dir.path().join("carol.bin");
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

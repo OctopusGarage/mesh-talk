@@ -146,6 +146,27 @@ enum SyncWire {
     FpRequestV5(FpRequest),
     RequestV5(SyncRequest),
     FollowupV5(SyncFollowup),
+    SignedChunkRequest {
+        file: ConversationId,
+        author: crate::eventlog::Author,
+        index: u32,
+    },
+    SignedChunkResponse {
+        file: ConversationId,
+        index: u32,
+        event: Option<crate::eventlog::Event>,
+    },
+    SignedChunkAvailabilityRequest {
+        file: ConversationId,
+        author: crate::eventlog::Author,
+        start: u32,
+        count: u32,
+    },
+    SignedChunkAvailabilityResponse {
+        file: ConversationId,
+        start: u32,
+        availability: Option<Vec<bool>>,
+    },
 }
 
 fn supports_event_kind(kind: EventKind, v2: bool, v3: bool, v4: bool, v5: bool) -> bool {
@@ -392,6 +413,73 @@ pub(in crate::node) fn durable_have_response_for_test(
             stored,
         } => Some((conversation, event_id, stored)),
         _ => None,
+    }
+}
+
+/// Pull one signed attachment block and pass it to the normal sync admission
+/// path. The caller checks consent before the request and again before ingest.
+pub(super) async fn request_signed_chunk<IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    file: ConversationId,
+    author: crate::eventlog::Author,
+    index: u32,
+) -> Result<Option<crate::eventlog::Event>, SessionError> {
+    channel
+        .send(&encode(&SyncWire::SignedChunkRequest {
+            file,
+            author,
+            index,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::SignedChunkResponse {
+            file: actual,
+            index: returned,
+            event,
+        } if actual == file
+            && returned == index
+            && event.as_ref().is_none_or(|event| {
+                event.conversation_id == file
+                    && event.author == author
+                    && event.kind == EventKind::Message
+                    && event.seq == u64::from(index) + 1
+            }) =>
+        {
+            Ok(event)
+        }
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
+pub(super) async fn request_signed_chunk_availability<IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    file: ConversationId,
+    author: crate::eventlog::Author,
+    start: u32,
+    count: u32,
+) -> Result<Option<Vec<bool>>, SessionError> {
+    channel
+        .send(&encode(&SyncWire::SignedChunkAvailabilityRequest {
+            file,
+            author,
+            start,
+            count,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::SignedChunkAvailabilityResponse {
+            file: actual,
+            start: returned,
+            availability,
+        } if actual == file
+            && returned == start
+            && availability
+                .as_ref()
+                .is_none_or(|page| page.len() == count as usize) =>
+        {
+            Ok(availability)
+        }
+        _ => Err(SessionError::UnexpectedMessage),
     }
 }
 
@@ -1137,6 +1225,67 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
 ) -> Result<Served, SessionError> {
     backend.bind_session_peer(channel.peer_identity());
     match decode(bytes)? {
+        SyncWire::SignedChunkAvailabilityRequest {
+            file,
+            author,
+            start,
+            count,
+        } => {
+            if !(1..=32).contains(&count) || start.checked_add(count).is_none() {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            let mut view = None;
+            let availability = if backend.supports_file_chunk_scope(&file)? {
+                let prepared = open_prepared_view(backend, &file).await?;
+                prepare_outgoing_selection(backend, &prepared, &Default::default()).await?;
+                let answer = backend.available_file_chunks(&prepared, author, start, count)?;
+                backend.validate_view(&prepared)?;
+                view = Some(prepared);
+                answer
+            } else {
+                None
+            };
+            channel
+                .send(&encode(&SyncWire::SignedChunkAvailabilityResponse {
+                    file,
+                    start,
+                    availability,
+                })?)
+                .await?;
+            if let Some(view) = view {
+                drop(backend.retain_custody_view(view)?);
+            }
+            Ok(Served::Handled(file))
+        }
+        SyncWire::SignedChunkRequest {
+            file,
+            author,
+            index,
+        } => {
+            if !backend.supports_file_chunk_scope(&file)? {
+                channel
+                    .send(&encode(&SyncWire::SignedChunkResponse {
+                        file,
+                        index,
+                        event: None,
+                    })?)
+                    .await?;
+                return Ok(Served::Handled(file));
+            }
+            let view = open_prepared_view(backend, &file).await?;
+            prepare_outgoing_selection(backend, &view, &Default::default()).await?;
+            let event = backend.export_file_chunk(&view, author, index, MAX_PLAINTEXT)?;
+            let reply = |event| encode(&SyncWire::SignedChunkResponse { file, index, event });
+            let mut response = reply(event)?;
+            if response.len() > MAX_PLAINTEXT {
+                response = reply(None)?;
+            }
+            backend.validate_view(&view)?;
+            channel.send(&response).await?;
+            drop(backend.retain_custody_view(view)?);
+            Ok(Served::Handled(file))
+        }
+
         SyncWire::FileMessageIdentitiesRequest { requests, offers } => {
             if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
                 return Err(SessionError::UnexpectedMessage);
@@ -1369,7 +1518,9 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
         | SyncWire::SignedFileConsentResponse { .. }
         | SyncWire::StickerFileConsentResponse { .. }
         | SyncWire::StickerFileProofResponse { .. }
-        | SyncWire::FileMessageIdentitiesResponse { .. } => Err(SessionError::UnexpectedMessage),
+        | SyncWire::FileMessageIdentitiesResponse { .. }
+        | SyncWire::SignedChunkResponse { .. }
+        | SyncWire::SignedChunkAvailabilityResponse { .. } => Err(SessionError::UnexpectedMessage),
     }
 }
 

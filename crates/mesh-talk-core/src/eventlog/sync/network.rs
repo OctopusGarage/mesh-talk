@@ -138,6 +138,31 @@ pub trait NetworkSyncStore {
     type View;
     type HaveCursor;
     type ExportCursor;
+    /// Cheap scope qualification before allocating a signed-chunk export view.
+    fn supports_file_chunk_scope(&self, _file: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
+    }
+
+    fn available_file_chunks(
+        &self,
+        _view: &Self::View,
+        _author: crate::eventlog::Author,
+        _start: u32,
+        _count: u32,
+    ) -> Result<Option<Vec<bool>>, LogError> {
+        Ok(None)
+    }
+
+    /// Export one signed chunk from a fully prepared outgoing view.
+    fn export_file_chunk(
+        &self,
+        _view: &Self::View,
+        _author: crate::eventlog::Author,
+        _index: u32,
+        _encoded_limit: usize,
+    ) -> Result<Option<Event>, LogError> {
+        Ok(None)
+    }
     /// Qualify optional node-owned preparation reuse with the actual authenticated
     /// peer. Cached plans grant no remote outcome or custody authority.
     fn bind_session_peer(&mut self, _peer: &crate::identity::device::PublicIdentity) {}

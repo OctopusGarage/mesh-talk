@@ -1886,8 +1886,9 @@ impl Node {
         // guard is disarmed only once the file is committed into place.
         let part = part_path(dest);
         let mut part_guard = PartFileGuard::new(part.clone());
-        let mut whole = Sha256::new();
-        let mut size = 0_u64;
+        let mut verifier =
+            mesh_blob::BlobVerifier::new(total, manifest.size(), manifest.checksum())
+                .map_err(|error| NodeError::File(error.to_string()))?;
         {
             let f = std::fs::File::create(&part)
                 .map_err(|e| NodeError::File(format!("create part: {e}")))?;
@@ -1896,11 +1897,9 @@ impl Node {
                 let ct = self.chunk_ciphertext(id?)?;
                 let plain = open_chunk_for(&manifest, i as u32, &ct)
                     .map_err(|e| NodeError::File(format!("open chunk {i}: {e}")))?;
-                size = size.saturating_add(plain.len() as u64);
-                if size > manifest.size() {
-                    return Err(NodeError::File("file size mismatch".into()));
-                }
-                whole.update(&plain);
+                verifier
+                    .push(i as u32, &plain)
+                    .map_err(|error| NodeError::File(error.to_string()))?;
                 writer
                     .write_all(&plain)
                     .map_err(|e| NodeError::File(format!("write chunk {i}: {e}")))?;
@@ -1909,9 +1908,9 @@ impl Node {
                     total,
                 });
             }
-            if size != manifest.size() {
-                return Err(NodeError::File("file size mismatch".into()));
-            }
+            verifier
+                .finish()
+                .map_err(|error| NodeError::File(error.to_string()))?;
             writer
                 .flush()
                 .map_err(|e| NodeError::File(format!("flush: {e}")))?;
@@ -1919,11 +1918,6 @@ impl Node {
                 .get_ref()
                 .sync_all()
                 .map_err(|e| NodeError::File(format!("sync file: {e}")))?;
-        }
-        let expected = manifest.checksum();
-        let actual: [u8; 32] = whole.finalize().into();
-        if actual != expected {
-            return Err(NodeError::File("whole-file checksum mismatch".into()));
         }
         std::fs::rename(&part, dest)
             .map_err(|e| NodeError::File(format!("finalize rename: {e}")))?;

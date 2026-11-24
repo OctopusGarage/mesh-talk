@@ -1018,6 +1018,7 @@ impl Node {
         let mut processed = Vec::new();
         let mut retained = Vec::new();
         let mut semantic = Vec::new();
+        let mut attachment_progress = false;
         for outer in wrappers {
             self.observe_mailbox_work(
                 super::work_observation::reason::OUTER,
@@ -1193,12 +1194,20 @@ impl Node {
                 }
                 let inner_id = event.id;
                 let conv = event.conversation_id;
+                let is_chunk_candidate = event.kind == EventKind::Message;
                 let (admission, staged) = {
                     let mut store = store.lock().expect("projection lock not poisoned");
                     let admission = store.ingest(event);
                     let staged = store.uninvited_channel_staged(conv, inner_id);
                     (admission, staged)
                 };
+                if !attachment_progress
+                    && is_chunk_candidate
+                    && matches!(&admission, Ok(crate::eventlog::AppendOutcome::Appended))
+                    && self.has_file_scope(conv).unwrap_or(false)
+                {
+                    attachment_progress = true;
+                }
                 if let Err(error) = admission {
                     self.observe_mailbox_work(
                         super::work_observation::reason::ADMISSION_FAILED,
@@ -1288,6 +1297,11 @@ impl Node {
             }
             Ok(())
         })();
+        if attachment_progress {
+            // The direct lane reads the same retained events and can continue
+            // from this durable progress even when the rest of the page fails.
+            self.file_pull_notify.notify_one();
+        }
         store
             .lock()
             .expect("projection lock not poisoned")

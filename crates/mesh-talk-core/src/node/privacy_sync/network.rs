@@ -1274,6 +1274,89 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         *observed = current;
         Ok(())
     }
+    fn supports_file_chunk_scope(&self, file: &ConversationId) -> Result<bool, LogError> {
+        self.node.has_file_scope(*file)
+    }
+
+    fn available_file_chunks(
+        &self,
+        view: &Self::View,
+        author: crate::eventlog::Author,
+        start: u32,
+        count: u32,
+    ) -> Result<Option<Vec<bool>>, LogError> {
+        self.validate_view(view)?;
+        if !self.node.has_file_scope(view.conversation)? {
+            return Ok(None);
+        }
+        let end = start
+            .checked_add(count)
+            .ok_or(LogError::InvalidPageBudget)?;
+        if !(1..=32).contains(&count) {
+            return Err(LogError::InvalidPageBudget);
+        }
+        let available = {
+            let preparation = view.preparation.lock().expect("view preparation lock");
+            let export = view.export_have.lock().expect("view export lock");
+            if !preparation.ready() || export.is_none() {
+                return Err(LogError::StaleCursor);
+            }
+            let log = self.node.log.lock().expect("log lock");
+            let repository = log.repository()?;
+            (start..end)
+                .map(|index| {
+                    repository
+                        .selected_file_chunk_header(
+                            preparation.selection()?,
+                            &view.repository,
+                            author,
+                            index,
+                        )
+                        .map(|header| header.is_some())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        self.validate_view(view)?;
+        Ok(Some(available))
+    }
+
+    fn export_file_chunk(
+        &self,
+        view: &Self::View,
+        author: crate::eventlog::Author,
+        index: u32,
+        encoded_limit: usize,
+    ) -> Result<Option<Event>, LogError> {
+        self.validate_view(view)?;
+        if !self.node.has_file_scope(view.conversation)? {
+            return Ok(None);
+        }
+        let event = {
+            let preparation = view.preparation.lock().expect("view preparation lock");
+            let export = view.export_have.lock().expect("view export lock");
+            if !preparation.ready() || export.is_none() {
+                return Err(LogError::StaleCursor);
+            }
+            let log = self.node.log.lock().expect("log lock");
+            let repository = log.repository()?;
+            let Some(header) = repository.selected_file_chunk_header(
+                preparation.selection()?,
+                &view.repository,
+                author,
+                index,
+            )?
+            else {
+                return Ok(None);
+            };
+            if header.encoded_bytes > encoded_limit {
+                return Ok(None);
+            }
+            repository.get_bounded(&header.id, 4 * 1024 * 1024)?
+        };
+        self.validate_view(view)?;
+        Ok(event)
+    }
+
     fn metadata(&self, view: &Self::View) -> Result<SyncMetadata, LogError> {
         self.validate_view(view)?;
         let preparation = view.preparation.lock().expect("view preparation lock");

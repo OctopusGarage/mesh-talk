@@ -11,6 +11,27 @@ pub(super) trait SessionBackend {
     type View;
     type HaveCursor;
     type ExportCursor;
+    fn supports_file_chunk_scope(&self, _file: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    fn available_file_chunks(
+        &self,
+        _view: &Self::View,
+        _author: crate::eventlog::Author,
+        _start: u32,
+        _count: u32,
+    ) -> Result<Option<Vec<bool>>, LogError> {
+        Ok(None)
+    }
+    fn export_file_chunk(
+        &self,
+        _view: &Self::View,
+        _author: crate::eventlog::Author,
+        _index: u32,
+        _encoded_limit: usize,
+    ) -> Result<Option<Event>, LogError> {
+        Ok(None)
+    }
     fn bind_session_peer(&self, _peer: &crate::identity::device::PublicIdentity) {}
     fn remote_have_budget(&self) -> Option<&RemoteHaveBudget> {
         None
@@ -501,6 +522,36 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .expect("store mutex not poisoned")
             .prepare_export_step(v, have, budget)
     }
+    fn supports_file_chunk_scope(&self, file: &ConversationId) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .supports_file_chunk_scope(file)
+    }
+    fn available_file_chunks(
+        &self,
+        view: &S::View,
+        author: crate::eventlog::Author,
+        start: u32,
+        count: u32,
+    ) -> Result<Option<Vec<bool>>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .available_file_chunks(view, author, start, count)
+    }
+    fn export_file_chunk(
+        &self,
+        view: &S::View,
+        author: crate::eventlog::Author,
+        index: u32,
+        encoded_limit: usize,
+    ) -> Result<Option<Event>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .export_file_chunk(view, author, index, encoded_limit)
+    }
     fn metadata(&self, v: &S::View) -> Result<SyncMetadata, LogError> {
         self.0.lock().expect("store mutex not poisoned").metadata(v)
     }
@@ -795,13 +846,11 @@ fn event_frame_budget(conversation: ConversationId) -> Result<usize, SessionErro
     .len();
     Ok(MAX_PLAINTEXT - overhead)
 }
-pub(super) async fn select_export_frames<B: SessionBackend>(
+pub(super) async fn prepare_outgoing_selection<B: SessionBackend>(
     backend: &B,
     view: &B::View,
-    conversation: ConversationId,
     have: &HashSet<EventId>,
-    max_frames: usize,
-) -> Result<Vec<SyncFollowup>, SessionError> {
+) -> Result<(), SessionError> {
     if !backend.reusable_export(view, have)? {
         loop {
             if backend
@@ -836,6 +885,17 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
             tokio::task::yield_now().await;
         }
     }
+    Ok(())
+}
+
+pub(super) async fn select_export_frames<B: SessionBackend>(
+    backend: &B,
+    view: &B::View,
+    conversation: ConversationId,
+    have: &HashSet<EventId>,
+    max_frames: usize,
+) -> Result<Vec<SyncFollowup>, SessionError> {
+    prepare_outgoing_selection(backend, view, have).await?;
     let frame_budget = event_frame_budget(conversation)?;
     let mut frames = Vec::new();
     let mut cursor = None;

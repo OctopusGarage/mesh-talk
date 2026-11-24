@@ -1124,16 +1124,16 @@ impl Node {
                 // The former collector sorted by sequence. Exact author/sequence
                 // seeks retain that rule, and missing or mixed-author slots fail.
                 for index in 0..count {
-                    let header = log
+                    let chunk = log
                         .repository()?
-                        .authored_header(&manifest.file_conv(), first.author, index + 1)?
+                        .authored_file_chunk(
+                            &manifest.file_conv(),
+                            first.author,
+                            index as u32,
+                            4 * 1024 * 1024,
+                        )?
                         .ok_or_else(|| {
                             LogError::CorruptFile("conflicting file chunk conversation".into())
-                        })?;
-                    let chunk = log
-                        .get_bounded(&header.id, 4 * 1024 * 1024)?
-                        .ok_or_else(|| {
-                            LogError::CorruptFile("selected file chunk disappeared".into())
                         })?;
                     if !chain.accept(&chunk)
                         || crate::file::open_chunk_for(&manifest, index as u32, &chunk.ciphertext)
