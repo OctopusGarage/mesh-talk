@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import time
 
+PARTITION_HOLD_SECONDS = 125
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("sibling", ROOT / "scripts/e2e-routed-sibling.py")
 SIBLING = importlib.util.module_from_spec(SPEC)
@@ -173,6 +174,16 @@ def run():
                     setting(a, command)
                 SIBLING.discover(a, ids[0], f"{local_ip}:{base}") if p.process.poll() is None else None
                 SIBLING.discover(a, ids[1], f"{r_ip}:{base + 1}")
+            # The fixture separates discovery ports. Renew both local ingress
+            # hints at the receipt and partition boundaries.
+            def refresh_local_ingress():
+                SIBLING.discover(a, ids[1], f"{r_ip}:{base + 1}")
+                SIBLING.discover(b, ids[3], f"127.0.0.1:{base + 3}")
+
+            def wait_for_local_ingress():
+                wait(a, "peers", lambda line: line.startswith(f"peer {ids[1]} "), 15)
+                wait(b, "peers", lambda line: line.startswith(f"peer {ids[3]} "), 15)
+
             configure_a()
             setting(b, "relay on")
             setting(b, "bridge on")
@@ -201,9 +212,12 @@ def run():
             setting(b, f"save-file {file} {b64(destination)}")
             actual = FOUR.macmini(f"shasum -a 256 {shlex.quote(destination)}").split()[0]
             assert actual == hashlib.sha256(payload).hexdigest(), "failover file SHA-256 mismatch"
+            refresh_local_ingress()
             wait(a, "file-sent " + card, lambda line: line == "file-sent true", 180)
             print("PASS: failover file consent, sender restart, full SHA-256 and recipient completion", flush=True)
+            refresh_local_ingress()
             stop_remote(q, FOUR.MAC2015, q_dir, "Q")
+            wait_for_local_ingress()
             second = f"queued-during-federation-partition-{base}"
             a.send(f"enqueue {recipient_account} {b64(second)}")
             queued = a.expect(lambda line: line.startswith("queued ")).split()[1]
@@ -211,12 +225,21 @@ def run():
             # A first Awaiting state alone proves nothing: even a healthy graph
             # queues asynchronously. Hold the actual bridge down, repeatedly
             # query the recipient, and prove the new event remains absent.
-            partition_until = time.monotonic() + 3
+            partition_until = time.monotonic() + PARTITION_HOLD_SECONDS
+            refresh_at = time.monotonic() + 20
             while time.monotonic() < partition_until:
+                if time.monotonic() >= refresh_at:
+                    refresh_local_ingress()
+                    refresh_at = time.monotonic() + 20
                 history_lacks(b, aa, second)
                 wait(a, f"delivery-status {queued}", lambda line: line == "delivery-status Some(Awaiting)", 5)
                 time.sleep(0.25)
-            print("PASS: bridge stayed offline ≥3s; recipient history lacked queued event and sender remained Awaiting", flush=True)
+            wait_for_local_ingress()
+            print(
+                f"PASS: bridge stayed offline ≥{PARTITION_HOLD_SECONDS}s; "
+                "recipient history lacked queued event and sender remained Awaiting",
+                flush=True,
+            )
             q = q_start(q_dir + "/relays.conf")
             assert FOUR.identity(q, "post-office") == ids[2]
             SIBLING.history_has(b, aa, second, 120)

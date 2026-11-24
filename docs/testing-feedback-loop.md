@@ -2466,6 +2466,11 @@ to be stopped.
   Intel macOS and Windows GNU, plus the arm64 `network-acceptance` example.
   Exercise preferred-relay outage, a surviving three-relay route, consented file
   delivery with sender restart and SHA-256, and bridge partition/recovery.
+  The fixture isolates discovery ports, so refresh the local ingress relay
+  hints with routed discovery before awaiting the attachment receipt, before
+  stopping the inter-site bridge and during its 125-second partition. Verify
+  both ingress relays remain discovered before queueing the partitioned message
+  and before restoring the bridge.
 - `frontend/e2e/call-media-physical.spec.ts`: build the `network-acceptance`
   example for native macOS and Windows GNU, then run
   `MESH_TALK_PHYSICAL_MEDIA=1 npx playwright test e2e/call-media-physical.spec.ts`
