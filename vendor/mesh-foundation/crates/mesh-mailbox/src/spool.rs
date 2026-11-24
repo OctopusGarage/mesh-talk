@@ -2,14 +2,13 @@
 //! The spool owns its exclusive path lease. The host owns authenticated
 //! admission, the clock, and when to invoke expiry.
 
+use crate::{Record, RecordId, ScopeId};
 use crate::{
     capacity::{Admission, CapacityLimits},
     delta::{DeltaError, DeltaSelection},
-    envelope_shape,
     rpc::{MailboxCursor, MailboxDeltaPage, PAGE_IDS},
     service::MailboxStore,
 };
-use mesh_replication::legacy_event::{ConversationId, Event, EventId};
 use mesh_storage::{
     EncryptionKey, SALT_SIZE, StorageError,
     record_log::{EncryptedRecordLog, RecordLogError, ReplacementDurability},
@@ -23,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MAGIC: &[u8; 6] = b"MTMSP1";
+const MAGIC: &[u8; 6] = b"MFMSP1";
 
 #[derive(Debug)]
 pub enum SpoolError {
@@ -44,6 +43,7 @@ impl From<DeltaError> for SpoolError {
     fn from(error: DeltaError) -> Self {
         match error {
             DeltaError::InvalidLimit => Self::Limit,
+            DeltaError::InvalidOrdinal => Self::StaleCursor,
             DeltaError::OrdinalExhausted => Self::CounterExhausted,
         }
     }
@@ -70,43 +70,40 @@ pub struct ExpiryReport {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-enum Record {
+enum JournalEntry {
     Header {
-        scope: ConversationId,
+        scope: ScopeId,
         store_uuid: [u8; 16],
         epoch: i64,
     },
     Envelope {
         first_seen: u64,
-        event: Event,
+        event: Record,
     },
 }
 
 struct Entry {
-    event: Event,
+    event: Record,
     wire_bytes: u64,
 }
 
 pub struct Spool {
-    log: EncryptedRecordLog<Record>,
+    log: EncryptedRecordLog<JournalEntry>,
     cursor: MailboxCursor,
     entries: Vec<Entry>,
-    positions: HashMap<EventId, usize>,
+    positions: HashMap<RecordId, usize>,
     bytes: u64,
     limits: CapacityLimits,
     max_age_secs: NonZeroU64,
     _lease: File,
 }
 
-fn encoded_size(event: &Event) -> Result<u64, SpoolError> {
+fn encoded_size(event: &Record) -> Result<u64, SpoolError> {
     bincode::serialized_size(event).map_err(|_| SpoolError::InvalidRecord)
 }
 
-fn valid_envelope(scope: ConversationId, event: &Event) -> bool {
-    event.conversation_id == scope
-        && envelope_shape(event)
-        && event.verify_integrity()
-        && event.verify_signature()
+fn valid_record(scope: ScopeId, event: &Record) -> bool {
+    event.scope == scope && event.verify_integrity()
 }
 
 impl Spool {
@@ -118,7 +115,7 @@ impl Spool {
     pub fn open(
         path: &Path,
         password: &str,
-        scope: ConversationId,
+        scope: ScopeId,
         limits: CapacityLimits,
         max_age_secs: NonZeroU64,
     ) -> Result<Self, SpoolError> {
@@ -131,7 +128,7 @@ impl Spool {
     /// exclusive writer lease, record-size ceiling, and durable cursor.
     pub fn open_with_key_provider(
         path: &Path,
-        scope: ConversationId,
+        scope: ScopeId,
         limits: CapacityLimits,
         max_age_secs: NonZeroU64,
         derive: impl FnOnce(&[u8; SALT_SIZE]) -> Result<EncryptionKey, StorageError>,
@@ -169,7 +166,7 @@ impl Spool {
             128 * 1024,
             |record| {
                 let error = match record {
-                    Record::Header {
+                    JournalEntry::Header {
                         scope: actual,
                         store_uuid,
                         epoch,
@@ -177,13 +174,13 @@ impl Spool {
                         loaded = Some((store_uuid, epoch));
                         return Ok(());
                     }
-                    Record::Envelope {
+                    JournalEntry::Envelope {
                         first_seen: time,
                         event,
                     } if loaded.is_some()
                         && first_seen.is_none_or(|old| old == time)
                         && !positions.contains_key(&event.id)
-                        && valid_envelope(scope, &event) =>
+                        && valid_record(scope, &event) =>
                     {
                         match encoded_size(&event).and_then(|size| {
                             let admission = limits
@@ -223,7 +220,7 @@ impl Spool {
         } else {
             let mut uuid = [0; 16];
             OsRng.fill_bytes(&mut uuid);
-            log.append_durable(&Record::Header {
+            log.append_durable(&JournalEntry::Header {
                 scope,
                 store_uuid: uuid,
                 epoch: 0,
@@ -235,7 +232,7 @@ impl Spool {
             log,
             cursor: MailboxCursor {
                 store_uuid,
-                conversation: scope,
+                scope,
                 epoch,
                 first_seen,
                 revision: after,
@@ -281,8 +278,8 @@ impl Spool {
             .checked_add(1)
             .ok_or(SpoolError::CounterExhausted)?;
         let removed = self.usage();
-        let durability = self.log.rewrite_report(&[Record::Header {
-            scope: self.cursor.conversation,
+        let durability = self.log.rewrite_report(&[JournalEntry::Header {
+            scope: self.cursor.scope,
             store_uuid: self.cursor.store_uuid,
             epoch,
         }])?;
@@ -300,7 +297,7 @@ impl Spool {
     }
 
     /// The host authenticates the depositor before calling this method.
-    pub fn deposit(&mut self, event: Event, now: u64) -> Result<Deposit, SpoolError> {
+    pub fn deposit(&mut self, event: Record, now: u64) -> Result<Deposit, SpoolError> {
         self.deposit_observed(event, now, |_| {})
     }
 
@@ -308,7 +305,7 @@ impl Spool {
     /// fails. The callback must be fast and nonblocking.
     pub fn deposit_observed(
         &mut self,
-        event: Event,
+        event: Record,
         now: u64,
         on_expiry: impl FnOnce(ExpiryReport),
     ) -> Result<Deposit, SpoolError> {
@@ -320,7 +317,7 @@ impl Spool {
         {
             return Ok(Deposit::AlreadyStored);
         }
-        if !valid_envelope(self.cursor.conversation, &event) {
+        if !valid_record(self.cursor.scope, &event) {
             return Err(SpoolError::InvalidRecord);
         }
         if let Some(report) = self.expire_report(now)? {
@@ -345,7 +342,7 @@ impl Spool {
             .checked_add(1)
             .ok_or(SpoolError::CounterExhausted)?;
         let first_seen = self.cursor.first_seen.unwrap_or(now);
-        self.log.append_durable(&Record::Envelope {
+        self.log.append_durable(&JournalEntry::Envelope {
             first_seen,
             event: event.clone(),
         })?;
@@ -361,7 +358,7 @@ impl Spool {
         Ok(Deposit::Stored)
     }
 
-    pub fn durable_have(&self, id: &EventId, now: u64) -> bool {
+    pub fn durable_have(&self, id: &RecordId, now: u64) -> bool {
         !self.expired(now) && self.positions.contains_key(id)
     }
 
@@ -382,11 +379,11 @@ impl MailboxStore for SpoolView<'_> {
 
     fn delta(
         &self,
-        scope: &ConversationId,
+        scope: &ScopeId,
         prior: Option<&MailboxCursor>,
         limit: usize,
     ) -> Result<MailboxDeltaPage, SpoolError> {
-        if *scope != self.spool.cursor.conversation || self.spool.expired(self.now) {
+        if *scope != self.spool.cursor.scope || self.spool.expired(self.now) {
             return Err(SpoolError::StaleCursor);
         }
         let mut scan = match DeltaSelection::open(&self.spool.cursor, prior, limit)? {
@@ -411,12 +408,12 @@ impl MailboxStore for SpoolView<'_> {
 
     fn bodies(
         &self,
-        scope: &ConversationId,
+        scope: &ScopeId,
         cursor: &MailboxCursor,
-        ids: &[EventId],
+        ids: &[RecordId],
         max_bytes: usize,
-    ) -> Result<Vec<Event>, SpoolError> {
-        if *scope != self.spool.cursor.conversation
+    ) -> Result<Vec<Record>, SpoolError> {
+        if *scope != self.spool.cursor.scope
             || !cursor.accepts(&self.spool.cursor)
             || self.spool.expired(self.now)
         {
@@ -445,5 +442,25 @@ impl MailboxStore for SpoolView<'_> {
             selected.push(&entry.event);
         }
         Ok(selected.into_iter().cloned().collect())
+    }
+}
+
+impl std::fmt::Display for SpoolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => write!(f, "mailbox storage: {error}"),
+            Self::InvalidRecord => f.write_str("invalid opaque record"),
+            Self::StaleCursor => f.write_str("mailbox source checkpoint invalidated"),
+            Self::Limit => f.write_str("mailbox resource limit exceeded"),
+            Self::CounterExhausted => f.write_str("mailbox counter exhausted"),
+        }
+    }
+}
+impl std::error::Error for SpoolError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+            _ => None,
+        }
     }
 }

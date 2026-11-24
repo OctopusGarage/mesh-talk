@@ -3,8 +3,8 @@ use super::*;
 use crate::eventlog::Event;
 use crate::postoffice::{IndexedPostOffice, MailboxCursor, MailboxDeltaPage};
 #[cfg(test)]
-use mesh_mailbox::rpc::{decode_frame, marker};
-use mesh_mailbox::{
+use mesh_talk_protocol::mailbox::rpc::{decode_frame, marker};
+use mesh_talk_protocol::mailbox::{
     rpc::{
         Frame, PAGE_IDS, RpcError, encode_frame, is_mailbox_frame, make_get_request,
         read_delta_response, read_get_response,

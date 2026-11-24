@@ -1,4 +1,4 @@
-//! Mesh Talk-compatible content encryption state machines.
+//! Content encryption state machines for host-managed key lifecycles.
 //!
 //! Callers supply authenticated key material, enforce epoch and membership
 //! authority, and persist each accepted event atomically with its new state.

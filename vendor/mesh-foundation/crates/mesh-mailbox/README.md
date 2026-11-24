@@ -1,8 +1,8 @@
 # mesh-foundation-mailbox
 
-Opaque envelopes, negotiated delta retrieval and durable mailbox spools.
+Opaque scoped records, negotiated delta retrieval and durable mailbox spools.
 
-Start with crate-level envelopes and the `service` and `spool` modules. Hosts own admission, expiry scheduling and federation; the spool owns its writer lease.
+Start with `Record::new(scope, bytes)` and the `service` and `spool` modules. Hosts own payload encryption, admission, expiry scheduling and federation; the spool owns its writer lease.
 
 ## Development and documentation
 
@@ -23,3 +23,8 @@ See the repository [README](https://github.com/OctopusGarage/mesh-foundation#rea
 [contribution guide](https://github.com/OctopusGarage/mesh-foundation/blob/main/CONTRIBUTING.md)
 and [security policy](https://github.com/OctopusGarage/mesh-foundation/blob/main/SECURITY.md).
 Licensed under MIT; see the workspace LICENSE.
+
+This page describes unreleased alpha.2. The old chat envelope and wire/spool
+profiles are application-owned; see [migration](../../docs/business-neutral-migration.md).
+Run `cargo run -p mesh-foundation-mailbox --example opaque_mailbox` for a minimal
+durable example. Content integrity is not authentication or permission.

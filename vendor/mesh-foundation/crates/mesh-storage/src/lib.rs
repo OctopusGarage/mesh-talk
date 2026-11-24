@@ -1,4 +1,4 @@
-//! At-rest encryption for existing Mesh Talk records.
+//! At-rest encryption for opaque host-owned records.
 //! Database transactions and key lifecycle belong to the caller.
 
 pub mod record_log;

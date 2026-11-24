@@ -1,9 +1,8 @@
-//! Mesh Talk-compatible bounded mailbox delta frames and snapshot cursors.
+//! Bounded opaque mailbox frames and snapshot cursors.
 
+use crate::{Record, RecordId, ScopeId};
 use bincode::Options;
-use mesh_replication::legacy_event::{ConversationId, Event, EventId};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 const MAX_PLAINTEXT: usize = 65_519;
 
@@ -27,7 +26,7 @@ impl std::error::Error for RpcError {}
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MailboxCursor {
     pub store_uuid: [u8; 16],
-    pub conversation: ConversationId,
+    pub scope: ScopeId,
     pub epoch: i64,
     pub first_seen: Option<u64>,
     pub revision: i64,
@@ -38,7 +37,7 @@ pub struct MailboxCursor {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MailboxDeltaPage {
     pub cursor: MailboxCursor,
-    pub ids: Vec<EventId>,
+    pub ids: Vec<RecordId>,
     pub complete: bool,
     pub reset: bool,
 }
@@ -46,7 +45,7 @@ pub struct MailboxDeltaPage {
 impl MailboxCursor {
     pub fn accepts(&self, current: &Self) -> bool {
         self.store_uuid == current.store_uuid
-            && self.conversation == current.conversation
+            && self.scope == current.scope
             && self.epoch == current.epoch
             && self.first_seen == current.first_seen
             && self.revision >= 0
@@ -62,40 +61,35 @@ impl MailboxCursor {
     }
 }
 
-const MAGIC: &[u8; 5] = b"MTOM1";
+const MAGIC: &[u8; 5] = b"MFOM1";
 pub const PAGE_IDS: usize = 64;
 pub const BODY_BUDGET: usize = MAX_PLAINTEXT - 2048;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Frame {
+    Probe {
+        scope: ScopeId,
+    },
+    Unsupported {
+        scope: ScopeId,
+    },
     Supported {
-        conversation: ConversationId,
+        scope: ScopeId,
     },
     Delta {
-        conversation: ConversationId,
+        scope: ScopeId,
         prior: Option<MailboxCursor>,
     },
     Page(MailboxDeltaPage),
     Get {
-        conversation: ConversationId,
+        scope: ScopeId,
         cursor: MailboxCursor,
-        ids: Vec<EventId>,
+        ids: Vec<RecordId>,
     },
-    Events {
-        conversation: ConversationId,
-        events: Vec<Event>,
+    Records {
+        scope: ScopeId,
+        records: Vec<Record>,
     },
-}
-
-// The legacy probe contains a domain-separated digest rather than a real set
-// fingerprint. An ordinary fingerprint can coincide only by a SHA256 collision;
-// even then a legacy matched=true response is an error, never positive support.
-// Consequently old endpoints receive only a frame they already understand.
-pub fn marker(conversation: ConversationId) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    hash.update(b"mesh-talk-opaque-mailbox-rpc-v1-probe\0");
-    hash.update(conversation.as_bytes());
-    hash.finalize().into()
 }
 
 pub fn encode_frame(frame: &Frame) -> Result<Vec<u8>, RpcError> {
@@ -131,32 +125,11 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, RpcError> {
         .map_err(|e| RpcError::Serialization(e.to_string()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mailbox_frame_roundtrip_rejects_bad_magic_trailing_bytes_and_large_payloads() {
-        let conversation = ConversationId::new([5; 32]);
-        let mut bytes = encode_frame(&Frame::Supported { conversation }).unwrap();
-        assert!(
-            matches!(decode_frame(&bytes).unwrap(), Frame::Supported { conversation: actual } if actual == conversation)
-        );
-        bytes.push(0);
-        assert!(decode_frame(&bytes).is_err());
-        assert!(decode_frame(&vec![0; MAX_PLAINTEXT + 1]).is_err());
-        assert!(decode_frame(b"MTOM2").is_err());
-    }
-}
-
 /// Qualify a delta response before its cursor can be considered for local commit.
-pub fn read_delta_response(
-    bytes: &[u8],
-    conversation: ConversationId,
-) -> Result<MailboxDeltaPage, RpcError> {
+pub fn read_delta_response(bytes: &[u8], scope: ScopeId) -> Result<MailboxDeltaPage, RpcError> {
     match decode_frame(bytes)? {
         Frame::Page(page)
-            if page.cursor.conversation == conversation
+            if page.cursor.scope == scope
                 && page.ids.len() <= PAGE_IDS
                 && page.complete == page.cursor.window.is_none()
                 && page.cursor.after >= 0
@@ -170,15 +143,15 @@ pub fn read_delta_response(
 }
 
 pub fn make_get_request(
-    conversation: ConversationId,
+    scope: ScopeId,
     cursor: &MailboxCursor,
-    ids: &[EventId],
+    ids: &[RecordId],
 ) -> Result<Vec<u8>, RpcError> {
-    if ids.len() > PAGE_IDS || cursor.conversation != conversation {
+    if ids.len() > PAGE_IDS || cursor.scope != scope {
         return Err(RpcError::UnexpectedMessage);
     }
     encode_frame(&Frame::Get {
-        conversation,
+        scope,
         cursor: cursor.clone(),
         ids: ids.to_vec(),
     })
@@ -188,63 +161,26 @@ pub fn make_get_request(
 /// and commit acceptance before advancing local progress.
 pub fn read_get_response(
     bytes: &[u8],
-    conversation: ConversationId,
-    ids: &[EventId],
-    encoded_size: impl Fn(&Event) -> usize,
-) -> Result<Vec<Event>, RpcError> {
+    scope: ScopeId,
+    ids: &[RecordId],
+    encoded_size: impl Fn(&Record) -> usize,
+) -> Result<Vec<Record>, RpcError> {
     match decode_frame(bytes)? {
-        Frame::Events {
-            conversation: response,
-            events,
-        } if response == conversation
-            && events.len() == ids.len()
-            && events
-                .iter()
-                .zip(ids)
-                .all(|(event, id)| event.id == *id && event.conversation_id == conversation)
-            && events
+        Frame::Records {
+            scope: response,
+            records,
+        } if response == scope
+            && records.len() == ids.len()
+            && records.iter().zip(ids).all(|(event, id)| {
+                event.id == *id && event.scope == scope && event.verify_integrity()
+            })
+            && records
                 .iter()
                 .try_fold(0usize, |sum, event| sum.checked_add(encoded_size(event)))
                 .is_some_and(|bytes| bytes <= BODY_BUDGET) =>
         {
-            Ok(events)
+            Ok(records)
         }
         _ => Err(RpcError::UnexpectedMessage),
-    }
-}
-
-#[cfg(test)]
-mod response_tests {
-    use super::*;
-    use mesh_identity::device::DeviceIdentity;
-    use mesh_replication::legacy_event::EventKind;
-
-    #[test]
-    fn body_response_must_match_requested_scope_identity_and_budget() {
-        let scope = ConversationId::new([7; 32]);
-        let error_scope = ConversationId::new([8; 32]);
-        let event = Event::new(
-            &DeviceIdentity::generate(),
-            scope,
-            1,
-            vec![],
-            1,
-            0,
-            EventKind::Message,
-            vec![5],
-        );
-        let id = event.id;
-        let bytes = encode_frame(&Frame::Events {
-            conversation: scope,
-            events: vec![event.clone()],
-        })
-        .unwrap();
-        assert_eq!(
-            read_get_response(&bytes, scope, &[id], |_| BODY_BUDGET).unwrap(),
-            [event]
-        );
-        assert!(read_get_response(&bytes, scope, &[id], |_| BODY_BUDGET + 1).is_err());
-        assert!(read_get_response(&bytes, error_scope, &[id], |_| 1).is_err());
-        assert!(read_get_response(&bytes, scope, &[EventId::new([4; 32])], |_| 1).is_err());
     }
 }

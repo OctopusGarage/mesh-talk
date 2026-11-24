@@ -1,7 +1,7 @@
 //! First-contact discovery over a routed IP path.
 
+use crate::device::DeviceIdentity;
 use crate::discovery::announce::{Announce, decode as decode_announce, encode as encode_announce};
-use mesh_identity::device::DeviceIdentity;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -106,7 +106,7 @@ pub fn encode_response(
 pub fn encode_response_signed(
     nonce: Nonce,
     announce: &Announce,
-    public: &mesh_identity::device::PublicIdentity,
+    public: &crate::device::PublicIdentity,
     sign: impl FnOnce(&[u8]) -> [u8; 64],
 ) -> Option<Vec<u8>> {
     if !announce.valid_presence() || announce.public() != *public {
@@ -157,8 +157,8 @@ pub fn decode_response(bytes: &[u8], expected_nonce: Nonce) -> Option<Announce> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::DeviceIdentity;
     use crate::discovery::announce::Announce;
-    use mesh_identity::device::DeviceIdentity;
 
     #[test]
     fn query_is_identity_free_and_only_a_nonce_bound_reply_is_accepted() {

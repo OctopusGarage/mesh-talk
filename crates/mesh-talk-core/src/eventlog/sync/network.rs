@@ -4,7 +4,7 @@ use super::{ApplyReport, FileConsentStatus};
 use crate::eventlog::{AppendOutcome, ConversationId, Event, EventId, LogError};
 use std::collections::HashSet;
 
-pub use mesh_replication::legacy_round::{QuietComparison, SyncMetadata};
+pub use mesh_talk_protocol::legacy_round::{QuietComparison, SyncMetadata};
 
 /// Work includes rejected rows and graph edges, not just selected output. The
 /// transport releases the store lock and yields after each preparation step.

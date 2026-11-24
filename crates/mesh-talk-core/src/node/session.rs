@@ -84,10 +84,10 @@ const MAX_HAVE_CHUNKS: usize = 1000;
 pub(super) const MAX_HAVE_IDS_TOTAL: usize = 200_000;
 
 #[cfg(test)]
-use mesh_replication::legacy_wire::HaveChunk;
-use mesh_replication::legacy_wire::{self, SyncWire};
+use mesh_talk_protocol::legacy_wire::HaveChunk;
+use mesh_talk_protocol::legacy_wire::{self, SyncWire};
 
-use mesh_replication::legacy_round::{self, RoundFault};
+use mesh_talk_protocol::legacy_round::{self, RoundFault};
 
 impl From<RoundFault> for SessionError {
     fn from(error: RoundFault) -> Self {

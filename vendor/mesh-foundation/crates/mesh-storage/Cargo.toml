@@ -8,7 +8,7 @@ repository.workspace = true
 readme = "README.md"
 keywords = ["mesh", "peer-to-peer", "sdk"]
 categories = ["network-programming"]
-description = "At-rest record encryption compatible with Mesh Talk"
+description = "At-rest encryption and durable opaque record logs"
 
 [features]
 test-observability = []

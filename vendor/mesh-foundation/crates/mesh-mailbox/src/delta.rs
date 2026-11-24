@@ -1,7 +1,7 @@
 //! Bounded delta selection over a finite mailbox prefix.
 
+use crate::RecordId;
 use crate::rpc::{MailboxCursor, MailboxDeltaPage};
-use mesh_replication::legacy_event::EventId;
 
 /// A page's authorization and SQL transaction are owned by the caller.
 pub enum DeltaSelection {
@@ -14,7 +14,7 @@ pub struct DeltaScan {
     upper: i64,
     revision: i64,
     reset: bool,
-    ids: Vec<EventId>,
+    ids: Vec<RecordId>,
     limit: usize,
     complete: bool,
 }
@@ -22,6 +22,7 @@ pub struct DeltaScan {
 #[derive(Debug, Eq, PartialEq)]
 pub enum DeltaError {
     InvalidLimit,
+    InvalidOrdinal,
     OrdinalExhausted,
 }
 
@@ -36,9 +37,9 @@ impl DeltaSelection {
         }
         let prior_valid = prior.filter(|cursor| cursor.accepts(current));
         let reset = prior.is_some() && prior_valid.is_none();
-        if let Some(cursor) =
-            prior_valid.filter(|p| p.window.is_none() && p.revision == current.revision)
-        {
+        if let Some(cursor) = prior_valid.filter(|p| {
+            p.window.is_none() && p.revision == current.revision && p.after == current.after
+        }) {
             return Ok(Self::Unchanged(MailboxDeltaPage {
                 cursor: cursor.clone(),
                 ids: vec![],
@@ -86,7 +87,10 @@ impl DeltaScan {
         self.complete
     }
 
-    pub fn push(&mut self, ordinal: i64, id: EventId) -> Result<(), DeltaError> {
+    pub fn push(&mut self, ordinal: i64, id: RecordId) -> Result<(), DeltaError> {
+        if ordinal < self.cursor.after || ordinal < 0 || ordinal >= self.upper {
+            return Err(DeltaError::InvalidOrdinal);
+        }
         if !self.accept_row() {
             return Err(DeltaError::InvalidLimit);
         }
@@ -115,12 +119,12 @@ impl DeltaScan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mesh_replication::legacy_event::ConversationId;
+    use crate::ScopeId;
 
     fn cursor(after: i64, revision: i64) -> MailboxCursor {
         MailboxCursor {
             store_uuid: [1; 16],
-            conversation: ConversationId::new([5; 32]),
+            scope: ScopeId::new([5; 32]),
             epoch: 2,
             first_seen: Some(100),
             revision,
@@ -137,7 +141,7 @@ mod tests {
             panic!("new mailbox needs a scan")
         };
         assert_eq!((scan.lower(), scan.upper(), scan.query_limit()), (0, 20, 2));
-        scan.push(10, EventId::new([1; 32])).unwrap();
+        scan.push(10, RecordId::new([1; 32])).unwrap();
         assert!(!scan.accept_row());
         let first = scan.finish();
         assert_eq!(first.cursor.window, Some((20, 4)));
@@ -147,7 +151,7 @@ mod tests {
             panic!("unfinished mailbox needs a scan")
         };
         assert_eq!((resumed.lower(), resumed.upper()), (11, 20));
-        resumed.push(12, EventId::new([2; 32])).unwrap();
+        resumed.push(12, RecordId::new([2; 32])).unwrap();
         let final_page = resumed.finish();
         assert!(final_page.complete);
         assert_eq!(final_page.cursor, current);
@@ -170,5 +174,28 @@ mod tests {
         let reset = scan.finish();
         assert!(reset.reset && reset.complete);
         assert_eq!(reset.cursor, current);
+    }
+    #[test]
+    fn revision_match_does_not_skip_an_unread_prefix() {
+        let current = cursor(20, 4);
+        let prior = cursor(0, 4);
+        assert!(matches!(
+            DeltaSelection::open(&current, Some(&prior), 2),
+            Ok(DeltaSelection::Scan(_))
+        ));
+    }
+    #[test]
+    fn rejected_ordinals_leave_the_scan_unchanged() {
+        let DeltaSelection::Scan(mut scan) = DeltaSelection::open(&cursor(20, 4), None, 2).unwrap()
+        else {
+            panic!("scan")
+        };
+        assert!(scan.push(-1, RecordId::new([1; 32])).is_err());
+        assert_eq!(scan.lower(), 0);
+        assert!(scan.push(20, RecordId::new([1; 32])).is_err());
+        assert_eq!(scan.lower(), 0);
+        scan.push(3, RecordId::new([1; 32])).unwrap();
+        assert!(scan.push(2, RecordId::new([2; 32])).is_err());
+        assert_eq!(scan.lower(), 4);
     }
 }

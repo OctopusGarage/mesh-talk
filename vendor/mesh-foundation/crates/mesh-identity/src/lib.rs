@@ -1,4 +1,4 @@
-//! Mesh Talk identity and device certificate formats.
+//! Application-neutral signing identities and device certificate primitives.
 //! Applications establish trust and decide how to enroll and revoke devices.
 
 //! # Example

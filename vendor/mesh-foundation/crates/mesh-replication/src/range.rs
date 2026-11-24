@@ -617,3 +617,183 @@ pub async fn serve_summary<S: crate::session::ReconciliationSession>(
     }
     session.send(&response).await.map_err(RemoteError::Exchange)
 }
+
+/// Fallible reads for a disk-backed authorized snapshot. Storage failure is
+/// separate from protocol invalidation and must never be treated as equality.
+/// Every read and revision must describe the same pinned authorized snapshot.
+pub trait RangeRead {
+    type Error;
+    fn revision(&self) -> u64;
+    fn summary(&self, prefix: Prefix) -> Result<Summary, Self::Error>;
+    fn contains(&self, id: &EventId) -> Result<bool, Self::Error>;
+}
+impl RangeRead for RangeIndex {
+    type Error = std::convert::Infallible;
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+    fn summary(&self, prefix: Prefix) -> Result<Summary, Self::Error> {
+        Ok(self.summary(prefix))
+    }
+    fn contains(&self, id: &EventId) -> Result<bool, Self::Error> {
+        Ok(self.ids.contains(id))
+    }
+}
+impl Checkpoint {
+    /// Next undiscovered summary; absence says nothing about body durability.
+    pub fn next_query(&self) -> Option<Prefix> {
+        self.pending.last().copied()
+    }
+    /// Whether summary discovery remains, independent of returned missing IDs.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+    pub fn for_reader<R: RangeRead + ?Sized>(
+        scope: [u8; 32],
+        authority: [u8; 32],
+        local: &R,
+        remote_revision: u64,
+    ) -> Result<Self, R::Error> {
+        Ok(Self {
+            scope,
+            authority,
+            local: local.revision(),
+            local_root: local.summary(Prefix::root())?,
+            remote_root: None,
+            remote: remote_revision,
+            pending: vec![Prefix::root()],
+            remote_view: None,
+        })
+    }
+    pub fn valid_reader_binding<R: RangeRead + ?Sized>(
+        &self,
+        local: &R,
+        scope: [u8; 32],
+        view: [u8; 32],
+        authority: [u8; 32],
+        revision: u64,
+    ) -> Result<bool, R::Error> {
+        Ok(self.local_root == local.summary(Prefix::root())?
+            && self.local == local.revision()
+            && self.scope == scope
+            && self.authority == authority
+            && self.remote == revision
+            && self.remote_view.is_none_or(|v| v == view))
+    }
+    /// Reads all needed local facts before mutating discovery state. A failed
+    /// SQL read therefore retains the exact prefix for retry. Returned missing
+    /// IDs must remain paired with the advanced checkpoint until durable commit;
+    /// otherwise discard/restart the checkpoint after cancellation or failure.
+    pub fn accept_reader<R: RangeRead + ?Sized>(
+        &mut self,
+        local: &R,
+        scope: [u8; 32],
+        view: [u8; 32],
+        authority: [u8; 32],
+        revision: u64,
+        frame: SummaryFrame,
+    ) -> Result<Result<Vec<EventId>, RemoteError<()>>, R::Error> {
+        if !self.valid_reader_binding(local, scope, view, authority, revision)? {
+            return Ok(Err(RemoteError::Invalidated));
+        }
+        let Some(prefix) = self.next_query() else {
+            return Ok(Err(RemoteError::InvalidFrame));
+        };
+        if frame.scope != scope
+            || frame.view != view
+            || frame.prefix != prefix
+            || !frame.valid_leaves()
+        {
+            return Ok(Err(RemoteError::InvalidFrame));
+        }
+        let equal = local.summary(prefix)? == frame.summary || frame.summary.count == 0;
+        let mut missing = Vec::new();
+        if !equal {
+            for id in frame.leaves.iter().copied().chain(frame.singleton) {
+                if !local.contains(&id)? {
+                    missing.push(id);
+                }
+            }
+            if frame.leaves.is_empty()
+                && frame.singleton.is_none()
+                && prefix.bits == 256
+                && frame.summary.count != 1
+            {
+                return Ok(Err(RemoteError::InvalidFrame));
+            }
+        }
+        self.remote_view = Some(view);
+        self.pending.pop();
+        if !equal && frame.leaves.is_empty() && frame.singleton.is_none() {
+            if let Some([left, right]) = prefix.children() {
+                self.pending.push(right);
+                self.pending.push(left);
+            } else {
+                missing.push(prefix.key);
+            }
+        }
+        Ok(Ok(missing))
+    }
+}
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    struct Reader {
+        index: RangeIndex,
+        fail: std::cell::Cell<bool>,
+    }
+    impl RangeRead for Reader {
+        type Error = &'static str;
+        fn revision(&self) -> u64 {
+            self.index.revision()
+        }
+        fn summary(&self, p: Prefix) -> Result<Summary, Self::Error> {
+            if self.fail.get() {
+                Err("storage unavailable")
+            } else {
+                Ok(self.index.summary(p))
+            }
+        }
+        fn contains(&self, id: &EventId) -> Result<bool, Self::Error> {
+            if self.fail.get() {
+                Err("storage unavailable")
+            } else {
+                Ok(self.index.ids.contains(id))
+            }
+        }
+    }
+    #[test]
+    fn failed_reader_does_not_consume_frontier_or_claim_equality() {
+        let local = Reader {
+            index: RangeIndex::default(),
+            fail: std::cell::Cell::new(false),
+        };
+        let mut remote = RangeIndex::default();
+        remote.insert([3; 32]);
+        let mut checkpoint =
+            Checkpoint::for_reader([1; 32], [2; 32], &local, remote.revision()).unwrap();
+        let frame = remote.frame([1; 32], [4; 32], Prefix::root());
+        local.fail.set(true);
+        assert!(
+            checkpoint
+                .accept_reader(
+                    &local,
+                    [1; 32],
+                    [4; 32],
+                    [2; 32],
+                    remote.revision(),
+                    frame.clone()
+                )
+                .is_err()
+        );
+        assert_eq!(checkpoint.next_query(), Some(Prefix::root()));
+        local.fail.set(false);
+        assert_eq!(
+            checkpoint
+                .accept_reader(&local, [1; 32], [4; 32], [2; 32], remote.revision(), frame)
+                .unwrap()
+                .unwrap(),
+            vec![[3; 32]]
+        );
+    }
+}

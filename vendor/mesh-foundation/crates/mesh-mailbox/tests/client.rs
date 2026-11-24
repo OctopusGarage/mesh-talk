@@ -1,8 +1,9 @@
+use mesh_mailbox::{Record, ScopeId};
 use mesh_mailbox::{
     client::{MailboxTurnLimits, sync_turn},
     rpc::{self, Frame, MailboxCursor, MailboxDeltaPage},
 };
-use mesh_replication::{legacy_event::ConversationId, session::ReconciliationSession};
+use mesh_replication::session::ReconciliationSession;
 use std::collections::VecDeque;
 
 struct Session {
@@ -23,10 +24,10 @@ impl ReconciliationSession for Session {
         self.received.pop_front().ok_or("closed")
     }
 }
-fn cursor(scope: ConversationId) -> MailboxCursor {
+fn cursor(scope: ScopeId) -> MailboxCursor {
     MailboxCursor {
         store_uuid: [1; 16],
-        conversation: scope,
+        scope,
         epoch: 0,
         first_seen: None,
         revision: 1,
@@ -36,7 +37,7 @@ fn cursor(scope: ConversationId) -> MailboxCursor {
 }
 #[tokio::test]
 async fn empty_page_checkpoint_is_committed_before_returning_complete() {
-    let scope = ConversationId::new([1; 32]);
+    let scope = ScopeId::new([1; 32]);
     let mut c = cursor(scope);
     c.after = 5;
     let frame = rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
@@ -56,8 +57,8 @@ async fn empty_page_checkpoint_is_committed_before_returning_complete() {
         scope,
         None,
         MailboxTurnLimits::default(),
-        |events, checkpoint| {
-            assert!(events.is_empty());
+        |records, checkpoint| {
+            assert!(records.is_empty());
             saved = Some(checkpoint.clone());
             Ok::<_, &'static str>(())
         },
@@ -70,7 +71,7 @@ async fn empty_page_checkpoint_is_committed_before_returning_complete() {
 }
 #[tokio::test]
 async fn failed_commit_retains_prior_checkpoint() {
-    let scope = ConversationId::new([1; 32]);
+    let scope = ScopeId::new([1; 32]);
     let prior = cursor(scope);
     let mut next = prior.clone();
     next.after = 5;
@@ -98,32 +99,14 @@ async fn failed_commit_retains_prior_checkpoint() {
     assert!(!error.progress.work.complete);
 }
 
-fn messages(scope: ConversationId, count: usize) -> Vec<mesh_replication::legacy_event::Event> {
-    use mesh_identity::device::DeviceIdentity;
-    use mesh_replication::legacy_event::{Event, EventKind};
-    let identity = DeviceIdentity::generate();
+fn messages(scope: ScopeId, count: usize) -> Vec<Record> {
     (0..count)
-        .map(|i| {
-            Event::new(
-                &identity,
-                scope,
-                i as u64,
-                vec![],
-                i as u64,
-                0,
-                EventKind::Message,
-                vec![1],
-            )
-        })
+        .map(|i| Record::new(scope, (i as u64).to_le_bytes().to_vec()))
         .collect()
 }
-fn pages(
-    scope: ConversationId,
-    events: &[mesh_replication::legacy_event::Event],
-    offset: usize,
-) -> Session {
+fn pages(scope: ScopeId, records: &[Record], offset: usize) -> Session {
     let mut received = VecDeque::new();
-    for (n, batch) in events.chunks(64).enumerate() {
+    for (n, batch) in records.chunks(64).enumerate() {
         let after = offset + (n * 64) + batch.len();
         let mut c = cursor(scope);
         c.after = after as i64;
@@ -141,9 +124,9 @@ fn pages(
             .unwrap(),
         );
         received.push_back(
-            rpc::encode_frame(&Frame::Events {
-                conversation: scope,
-                events: batch.to_vec(),
+            rpc::encode_frame(&Frame::Records {
+                scope,
+                records: batch.to_vec(),
             })
             .unwrap(),
         );
@@ -152,9 +135,9 @@ fn pages(
 }
 #[tokio::test]
 async fn full_pages_never_turn_a_200_record_budget_into_256_or_skip_unacknowledged_ids() {
-    let scope = ConversationId::new([2; 32]);
-    let events = messages(scope, 201);
-    let mut first = pages(scope, &events, 0);
+    let scope = ScopeId::new([2; 32]);
+    let records = messages(scope, 201);
+    let mut first = pages(scope, &records, 0);
     let mut saved = Vec::new();
     let p = sync_turn(
         &mut first,
@@ -172,7 +155,7 @@ async fn full_pages_never_turn_a_200_record_budget_into_256_or_skip_unacknowledg
     assert!(!p.work.complete);
     assert_eq!(first.sends, 7);
     assert_eq!(p.cursor.as_ref().unwrap().after, 192);
-    let mut second = pages(scope, &events[192..], 192);
+    let mut second = pages(scope, &records[192..], 192);
     let p = sync_turn(
         &mut second,
         scope,
@@ -186,11 +169,11 @@ async fn full_pages_never_turn_a_200_record_budget_into_256_or_skip_unacknowledg
     .await
     .unwrap();
     assert!(p.work.complete);
-    assert_eq!(saved, events.iter().map(|e| e.id).collect::<Vec<_>>());
+    assert_eq!(saved, records.iter().map(|e| e.id).collect::<Vec<_>>());
 }
 #[tokio::test]
 async fn nonadvancing_partial_page_fails_without_acknowledgement() {
-    let scope = ConversationId::new([3; 32]);
+    let scope = ScopeId::new([3; 32]);
     let mut c = cursor(scope);
     c.window = Some((100, 1));
     let bytes = rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
@@ -217,7 +200,7 @@ async fn nonadvancing_partial_page_fails_without_acknowledgement() {
 
 #[tokio::test]
 async fn reset_is_explicit_and_does_not_acknowledge_a_new_checkpoint() {
-    let scope = ConversationId::new([4; 32]);
+    let scope = ScopeId::new([4; 32]);
     let prior = cursor(scope);
     let mut next = prior.clone();
     next.epoch = 1;
@@ -250,7 +233,7 @@ async fn reset_is_explicit_and_does_not_acknowledge_a_new_checkpoint() {
 
 #[tokio::test]
 async fn partial_snapshot_cannot_move_its_upper_watermark_or_finish_early() {
-    let scope = ConversationId::new([5; 32]);
+    let scope = ScopeId::new([5; 32]);
     let mut prior = cursor(scope);
     prior.after = 64;
     prior.window = Some((201, 1));
@@ -284,4 +267,38 @@ async fn partial_snapshot_cannot_move_its_upper_watermark_or_finish_early() {
         ));
         assert_eq!(error.progress.cursor, Some(prior.clone()));
     }
+}
+
+#[tokio::test]
+async fn initial_partial_page_must_advance_before_any_acknowledgement() {
+    let scope = ScopeId::new([1; 32]);
+    let mut c = cursor(scope);
+    c.window = Some((5, 1));
+    let frame = rpc::encode_frame(&Frame::Page(MailboxDeltaPage {
+        cursor: c,
+        ids: vec![],
+        complete: false,
+        reset: false,
+    }))
+    .unwrap();
+    let mut session = Session {
+        received: VecDeque::from([frame]),
+        sends: 0,
+    };
+    let mut acknowledged = false;
+    assert!(
+        sync_turn(
+            &mut session,
+            scope,
+            None,
+            MailboxTurnLimits::default(),
+            |_, _| {
+                acknowledged = true;
+                Ok::<_, &'static str>(())
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(!acknowledged);
 }

@@ -1396,7 +1396,7 @@
       "id": "core-discovery",
       "paths": ["crates/mesh-talk-core/src/discovery/"],
       "rust": [
-        { "package": "mesh-connect", "filters": ["discovery::", "net::"] },
+        { "package": "mesh-talk-protocol", "filters": ["discovery::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1450,7 +1450,7 @@
         "crates/mesh-talk-core/src/eventlog/"
       ],
       "rust": [
-        { "package": "mesh-replication", "filters": ["legacy_event::"] },
+        { "package": "mesh-talk-protocol", "filters": ["legacy_event::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1558,10 +1558,6 @@
         {
           "package": "mesh-talk-core",
           "filters": ["file::"]
-        },
-        {
-          "package": "mesh-blob",
-          "filters": ["tests::"]
         }
       ],
       "escalation": [
@@ -1578,7 +1574,7 @@
         "crates/mesh-talk-core/src/node/account_sync.rs"
       ],
       "rust": [
-        { "package": "mesh-identity", "filters": ["tests::"] },
+        { "package": "mesh-talk-protocol", "filters": ["account::", "device::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1635,7 +1631,7 @@
         "crates/mesh-talk-core/tests/indexed_relay_cli.rs"
       ],
       "rust": [
-        { "package": "mesh-mailbox", "filters": ["tests::"] },
+        { "package": "mesh-talk-protocol", "filters": ["mailbox::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1738,10 +1734,6 @@
         {
           "package": "mesh-talk-core",
           "filters": ["ratchet::"]
-        },
-        {
-          "package": "mesh-e2ee",
-          "filters": ["tests::"]
         }
       ],
       "escalation": [
@@ -1862,7 +1854,6 @@
         "crates/mesh-talk-core/src/storage/"
       ],
       "rust": [
-        { "package": "mesh-storage", "filters": ["tests::", "record_log::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -2757,13 +2748,13 @@
         "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs"
       ],
       "rust": [
+        { "package": "mesh-talk-protocol", "filters": ["legacy_event::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
             "node::group_metadata::tests::",
             "current_group_metadata_crosses_real_tcp_after_owner_goes_offline",
             "node::session::tests::",
-            "eventlog::event::tests::",
             "eventlog::persist::legacy::tests::",
             "node::join_history::tests::",
             "settled_local_channel_owner_does_not_reenter_business_between_repair_deadlines",

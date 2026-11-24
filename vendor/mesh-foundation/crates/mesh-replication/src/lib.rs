@@ -87,7 +87,7 @@ impl Inventory {
     }
 }
 
-/// Streaming Mesh Talk-compatible digest for a finite, ordered inventory.
+/// Streaming deterministic digest for a finite, ordered inventory.
 /// The caller owns the snapshot and supplies exactly the declared number of
 /// IDs in lexicographic order. This type only computes a summary.
 pub struct InventoryDigest(Sha256);
@@ -165,20 +165,8 @@ impl CompleteInventory {
     }
 }
 
-/// Mesh Talk signed event compatibility codec.
-#[cfg(feature = "legacy-wire")]
-pub mod legacy_event;
-
 /// Transport-independent framed reconciliation.
 pub mod session;
-
-/// Mesh Talk-compatible synchronization frame codec.
-#[cfg(feature = "legacy-wire")]
-pub mod legacy_wire;
-
-/// Requester engine for Mesh Talk-compatible sync rounds.
-#[cfg(feature = "legacy-wire")]
-pub mod legacy_round;
 
 /// Transport-independent record retrieval and commit orchestration.
 pub mod pull;
@@ -191,3 +179,6 @@ pub mod range;
 
 /// High-level budgeted range reconciliation and record retrieval.
 pub mod driver;
+
+/// Recent-history pages with explicit source-local older-history continuation.
+pub mod history;

@@ -1,0 +1,30 @@
+[package]
+name = "mesh-talk-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+test-observability = []
+
+[dependencies]
+mesh-mailbox = { package = "mesh-foundation-mailbox", path = "../../vendor/mesh-foundation/crates/mesh-mailbox" }
+mesh-replication = { package = "mesh-foundation-replication", path = "../../vendor/mesh-foundation/crates/mesh-replication" }
+mesh-storage = { package = "mesh-foundation-storage", path = "../../vendor/mesh-foundation/crates/mesh-storage" }
+bincode.workspace = true
+serde.workspace = true
+hex.workspace = true
+log.workspace = true
+aes-gcm.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+zeroize.workspace = true
+rand_core.workspace = true
+
+[dev-dependencies]
+mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect" }
+tokio.workspace = true
+tempfile.workspace = true

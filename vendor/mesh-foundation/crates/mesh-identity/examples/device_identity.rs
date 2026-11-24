@@ -15,5 +15,5 @@ fn main() {
         b"tampered",
         &signature
     ));
-    println!("Device {} signed and verified a message", public.user_id());
+    println!("Device {} signed and verified a message", public.node_id());
 }

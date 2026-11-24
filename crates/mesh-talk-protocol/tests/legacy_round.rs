@@ -1,8 +1,6 @@
-#![cfg(feature = "legacy-wire")]
-
-use mesh_identity::device::DeviceIdentity;
-use mesh_replication::legacy_round::{ResponderBackend, serve};
-use mesh_replication::{
+use mesh_talk_protocol::device::DeviceIdentity;
+use mesh_talk_protocol::legacy_round::{ResponderBackend, serve};
+use mesh_talk_protocol::{
     legacy_event::{ConversationId, Event, EventId, EventKind},
     legacy_round::{
         ApplyReport, HaveSender, Probe, QuietComparison, RoundBackend, RoundFault, SyncMetadata,
@@ -217,7 +215,7 @@ impl RoundBackend<RoundFault> for Replica {
 
 #[tokio::test]
 async fn file_identity_exchange_checks_both_budgets_and_preserves_scope() {
-    use mesh_replication::legacy_round::MAX_FILE_IDENTITIES;
+    use mesh_talk_protocol::legacy_round::MAX_FILE_IDENTITIES;
 
     let scope = ConversationId::new([7; 32]);
     let event = Event::new(
@@ -374,7 +372,7 @@ impl ResponderBackend<RoundFault> for Replica {
 
 #[tokio::test]
 async fn responder_exports_only_missing_ids_and_finishes_its_inventory() {
-    use mesh_replication::legacy_wire::SyncRequest;
+    use mesh_talk_protocol::legacy_wire::SyncRequest;
 
     let scope = ConversationId::new([7; 32]);
     let author = DeviceIdentity::generate();
@@ -449,7 +447,7 @@ fn have_codec_checks_role_and_scope() {
 
 #[tokio::test]
 async fn responder_reserves_before_reading_and_releases_on_invalid_inventory() {
-    use mesh_replication::legacy_wire::SyncRequest;
+    use mesh_talk_protocol::legacy_wire::SyncRequest;
 
     let scope = ConversationId::new([7; 32]);
     let request = legacy_wire::encode(&SyncWire::Request(SyncRequest {
@@ -486,7 +484,7 @@ async fn responder_reserves_before_reading_and_releases_on_invalid_inventory() {
 
 #[tokio::test]
 async fn responder_rejects_an_export_from_another_scope_before_sending() {
-    use mesh_replication::legacy_wire::SyncRequest;
+    use mesh_talk_protocol::legacy_wire::SyncRequest;
 
     let scope = ConversationId::new([7; 32]);
     let foreign = ConversationId::new([8; 32]);

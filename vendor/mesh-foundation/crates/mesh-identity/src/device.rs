@@ -1,6 +1,6 @@
 //! Device identity: Ed25519 (signing) + X25519 (key exchange) keys, with a
-//! self-certifying device ID derived from the signing public key. The historical
-//! `user_id()` spelling does not refer to a local sign-in UUID or account ID.
+//! self-certifying node ID derived from the signing public key.
+//! Account enrollment and application user identifiers belong to the host.
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -29,15 +29,15 @@ pub struct PublicIdentity {
 }
 
 impl PublicIdentity {
-    /// Stable, self-certifying user id = hex of the first 16 bytes of
-    /// SHA-256("mesh-talk-id-v1" || ed25519_pub). 32 hex chars.
-    pub fn user_id(&self) -> String {
-        Self::user_id_from(&self.ed25519_pub)
+    /// Stable, self-certifying node id = hex of the first 16 bytes of
+    /// SHA-256("mesh-foundation-node-id-v1" || ed25519_pub). 32 hex chars.
+    pub fn node_id(&self) -> String {
+        Self::node_id_from(&self.ed25519_pub)
     }
 
-    pub fn user_id_from(ed25519_pub: &[u8; 32]) -> String {
+    pub fn node_id_from(ed25519_pub: &[u8; 32]) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(b"mesh-talk-id-v1");
+        hasher.update(b"mesh-foundation-node-id-v1");
         hasher.update(ed25519_pub);
         let digest = hasher.finalize();
         hex::encode(&digest[..16])
@@ -86,8 +86,8 @@ impl DeviceIdentity {
         self.public.clone()
     }
 
-    pub fn user_id(&self) -> String {
-        self.public.user_id()
+    pub fn node_id(&self) -> String {
+        self.public.node_id()
     }
 
     /// Sign a message with the Ed25519 signing key.
@@ -117,8 +117,8 @@ mod tests {
         let id = DeviceIdentity::generate();
         let public = id.public();
 
-        // user_id from the device matches the one derived from its public bundle.
-        assert_eq!(id.user_id(), public.user_id());
+        // node_id from the device matches the one derived from its public bundle.
+        assert_eq!(id.node_id(), public.node_id());
 
         // A signature over a message verifies against the public signing key.
         let msg = b"hello mesh";
@@ -134,7 +134,7 @@ mod tests {
 
         // Two generated identities differ.
         let other = DeviceIdentity::generate();
-        assert_ne!(id.user_id(), other.user_id());
+        assert_ne!(id.node_id(), other.node_id());
     }
 
     #[test]
@@ -159,27 +159,27 @@ mod tests {
     }
 
     #[test]
-    fn user_id_is_stable_and_derived_from_signing_key() {
+    fn node_id_is_stable_and_derived_from_signing_key() {
         let pid = PublicIdentity {
             ed25519_pub: [7u8; 32],
             x25519_pub: [9u8; 32],
         };
-        let id = pid.user_id();
-        assert_eq!(id.len(), 32, "user_id is 32 hex chars");
+        let id = pid.node_id();
+        assert_eq!(id.len(), 32, "node_id is 32 hex chars");
         // Deterministic: same key -> same id.
-        assert_eq!(id, pid.user_id());
+        assert_eq!(id, pid.node_id());
         // Independent of the x25519 key.
         let pid2 = PublicIdentity {
             ed25519_pub: [7u8; 32],
             x25519_pub: [0u8; 32],
         };
-        assert_eq!(id, pid2.user_id());
+        assert_eq!(id, pid2.node_id());
         // Different signing key -> different id.
         let pid3 = PublicIdentity {
             ed25519_pub: [8u8; 32],
             x25519_pub: [9u8; 32],
         };
-        assert_ne!(id, pid3.user_id());
+        assert_ne!(id, pid3.node_id());
     }
 
     fn assert_public_reads_are_derived_once(identity: DeviceIdentity) {
@@ -188,7 +188,7 @@ mod tests {
             ed25519_pub: SigningKey::from_bytes(&ed).verifying_key().to_bytes(),
             x25519_pub: X25519Public::from(&StaticSecret::from(x)).to_bytes(),
         };
-        let expected_id = expected.user_id();
+        let expected_id = expected.node_id();
         let message = b"immutable public identity fixture";
         let signature = identity.sign(message);
         assert!(DeviceIdentity::verify(
@@ -207,7 +207,7 @@ mod tests {
             PUBLIC_DERIVATIONS.with(|calls| calls.set(0));
             for _ in 0..count {
                 assert!(identity.public() == expected);
-                assert!(identity.user_id() == expected_id);
+                assert!(identity.node_id() == expected_id);
             }
             observed.push(PUBLIC_DERIVATIONS.with(|calls| calls.get()));
         }

@@ -2,7 +2,7 @@
 
 Bounded inventory reconciliation and record retrieval.
 
-Start with `CompleteInventory` for exact set differences and `inventory_session` for scoped exchange. Default `legacy-wire` preserves Mesh Talk compatibility; `mesh-connect` adds session adapters. Authorization and durable stores belong to the host.
+Start with `CompleteInventory` for exact set differences and `inventory_session` for scoped exchange. There are no default application profiles; optional `mesh-connect` adds session adapters. Authorization and durable stores belong to the host.
 
 ## Development and documentation
 

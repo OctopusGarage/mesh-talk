@@ -3417,28 +3417,18 @@ dependencies = [
 name = "mesh-foundation-mailbox"
 version = "0.1.0-alpha.2"
 dependencies = [
- "aes-gcm 0.11.1",
  "bincode",
- "hkdf",
- "mesh-foundation-identity",
  "mesh-foundation-replication",
  "mesh-foundation-storage",
  "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]
 name = "mesh-foundation-replication"
 version = "0.1.0-alpha.2"
 dependencies = [
- "bincode",
- "hex",
- "log",
- "mesh-foundation-identity",
- "serde",
  "sha2 0.10.9",
 ]
 
@@ -3536,11 +3526,10 @@ dependencies = [
  "mesh-foundation-blob",
  "mesh-foundation-connect",
  "mesh-foundation-e2ee",
- "mesh-foundation-identity",
- "mesh-foundation-mailbox",
  "mesh-foundation-replication",
  "mesh-foundation-storage",
  "mesh-talk-core",
+ "mesh-talk-protocol",
  "pbkdf2",
  "rand_chacha",
  "rand_core 0.6.4",
@@ -3595,6 +3584,29 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "mesh-talk-protocol"
+version = "0.4.6"
+dependencies = [
+ "aes-gcm 0.11.1",
+ "bincode",
+ "ed25519-dalek",
+ "hex",
+ "hkdf",
+ "log",
+ "mesh-foundation-connect",
+ "mesh-foundation-mailbox",
+ "mesh-foundation-replication",
+ "mesh-foundation-storage",
+ "rand_core 0.6.4",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

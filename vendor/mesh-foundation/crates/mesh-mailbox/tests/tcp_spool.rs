@@ -1,7 +1,7 @@
 use mesh_connect::PeerSession;
 use mesh_identity::device::DeviceIdentity;
 use mesh_mailbox::{
-    RelayMailbox,
+    Record, ScopeId,
     capacity::CapacityLimits,
     rpc::{
         Frame, PAGE_IDS, encode_frame, make_get_request, read_delta_response, read_get_response,
@@ -9,7 +9,6 @@ use mesh_mailbox::{
     service::dispatch,
     spool::{Deposit, Spool},
 };
-use mesh_replication::legacy_event::{ConversationId, Event, EventKind};
 use mesh_storage::EncryptionKey;
 use std::{num::NonZeroU64, time::Duration};
 use tokio::net::{TcpListener, TcpStream};
@@ -17,12 +16,9 @@ use tokio::net::{TcpListener, TcpStream};
 #[tokio::test]
 async fn mailbox_reuses_an_authenticated_stream_and_resumes_after_a_lost_reply() {
     let directory = tempfile::tempdir().unwrap();
-    let sender = DeviceIdentity::generate();
     let recipient = DeviceIdentity::generate();
     let relay = DeviceIdentity::generate();
-    let outgoing = RelayMailbox::federated(&sender, &recipient.public()).unwrap();
-    let incoming = RelayMailbox::federated(&recipient, &sender.public()).unwrap();
-    let scope = outgoing.id();
+    let scope = ScopeId::new([1; 32]);
     let mut spool = Spool::open_with_key_provider(
         &directory.path().join("spool"),
         scope,
@@ -33,18 +29,10 @@ async fn mailbox_reuses_an_authenticated_stream_and_resumes_after_a_lost_reply()
     .unwrap();
     let count = PAGE_IDS + 6;
     for seq in 1..=count as u64 {
-        let inner = Event::new(
-            &sender,
-            ConversationId::new([3; 32]),
-            seq,
-            vec![],
-            seq,
-            0,
-            EventKind::Message,
-            vec![seq as u8],
-        );
         assert_eq!(
-            spool.deposit(outgoing.wrap(&inner).unwrap(), 1).unwrap(),
+            spool
+                .deposit(Record::new(scope, seq.to_le_bytes().to_vec()), 1)
+                .unwrap(),
             Deposit::Stored
         );
     }
@@ -66,13 +54,7 @@ async fn mailbox_reuses_an_authenticated_stream_and_resumes_after_a_lost_reply()
                         PeerSession::connect(stream, &recipient_secret, &relay_public)
                             .await
                             .unwrap();
-                    let delta = |prior| {
-                        encode_frame(&Frame::Delta {
-                            conversation: scope,
-                            prior,
-                        })
-                        .unwrap()
-                    };
+                    let delta = |prior| encode_frame(&Frame::Delta { scope, prior }).unwrap();
                     session.send(&delta(prior.clone())).await.unwrap();
                     let page = read_delta_response(&session.recv().await.unwrap(), scope).unwrap();
                     assert_eq!(page.complete, attempt == 1);
@@ -90,7 +72,9 @@ async fn mailbox_reuses_an_authenticated_stream_and_resumes_after_a_lost_reply()
                         |event| bincode::serialized_size(event).unwrap() as usize,
                     )
                     .unwrap();
-                    delivered.extend(events.iter().map(|event| incoming.open(event).unwrap().seq));
+                    delivered.extend(events.iter().map(|event| {
+                        u64::from_le_bytes(event.body.as_slice().try_into().unwrap())
+                    }));
                     prior = Some(page.cursor);
 
                     session.send(&delta(prior.clone())).await.unwrap();

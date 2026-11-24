@@ -49,7 +49,7 @@ const _: () = assert!(
         < crate::transport::MAX_PLAINTEXT
 );
 
-pub use mesh_replication::legacy_wire::{
+pub use mesh_talk_protocol::legacy_wire::{
     FileConsentStatus, FpRequest, FpResponse, SyncFollowup, SyncRequest, SyncResponse,
 };
 
@@ -68,7 +68,7 @@ pub fn fingerprint(mut ids: Vec<EventId>) -> [u8; 32] {
     hasher.finish()
 }
 
-pub use mesh_replication::legacy_round::ApplyReport;
+pub use mesh_talk_protocol::legacy_round::ApplyReport;
 
 /// Collecting compatibility operations for the in-process SDK. Network stores
 /// use the independent [`network::NetworkSyncStore`] seam.

@@ -1,8 +1,8 @@
 //! Finite append-only mailbox prefixes qualified by current relay policy.
 use super::*;
-use mesh_mailbox::delta::{DeltaError, DeltaSelection};
+use mesh_talk_protocol::mailbox::delta::{DeltaError, DeltaSelection};
 
-pub(crate) use mesh_mailbox::rpc::{MailboxCursor, MailboxDeltaPage};
+pub(crate) use mesh_talk_protocol::mailbox::rpc::{MailboxCursor, MailboxDeltaPage};
 
 /// Read-only invalidation hint; never a delivery checkpoint or receipt.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,6 +156,7 @@ fn delta_error(error: DeltaError) -> LogError {
     match error {
         DeltaError::InvalidLimit => LogError::InvalidPageBudget,
         DeltaError::OrdinalExhausted => LogError::RepositoryCounterExhausted,
+        DeltaError::InvalidOrdinal => LogError::StaleCursor,
     }
 }
 

@@ -192,3 +192,5 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PeerSession<S> {
         Ok(plaintext)
     }
 }
+
+pub mod capability;

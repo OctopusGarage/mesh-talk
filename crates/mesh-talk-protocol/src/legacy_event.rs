@@ -3,7 +3,7 @@
 //! Ed25519 signature over `id`. Hash-linked via `parents`, carrying a Lamport
 //! clock and a per-author sequence number.
 
-use mesh_identity::device::{DeviceIdentity, PublicIdentity};
+use crate::device::{DeviceIdentity, PublicIdentity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

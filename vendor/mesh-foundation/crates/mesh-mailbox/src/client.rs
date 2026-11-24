@@ -5,8 +5,8 @@
 //! plus cursor. A complete result covers this source snapshot, not group convergence.
 
 use crate::rpc::{self, BODY_BUDGET, Frame, MailboxCursor, RpcError};
+use crate::{Record, ScopeId};
 use mesh_replication::{
-    legacy_event::{ConversationId, Event},
     pull::{PullProgress, PullTurnLimits},
     session::ReconciliationSession,
 };
@@ -36,7 +36,7 @@ pub enum MailboxTurnErrorKind<Io, Commit> {
     Transport(Io),
     Wire(RpcError),
     Commit(Commit),
-    /// This legacy page cannot be acknowledged partially. Increase the record
+    /// This page cannot be acknowledged partially. Increase the record
     /// allowance to at least one page; never discard unacknowledged IDs.
     PageExceedsTurn,
     /// The server invalidated the source-local checkpoint. Reauthorize and start
@@ -51,10 +51,10 @@ pub struct MailboxTurnError<Io, Commit> {
 
 pub async fn sync_turn<S: ReconciliationSession, Commit>(
     session: &mut S,
-    scope: ConversationId,
+    scope: ScopeId,
     prior: Option<MailboxCursor>,
     limits: MailboxTurnLimits,
-    mut commit: impl FnMut(&[Event], &MailboxCursor) -> Result<(), Commit>,
+    mut commit: impl FnMut(&[Record], &MailboxCursor) -> Result<(), Commit>,
 ) -> Result<MailboxProgress, MailboxTurnError<S::Error, Commit>> {
     let mut progress = MailboxProgress {
         cursor: prior,
@@ -72,16 +72,13 @@ pub async fn sync_turn<S: ReconciliationSession, Commit>(
         || limits.work.bytes < BODY_BUDGET
         || limits.work.requests < 2
         || limits.pages == 0
-        || progress
-            .cursor
-            .as_ref()
-            .is_some_and(|c| c.conversation != scope)
+        || progress.cursor.as_ref().is_some_and(|c| c.scope != scope)
     {
         fail!(MailboxTurnErrorKind::InvalidLimits);
     }
     while progress.pages < limits.pages && progress.work.requests < limits.work.requests {
         let request = match rpc::encode_frame(&Frame::Delta {
-            conversation: scope,
+            scope,
             prior: progress.cursor.clone(),
         }) {
             Ok(request) => request,
@@ -117,7 +114,10 @@ pub async fn sync_turn<S: ReconciliationSession, Commit>(
                     || previous.is_some_and(|p| page.cursor.revision != p.revision)
             }
         });
-        let invalid = changed_window
+        let invalid = (!page.complete
+            && page.ids.is_empty()
+            && page.cursor.after <= previous.map_or(0, |p| p.after))
+            || changed_window
             || (!page.reset
                 && (identity_changed
                     || previous.is_some_and(|p| {
@@ -142,10 +142,10 @@ pub async fn sync_turn<S: ReconciliationSession, Commit>(
             }
             return Ok(progress);
         }
-        let events = if page.ids.is_empty() {
+        let records = if page.ids.is_empty() {
             Vec::new()
         } else {
-            // Old Get frames cannot advertise a smaller byte budget: reserve a
+            // Get frames cannot advertise a smaller byte budget: reserve a
             // full protocol response before requesting any bodies.
             if limits.work.bytes - progress.work.bytes < BODY_BUDGET
                 || progress.work.requests == limits.work.requests
@@ -165,15 +165,15 @@ pub async fn sync_turn<S: ReconciliationSession, Commit>(
                 Err(error) => fail!(MailboxTurnErrorKind::Transport(error)),
             };
             match rpc::read_get_response(&response, scope, &page.ids, event_size) {
-                Ok(events) => events,
+                Ok(records) => records,
                 Err(error) => fail!(MailboxTurnErrorKind::Wire(error)),
             }
         };
-        let bytes = events.iter().map(event_size).sum::<usize>();
-        if let Err(error) = commit(&events, &page.cursor) {
+        let bytes = records.iter().map(event_size).sum::<usize>();
+        if let Err(error) = commit(&records, &page.cursor) {
             fail!(MailboxTurnErrorKind::Commit(error));
         }
-        progress.work.committed += events.len();
+        progress.work.committed += records.len();
         progress.work.bytes += bytes;
         progress.cursor = Some(page.cursor);
         if page.complete {
@@ -186,7 +186,7 @@ pub async fn sync_turn<S: ReconciliationSession, Commit>(
     }
     Ok(progress)
 }
-fn event_size(event: &Event) -> usize {
+fn event_size(event: &Record) -> usize {
     bincode::serialized_size(event)
         .ok()
         .and_then(|n| usize::try_from(n).ok())

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 export const rustPackages = [
+  { kind: "protocol", package: "mesh-talk-protocol", directory: "crates/mesh-talk-protocol", library: "mesh_talk_protocol", filters: "protocolFilters", flag: "--protocol-filter", targets: "protocolTests", targetFlag: "--protocol-test", optional: true },
   { kind: "core", package: "mesh-talk-core", directory: "crates/mesh-talk-core", library: "mesh_talk_core", filters: "coreFilters", flag: "--core-filter", targets: "coreTests", targetFlag: "--core-test" },
   { kind: "host", package: "mesh-talk", directory: "src-tauri", library: "mesh_talk", filters: "hostFilters", flag: "--host-filter", frontendBuild: true, buildInputs: /^(?:tauri(?:\.[^/]+)?\.conf(?:\.[^/]+)?\.json|capabilities\/.*\.(?:json|toml)|windows\.manifest|icons\/icon\.(?:png|ico|icns)|Info\.plist|entitlements\.plist)$/u },
   { kind: "integration", package: "mesh-talk-integrations", directory: "crates/mesh-talk-integrations", library: "mesh_talk_integrations", filters: "integrationFilters", flag: "--integration-filter", optional: true },

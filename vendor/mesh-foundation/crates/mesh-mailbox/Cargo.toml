@@ -8,22 +8,18 @@ repository.workspace = true
 readme = "README.md"
 keywords = ["mesh", "peer-to-peer", "sdk"]
 categories = ["network-programming"]
-description = "Opaque recipient-pair envelopes for Mesh Talk relay compatibility"
+description = "Bounded opaque mailbox records, resumable retrieval and durable spool storage"
 
 [dependencies]
-aes-gcm = "0.11"
 bincode = "1.3"
-hkdf = "0.12"
-mesh-identity = { package = "mesh-foundation-identity", version = "=0.1.0-alpha.2", path = "../mesh-identity" }
-mesh-replication = { package = "mesh-foundation-replication", version = "=0.1.0-alpha.2", path = "../mesh-replication", default-features = false, features = ["legacy-wire"] }
+mesh-replication = { package = "mesh-foundation-replication", version = "=0.1.0-alpha.2", path = "../mesh-replication", default-features = false }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
-x25519-dalek = { version = "3", features = ["static_secrets", "getrandom"] }
-zeroize = "1"
 mesh-storage = { package = "mesh-foundation-storage", version = "=0.1.0-alpha.2", path = "../mesh-storage" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
+mesh-identity = { package = "mesh-foundation-identity", version = "=0.1.0-alpha.2", path = "../mesh-identity" }
 tempfile = "3"
 mesh-connect = { package = "mesh-foundation-connect", version = "=0.1.0-alpha.2", path = "../mesh-connect", default-features = false }
 tokio = { version = "1", features = ["macros", "rt", "time"] }

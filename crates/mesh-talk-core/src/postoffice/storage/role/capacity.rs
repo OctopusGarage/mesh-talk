@@ -1,6 +1,6 @@
 //! Shared post-office threshold meaning; repository physical charge is authority.
 use super::*;
-use mesh_mailbox::capacity::{Admission, CapacityLimits};
+use mesh_talk_protocol::mailbox::capacity::{Admission, CapacityLimits};
 
 #[derive(Clone, Copy)]
 pub(super) struct RelayLimits(CapacityLimits);

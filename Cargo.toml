@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mesh-talk-core", "crates/mesh-talk-integrations", "crates/mesh-talk-mcp", "src-tauri"]
+members = ["crates/mesh-talk-protocol", "crates/mesh-talk-core", "crates/mesh-talk-integrations", "crates/mesh-talk-mcp", "src-tauri"]
 exclude = ["vendor/mesh-foundation"]
 resolver = "3"
 

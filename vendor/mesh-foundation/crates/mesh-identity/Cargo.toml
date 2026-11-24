@@ -8,7 +8,7 @@ repository.workspace = true
 readme = "README.md"
 keywords = ["mesh", "peer-to-peer", "sdk"]
 categories = ["network-programming"]
-description = "Mesh Talk-compatible device identities and account certificates"
+description = "Signing identities and device certificate primitives"
 
 [features]
 test-observability = []

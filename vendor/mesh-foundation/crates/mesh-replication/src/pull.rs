@@ -16,7 +16,7 @@ pub struct PullLimits {
     pub bytes_per_batch: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub id: EventId,
     pub body: Vec<u8>,

@@ -1,12 +1,12 @@
-use mesh_identity::device::DeviceIdentity;
-use mesh_mailbox::{
+use mesh_talk_protocol::device::DeviceIdentity;
+use mesh_talk_protocol::legacy_event::{ConversationId, Event, EventKind};
+use mesh_talk_protocol::mailbox::{
     RelayMailbox,
     capacity::CapacityLimits,
     rpc::{Frame, decode_frame, encode_frame, make_get_request},
     service::{MailboxStore, dispatch},
     spool::{Deposit, Spool, SpoolError},
 };
-use mesh_replication::legacy_event::{ConversationId, Event, EventKind};
 use std::num::NonZeroU64;
 
 #[test]

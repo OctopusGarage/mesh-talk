@@ -1,7 +1,4 @@
-//! Mesh Talk-compatible signed discovery and host route inputs.
-
+//! Host route inputs and signed application discovery.
 #[cfg(feature = "signed-discovery")]
 pub mod announce;
 pub mod candidates;
-#[cfg(feature = "signed-discovery")]
-pub mod query;

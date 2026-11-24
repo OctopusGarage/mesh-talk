@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 /// Domain separator for the device-certificate signed message.
 pub const MAX_ACCOUNT_CREATED_AT_MS: u64 = 253_402_300_799_999;
 
-const CERT_DOMAIN: &[u8] = b"mesh-talk-device-cert-v1";
+const CERT_DOMAIN: &[u8] = b"mesh-foundation-device-cert-v1";
 
 /// serde helper for the 64-byte signature (serde derives arrays only up to len 32,
 /// so `[u8; 64]` needs a manual tuple (de)serialization).
@@ -69,11 +69,11 @@ pub struct AccountPublic {
 }
 
 impl AccountPublic {
-    /// Stable account id = hex of the first 16 bytes of SHA-256("mesh-talk-account-v1"
+    /// Stable account id = hex of the first 16 bytes of SHA-256("mesh-foundation-account-v1"
     /// ‖ ed25519_pub). 32 hex chars. The user's cross-device handle.
     pub fn account_id(&self) -> String {
         let mut h = Sha256::new();
-        h.update(b"mesh-talk-account-v1");
+        h.update(b"mesh-foundation-account-v1");
         h.update(self.ed25519_pub);
         hex::encode(&h.finalize()[..16])
     }
