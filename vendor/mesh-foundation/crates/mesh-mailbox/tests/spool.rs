@@ -101,8 +101,18 @@ fn durable_spool_reopens_resumes_and_rejects_stale_bodies() {
         spool.view(20).bodies(&scope, &old, &[first.id], 65519),
         Err(SpoolError::StaleCursor)
     ));
-    assert!(spool.expire_at(20).unwrap());
-    assert_eq!(spool.deposit(third.clone(), 20).unwrap(), Deposit::Stored);
+    let before = spool.usage();
+    assert_eq!(before.envelopes, 2);
+    let mut expiry = None;
+    assert_eq!(
+        spool
+            .deposit_observed(third.clone(), 20, |report| expiry = Some(report))
+            .unwrap(),
+        Deposit::Stored
+    );
+    assert_eq!(expiry.unwrap().removed, before);
+    assert_eq!(spool.usage().envelopes, 1);
+    assert!(spool.expire_report(20).unwrap().is_none());
     drop(spool);
     let spool = open();
     let request = encode_frame(&Frame::Delta {

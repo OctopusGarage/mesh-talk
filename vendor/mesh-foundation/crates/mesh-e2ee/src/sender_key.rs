@@ -34,6 +34,29 @@ pub enum SenderKeyError {
     Malformed(String),
 }
 
+/// Redacted categories for sender-key diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SenderKeyErrorKind {
+    Encrypt,
+    Decrypt,
+    TooManySkipped,
+    StaleReceiverCandidate,
+    Malformed,
+}
+
+impl SenderKeyError {
+    pub fn kind(&self) -> SenderKeyErrorKind {
+        match self {
+            Self::Encrypt => SenderKeyErrorKind::Encrypt,
+            Self::Decrypt => SenderKeyErrorKind::Decrypt,
+            Self::TooManySkipped => SenderKeyErrorKind::TooManySkipped,
+            Self::StaleReceiverCandidate => SenderKeyErrorKind::StaleReceiverCandidate,
+            Self::Malformed(_) => SenderKeyErrorKind::Malformed,
+        }
+    }
+}
+
 /// A member's SENDING chain for one channel epoch.
 pub struct SenderKey {
     chain_key: [u8; 32],

@@ -168,6 +168,14 @@ pub struct DeviceCertificate {
     pub signature: [u8; 64],
 }
 
+/// Reason a device certificate could not establish the expected binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CertificateRejection {
+    DeviceMismatch,
+    InvalidSignature,
+}
+
 impl DeviceCertificate {
     /// True if the signature is a valid account-over-device binding.
     pub fn verify(&self) -> bool {
@@ -180,16 +188,30 @@ impl DeviceCertificate {
     /// Check intrinsic proof for the expected device signing key. The application
     /// still decides whether it trusts the issuing account.
     pub fn verify_for_device(&self, expected_device: &[u8; 32]) -> bool {
-        &self.device_ed25519_pub == expected_device && self.verify()
+        self.check_issuer_for_device(expected_device).is_ok()
     }
 
     /// Return the cryptographically verified issuer for the expected device.
     /// The caller still checks whether this issuer is trusted and authorized.
     pub fn verified_issuer_for_device(&self, expected_device: &[u8; 32]) -> Option<AccountPublic> {
-        self.verify_for_device(expected_device)
-            .then_some(AccountPublic {
-                ed25519_pub: self.account_ed25519_pub,
-            })
+        self.check_issuer_for_device(expected_device).ok()
+    }
+
+    /// Verify the binding and return a redacted failure reason. The caller
+    /// still decides whether the issuer is trusted and authorized.
+    pub fn check_issuer_for_device(
+        &self,
+        expected_device: &[u8; 32],
+    ) -> Result<AccountPublic, CertificateRejection> {
+        if &self.device_ed25519_pub != expected_device {
+            return Err(CertificateRejection::DeviceMismatch);
+        }
+        if !self.verify() {
+            return Err(CertificateRejection::InvalidSignature);
+        }
+        Ok(AccountPublic {
+            ed25519_pub: self.account_ed25519_pub,
+        })
     }
 
     /// The account id this cert binds to (only meaningful if `verify()` is true).
@@ -274,6 +296,11 @@ mod tests {
             None
         );
         assert!(!cert.verify_for_device(&other.public().ed25519_pub));
+        assert_eq!(
+            cert.check_issuer_for_device(&other.public().ed25519_pub)
+                .unwrap_err(),
+            CertificateRejection::DeviceMismatch
+        );
         let mut tampered = cert;
         tampered.signature[0] ^= 1;
         assert!(!tampered.verify_for_device(&owner.public().ed25519_pub));

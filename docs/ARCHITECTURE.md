@@ -85,6 +85,14 @@ Other hosts can use the library's bounded spool with their own admission and
 expiry scheduling. File transfers use the library's chunk primitives while
 Mesh Talk owns the manifest and transfer lifecycle.
 
+Group range exchange uses the SDK's canonical prefix, summary frame codec, and
+leaf proof validation. The application owns authorization-bound snapshots, its
+resumable traversal checkpoint, and the scheduling of unavailable records.
+The signed attachment lane applies each body through the event repository:
+source selection, per-attempt consent, authenticated author checks and durable
+event admission stay with the node. The generic blob downloader works with a
+chunk store and returns a verified object.
+
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
 ### Protected messages

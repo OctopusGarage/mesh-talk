@@ -8,50 +8,8 @@ type EventId = [u8; 32];
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Prefix {
-    bits: u16,
-    key: EventId,
-}
-impl Prefix {
-    pub fn bits(self) -> u16 {
-        self.bits
-    }
-    pub fn key(self) -> EventId {
-        self.key
-    }
-    pub fn root() -> Self {
-        Self {
-            bits: 0,
-            key: [0; 32],
-        }
-    }
-    pub fn new(bits: u16, mut key: EventId) -> Option<Self> {
-        if bits > 256 {
-            return None;
-        }
-        for bit in usize::from(bits)..256 {
-            key[bit / 8] &= !(128 >> (bit % 8));
-        }
-        Some(Self { bits, key })
-    }
-    pub fn children(self) -> Option<[Self; 2]> {
-        if self.bits == 256 {
-            return None;
-        }
-        let mut right = self.key;
-        right[usize::from(self.bits) / 8] |= 128 >> (self.bits % 8);
-        Some([
-            Self::new(self.bits + 1, self.key)?,
-            Self::new(self.bits + 1, right)?,
-        ])
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Summary {
-    pub count: usize,
-    pub digest: [u8; 32],
-}
+pub use mesh_replication::range::{Prefix, RemoteError, Summary, SummaryFrame};
+
 fn empty() -> Summary {
     Summary {
         count: 0,
@@ -88,11 +46,11 @@ impl RangeIndex {
         if let Some(summary) = self.nodes.get(&p) {
             return *summary;
         }
-        let mut upper = p.key;
-        for bit in usize::from(p.bits)..256 {
+        let mut upper = p.key();
+        for bit in usize::from(p.bits())..256 {
             upper[bit / 8] |= 128 >> (bit % 8);
         }
-        let mut range = self.ids.range(p.key..=upper);
+        let mut range = self.ids.range(p.key()..=upper);
         let Some(first) = range.next() else {
             return empty();
         };
@@ -105,7 +63,7 @@ impl RangeIndex {
         }
         let base = Prefix::new(depth, *first).unwrap();
         let mut summary = *self.nodes.get(&base).expect("branch/leaf summary exists");
-        for bits in (p.bits..depth).rev() {
+        for bits in (p.bits()..depth).rev() {
             let right = first[usize::from(bits) / 8] & (128 >> (bits % 8)) != 0;
             summary = if right {
                 combine(bits, empty(), summary)
@@ -250,7 +208,7 @@ impl Checkpoint {
                 self.pending.push(right);
                 self.pending.push(left);
             } else if a.count == 0 {
-                missing.push(p.key);
+                missing.push(p.key());
             }
         }
         Difference {
@@ -266,104 +224,6 @@ impl Checkpoint {
 }
 
 /// A separate versioned profile; legacy wire discriminants are untouched.
-pub const PROFILE: &[u8; 4] = b"MRG1";
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SummaryFrame {
-    pub scope: [u8; 32],
-    pub view: [u8; 32],
-    pub prefix: Prefix,
-    pub summary: Summary,
-    pub singleton: Option<EventId>,
-    pub leaves: Vec<EventId>,
-}
-impl SummaryFrame {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(142);
-        bytes.extend_from_slice(PROFILE);
-        bytes.extend_from_slice(&self.scope);
-        bytes.extend_from_slice(&self.view);
-        bytes.extend_from_slice(&self.prefix.bits.to_le_bytes());
-        bytes.extend_from_slice(&self.prefix.key);
-        bytes.extend_from_slice(&(self.summary.count as u64).to_le_bytes());
-        bytes.extend_from_slice(&self.summary.digest);
-        if let Some(id) = self.singleton {
-            bytes.extend_from_slice(&id);
-        }
-        for id in &self.leaves {
-            bytes.extend_from_slice(id);
-        }
-        bytes
-    }
-    /// Fixed length bounds allocation before decode. The caller authorizes the
-    /// view token independently; it is not a remote authorization grant.
-    pub fn decode(bytes: &[u8], scope: [u8; 32], view: [u8; 32]) -> Option<Self> {
-        if !(142..=1166).contains(&bytes.len())
-            || !(bytes.len() - 142).is_multiple_of(32)
-            || &bytes[..4] != PROFILE
-            || bytes[4..36] != scope
-            || bytes[36..68] != view
-        {
-            return None;
-        }
-        let bits = u16::from_le_bytes(bytes[68..70].try_into().ok()?);
-        let key: EventId = bytes[70..102].try_into().ok()?;
-        let prefix = Prefix::new(bits, key)?;
-        if prefix.key != key {
-            return None;
-        }
-        let count = usize::try_from(u64::from_le_bytes(bytes[102..110].try_into().ok()?)).ok()?;
-        let frame = Self {
-            scope,
-            view,
-            prefix,
-            leaves: if bytes.len() > 174 {
-                bytes[142..].as_chunks::<32>().0.to_vec()
-            } else {
-                Vec::new()
-            },
-            singleton: if bytes.len() == 174 {
-                Some(bytes[142..174].try_into().ok()?)
-            } else {
-                None
-            },
-            summary: Summary {
-                count,
-                digest: bytes[110..142].try_into().ok()?,
-            },
-        };
-        frame.valid_leaves().then_some(frame)
-    }
-    pub fn valid_leaves(&self) -> bool {
-        if self.leaves.is_empty() {
-            return self
-                .singleton
-                .is_none_or(|id| singleton_summary(self.prefix, id) == Some(self.summary));
-        }
-        if self.singleton.is_some()
-            || !(2..=32).contains(&self.leaves.len())
-            || self.summary.count != self.leaves.len()
-            || self.leaves.windows(2).any(|w| w[0] >= w[1])
-            || self
-                .leaves
-                .iter()
-                .any(|id| Prefix::new(self.prefix.bits, *id) != Some(self.prefix))
-        {
-            return false;
-        }
-        let mut index = RangeIndex::default();
-        for id in &self.leaves {
-            index.insert(*id);
-        }
-        index.summary(self.prefix) == self.summary
-    }
-}
-
-#[derive(Debug)]
-pub enum RemoteError<E> {
-    Exchange(E),
-    InvalidFrame,
-    Invalidated,
-}
 impl Checkpoint {
     /// Query only divergent remote prefixes; no remote ID collection is retained.
     /// `view` is the pinned remote snapshot identity; `authorize` requalifies the
@@ -474,7 +334,7 @@ impl Checkpoint {
             } else if b.count != 1 {
                 return Err(RemoteError::InvalidFrame);
             } else if a.count == 0 {
-                missing.push(prefix.key);
+                missing.push(prefix.key());
             }
         }
         Ok(Difference {
@@ -524,14 +384,14 @@ impl Checkpoint {
 }
 
 fn singleton_summary(prefix: Prefix, id: EventId) -> Option<Summary> {
-    if Prefix::new(prefix.bits, id)? != prefix {
+    if Prefix::new(prefix.bits(), id)? != prefix {
         return None;
     }
     let mut summary = Summary {
         count: 1,
         digest: Sha256::digest([b"mesh-range-id-v1".as_slice(), &id].concat()).into(),
     };
-    for bits in (prefix.bits..256).rev() {
+    for bits in (prefix.bits()..256).rev() {
         summary = if id[usize::from(bits) / 8] & (128 >> (bits % 8)) != 0 {
             combine(bits, empty(), summary)
         } else {
@@ -544,7 +404,7 @@ impl RangeIndex {
     pub fn frame(&self, scope: [u8; 32], view: [u8; 32], prefix: Prefix) -> SummaryFrame {
         let summary = self.summary(prefix);
         let singleton = if summary.count == 1 {
-            self.ids.range(prefix.key..).next().copied()
+            self.ids.range(prefix.key()..).next().copied()
         } else {
             None
         };
@@ -556,7 +416,7 @@ impl RangeIndex {
             singleton,
             leaves: if (2..=32).contains(&summary.count) {
                 self.ids
-                    .range(prefix.key..)
+                    .range(prefix.key()..)
                     .take(summary.count)
                     .copied()
                     .collect()
@@ -631,7 +491,7 @@ impl Checkpoint {
             self.pending.push(left);
             Ok(vec![])
         } else if frame.summary.count == 1 {
-            Ok(vec![prefix.key])
+            Ok(vec![prefix.key()])
         } else {
             Err(RemoteError::InvalidFrame)
         }

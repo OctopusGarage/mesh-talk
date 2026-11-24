@@ -33,6 +33,7 @@ pub struct SparseBlobReceiver<'a> {
     checksum: [u8; 32],
     pub(crate) hashes: &'a [[u8; 32]],
     present: Vec<bool>,
+    stored_chunks: u32,
 }
 
 impl<'a> SparseBlobReceiver<'a> {
@@ -55,7 +56,13 @@ impl<'a> SparseBlobReceiver<'a> {
             checksum,
             hashes,
             present,
+            stored_chunks: 0,
         })
+    }
+
+    /// Number of chunks validated from staging or written successfully.
+    pub fn stored_chunks(&self) -> u32 {
+        self.stored_chunks
     }
 
     /// Enumerate missing indices. The scheduler may intersect these with
@@ -91,6 +98,7 @@ impl<'a> SparseBlobReceiver<'a> {
         store: &mut S,
     ) -> Result<(), SparseReceiveError<S::Error>> {
         self.present.fill(false);
+        self.stored_chunks = 0;
         for index in 0..self.layout.chunk_count() {
             let length = self
                 .layout
@@ -99,8 +107,10 @@ impl<'a> SparseBlobReceiver<'a> {
             let bytes = store
                 .read(index, length)
                 .map_err(SparseReceiveError::Store)?;
-            self.present[index as usize] =
-                bytes.is_some_and(|bytes| self.check(index, &bytes).is_ok());
+            if bytes.is_some_and(|bytes| self.check(index, &bytes).is_ok()) {
+                self.present[index as usize] = true;
+                self.stored_chunks += 1;
+            }
         }
         Ok(())
     }
@@ -120,6 +130,7 @@ impl<'a> SparseBlobReceiver<'a> {
             .write(index, bytes)
             .map_err(SparseReceiveError::Store)?;
         self.present[index as usize] = true;
+        self.stored_chunks += 1;
         Ok(ChunkAcceptance::Stored)
     }
 

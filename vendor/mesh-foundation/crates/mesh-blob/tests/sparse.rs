@@ -96,6 +96,8 @@ async fn complementary_sources_retry_and_resume_from_disk() {
     let layout = BlobLayout::new(5, 2, 5).unwrap();
     let hashes = [chunk_hash(b"ab"), chunk_hash(b"cd"), chunk_hash(b"e")];
     let open = || SparseBlobReceiver::new(layout, file_checksum(b"abcde"), &hashes, 3).unwrap();
+    use mesh_blob::{ChunkRejection, DownloadEvent};
+    let events = RefCell::new(Vec::new());
     let requests = RefCell::new(Vec::new());
     let limit = NonZeroUsize::new(3).unwrap();
     {
@@ -116,10 +118,20 @@ async fn complementary_sources_retry_and_resume_from_disk() {
             },
         ];
         assert!(matches!(
-            receiver.download(&mut store, &peers, limit).await,
+            receiver
+                .download_observed(&mut store, &peers, limit, |event| events
+                    .borrow_mut()
+                    .push(event))
+                .await,
             Err(DownloadError::Unavailable(1))
         ));
     }
+    assert!(events.borrow().contains(&DownloadEvent::SourceRejected {
+        index: 0,
+        reason: ChunkRejection::HashMismatch,
+    }));
+    assert!(!events.borrow().contains(&DownloadEvent::Verified));
+    events.borrow_mut().clear();
     requests.borrow_mut().clear();
     let mut store = DirectoryChunkStore::open(path.path()).unwrap();
     let mut receiver = open();
@@ -129,7 +141,20 @@ async fn complementary_sources_retry_and_resume_from_disk() {
         chunks: &[(1, b"cd")],
         requests: &requests,
     };
-    receiver.download(&mut store, &[peer], limit).await.unwrap();
+    assert_eq!(receiver.stored_chunks(), 2);
+    receiver
+        .download_observed(&mut store, &[peer], limit, |event| {
+            events.borrow_mut().push(event)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        *events.borrow(),
+        [
+            DownloadEvent::ChunkStored { index: 1, bytes: 2 },
+            DownloadEvent::Verified,
+        ]
+    );
     assert_eq!(*requests.borrow(), [1]);
 }
 

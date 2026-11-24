@@ -12,7 +12,7 @@ use crate::{
 use mesh_replication::legacy_event::{ConversationId, Event, EventId};
 use mesh_storage::{
     EncryptionKey, SALT_SIZE, StorageError,
-    record_log::{EncryptedRecordLog, RecordLogError},
+    record_log::{EncryptedRecordLog, RecordLogError, ReplacementDurability},
 };
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,18 @@ pub enum Deposit {
     AlreadyStored,
     CapacityUnavailable,
     TooLarge,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpoolUsage {
+    pub envelopes: usize,
+    pub encoded_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpiryReport {
+    pub removed: SpoolUsage,
+    pub durability: ReplacementDurability,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -247,15 +259,29 @@ impl Spool {
 
     /// Advance the destructive generation only after the replacement commits.
     pub fn expire_at(&mut self, now: u64) -> Result<bool, SpoolError> {
+        self.expire_report(now).map(|report| report.is_some())
+    }
+
+    /// Retained occupancy, including entries awaiting explicit expiry.
+    pub fn usage(&self) -> SpoolUsage {
+        SpoolUsage {
+            envelopes: self.entries.len(),
+            encoded_bytes: self.bytes,
+        }
+    }
+
+    /// Apply expiry and report the removed data and replacement durability.
+    pub fn expire_report(&mut self, now: u64) -> Result<Option<ExpiryReport>, SpoolError> {
         if !self.expired(now) {
-            return Ok(false);
+            return Ok(None);
         }
         let epoch = self
             .cursor
             .epoch
             .checked_add(1)
             .ok_or(SpoolError::CounterExhausted)?;
-        self.log.rewrite(&[Record::Header {
+        let removed = self.usage();
+        let durability = self.log.rewrite_report(&[Record::Header {
             scope: self.cursor.conversation,
             store_uuid: self.cursor.store_uuid,
             epoch,
@@ -267,11 +293,25 @@ impl Spool {
         self.cursor.first_seen = None;
         self.cursor.revision = 0;
         self.cursor.after = 0;
-        Ok(true)
+        Ok(Some(ExpiryReport {
+            removed,
+            durability,
+        }))
     }
 
     /// The host authenticates the depositor before calling this method.
     pub fn deposit(&mut self, event: Event, now: u64) -> Result<Deposit, SpoolError> {
+        self.deposit_observed(event, now, |_| {})
+    }
+
+    /// Report any committed expiry inline, even when the subsequent deposit
+    /// fails. The callback must be fast and nonblocking.
+    pub fn deposit_observed(
+        &mut self,
+        event: Event,
+        now: u64,
+        on_expiry: impl FnOnce(ExpiryReport),
+    ) -> Result<Deposit, SpoolError> {
         // Only byte-for-byte equivalent, previously authenticated entries can
         // skip verification. A matching ID alone cannot authenticate a retry.
         if !self.expired(now)
@@ -283,7 +323,9 @@ impl Spool {
         if !valid_envelope(self.cursor.conversation, &event) {
             return Err(SpoolError::InvalidRecord);
         }
-        self.expire_at(now)?;
+        if let Some(report) = self.expire_report(now)? {
+            on_expiry(report);
+        }
         if self.positions.contains_key(&event.id) {
             return Ok(Deposit::AlreadyStored);
         }

@@ -30,7 +30,10 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 mod download;
-pub use download::{ChunkSource, DownloadError, EncryptedChunkError, EncryptedChunkSource};
+pub use download::{
+    ChunkRejection, ChunkSource, DownloadError, DownloadEvent, EncryptedChunkError,
+    EncryptedChunkSource,
+};
 mod receive;
 #[cfg(feature = "mesh-connect")]
 pub mod session;

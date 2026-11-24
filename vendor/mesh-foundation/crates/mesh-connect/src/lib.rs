@@ -42,6 +42,38 @@ pub enum TransportError {
     Serialization(String),
 }
 
+/// Low-cardinality transport failure categories suitable for metrics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TransportErrorKind {
+    Noise,
+    Io,
+    FrameTooLarge,
+    PlaintextTooLarge,
+    MissingRemoteStatic,
+    IdentityMismatch,
+    UnexpectedPeer,
+    AdmissionDenied,
+    Serialization,
+}
+
+impl TransportError {
+    /// Classify the failure without exposing error text or peer information.
+    pub fn kind(&self) -> TransportErrorKind {
+        match self {
+            Self::Noise(_) => TransportErrorKind::Noise,
+            Self::Io(_) => TransportErrorKind::Io,
+            Self::FrameTooLarge(_) => TransportErrorKind::FrameTooLarge,
+            Self::PlaintextTooLarge(_) => TransportErrorKind::PlaintextTooLarge,
+            Self::MissingRemoteStatic => TransportErrorKind::MissingRemoteStatic,
+            Self::IdentityMismatch => TransportErrorKind::IdentityMismatch,
+            Self::UnexpectedPeer => TransportErrorKind::UnexpectedPeer,
+            Self::AdmissionDenied => TransportErrorKind::AdmissionDenied,
+            Self::Serialization(_) => TransportErrorKind::Serialization,
+        }
+    }
+}
+
 impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

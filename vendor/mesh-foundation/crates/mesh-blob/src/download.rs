@@ -19,6 +19,24 @@ pub enum DownloadError<E> {
     Receive(SparseReceiveError<E>),
 }
 
+/// Diagnostic classification without source addresses or error payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChunkRejection {
+    FetchFailed,
+    WrongLength,
+    HashMismatch,
+}
+
+/// Notifications scoped to one download operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DownloadEvent {
+    SourceRejected { index: u32, reason: ChunkRejection },
+    ChunkStored { index: u32, bytes: u32 },
+    Verified,
+}
+
 impl SparseBlobReceiver<'_> {
     /// Pull a bounded number of independent chunks concurrently. Rotate the
     /// starting source by index and retry other sources on failure. Durable
@@ -29,6 +47,21 @@ impl SparseBlobReceiver<'_> {
         sources: &[P],
         concurrency: NonZeroUsize,
     ) -> Result<(), DownloadError<S::Error>> {
+        self.download_observed(store, sources, concurrency, |_| {})
+            .await
+    }
+
+    /// Observe source rejection, durable writes and final verification.
+    /// The callback runs inline and must be fast and nonblocking. Chunks can
+    /// complete out of order. Dropping the future emits no terminal event.
+    pub async fn download_observed<S: ChunkStore, P: ChunkSource>(
+        &mut self,
+        store: &mut S,
+        sources: &[P],
+        concurrency: NonZeroUsize,
+        observe: impl Fn(DownloadEvent),
+    ) -> Result<(), DownloadError<S::Error>> {
+        let observe = &observe;
         let layout = self.layout;
         let hashes = self.hashes;
         let fetch = |index| async move {
@@ -37,13 +70,18 @@ impl SparseBlobReceiver<'_> {
                 .expect("index from validated layout");
             let start = (index as usize).checked_rem(sources.len()).unwrap_or(0);
             for source in sources[start..].iter().chain(&sources[..start]) {
-                if source.has_chunk(index)
-                    && let Ok(bytes) = source.fetch(index, length).await
-                    && bytes.len() == length as usize
-                    && crate::chunk_hash(&bytes) == hashes[index as usize]
-                {
-                    return Ok((index, bytes));
+                if !source.has_chunk(index) {
+                    continue;
                 }
+                let reason = match source.fetch(index, length).await {
+                    Err(_) => ChunkRejection::FetchFailed,
+                    Ok(bytes) if bytes.len() != length as usize => ChunkRejection::WrongLength,
+                    Ok(bytes) if crate::chunk_hash(&bytes) != hashes[index as usize] => {
+                        ChunkRejection::HashMismatch
+                    }
+                    Ok(bytes) => return Ok((index, bytes)),
+                };
+                observe(DownloadEvent::SourceRejected { index, reason });
             }
             Err(DownloadError::Unavailable(index))
         };
@@ -67,8 +105,16 @@ impl SparseBlobReceiver<'_> {
             // miss, drain only work already started so it can survive a retry.
             match requests.next().await {
                 Some(Ok((index, bytes))) => {
-                    self.accept(store, index, &bytes)
-                        .map_err(DownloadError::Receive)?;
+                    if self
+                        .accept(store, index, &bytes)
+                        .map_err(DownloadError::Receive)?
+                        == crate::ChunkAcceptance::Stored
+                    {
+                        observe(DownloadEvent::ChunkStored {
+                            index,
+                            bytes: bytes.len() as u32,
+                        });
+                    }
                 }
                 Some(Err(error)) => {
                     unavailable.get_or_insert(error);
@@ -79,7 +125,9 @@ impl SparseBlobReceiver<'_> {
         if let Some(error) = unavailable {
             return Err(error);
         }
-        self.verify(store).map_err(DownloadError::Receive)
+        self.verify(store).map_err(DownloadError::Receive)?;
+        observe(DownloadEvent::Verified);
+        Ok(())
     }
 }
 

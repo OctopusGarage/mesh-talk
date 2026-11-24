@@ -37,6 +37,10 @@ product authorization and lifecycle in its adapters. Replication defines its
 own transport interface so a consumer can compose it with Mesh Connect or
 another suitable channel. See the [architecture reference](ARCHITECTURE.md#mesh-foundation-libraries).
 
+Use the SDK range summary wire codec for every application range index. Keep
+authorization, prepared-view lifetime, and durable admission with the
+application repository; a canonical summary does not establish custody.
+
 ## Use introduction distance as a relay ranking hint
 
 A targeted exchange uses the known correspondent's fresh directory distance

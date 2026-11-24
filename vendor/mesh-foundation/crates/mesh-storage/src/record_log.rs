@@ -30,6 +30,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const FRAME_CRYPTO_OVERHEAD: u64 = (NONCE_SIZE + 16) as u64;
 
+/// Outcome after an atomic replacement has become visible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReplacementDurability {
+    /// A directory sync succeeded.
+    DirectorySynced,
+    /// The replacement is visible, but the directory sync failed.
+    DirectorySyncPending,
+    /// The replacement is visible on a platform where this log does not sync directories.
+    DirectorySyncUnavailable,
+}
+
 /// Error reported by the encrypted record log.
 #[derive(Debug)]
 pub enum RecordLogError {
@@ -502,6 +514,15 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
     /// fresh per-record nonces). Written to a temp file and atomically renamed over
     /// the original, so an interrupted rewrite leaves the old file intact.
     pub fn rewrite(&mut self, records: &[R]) -> Result<(), RecordLogError> {
+        self.rewrite_report(records).map(|_| ())
+    }
+
+    /// Replace the log and report whether the parent directory was synced.
+    /// A pending sync indicates an already-visible replacement.
+    pub fn rewrite_report(
+        &mut self,
+        records: &[R],
+    ) -> Result<ReplacementDurability, RecordLogError> {
         if self.poisoned {
             return Err(RecordLogError::CorruptFile(
                 "record log requires reopen".into(),
@@ -520,13 +541,22 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
     /// Append a causally closed batch as one filesystem replacement. Existing
     /// encrypted records are copied verbatim in file order.
     pub fn append_batch_atomic(&mut self, records: &[R]) -> Result<(), RecordLogError> {
+        self.append_batch_atomic_report(records).map(|_| ())
+    }
+
+    /// Append an atomic batch and report replacement durability. An empty
+    /// batch returns `None` without performing a replacement.
+    pub fn append_batch_atomic_report(
+        &mut self,
+        records: &[R],
+    ) -> Result<Option<ReplacementDurability>, RecordLogError> {
         if self.poisoned {
             return Err(RecordLogError::CorruptFile(
                 "record log requires reopen".into(),
             ));
         }
         if records.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         self.replace_with(|log, writer| {
             let mut source = File::open(&log.path)?;
@@ -536,6 +566,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             }
             Ok(())
         })
+        .map(Some)
     }
 
     #[cfg(any(test, feature = "test-observability"))]
@@ -546,7 +577,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
     fn replace_with(
         &mut self,
         write: impl FnOnce(&Self, &mut BufWriter<&File>) -> Result<(), RecordLogError>,
-    ) -> Result<(), RecordLogError> {
+    ) -> Result<ReplacementDurability, RecordLogError> {
         #[cfg(any(test, feature = "test-observability"))]
         if self.fail_replacements {
             return Err(std::io::Error::other("injected record log replacement failure").into());
@@ -590,10 +621,15 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         // indexes describing the old file. Directory sync is best effort after rename.
         if sync_parent(&self.path).is_err() {
             log::warn!("record log replacement directory sync failed");
+            Ok(ReplacementDurability::DirectorySyncPending)
         } else {
             self.needs_sync.store(false, Ordering::Release);
+            Ok(if cfg!(unix) {
+                ReplacementDurability::DirectorySynced
+            } else {
+                ReplacementDurability::DirectorySyncUnavailable
+            })
         }
-        Ok(())
     }
 }
 
@@ -1011,6 +1047,24 @@ mod tests {
         let (_log, records): (EncryptedRecordLog<Rec>, _) =
             EncryptedRecordLog::open(&path, "pw", TEST_MAGIC).unwrap();
         assert_eq!(records, vec![rec(1, b"a"), rec(3, b"c"), rec(4, b"d")]);
+    }
+
+    #[test]
+    fn replacement_reports_directory_sync_failure_after_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.log");
+        let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        assert_eq!(log.append_batch_atomic_report(&[]).unwrap(), None);
+        let record = rec(1, b"committed");
+        sync_observations::fail_parent();
+        assert_eq!(
+            log.append_batch_atomic_report(std::slice::from_ref(&record))
+                .unwrap(),
+            Some(ReplacementDurability::DirectorySyncPending)
+        );
+        drop(log);
+        let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        assert_eq!(records, [record]);
     }
 
     #[test]

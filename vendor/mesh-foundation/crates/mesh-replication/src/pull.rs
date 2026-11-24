@@ -87,8 +87,28 @@ pub async fn pull_missing<Fetch, Commit>(
     remote: &CompleteInventory,
     local: &CompleteInventory,
     limits: PullLimits,
+    fetch: impl AsyncFnMut(&[EventId], usize) -> Result<Vec<Record>, Fetch>,
+    commit: impl FnMut(&[Record]) -> Result<(), Commit>,
+) -> Result<usize, PullError<Fetch, Commit>> {
+    pull_missing_observed(remote, local, limits, fetch, commit, |_| {}).await
+}
+
+/// Progress after one successful atomic commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PullCommitProgress {
+    pub batch_records: usize,
+    pub committed_records: usize,
+}
+
+/// Same authorization and commit contract as [pull_missing]. Progress runs
+/// inline after commit returns. Use the commit adapter for a durable outbox.
+pub async fn pull_missing_observed<Fetch, Commit>(
+    remote: &CompleteInventory,
+    local: &CompleteInventory,
+    limits: PullLimits,
     mut fetch: impl AsyncFnMut(&[EventId], usize) -> Result<Vec<Record>, Fetch>,
     mut commit: impl FnMut(&[Record]) -> Result<(), Commit>,
+    mut observe: impl FnMut(PullCommitProgress),
 ) -> Result<usize, PullError<Fetch, Commit>> {
     if limits.records_per_batch == 0 || limits.bytes_per_batch == 0 {
         return Err(PullError {
@@ -115,6 +135,10 @@ pub async fn pull_missing<Fetch, Commit>(
         })?;
         commit(&records).map_err(|error| fail(PullErrorKind::Commit(error)))?;
         committed += records.len();
+        observe(PullCommitProgress {
+            batch_records: records.len(),
+            committed_records: committed,
+        });
     }
 }
 

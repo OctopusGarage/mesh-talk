@@ -1,6 +1,8 @@
 use mesh_replication::{
     CompleteInventory,
-    pull::{PullErrorKind, PullLimits, Record, pull_missing},
+    pull::{
+        PullCommitProgress, PullErrorKind, PullLimits, Record, pull_missing, pull_missing_observed,
+    },
 };
 
 fn inventory(ids: &[u8]) -> CompleteInventory {
@@ -13,7 +15,8 @@ async fn reports_committed_prefix_when_the_next_batch_is_invalid() {
     let remote = inventory(&[1, 2, 3]);
     let local = inventory(&[1]);
     let mut committed = Vec::new();
-    let error = pull_missing(
+    let mut progress = Vec::new();
+    let error = pull_missing_observed(
         &remote,
         &local,
         PullLimits {
@@ -35,11 +38,19 @@ async fn reports_committed_prefix_when_the_next_batch_is_invalid() {
             committed.push(records[0].id);
             Ok::<_, ()>(())
         },
+        |event| progress.push(event),
     )
     .await
     .unwrap_err();
     assert_eq!(committed, [[2; 32]]);
     assert_eq!(error.committed, 1);
+    assert_eq!(
+        progress,
+        [PullCommitProgress {
+            batch_records: 1,
+            committed_records: 1
+        }]
+    );
     assert_eq!(error.kind, PullErrorKind::UnexpectedRecords);
 }
 
