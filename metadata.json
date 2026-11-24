@@ -1,0 +1,41 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M860WGZ038X6RA8H7AHZ6C8V",
+  "strategy": "manual-commit",
+  "branch": "feat/sparse-attachment-integration",
+  "checkpoints_count": 26,
+  "files_touched": [
+    "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs",
+    "crates/mesh-talk-core/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 73391,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 16519168,
+    "output_tokens": 20822,
+    "api_call_count": 87
+  },
+  "redaction": {
+    "replacements": 722,
+    "layers": {
+      "betterleaks": 37,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 75,
+      "credentialed_uri": 0,
+      "entropy": 612,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
