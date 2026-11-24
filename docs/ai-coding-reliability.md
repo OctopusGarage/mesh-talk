@@ -481,6 +481,12 @@ account document/history controls require retained digests, pending demand and
 recovery without a false sync error. The same module retains bounded saturation,
 cancellation and priority-fairness controls.
 
+The participant relay owner distinguishes local resource deferral and a stale
+store cursor from relay failure. These outcomes preserve the relay's existing
+health and stay under the operation's retry pacing. Route failures still
+activate the relay cooldown. The [candidate ranking regression](../crates/mesh-talk-core/src/node/delivery_runtime.rs)
+requires a measured healthy relay to stay eligible after either local deferral.
+
 Distinct direct receipt and message-history scopes need independent polling
 inside their existing delivery owner; shared opaque-mailbox pulls remain serial. Serial receipt-first ordering merely
 reverses a dependency: a held receipt query must not prevent a fresh original

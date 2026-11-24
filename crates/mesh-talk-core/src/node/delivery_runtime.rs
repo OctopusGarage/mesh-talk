@@ -2467,7 +2467,7 @@ impl Node {
                 {
                     return false;
                 }
-                let success = self
+                let result = self
                     .adaptive_control_timeout(&po.public, async {
                         for fresh in [false, true] {
                             let started = std::time::Instant::now();
@@ -2484,7 +2484,7 @@ impl Node {
                                     .await
                             };
                             let Ok((mut channel, reused)) = dial else {
-                                return false;
+                                return Ok(false);
                             };
                             if !self.delivery_destination_allowed(destination)
                                 || !self.relay_send_allowed(&po.public)
@@ -2497,7 +2497,7 @@ impl Node {
                                     .expect("delivery lock not poisoned")
                                     .contains_work_event(destination.event.id)
                             {
-                                return false;
+                                return Ok(false);
                             }
                             let exchange = self
                                 .confirm_history_relay_custody(
@@ -2513,25 +2513,24 @@ impl Node {
                                     if held {
                                         self.recycle_sync_channel(channel);
                                     }
-                                    return held
+                                    return Ok(held
                                         && self.delivery_destination_allowed(destination)
-                                        && self.relay_send_allowed(&po.public);
+                                        && self.relay_send_allowed(&po.public));
                                 }
                                 Err(error)
                                     if reused
                                         && super::session_pool::retryable_sync_error(&error) => {}
-                                Err(_) => return false,
+                                Err(error) => return Err(error),
                             }
                         }
-                        false
+                        Ok(false)
                     })
                     .await
-                    .unwrap_or(false);
-                if success {
+                    .unwrap_or(Ok(false));
+                if matches!(result, Ok(true)) {
                     self.observe_exact_relay_custody(destination, &po.public, generation);
                 }
-                self.record_relay_attempt(&po.public, success);
-                success
+                self.record_relay_attempt_result(&po.public, result.as_ref().copied())
             })
             .buffer_unordered(2);
         tokio::pin!(attempts);
@@ -2605,6 +2604,24 @@ impl Node {
                 std::time::Instant::now() + RELAY_FAILURE_COOLDOWN,
             );
         }
+    }
+
+    /// A local pause preserves the relay's current health and leaves retry
+    /// pacing to the operation that owns the interrupted exchange.
+    pub(super) fn record_relay_attempt_result(
+        &self,
+        relay: &PublicIdentity,
+        result: Result<bool, &SessionError>,
+    ) -> bool {
+        if matches!(
+            result,
+            Err(SessionError::ResourceUnavailable | SessionError::Store(LogError::StaleCursor))
+        ) {
+            return false;
+        }
+        let success = result.unwrap_or(false);
+        self.record_relay_attempt(relay, success);
+        success
     }
 
     fn control_routes(&self, peer: &PublicIdentity) -> ControlRoutes {
@@ -3336,7 +3353,12 @@ impl Node {
                 })
                 .await;
             if relay {
-                self.record_relay_attempt(&peer.public, matches!(result, Some(Ok(_))));
+                self.record_relay_attempt_result(
+                    &peer.public,
+                    result
+                        .as_ref()
+                        .map_or(Ok(false), |outcome| outcome.as_ref().map(|_| true)),
+                );
             }
             completed = completed.combine(match result {
                 Some(Ok(true)) => Reconciliation::Advanced,
@@ -5365,7 +5387,21 @@ mod diagnostic_tests {
             node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
             fastest.public
         );
-        node.record_relay_attempt(&fastest.public, false);
+        for error in [
+            crate::node::session::SessionError::ResourceUnavailable,
+            crate::node::session::SessionError::Store(crate::eventlog::LogError::StaleCursor),
+        ] {
+            assert!(!node.record_relay_attempt_result(&fastest.public, Err(&error)));
+            assert!(node.relay_retry_due(&fastest.public));
+            assert_eq!(
+                node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+                fastest.public
+            );
+        }
+        let failure = crate::node::session::SessionError::Transport(
+            crate::transport::TransportError::Io(std::io::ErrorKind::ConnectionRefused.into()),
+        );
+        assert!(!node.record_relay_attempt_result(&fastest.public, Err(&failure)));
         assert_ne!(
             node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
             fastest.public

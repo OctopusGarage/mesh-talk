@@ -612,6 +612,7 @@
             "receiver_write_failure_keeps_plaintext_intent_until_restart_and_no_early_receipt",
             "recipient_introduction_respects_preference_and_prioritizes_shared_fallback",
             "responsive_relay_order_preserves_preference_and_avoids_failed_paths",
+            "bounded_relay_batches_eventually_visit_a_healthy_tail_after_four_failures",
             "exact_chunk_lookup_requires_outgoing_authority",
             "federated_body_claims_are_exact_and_released_on_cancellation",
             "relay_completes_attachment_after_direct_prefix",

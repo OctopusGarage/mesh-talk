@@ -2755,6 +2755,7 @@ impl Node {
             .copied()
             .unwrap_or(0);
         let mut success = true;
+        let mut exchange_error = None;
         for offset in 0..peers.len().min(8) {
             let index = start.wrapping_add(offset) % peers.len();
             // Record the turn before awaiting. Neither a huge mailbox
@@ -2828,6 +2829,7 @@ impl Node {
                 self.observe_mailbox_work(reason, None);
             }
             if !matches!(result, Ok(Ok(()))) {
+                exchange_error = result.ok().and_then(Result::err);
                 success = false;
                 channel = None;
                 break;
@@ -2836,8 +2838,10 @@ impl Node {
         if let Some(channel) = channel {
             self.recycle_sync_channel(channel);
         }
-        self.record_relay_attempt(&po.public, success);
-        success
+        self.record_relay_attempt_result(
+            &po.public,
+            exchange_error.as_ref().map_or(Ok(success), Err),
+        )
     }
 
     /// Decrypt (via the Double Ratchet) and emit any not-yet-emitted, non-self
