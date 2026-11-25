@@ -1788,6 +1788,11 @@ mod tests {
                 .unwrap()
                 .is_accepted_member(&target.user_id())
         );
+        // The bare listeners have no canonical recovery owner. Inheritance
+        // appended signed membership controls on both devices; settle those
+        // local cuts without publishing ReceiveKeys or pulling message bodies.
+        source.await_channel_metadata_owned(channel).await.unwrap();
+        target.await_channel_metadata_owned(channel).await.unwrap();
         let absent = {
             let binding = target
                 .channel_checkpoints
@@ -1816,10 +1821,31 @@ mod tests {
         let wake_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed_wake = Arc::clone(&wake_ready);
         let sibling = target.identity.public();
+        let trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let source_trace = Arc::clone(&trace);
         *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, event| {
             if peer == sibling && event.starts_with("wake_send_ack revision=") {
                 observed_wake.store(true, Ordering::Release);
             }
+            if !event.starts_with("history_") && !event.starts_with("wake_") {
+                return;
+            }
+            let mut trace = source_trace.lock().unwrap();
+            if trace.len() == 128 {
+                trace.pop_front();
+            }
+            trace.push_back(format!("source {event}"));
+        }));
+        let target_trace = Arc::clone(&trace);
+        *target.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, event| {
+            if !event.starts_with("history_") && !event.starts_with("wake_") {
+                return;
+            }
+            let mut trace = target_trace.lock().unwrap();
+            if trace.len() == 128 {
+                trace.pop_front();
+            }
+            trace.push_back(format!("target {event}"));
         }));
         let history = tokio::spawn(Arc::clone(target).run_account_history_loop());
         let source_history = tokio::spawn(Arc::clone(source).run_account_history_loop());
@@ -1859,6 +1885,12 @@ mod tests {
         })
         .await;
         if old_history.is_err() {
+            eprintln!(
+                "initial history source={:?} target={:?} trace={:#?}",
+                source.device_sync_status(),
+                target.device_sync_status(),
+                trace.lock().unwrap()
+            );
             for task in [history, source_history, source_wake] {
                 task.abort();
                 let _ = tokio::time::timeout(Duration::from_secs(3), task)
@@ -2072,6 +2104,7 @@ mod tests {
                 .expect("history fixture owners must retire after abort");
         }
         *source.account_client_test_hook.lock().unwrap() = None;
+        *target.account_client_test_hook.lock().unwrap() = None;
         assert!(
             repaired.is_ok(),
             "history must repair an authorized ciphertext whose first receive snapshot is too new"

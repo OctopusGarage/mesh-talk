@@ -310,6 +310,9 @@ exclusive-open failures fatal rather than retrying around a live owner. The
 [cached-route restart fixture](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
 awaits both original runtimes before asserting that an offline cached route is
 not fresh presence; retirement's held-writer controls retain lease exclusion.
+Take a final prepared-view cut after admitted producers and workers join: they
+can publish views after the initial cancellation cut. Await that final cleanup;
+`Drop` must not start new storage-owning work after an awaited stop has returned.
 Direct Node fixtures must also close work admission, join their accept owners,
 drain actual admitted children/blocking captures, and consume `close_profile`
 before reopening storage. Aborting and joining only the accept-loop parent does

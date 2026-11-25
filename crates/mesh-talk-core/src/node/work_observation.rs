@@ -752,6 +752,9 @@ mod tests {
                     && row.contains("work_observation.rs")),
             "static origins survive a busy supplemental repository"
         );
+        // Cancelling the first poll does not cancel its admitted blocking
+        // metadata turn. Its real owner must retire before exclusive mutation.
+        node.runtime_work.drain().await;
         std::sync::Arc::get_mut(&mut node)
             .unwrap()
             .order_work_observation = None;

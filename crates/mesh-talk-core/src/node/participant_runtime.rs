@@ -776,6 +776,12 @@ impl ParticipantRuntime {
             let _ = retirement.await;
         }
         self.node.runtime_work.drain().await;
+        // Already-admitted producers may publish a prepared view after the
+        // initial cache take. Retire their final cut after every writer joins;
+        // Drop must not start fresh untracked storage cleanup after this barrier.
+        if let Some(retirement) = self.node.retire_prepared_sync_views() {
+            let _ = retirement.await;
+        }
     }
 }
 

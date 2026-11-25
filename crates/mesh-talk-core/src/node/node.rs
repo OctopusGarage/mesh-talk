@@ -606,18 +606,9 @@ impl Node {
             ))
         })?;
         let storage = node.storage.clone();
-        #[cfg(test)]
-        let privacy = Arc::downgrade(&node.privacy);
         drop(node);
         Arc::try_unwrap(storage)
-            .map_err(|retained| {
-                #[cfg(test)]
-                eprintln!(
-                    "retained profile owners: storage={}, privacy={}",
-                    Arc::strong_count(&retained),
-                    privacy.strong_count()
-                );
-                drop(retained);
+            .map_err(|_| {
                 LogError::Io(std::io::Error::other(
                     "profile still has retained storage work",
                 ))
