@@ -342,7 +342,10 @@ impl EventRepository {
         {
             return Err(LogError::StaleCursor);
         }
-        selection.activate()
+        selection.activate()?;
+        // Reacquiring an in-memory permit does not revive retired SQL work.
+        self.database
+            .read(|c| self.require_selection_on(c, selection))
     }
 
     /// Charge disposable IDs/scalar work, including variable checkpoint bytes.

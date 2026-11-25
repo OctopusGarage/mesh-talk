@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(
             node.distribute_channel_confirming(unknown, &[], None)
                 .now_or_never(),
-            Some(false)
+            Some(crate::node::channels::FanoutProgress::Deferred)
         );
         let sites = node
             .order_work_observation
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(
             node.distribute_channel_confirming(unknown, &[], None)
                 .now_or_never(),
-            Some(false)
+            Some(crate::node::channels::FanoutProgress::Deferred)
         );
         let capture = OwnerCapture(Mutex::new(Vec::new()));
         node.observe_order_work_with_logger(&capture);

@@ -53,11 +53,16 @@ async fn completed_receipt_scope_keeps_the_authenticated_connection_for_the_next
         .unwrap()
         .destinations[0]
         .clone();
-    assert!(
-        alice
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !alice
             .transfer_delivery_destination(&peer, &destination, destination.event.conversation_id)
             .await
-    );
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("the same authenticated stream must finish bounded payload setup");
     let control =
         super::delivery_receipt::delivery_conversation_id(&alice.identity.public(), &public);
     alice

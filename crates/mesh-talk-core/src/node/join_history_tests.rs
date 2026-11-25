@@ -895,6 +895,7 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
         .add_channel_member(channel, bob.identity.public())
         .await
         .unwrap();
+    crate::node::test_support::complete_group_fanout(&alice, channel, &[&bob]).await;
     {
         let log = alice.log.lock().unwrap();
         let events = log.events(&channel).unwrap();

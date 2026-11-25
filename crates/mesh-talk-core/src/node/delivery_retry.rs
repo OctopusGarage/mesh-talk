@@ -56,6 +56,13 @@ impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
             .get(key)
             .is_none_or(|e| e.routes != *routes || now >= e.next)
     }
+    /// Remaining lifetime of a route-qualified hint; reading never renews it.
+    pub(super) fn remaining(&self, key: &K, routes: &R, now: Instant) -> Option<Duration> {
+        self.entries
+            .get(key)
+            .filter(|entry| entry.routes == *routes && entry.next > now)
+            .map(|entry| entry.next.duration_since(now))
+    }
     pub(super) fn finished(&mut self, key: K, routes: R, progress: bool, now: Instant) {
         let failures = if progress {
             0
@@ -223,6 +230,29 @@ impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hint_remaining_qualifies_routes_and_never_renews_its_original_expiry() {
+        let mut hints = RetrySchedule::default();
+        let now = Instant::now();
+        hints.settled("event", 1, Duration::from_secs(300), now);
+        for elapsed in [0, 1, 150, 299] {
+            assert_eq!(
+                hints.remaining(&"event", &1, now + Duration::from_secs(elapsed)),
+                Some(Duration::from_secs(300 - elapsed))
+            );
+            assert_eq!(
+                hints.remaining(&"event", &2, now + Duration::from_secs(elapsed)),
+                None
+            );
+        }
+        assert_eq!(
+            hints.remaining(&"event", &1, now + Duration::from_secs(300)),
+            None
+        );
+        assert!(hints.ready(&"event", &1, now + Duration::from_secs(300)));
+        assert_eq!(hints.entries["event"].next, now + Duration::from_secs(300));
+    }
+
     #[test]
     fn local_deferral_preserves_failures_deadlines_and_exact_reservation_authority() {
         let mut retries = RetrySchedule::default();

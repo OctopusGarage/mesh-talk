@@ -592,7 +592,7 @@ async fn sticker_alias_after_chunk_reclamation_gets_exact_completion_control() {
         _ => unreachable!(),
     };
     let serving = tokio::spawn(b.clone().run_accept_loop(listener));
-    a.flush_delivery(first).await;
+    flush_sticker_offer_fixture(&a, &b, first).await;
     a.flush_file_delivery(first).await;
     assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
     assert!(
@@ -611,7 +611,7 @@ async fn sticker_alias_after_chunk_reclamation_gets_exact_completion_control() {
             &manifest,
         )
         .unwrap();
-    a.flush_delivery(second).await;
+    flush_sticker_offer_fixture(&a, &b, second).await;
     let cards = b.delivery.lock().unwrap().cards_for_file(file);
     assert_eq!(cards.len(), 2);
     let alias = cards.iter().find(|card| card.id != prior[0].id).unwrap();
@@ -667,7 +667,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
         _ => unreachable!(),
     };
     let serving = tokio::spawn(b.clone().run_accept_loop(listener));
-    a.flush_delivery(first).await;
+    flush_sticker_offer_fixture(&a, &b, first).await;
     a.flush_file_delivery(first).await;
     assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
     assert!(
@@ -689,7 +689,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
     b.media
         .store_bytes(file, manifest.v2.name.as_str(), b"corrupted cache")
         .unwrap();
-    a.flush_delivery(second).await;
+    flush_sticker_offer_fixture(&a, &b, second).await;
     let cards = b.delivery.lock().unwrap().cards_for_file(file);
     assert_eq!(cards.len(), 2);
     let alias = cards.iter().find(|card| card.id != prior[0].id).unwrap();
@@ -809,7 +809,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
             .await
             .unwrap();
         let serving = tokio::spawn(b.clone().run_accept_loop(listener));
-        a.flush_delivery(id).await;
+        flush_sticker_offer_fixture(&a, &b, id).await;
         let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
         let destination = card.destinations.first().unwrap();
         let manifest = destination.binding.event_id;
@@ -1087,7 +1087,7 @@ async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() 
             proofs.clone(),
         );
         let receiver = tokio::spawn(b.clone().run_accept_loop(bl));
-        a.flush_delivery(id).await;
+        flush_sticker_offer_fixture(&a, &b, id).await;
         assert!(b.read_media(file).is_none());
         let (demand, _) = b.pending_sticker_sources(None, 32).unwrap();
         assert_eq!(demand.len(), 1, "accepted offscreen manifest owns demand");
@@ -1572,4 +1572,43 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
             .is_none(),
         "retaining another author's ciphertext does not let this node export it as its own signed proof"
     );
+}
+
+// These exact-offer tests deliberately keep the source file worker stopped.
+// Drive only the existing message fanout until the real receiver records that
+// manifest; image/chunk assertions remain owned by each individual scenario.
+async fn flush_sticker_offer_fixture(
+    source: &Arc<Node>,
+    receiver: &Arc<Node>,
+    id: crate::eventlog::EventId,
+) {
+    let manifest = source
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(id)
+        .unwrap()
+        .destinations
+        .iter()
+        .find(|destination| destination.binding.device == receiver.identity.public())
+        .expect("the exact receiver is an admitted file destination")
+        .binding
+        .event_id;
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            source.flush_delivery(id).await;
+            if receiver
+                .delivery
+                .lock()
+                .unwrap()
+                .file_card(manifest)
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("normal bounded manifest fanout must finish before the sticker proof scenario");
 }

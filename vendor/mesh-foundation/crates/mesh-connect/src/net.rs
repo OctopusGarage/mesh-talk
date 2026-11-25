@@ -1,6 +1,5 @@
-//! Low-level socket helpers shared by the node's discovery (the CLI binary and
-//! the desktop runtime both bind the same kind of reuse UDP socket and join the
-//! discovery multicast group on every local interface).
+//! Socket helpers for multicast discovery and dual-stack peer connections.
+//! Hosts select discovery scope and schedule sends and interface refreshes.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;

@@ -2378,6 +2378,12 @@ impl Node {
                     .await
             };
             let Ok((mut channel, reused)) = dial else {
+                #[cfg(test)]
+                if let Err(error) = &dial {
+                    self.trace_account_client(&peer.public, || {
+                        format!("delivery_range_failed stage=dial error={error}")
+                    });
+                }
                 return (TransferOutcome::Failed, false);
             };
             if !self.delivery_destination_allowed(destination)
@@ -2404,7 +2410,22 @@ impl Node {
                     super::session::request_sync_turn_paged(&mut channel, &store, conversation)
                         .await;
                 self.dispatch_received_sync_work(&store);
+                #[cfg(test)]
+                self.trace_account_client(&peer.public, || match &result {
+                    Ok(outcome) => format!(
+                        "delivery_range_done message={} complete={} limited={} applied={}",
+                        conversation == destination.event.conversation_id,
+                        outcome.complete,
+                        outcome.limited,
+                        outcome.applied
+                    ),
+                    Err(error) => format!("delivery_range_failed stage=sync error={error}"),
+                });
                 let outcome = result?;
+                // This framed range turn has actually completed. Publish its
+                // measured cost before the separate Have RPC, so the existing
+                // adaptive owner can use its existing deadline ceiling in time.
+                self.observe_control_exchange(&channel, started);
                 let (complete, limited) = (outcome.complete, outcome.limited);
                 if conversation != destination.event.conversation_id {
                     return Ok((false, complete, limited));
@@ -2420,6 +2441,13 @@ impl Node {
             .await;
             match exchange {
                 Ok((held, complete, limited)) => {
+                    #[cfg(test)]
+                    self.trace_account_client(&peer.public, || {
+                        format!(
+                            "delivery_range_have message={} held={held} complete={complete} limited={limited}",
+                            conversation == destination.event.conversation_id
+                        )
+                    });
                     self.observe_control_exchange(&channel, started);
                     let held = held && self.delivery_destination_allowed(destination);
                     if let Some(ready) = receipt_ready.filter(|_| held) {
@@ -2713,7 +2741,8 @@ impl Node {
     }
 
     fn control_budget(&self, peer: &PublicIdentity) -> std::time::Duration {
-        self.routing_peer(&peer.user_id())
+        let observed = self
+            .routing_peer(&peer.user_id())
             .filter(|p| p.public == *peer)
             .map_or(CONTROL_EXCHANGE_TIMEOUT, |record| {
                 record
@@ -2728,7 +2757,16 @@ impl Node {
                     ))
                     .max()
                     .unwrap_or(CONTROL_EXCHANGE_TIMEOUT)
-            })
+            });
+        let preferred = self
+            .preferred_routes
+            .lock()
+            .expect("routes lock not poisoned")
+            .get(&peer.user_id())
+            .copied();
+        preferred.map_or(observed, |address| {
+            observed.max(self.sessions.control_timeout(peer, address))
+        })
     }
 
     pub(super) async fn adaptive_control_timeout<T>(
@@ -2821,6 +2859,8 @@ impl Node {
         // Custody qualifies one exact destination, whereas failures pace the
         // peer lane. One held event must not park another queued event.
         let mut quiet_destinations = super::delivery_retry::RetrySchedule::default();
+        // Exact-event receipt polls cannot park another message on the peer lane.
+        let mut receipt_polls = super::delivery_retry::RetrySchedule::default();
         let mut network = self.network_changes.subscribe();
         let mut roster_changes = self.subscribe_roster_changes();
         let mut roster_open = true;
@@ -2864,6 +2904,7 @@ impl Node {
                     active.clear();
                     retries.clear();
                     quiet_destinations.clear();
+                    receipt_polls.clear();
                     self.channel_recovery_notify.notify_one();
                     self.account_sync_notify.notify_one();
                     self.bridge_notify.notify_one();
@@ -2873,7 +2914,7 @@ impl Node {
                 },
                 result = controls.join_next_with_id(), if !controls.is_empty() => {
                     match result {
-                        Some(Ok((task, (key, persistence_failed, progress, observation)))) => {
+                        Some(Ok((task, (key, persistence_failed, progress, observation, fresh_hold)))) => {
                             if control_owners.finished(task).as_ref() == Some(&key)
                                 && let Some(routes) = active.remove(&key) {
                                 if matches!(key, ControlWork::Pull(_)) {
@@ -2887,15 +2928,31 @@ impl Node {
                                     self.observe_mailbox_work(reason, None);
                                 }
                                 let now = std::time::Instant::now();
-                                let input = routes.retry_routes();
-                                if let (Reconciliation::Quiet, ControlWork::Destination(event)) = (progress, &key) {
-                                    quiet_destinations.settled(
-                                        (*event, routes.peer.ed25519_pub, routes.peer.x25519_pub),
-                                        input.clone(), QUIET_REPAIR_INTERVAL, now,
-                                    );
-                                    // Release the peer after its ordinary short
-                                    // pacing turn; only this event owns quietness.
-                                    retries.settled(key.retry_key(&routes.peer), input, Duration::from_millis(500), now);
+                                // A fresh authenticated Have can finish after discovery
+                                // presence expires or unrelated demand is queued. Capture
+                                // those scheduling inputs at completion, while rejecting
+                                // any changed endpoint, relay or authorization generation.
+                                let current_routes = self.control_routes(&routes.peer);
+                                let same_route = current_routes.endpoints == routes.endpoints
+                                    && current_routes.relays == routes.relays
+                                    && current_routes.policy_generation == routes.policy_generation;
+                                let input = if fresh_hold && same_route {
+                                    current_routes.retry_routes()
+                                } else { routes.retry_routes() };
+                                if let ControlWork::Destination(event) = &key {
+                                    let hint = (*event, routes.peer.ed25519_pub, routes.peer.x25519_pub);
+                                    if fresh_hold && same_route {
+                                        receipt_polls.forget(&hint);
+                                        quiet_destinations.settled(hint, input.clone(), QUIET_REPAIR_INTERVAL, now);
+                                    }
+                                    if progress == Reconciliation::Quiet {
+                                        let delay = quiet_destinations.remaining(&hint, &input, now)
+                                            .unwrap_or(Duration::from_millis(500));
+                                        receipt_polls.settled(hint, input.clone(), delay, now);
+                                        retries.settled(key.retry_key(&routes.peer), input, Duration::from_millis(500), now);
+                                    } else {
+                                        progress.schedule(&mut retries, key.retry_key(&routes.peer), input, now);
+                                    }
                                 } else {
                                     progress.schedule(&mut retries, key.retry_key(&routes.peer), input, now);
                                 }
@@ -3014,127 +3071,143 @@ impl Node {
                         &input,
                         std::time::Instant::now(),
                     )
-                    && quiet_destinations.ready(
-                        &(
-                            destination.event_id,
-                            destination.device.ed25519_pub,
-                            destination.device.x25519_pub,
-                        ),
-                        &input,
-                        std::time::Instant::now(),
-                    )
                 {
-                    let Some(work) = self.runtime_work.admit() else {
-                        return;
-                    };
-                    let reading = self.clone();
-                    let payload = work
-                        .spawn_blocking(move || {
-                            let event = reading
-                                .log
-                                .lock()
-                                .expect("log lock not poisoned")
-                                .get(&destination.event_id)?;
-                            Ok::<_, crate::eventlog::LogError>(event.map(|event| {
-                                DeliveryDestination {
-                                    device: destination.device,
-                                    account: destination.account,
-                                    event,
-                                    receipt_eligible: destination.receipt_eligible,
+                    let hint = (
+                        destination.event_id,
+                        destination.device.ed25519_pub,
+                        destination.device.x25519_pub,
+                    );
+                    let held = quiet_destinations
+                        .remaining(&hint, &input, std::time::Instant::now())
+                        .is_some();
+                    if held
+                        && destination.receipt_eligible
+                        && receipt_polls.ready(&hint, &input, std::time::Instant::now())
+                    {
+                        let Some(work) = self.runtime_work.admit() else {
+                            return;
+                        };
+                        let node = self.clone();
+                        active.insert(key.clone(), routes);
+                        let owner = key.clone();
+                        let task = controls.spawn(work.track(async move {
+                            let progress = node.collect_destination_receipt(id, &destination).await;
+                            (key, false, progress, None, false)
+                        }));
+                        control_owners.insert(owner, task);
+                    } else if !held {
+                        let Some(work) = self.runtime_work.admit() else {
+                            return;
+                        };
+                        let reading = self.clone();
+                        let payload = work
+                            .spawn_blocking(move || {
+                                let event = reading
+                                    .log
+                                    .lock()
+                                    .expect("log lock not poisoned")
+                                    .get(&destination.event_id)?;
+                                Ok::<_, crate::eventlog::LogError>(event.map(|event| {
+                                    DeliveryDestination {
+                                        device: destination.device,
+                                        account: destination.account,
+                                        event,
+                                        receipt_eligible: destination.receipt_eligible,
+                                    }
+                                }))
+                            })
+                            .await;
+                        let destination = match payload {
+                            Ok(payload) => match payload.into_inner() {
+                                Ok(Some(destination)) => destination,
+                                Ok(None) => continue,
+                                Err(error) => {
+                                    log::warn!("delivery payload read deferred: {error}");
+                                    diagnostic.warn_if_due();
+                                    continue;
                                 }
-                            }))
-                        })
-                        .await;
-                    let destination = match payload {
-                        Ok(payload) => match payload.into_inner() {
-                            Ok(Some(destination)) => destination,
-                            Ok(None) => continue,
+                            },
                             Err(error) => {
-                                log::warn!("delivery payload read deferred: {error}");
+                                log::warn!("delivery payload worker failed: {error}");
                                 diagnostic.warn_if_due();
                                 continue;
                             }
-                        },
-                        Err(error) => {
-                            log::warn!("delivery payload worker failed: {error}");
-                            diagnostic.warn_if_due();
-                            continue;
-                        }
-                    };
-                    let Some(work) = self.runtime_work.admit() else {
-                        return;
-                    };
-                    // This attempt supersedes any earlier quiet observation,
-                    // including when it later fails or is cancelled. Returning
-                    // to an older route input must not revive the old hint.
-                    quiet_destinations.forget(&(
-                        destination.event.id,
-                        destination.device.ed25519_pub,
-                        destination.device.x25519_pub,
-                    ));
-                    let node = self.clone();
-                    // Capture the exact admitted attempt before spawning. A
-                    // cancelled task may never be polled; it still owns cleanup,
-                    // and cannot publish a new hint after its parent is dropped.
-                    let attempt = ObservationAttempt {
-                        node: node.clone(),
-                        token: node.begin_delivery_observation(id, &destination),
-                    };
-                    active.insert(key.clone(), routes);
-                    let owner = key.clone();
-                    let task = controls.spawn(work.track(async move {
-                        // Move the entire Drop owner into the future. Capturing
-                        // only its Copy token would drop the guard at admission.
-                        let mut attempt = attempt;
-                        let live = node
-                            .delivery
-                            .lock()
-                            .expect("delivery lock not poisoned")
-                            .contains_destination(id, destination.event.id);
-                        let (progress, reason, continuation) = if live {
-                            node.retry_one_destination_outcome(
-                                &destination,
-                                DeliveryAttemptContext::RetainedRecovery,
-                            )
-                            .await
-                        } else {
-                            (false, None, TransferContinuation::None)
                         };
-                        let (failed, advanced) = if progress {
-                            let mut store =
-                                node.delivery.lock().expect("delivery lock not poisoned");
-                            let failed = store.completed_work(id).is_some()
-                                && store.retire_destination(id, destination.event.id).is_err();
-                            // An unchanged positive remote-have proof is storage
-                            // evidence, not new queue progress. Keep awaiting the
-                            // recipient's receipt with the existing bounded backoff.
-                            let advanced =
-                                !failed && !store.contains_destination(id, destination.event.id);
-                            (failed, advanced)
-                        } else {
-                            (false, false)
+                        let Some(work) = self.runtime_work.admit() else {
+                            return;
                         };
-                        let reconciliation = if failed {
-                            Reconciliation::Deferred
-                        } else if advanced {
-                            Reconciliation::Advanced
-                        } else if continuation == TransferContinuation::More {
-                            Reconciliation::More
-                        } else if continuation == TransferContinuation::Limited {
-                            Reconciliation::Limited
-                        } else if progress {
-                            // Positive custody with an unchanged queue is an
-                            // observed success, not a failed delivery attempt.
-                            // Keep Awaiting until the recipient's real receipt;
-                            // new demand and changed routes retain their wakes.
-                            Reconciliation::Quiet
-                        } else {
-                            Reconciliation::Deferred
+                        // This attempt supersedes any earlier quiet observation,
+                        // including when it later fails or is cancelled. Returning
+                        // to an older route input must not revive the old hint.
+                        quiet_destinations.forget(&(
+                            destination.event.id,
+                            destination.device.ed25519_pub,
+                            destination.device.x25519_pub,
+                        ));
+                        let node = self.clone();
+                        // Capture the exact admitted attempt before spawning. A
+                        // cancelled task may never be polled; it still owns cleanup,
+                        // and cannot publish a new hint after its parent is dropped.
+                        let attempt = ObservationAttempt {
+                            node: node.clone(),
+                            token: node.begin_delivery_observation(id, &destination),
                         };
-                        let observation = attempt.token.take().map(|token| (token, reason));
-                        (key, failed, reconciliation, observation)
-                    }));
-                    control_owners.insert(owner, task);
+                        active.insert(key.clone(), routes);
+                        let owner = key.clone();
+                        let task = controls.spawn(work.track(async move {
+                            // Move the entire Drop owner into the future. Capturing
+                            // only its Copy token would drop the guard at admission.
+                            let mut attempt = attempt;
+                            let live = node
+                                .delivery
+                                .lock()
+                                .expect("delivery lock not poisoned")
+                                .contains_destination(id, destination.event.id);
+                            let (progress, reason, continuation) = if live {
+                                node.retry_one_destination_outcome(
+                                    &destination,
+                                    DeliveryAttemptContext::RetainedRecovery,
+                                )
+                                .await
+                            } else {
+                                (false, None, TransferContinuation::None)
+                            };
+                            let (failed, advanced) = if progress {
+                                let mut store =
+                                    node.delivery.lock().expect("delivery lock not poisoned");
+                                let failed = store.completed_work(id).is_some()
+                                    && store.retire_destination(id, destination.event.id).is_err();
+                                // An unchanged positive remote-have proof is storage
+                                // evidence, not new queue progress. Keep awaiting the
+                                // recipient's receipt with the existing bounded backoff.
+                                let advanced = !failed
+                                    && !store.contains_destination(id, destination.event.id);
+                                (failed, advanced)
+                            } else {
+                                (false, false)
+                            };
+                            let reconciliation = if failed {
+                                Reconciliation::Deferred
+                            } else if advanced {
+                                Reconciliation::Advanced
+                            } else if continuation == TransferContinuation::More {
+                                Reconciliation::More
+                            } else if continuation == TransferContinuation::Limited {
+                                Reconciliation::Limited
+                            } else if progress {
+                                // Positive custody with an unchanged queue is an
+                                // observed success, not a failed delivery attempt.
+                                // Keep Awaiting until the recipient's real receipt;
+                                // new demand and changed routes retain their wakes.
+                                Reconciliation::Quiet
+                            } else {
+                                Reconciliation::Deferred
+                            };
+                            let observation = attempt.token.take().map(|token| (token, reason));
+                            (key, failed, reconciliation, observation, progress)
+                        }));
+                        control_owners.insert(owner, task);
+                    }
                 }
             }
             if let Some(receipt) = receipt {
@@ -3176,6 +3249,7 @@ impl Node {
                             failed,
                             Reconciliation::receipt_result(progress, failed, continuation),
                             None,
+                            false,
                         )
                     }));
                     control_owners.insert(owner, task);
@@ -3257,7 +3331,7 @@ impl Node {
                     let owner = key.clone();
                     let task = controls.spawn(work.track(async move {
                         let progress = node.reconcile_delivery_peer(&peer).await;
-                        (key, false, progress, None)
+                        (key, false, progress, None, false)
                     }));
                     control_owners.insert(owner, task);
                 }
@@ -3455,6 +3529,131 @@ impl Node {
         (held, reason)
     }
 
+    /// A fresh storage hint changes scheduling only. A real signed receipt is
+    /// still required to retire the exact pending destination.
+    async fn collect_destination_receipt(
+        self: &Arc<Self>,
+        logical: EventId,
+        destination: &super::delivery_store::DeliveryReference,
+    ) -> Reconciliation {
+        let current = || {
+            !self.delivery_suspended.load(Ordering::Acquire)
+                && self.known_account_allowed(&destination.device)
+                && self
+                    .historical_author(&destination.device.ed25519_pub)
+                    .is_some_and(|proof| {
+                        proof.public() == destination.device
+                            && (destination.account.is_none()
+                                || proof.account_id() == destination.account)
+                    })
+                && self
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned")
+                    .contains_destination(logical, destination.event_id)
+        };
+        if !current() {
+            return Reconciliation::Deferred;
+        }
+        let Some(peer) = self
+            .routing_peer(&destination.device.user_id())
+            .filter(|peer| {
+                peer.public == destination.device
+                    && (destination.account.is_none() || peer.account_id == destination.account)
+            })
+        else {
+            return Reconciliation::Deferred;
+        };
+        let control = super::delivery_receipt::delivery_conversation_id(
+            &self.identity.public(),
+            &destination.device,
+        );
+        let exchange = self.adaptive_control_timeout(&peer.public, async {
+            for fresh in [false, true] {
+                let started = std::time::Instant::now();
+                let admission = super::session_pool::AuthenticationAdmission::RouteProgress;
+                let dial = if fresh {
+                    self.privacy_dial_with_admission(peer.addr, &peer.public, admission)
+                        .await
+                        .map(|channel| (channel, false))
+                } else {
+                    self.privacy_sync_dial_with_admission(peer.addr, &peer.public, admission)
+                        .await
+                };
+                let (mut channel, reused) = dial.map_err(SessionError::from)?;
+                if !current()
+                    || channel.peer_announcement().is_some_and(|proof| {
+                        destination.account.is_some() && proof.account_id() != destination.account
+                    })
+                {
+                    return Err(SessionError::UnexpectedMessage);
+                }
+                // Receipt publication has its own owner. This collector only
+                // pulls the pairwise control scope; it never reopens DM history.
+                let store = self.pull_sync_store(channel.peer_identity());
+                let _reception = self
+                    .request_reception_scope(&store, &channel)
+                    .ok_or(SessionError::UnexpectedMessage)?;
+                let received = store.lock().expect("sync store lock").reception_notify();
+                for tick in 0..4 {
+                let result = {
+                    let turn =
+                        super::session::request_sync_turn_paged(&mut channel, &store, control);
+                    tokio::pin!(turn);
+                    loop {
+                        tokio::select! {
+                            result = &mut turn => break result,
+                            _ = received.notified() => { self.dispatch_received_sync_work(&store); }
+                        }
+                    }
+                };
+                self.dispatch_received_sync_work(&store);
+                match result {
+                    Ok(outcome) => {
+                        self.observe_control_exchange(&channel, started);
+                        if current() && !outcome.complete && !outcome.limited && tick + 1 < 4 {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            continue;
+                        }
+                        self.recycle_sync_channel(channel);
+                        return Ok(if !current() {
+                            Reconciliation::Advanced
+                        } else if outcome.limited {
+                            Reconciliation::Limited
+                        } else if !outcome.complete {
+                            Reconciliation::More
+                        } else {
+                            Reconciliation::Quiet
+                        });
+                    }
+                    Err(error) if reused && super::session_pool::retryable_sync_error(&error) => break,
+                    Err(error) => {
+                        #[cfg(test)]
+                        self.trace_account_client(&peer.public, || {
+                            format!("receipt_collect_failed error={error}")
+                        });
+                        return Err(error);
+                    }
+                }
+                }
+            }
+            Err(SessionError::UnexpectedMessage)
+        });
+        tokio::pin!(exchange);
+        loop {
+            let changed = self.delivery_status_notify.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !current() {
+                return Reconciliation::Advanced;
+            }
+            tokio::select! {
+                result = &mut exchange => return result.and_then(Result::ok).unwrap_or(Reconciliation::Deferred),
+                _ = &mut changed => {},
+            }
+        }
+    }
+
     async fn retry_one_destination_outcome(
         self: &Arc<Self>,
         destination: &DeliveryDestination,
@@ -3520,7 +3719,7 @@ impl Node {
                                     destination,
                                     destination.event.conversation_id,
                                     super::session_pool::AuthenticationAdmission::RouteProgress,
-                                    Some(&receipt_ready),
+                                    (!independent_receipts).then_some(&receipt_ready),
                                 )
                                 .await;
                             self.emit_new_messages(destination.event.conversation_id);
@@ -3561,24 +3760,21 @@ impl Node {
                             // by this one deadline/cancellation boundary and
                             // the shared TCP capacity. Only receipt validation
                             // may retire this exact destination as delivered.
-                            let (held, followed) = tokio::join!(Box::pin(messages), async {
-                                receipts().await;
-                                receipt_ready.notify_one();
-                            })
-                            .0;
-                            if held
-                                && !followed
-                                && self
-                                    .delivery
-                                    .lock()
-                                    .expect("delivery lock not poisoned")
-                                    .contains_work_event(destination.event.id)
-                            {
-                                // The early independent control round can finish
-                                // empty before this first send creates a receipt.
-                                // Preserve the existing post-send control pull
-                                // inside this same bounded owner.
-                                receipts().await;
+                            tokio::pin!(messages);
+                            let early = receipts();
+                            tokio::pin!(early);
+                            let held = tokio::select! {
+                                result = &mut messages => {
+                                    if !result.0 { early.await; }
+                                    result.0
+                                }
+                                _ = &mut early => messages.await.0,
+                            };
+                            // Positive Have finishes the original-message phase.
+                            // The same bounded destination lane collects receipts
+                            // separately without reading/resending its ciphertext.
+                            if held {
+                                direct_more.store(true, Ordering::Release);
                             }
                             held
                         } else {
@@ -5356,13 +5552,33 @@ mod diagnostic_tests {
         let sending = Arc::clone(&sender);
         let task = controls.spawn(async move {
             let _attempt = attempt;
-            sending
+            let held = sending
                 .retry_one_destination_with_reason(
                     &destination,
                     super::DeliveryAttemptContext::RetainedRecovery,
                 )
                 .await
-                .0
+                .0;
+            if held {
+                let reference = super::super::delivery_store::DeliveryReference {
+                    device: destination.device.clone(),
+                    account: destination.account.clone(),
+                    event_id: destination.event.id,
+                    receipt_eligible: destination.receipt_eligible,
+                };
+                // Preserve this exact task/observation while driving the new
+                // receipt phase. No repeat original scope or source rescue.
+                while sending.delivery_status(logical) != Some(super::DeliveryStatus::Delivered) {
+                    let progress = sending
+                        .collect_destination_receipt(logical, &reference)
+                        .await;
+                    if progress != super::Reconciliation::More {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+            held
         });
         let healthy_task = task.id();
         owners.insert(healthy.clone(), task);
@@ -6692,19 +6908,24 @@ mod requester_reception_tests {
             let receiving = target.clone();
             target.replace_verified_dm_pull_peers(vec![source_proof.user_id.clone()]);
             let request = tokio::spawn(async move {
-                match mode {
-                    0 => {
-                        receiving
-                            .transfer_delivery_destination(&peer, &destination, conversation)
-                            .await
-                    }
-                    1 => receiving.deliver_direct(&peer, conversation).await.is_ok(),
-                    _ => {
-                        receiving
-                            .pull_delivery_scope(&source_proof, conversation, false)
-                            .await
-                            != Reconciliation::Deferred
-                    }
+                loop {
+                    match mode {
+                        0 => {
+                            receiving
+                                .transfer_delivery_destination(&peer, &destination, conversation)
+                                .await
+                        }
+                        1 => receiving.deliver_direct(&peer, conversation).await.is_ok(),
+                        _ => {
+                            receiving
+                                .pull_delivery_scope(&source_proof, conversation, false)
+                                .await
+                                != Reconciliation::Deferred
+                        }
+                    };
+                    // The cancellation boundary is actual ciphertext admission,
+                    // not the completion of one possibly deferred range turn.
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
             });
             tokio::time::timeout(std::time::Duration::from_secs(5), ready)
@@ -6764,6 +6985,36 @@ mod requester_reception_tests {
 #[cfg(test)]
 mod bounded_sync_retry_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn control_budget_includes_the_authenticated_preferred_fallback() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let route = "127.0.0.1:42".parse().unwrap();
+        let before = node.control_budget(&peer.public());
+        node.preferred_routes
+            .lock()
+            .unwrap()
+            .insert(peer.user_id(), route);
+        node.sessions
+            .control_succeeded(&peer.public(), route, std::time::Duration::from_secs(12));
+        let measured = node.sessions.control_timeout(&peer.public(), route);
+        assert!(measured > before);
+        assert_eq!(node.control_budget(&peer.public()), measured);
+        assert!(measured <= super::super::route_timing::MAX_CONTROL_DEADLINE);
+    }
+
     #[test]
     fn limited_sync_parks_without_claiming_quiet_or_delivery() {
         let now = std::time::Instant::now();

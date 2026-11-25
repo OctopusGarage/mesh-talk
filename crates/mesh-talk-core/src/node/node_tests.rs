@@ -1385,6 +1385,7 @@ async fn auto_enrolls_certified_sibling_with_owner_signed_invitation() {
         .await
         .unwrap();
     assert!(alice.auto_enroll_one_channel_sibling().await.unwrap());
+    crate::node::test_support::complete_group_fanout(&alice, channel, &[&bob, &sibling]).await;
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             if sibling
@@ -2902,11 +2903,12 @@ async fn two_nodes_exchange_a_dm_over_loopback_tcp() {
     // Bob's listener (ephemeral loopback port).
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bob_addr = listener.local_addr().unwrap();
+    let alice_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_port = alice_listener.local_addr().unwrap().port();
 
-    // Rosters: Alice knows Bob (at his real listen port); Bob knows Alice
-    // (any port — Bob never dials Alice; he just needs her key to decrypt).
+    // Both live runtime owners use each peer's actual listener and identity.
     let alice_roster = seed_roster(&bob, "Bob", bob_addr.port(), &alice_uid);
-    let bob_roster = seed_roster(&alice, "Alice", 4000, &bob_uid);
+    let bob_roster = seed_roster(&alice, "Alice", alice_port, &bob_uid);
 
     let dir = tempfile::tempdir().unwrap();
     let (alice_tx, _alice_rx) = mpsc::unbounded_channel();
@@ -2943,8 +2945,20 @@ async fn two_nodes_exchange_a_dm_over_loopback_tcp() {
         "a direct incoming DM must not require a verified pull contact"
     );
 
-    // Bob accepts and serves connections.
-    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+    // A bounded best-effort send can retain preparation/continuation work.
+    // Both applications therefore own their real serving and delivery loops.
+    let mut alice_host = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        alice_node.clone(),
+        alice_listener,
+    )
+    .await;
+    let mut bob_host = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        bob_node.clone(),
+        listener,
+    )
+    .await;
+    alice_host.launch();
+    bob_host.launch();
 
     // Alice sends Bob a DM.
     alice_node
@@ -2953,9 +2967,18 @@ async fn two_nodes_exchange_a_dm_over_loopback_tcp() {
         .expect("send_dm");
 
     // Bob surfaces the decrypted DM (bounded wait).
-    let received = tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
-        .await
-        .expect("bob received a dm within 5s")
+    let received = tokio::time::timeout(Duration::from_secs(5), bob_rx.recv()).await;
+    alice_host.stop().await;
+    bob_host.stop().await;
+    let received = received.unwrap_or_else(|error| {
+            let conversation = dm_conversation_id(
+                &alice_node.identity.public(), &bob_node.identity.public(),
+            );
+            let sender_events = alice_node.log.lock().unwrap().conversation_len(&conversation);
+            let receiver_events = bob_node.log.lock().unwrap().conversation_len(&conversation);
+            let receiver_rows = bob_node.received.lock().unwrap().entries(&conversation).len();
+            panic!("bob received a dm within 5s: {error}; sender_events={sender_events:?}; receiver_events={receiver_events:?}; receiver_rows={receiver_rows}");
+        })
         .expect("incoming channel open");
     assert_eq!(received.from, alice_uid);
     assert_eq!(received.from_name, "Alice");
@@ -3818,6 +3841,7 @@ async fn channel_custody_post_office_observation_survives_sibling_sync_without_r
         )
         .await
         .unwrap();
+    crate::node::test_support::complete_group_fanout(&source, channel, &[&sibling]).await;
     assert!(
         sibling
             .list_channels()
@@ -4859,6 +4883,9 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
     .unwrap();
 
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+    // Ordinary wire acceptance requires the same retained outgoing owner as
+    // the app. This fixture does not assert delivery from one bounded turn.
+    let source_runtime = start_outgoing_wire_fixture(alice_node.clone()).await;
 
     let channel = alice_node
         .create_channel("general", vec![bob_pub])
@@ -4952,6 +4979,7 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
         "a rejected transfer must not report success"
     );
     assert_eq!(alice_node.channel_owner(channel), owner);
+    source_runtime.stop().await;
 }
 
 // Every spawned fixture task is cancelled on assertion failure as well as normal cleanup.
@@ -5005,6 +5033,8 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
     let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
     let (slow_node, _slow_rx) = open(slow, Arc::new(Mutex::new(Roster::default())), "slow");
     let (fast_node, mut fast_rx) = open(fast, Arc::new(Mutex::new(Roster::default())), "fast");
+    crate::node::test_support::trace_sync_failures(&alice_node, "fault source");
+    crate::node::test_support::trace_sync_failures(&fast_node, "fault healthy");
     let mut owned_tasks = AbortStalledFixtureTasks(Vec::new());
     let slow_task = tokio::spawn(Arc::clone(&slow_node).run_accept_loop(slow_listener));
     owned_tasks.0.push(slow_task.abort_handle());
@@ -5017,6 +5047,12 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
         )
         .await
         .unwrap();
+    crate::node::test_support::complete_group_fanout(
+        &alice_node,
+        channel,
+        &[&slow_node, &fast_node],
+    )
+    .await;
 
     // Reserve a distinct real endpoint while the preparation listener is still bound.
     // The new signed route cannot reuse a preparation-phase cached connection.
@@ -5131,6 +5167,8 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
     let (alice_node, mut alice_rx) = open(alice, alice_roster, "alice");
     let (slow_node, _slow_rx) = open(slow, Arc::new(Mutex::new(Roster::default())), "slow");
     let (fast_node, _fast_rx) = open(fast, Arc::new(Mutex::new(Roster::default())), "fast");
+    crate::node::test_support::trace_sync_failures(&alice_node, "fault source");
+    crate::node::test_support::trace_sync_failures(&fast_node, "fault healthy");
     let mut owned_tasks = AbortStalledFixtureTasks(Vec::new());
     let slow_task = tokio::spawn(Arc::clone(&slow_node).run_accept_loop(slow_listener));
     owned_tasks.0.push(slow_task.abort_handle());
@@ -5143,6 +5181,12 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
         )
         .await
         .unwrap();
+    crate::node::test_support::complete_group_fanout(
+        &alice_node,
+        channel,
+        &[&slow_node, &fast_node],
+    )
+    .await;
 
     // Both post-setup routes are fresh: no retained preparation socket may bypass
     // either the stalled handshake or the healthy peer's real admission gate.
@@ -5198,9 +5242,38 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
         .send_channel_message(channel, b"recover promptly")
         .await
         .unwrap();
+    let expected = fast_node
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .unwrap()
+        .iter()
+        .rfind(|event| {
+            event.kind == EventKind::Message
+                && event.author.ed25519_pub() == &fast_node.identity.public().ed25519_pub
+        })
+        .expect("the real recovery source retained its signed message")
+        .id;
     let recovery = tokio::spawn({
         let node = Arc::clone(&alice_node);
-        async move { node.pull_one_channel_from_member(0).await }
+        async move {
+            loop {
+                node.pull_one_channel_from_member(0).await;
+                node.await_channel_metadata(channel).await.unwrap();
+                node.process_channel_reception(channel, "catch_up");
+                if node.received.lock().unwrap().processed(expected).unwrap()
+                    || !node
+                        .channel_recovery_pending
+                        .lock()
+                        .unwrap()
+                        .remove(&channel)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
     });
     owned_tasks.0.push(recovery.abort_handle());
     let contacted = tokio::time::timeout(Duration::from_secs(5), accepted_rx).await;
@@ -5284,6 +5357,12 @@ async fn channel_member_recovers_missed_message_from_peer() {
         .create_channel("general", vec![bob_pub, carol_pub.clone()])
         .await
         .unwrap();
+    crate::node::test_support::complete_group_fanout(
+        &alice_node,
+        channel,
+        &[&bob_node, &carol_node],
+    )
+    .await;
     assert!(
         carol_node
             .list_channels()
@@ -5303,6 +5382,28 @@ async fn channel_member_recovers_missed_message_from_peer() {
         .await
         .unwrap();
     let sent_id = alice_node.channel_history(channel, 10).unwrap()[0].id;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while alice_node.channel_custody_count(channel, sent_id).unwrap() != Some(1)
+            || bob_node
+                .log
+                .lock()
+                .unwrap()
+                .get(&sent_id)
+                .unwrap()
+                .is_none()
+        {
+            alice_node
+                .distribute_channel_confirming(
+                    channel,
+                    &[bob_node.identity.public()],
+                    Some(sent_id),
+                )
+                .await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("Bob must retain the exact original before the author goes offline");
     assert_eq!(
         alice_node.channel_custody_count(channel, sent_id).unwrap(),
         Some(1)
@@ -5765,12 +5866,19 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
     let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
     let (bob_node, _bob_rx) = open(bob, bob_roster, "bob");
     let (dana_node, mut dana_rx) = open(dana, dana_roster, "dana");
+    crate::node::test_support::trace_sync_failures(&bob_node, "relay Bob");
+    crate::node::test_support::trace_sync_failures(&dana_node, "relay Dana");
     let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
     let dana_task = tokio::spawn(Arc::clone(&dana_node).run_accept_loop(dana_listener));
 
     let mut members = vec![bob_pub, dana_pub];
     members.extend(extra);
     let channel = alice_node.create_channel("relay", members).await.unwrap();
+    crate::node::test_support::complete_group_fanout(&alice_node, channel, &[&bob_node]).await;
+    assert!(
+        alice_node.routing_peer(&dana_node.user_id()).is_none(),
+        "membership setup must preserve the missing author-to-Dana route"
+    );
     tokio::time::timeout(Duration::from_secs(8), async {
         while !dana_node
             .list_channels()
@@ -5788,6 +5896,9 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
         .send_channel_message(channel, b"via Bob")
         .await
         .unwrap();
+    // The bare source has no recovery owner: finish its actual Alice-to-Bob
+    // bounded send before testing Bob's independent forwarding to Dana.
+    crate::node::test_support::complete_group_fanout(&alice_node, channel, &[&bob_node]).await;
     let forwarded = tokio::time::timeout(Duration::from_secs(8), dana_rx.recv())
         .await
         .expect("Bob forwarded the message to Dana")
@@ -6141,6 +6252,8 @@ async fn channel_sending_survives_restart() {
     )
     .unwrap();
 
+    let restarted_runtime = start_outgoing_wire_fixture(alice_node2.clone()).await;
+
     // Same-epoch send AFTER restart. Bob (still running, first-wins on Alice's
     // existing chain) must decrypt it — proving Alice resumed her SAME chain.
     alice_node2
@@ -6165,6 +6278,7 @@ async fn channel_sending_survives_restart() {
         .await
         .unwrap();
     bob_node.close_profile().unwrap();
+    restarted_runtime.stop().await;
     alice_node2.close_profile().unwrap();
 }
 
@@ -6291,6 +6405,22 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         "an invitee cannot own the channel before accepting"
     );
     assert_eq!(alice_node.channel_owner(channel), alice_uid);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !bob_node
+            .channel_history_policy(channel)
+            .is_ok_and(|policy| policy == crate::channel::HistoryPolicy::Off)
+            || !bob_node
+                .channels
+                .lock()
+                .unwrap()
+                .state(&channel)
+                .is_some_and(|state| state.pending_invite())
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the real pending invitation and Off policy must reach Bob before accepting");
     bob_node.accept_channel_invite(channel).await.unwrap();
     alice_node
         .send_channel_message(channel, b"epoch0 msg")
@@ -6703,6 +6833,9 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
     .unwrap();
 
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+    // Ordinary wire acceptance requires the same retained outgoing owner as
+    // the app. This fixture does not assert delivery from one bounded turn.
+    let source_runtime = start_outgoing_wire_fixture(alice_node.clone()).await;
 
     let channel = alice_node
         .create_channel("general", vec![bob_pub])
@@ -6786,6 +6919,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
     })
     .await
     .expect("the receiver must attempt the failing durable write");
+    source_runtime.pause().await;
     assert!(b_ch_r.try_recv().is_err());
     assert_eq!(bob_node.channel_history(channel, 10).unwrap().len(), 2);
     bob_node
@@ -6814,6 +6948,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .unwrap()
         .fail_appends_for_test(true)
         .unwrap();
+    let erase_source = start_outgoing_wire_fixture(alice_node.clone()).await;
     alice_node
         .send_channel_message(channel, b"erase before retry")
         .await
@@ -6825,6 +6960,16 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .find(|entry| entry.text == b"erase before retry")
         .unwrap()
         .id;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while bob_node.log.lock().unwrap().get(&erased).unwrap().is_none()
+            || !bob_node.channel_plaintext_retry_pending_for_test(channel)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the exact erase target must hit the real failed receiver write");
+    erase_source.pause().await;
     bob_node
         .received
         .lock()
@@ -6853,10 +6998,28 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .unwrap()
         .fail_appends_for_test(true)
         .unwrap();
+    let prune_source = start_outgoing_wire_fixture(alice_node.clone()).await;
     alice_node
         .send_channel_message(channel, b"prune before retry")
         .await
         .unwrap();
+    let pruned = alice_node
+        .channel_history(channel, 10)
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.text == b"prune before retry")
+        .unwrap()
+        .id;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while bob_node.log.lock().unwrap().get(&pruned).unwrap().is_none()
+            || !bob_node.channel_plaintext_retry_pending_for_test(channel)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the exact prune target must hit the real failed receiver write");
+    prune_source.pause().await;
     bob_node
         .received
         .lock()
@@ -6922,6 +7085,9 @@ async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
     .unwrap();
 
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+    // Ordinary wire acceptance requires the same retained outgoing owner as
+    // the app. This fixture does not assert delivery from one bounded turn.
+    let source_runtime = start_outgoing_wire_fixture(alice_node.clone()).await;
 
     let channel = alice_node
         .create_channel("general", vec![bob_pub])
@@ -6988,6 +7154,7 @@ async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
             .expect("channel is listed");
         assert_eq!(summary.name, "renamed");
     }
+    source_runtime.stop().await;
 }
 
 #[tokio::test]
@@ -7202,22 +7369,48 @@ async fn owner_dissolution_syncs_to_member_over_loopback() {
     )
     .unwrap();
     tokio::spawn(Arc::clone(&member).run_accept_loop(listener));
+    let source_runtime = start_outgoing_wire_fixture(owner.clone()).await;
 
     let channel = owner
         .create_channel("general", vec![bob_public])
         .await
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !member
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == channel)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the original member must observe its real membership before the non-owner check");
     assert!(matches!(
         member.dissolve_channel(channel).await,
         Err(NodeError::Channel(_))
     ));
     owner.dissolve_channel(channel).await.unwrap();
     assert!(owner.list_channels().unwrap()[0].dissolved);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !member
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == channel && row.dissolved)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the original owner dissolution must propagate to the member");
     assert!(member.list_channels().unwrap()[0].dissolved);
     assert!(matches!(
         member.send_channel_message(channel, b"late").await,
         Err(NodeError::Channel(_))
     ));
+    source_runtime.stop().await;
 }
 
 // A sent/received IMAGE is persisted to the durable chat-media store and is readable from
@@ -8282,6 +8475,7 @@ async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_memb
         .create_channel("Photos", vec![bob_public])
         .await
         .unwrap();
+    crate::node::test_support::complete_group_fanout(&sender, channel, &[&recipient]).await;
     let relay = DeviceIdentity::generate();
     let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     roster.lock().unwrap().update(
@@ -8585,6 +8779,12 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
         .send_file_channel(channel, &source, crate::file::FileKind::File)
         .await
         .unwrap();
+    crate::node::test_support::complete_group_fanout(
+        &alice_node,
+        channel,
+        &[&bob_node, &carol_node],
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(5), async {
         // Bare inbound servers retain the cut but do not run its bounded
         // metadata and reception owners. Keep preparation inside the budget.
@@ -8640,6 +8840,7 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
         .send_file_channel(channel, &source, crate::file::FileKind::File)
         .await
         .unwrap();
+    crate::node::test_support::complete_group_fanout(&alice_node, channel, &[&bob_node]).await;
     assert!(carol_rx.try_recv().is_err());
     alice_task.abort();
     alice_task.await.unwrap_err();
@@ -8662,10 +8863,16 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
     );
     carol_node.pull_one_channel_from_member(0).await;
     let recovered_card = tokio::time::timeout(Duration::from_secs(5), async {
-        carol_node.await_channel_metadata(channel).await.unwrap();
-        carol_node.process_channel(channel);
-        carol_node.process_file_events_reception(channel, "catch_up");
-        carol_rx.recv().await.unwrap()
+        loop {
+            carol_node.await_channel_metadata(channel).await.unwrap();
+            carol_node.process_channel(channel);
+            carol_node.process_file_events_reception(channel, "catch_up");
+            if let Ok(card) = carol_rx.try_recv() {
+                break card;
+            }
+            carol_node.pull_one_channel_from_member(0).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     })
     .await
     .unwrap();
@@ -9230,6 +9437,9 @@ async fn dm_messages_are_forward_secret_over_the_ratchet() {
     .unwrap();
 
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+    // Ordinary wire acceptance requires the same retained outgoing owner as
+    // the app. This fixture does not assert delivery from one bounded turn.
+    let source_runtime = start_outgoing_wire_fixture(alice_node.clone()).await;
 
     // Alice sends two DMs; Bob receives both via the ratchet.
     alice_node.send_dm(&bob_uid, b"first").await.unwrap();
@@ -9344,6 +9554,7 @@ async fn dm_messages_are_forward_secret_over_the_ratchet() {
         dhist.iter().map(|e| e.text.clone()).collect::<Vec<_>>(),
         vec![b"m0".to_vec(), b"m1".to_vec(), b"m2".to_vec()]
     );
+    source_runtime.stop().await;
 }
 
 /// Seed `roster` with `peer` advertised under `account`, reachable at `port`.
@@ -9421,6 +9632,9 @@ async fn send_to_account_delivers_to_a_peer_account_over_loopback() {
     .unwrap();
 
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    // Ordinary wire acceptance requires the same retained outgoing owner as
+    // the app. This fixture does not assert delivery from one bounded turn.
+    let source_runtime = start_outgoing_wire_fixture(alice_node.clone()).await;
 
     alice_node
         .send_to_account(&bob_acct.account_id(), b"hi account", None)
@@ -9454,6 +9668,7 @@ async fn send_to_account_delivers_to_a_peer_account_over_loopback() {
     assert_eq!(a_hist.len(), 1);
     assert!(a_hist[0].from_me);
     assert_eq!(a_hist[0].text, b"hi account");
+    source_runtime.stop().await;
 }
 
 /// Two-node ACCOUNT recall over the wire: the sender recalls their own account message and
@@ -10089,6 +10304,9 @@ async fn send_to_account_self_syncs_to_own_other_device() {
 
     tokio::spawn(Arc::clone(&a2_node).run_accept_loop(a2_listener));
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    // Ordinary wire acceptance requires the same retained outgoing owner as
+    // the app. This fixture does not assert delivery from one bounded turn.
+    let source_runtime = start_outgoing_wire_fixture(a1_node.clone()).await;
 
     a1_node
         .send_to_account(&bob_acct.account_id(), b"to bob", None)
@@ -10152,6 +10370,7 @@ async fn send_to_account_self_syncs_to_own_other_device() {
         "note-to-self must dedupe to exactly one copy on the sibling device"
     );
     assert_eq!(a2_self[0].text, b"note to self");
+    source_runtime.stop().await;
 }
 
 #[tokio::test]
@@ -11827,6 +12046,9 @@ async fn send_file_to_account_delivers_to_a_peer_account() {
     .unwrap();
 
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    // Ordinary wire acceptance requires the same retained outgoing owner as
+    // the app. This fixture does not assert delivery from one bounded turn.
+    let source_runtime = start_outgoing_wire_fixture(alice_node.clone()).await;
 
     let file = dir.path().join("hello.txt");
     std::fs::write(&file, b"account file payload").unwrap();
@@ -11872,6 +12094,7 @@ async fn send_file_to_account_delivers_to_a_peer_account() {
             .unwrap(),
         Some(crate::file::AnyManifest::V4(_))
     ));
+    source_runtime.stop().await;
 }
 
 #[tokio::test]
@@ -15964,4 +16187,17 @@ fn known_profile_callback_progresses_behind_blocked_other_conversation() {
                 .unwrap()
         );
     }
+}
+
+/// A normal outgoing Node owns its bounded continuations after API acceptance.
+/// Fault/partition/held-source fixtures deliberately do not call this helper.
+async fn start_outgoing_wire_fixture(
+    node: Arc<Node>,
+) -> crate::node::test_support::IndependentPeerRuntime {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut runtime =
+        crate::node::test_support::IndependentPeerRuntime::start_multithreaded(node, listener)
+            .await;
+    runtime.launch();
+    runtime
 }

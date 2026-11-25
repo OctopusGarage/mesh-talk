@@ -263,16 +263,19 @@ async fn clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances()
         }
     });
     let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        let empty = receiver.reconcile_delivery_peer(&source_proof).await;
+        let empty = settle_delivery_pull_fixture(&receiver, &source_proof).await;
         let target = receiver.account_id();
         let id = source
             .enqueue_to_account(&target, b"new data after a quiet pull", None)
             .await
             .unwrap();
         assert!(received.try_recv().is_err());
-        let advanced = receiver.reconcile_delivery_peer(&source_proof).await;
-        let message = received.try_recv().unwrap();
-        let quiet = receiver.reconcile_delivery_peer(&source_proof).await;
+        let advanced = settle_delivery_pull_fixture(&receiver, &source_proof).await;
+        let message = received
+            .recv()
+            .await
+            .expect("the admitted raw message must finish its real reception owner");
+        let quiet = settle_delivery_pull_fixture(&receiver, &source_proof).await;
         let relay = DeviceIdentity::generate();
         let relay_proof = Announce::new_post_office_with_account(
             &relay,
@@ -290,7 +293,7 @@ async fn clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances()
         // A clean direct replay cannot relabel that skipped relay as quiet.
         receiver.record_relay_attempt(&relay_proof.public(), false);
         assert!(!receiver.relay_retry_due(&relay_proof.public()));
-        let cooling = receiver.reconcile_delivery_peer(&source_proof).await;
+        let cooling = settle_delivery_pull_fixture(&receiver, &source_proof).await;
         (empty, advanced, quiet, cooling, id, message.message_id)
     })
     .await;
@@ -11734,6 +11737,10 @@ async fn delayed_route_delivery_with_budget(
         Announce::new_with_account(&bob, &bob_account, "Bob", old.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     let (b, mut incoming) = node(bd.path(), bob, bob_account, &ap);
+    if recipient_inbound_only {
+        super::test_support::trace_sync_failures(&a, "slow sender");
+        super::test_support::trace_sync_failures(&b, "slow recipient");
+    }
     a.configure_privacy(
         ad.path(),
         "pw",
@@ -13856,8 +13863,8 @@ async fn authenticated_receipt_retirement(before_discovery: bool) {
     };
     let reconciling = async {
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let first = a.reconcile_delivery_peer(&bp).await;
-            let second = a.reconcile_delivery_peer(&bp).await;
+            let first = settle_delivery_pull_fixture(&a, &bp).await;
+            let second = settle_delivery_pull_fixture(&a, &bp).await;
             (first, second, pending().len(), opens.load(Ordering::SeqCst))
         })
         .await;
@@ -14071,4 +14078,19 @@ async fn authenticated_receipt_retirement_cancelled_delivery_does_not_qualify() 
         None,
         "receipt processing must not resurrect an erased/cancelled delivery"
     );
+}
+
+// Explicit pull fixtures own each bounded continuation themselves. Real runtime
+// acceptance tests retain their actual scheduling owners instead of using this.
+async fn settle_delivery_pull_fixture(
+    node: &Arc<Node>,
+    proof: &Announce,
+) -> super::delivery_runtime::Reconciliation {
+    loop {
+        let result = node.reconcile_delivery_peer(proof).await;
+        if result != super::delivery_runtime::Reconciliation::More {
+            return result;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }

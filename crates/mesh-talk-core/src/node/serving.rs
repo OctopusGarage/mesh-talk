@@ -854,6 +854,12 @@ impl Node {
                         accepted.is_ok()
                     )
                 });
+                #[cfg(test)]
+                if let Err(error) = &accepted {
+                    node.trace_account_client(&node.identity.public(), || {
+                        format!("history_wire_failed outcome=admission error={error}")
+                    });
+                }
                 if let Ok(channel) = accepted {
                     Box::pin(node.serve_connection_with_capacity(channel, Some(capacity))).await;
                 }
@@ -1161,6 +1167,15 @@ impl Node {
         .await;
         self.dispatch_received_sync_work(&store);
         if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
+            #[cfg(test)]
+            if let Ok(Err(error)) = &result {
+                self.trace_account_client(channel.peer_identity(), || {
+                    format!(
+                        "history_wire_failed outcome=error frame={:02x?} error={error}",
+                        first.get(..4)
+                    )
+                });
+            }
             range_state.retire(&store);
             recent_state.retire(&store);
             return;
@@ -1169,11 +1184,17 @@ impl Node {
             if is_relay && !self.relay_allowed(channel.peer_identity()) {
                 break;
             }
+            #[cfg(test)]
+            let mut frame_tag = [0_u8; 4];
             let result = tokio::time::timeout(SERVE_IDLE_TIMEOUT, async {
                 let bytes = match channel.recv().await {
                     Ok(bytes) => bytes,
                     Err(_) => return Ok(Served::Closed),
                 };
+                #[cfg(test)]
+                if let Some(tag) = bytes.get(..4) {
+                    frame_tag.copy_from_slice(tag);
+                }
                 if let Some(result) = Box::pin(super::session::recent_history::serve(
                     &mut channel,
                     &store,
@@ -1200,6 +1221,14 @@ impl Node {
             .await;
             self.dispatch_received_sync_work(&store);
             if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
+                #[cfg(test)]
+                if let Ok(Err(error)) = &result {
+                    self.trace_account_client(channel.peer_identity(), || {
+                        format!(
+                            "history_wire_failed outcome=error frame={frame_tag:02x?} error={error}"
+                        )
+                    });
+                }
                 break; // peer closed, error, or idle past the timeout
             }
         }

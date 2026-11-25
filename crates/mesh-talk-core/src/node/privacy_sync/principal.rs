@@ -154,7 +154,9 @@ impl Preparation {
         if self.selection.is_none() {
             return false;
         }
-        self.reload = true;
+        // Committed SQL selections remain readable without their reducers.
+        // Partial preparation and failed saves still require checkpoint reload.
+        self.reload = !self.ready();
         self.principal = None;
         self.policy_scopes = None;
         self.active = None;
@@ -1394,5 +1396,263 @@ impl Preparation {
             capabilities(&mut self.metadata, header.kind);
         }
         Ok(self.advance())
+    }
+}
+
+#[cfg(test)]
+mod parking_tests {
+    use super::*;
+    use crate::{
+        eventlog::sync::range::RangeProgress,
+        identity::{account::Account, device::DeviceIdentity},
+    };
+
+    #[tokio::test]
+    async fn parked_complete_range_keeps_readiness_but_failed_save_does_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation =
+            crate::node::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+        let owner = node.sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        store.bind_session_peer(&peer.public());
+        // Warm only real metadata; capture the measured view after that source
+        // qualification exists, so parking cannot hide behind a cold stamp.
+        let warm = store.open_view(&conversation).unwrap();
+        let mut ready = false;
+        for _ in 0..128 {
+            if store
+                .prepare_view_step(&warm, PreparationBudget::default())
+                .unwrap()
+                .ready
+            {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready);
+        drop(warm);
+        let view = store.open_view(&conversation).unwrap();
+        ready = false;
+        for _ in 0..128 {
+            if matches!(
+                store.range_prepare(&view).unwrap(),
+                RangeProgress::Ready { .. }
+            ) {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready && store.reusable_view(&view).unwrap());
+        assert!(store.retain_range_view(view).unwrap().is_none());
+        let view = store
+            .take_custody_view(&conversation)
+            .unwrap()
+            .expect("range owner retained");
+        assert!(
+            store.reusable_view(&view).unwrap(),
+            "parking a committed complete selection must preserve read-only readiness"
+        );
+        let saved = {
+            let preparation = view.preparation.lock().unwrap();
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .selection_progress(preparation.selection().unwrap(), &view.repository)
+                .unwrap()
+                .unwrap()
+        };
+        let step = store
+            .prepare_view_step(&view, PreparationBudget::default())
+            .unwrap();
+        assert!(step.ready && step.rows == 0 && step.edges == 0 && step.bytes == 0);
+        {
+            let mut preparation = view.preparation.lock().unwrap();
+            assert_eq!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .selection_progress(preparation.selection().unwrap(), &view.repository)
+                    .unwrap()
+                    .unwrap(),
+                saved,
+                "a ready parked query cannot overwrite its persisted resume capsule with dropped reducers"
+            );
+            preparation.restore_history_owner(&store, &view).unwrap();
+            assert!(
+                preparation.principal.is_some(),
+                "the actual classified owner must remain restorable for a later append"
+            );
+            preparation.park_range();
+        }
+        // Real SQL save failure must fence an in-memory Ready phase. Parking
+        // may discard reducers, but cannot certify an uncommitted checkpoint.
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER test_park_failed_progress BEFORE UPDATE ON participant_work.participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected parked progress failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            view.preparation
+                .lock()
+                .unwrap()
+                .save_history_progress(&store, &view)
+                .is_err()
+        );
+        assert!(!store.reusable_view(&view).unwrap());
+        assert!(store.retain_range_view(view).unwrap().is_none());
+        let view = store
+            .take_custody_view(&conversation)
+            .unwrap()
+            .expect("failed owner remains retryable");
+        assert!(
+            !store.reusable_view(&view).unwrap(),
+            "a failed save remains unready across parking"
+        );
+        node.storage
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER test_park_failed_progress")?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn small_dm_range_preparation_finishes_without_phase_only_network_turns() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation =
+            crate::node::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+        node.append_event_with_profile_parent(
+            conversation,
+            crate::eventlog::EventKind::Message,
+            vec![7],
+            None,
+        )
+        .unwrap();
+        let owner = node.sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        store.bind_session_peer(&peer.public());
+        let view = store.open_view(&conversation).unwrap();
+        let mut count = None;
+        for _ in 0..2 {
+            match store.range_prepare(&view).unwrap() {
+                RangeProgress::Ready {
+                    count: selected, ..
+                } => {
+                    count = Some(selected);
+                    break;
+                }
+                RangeProgress::More => {}
+                RangeProgress::Unsupported => {
+                    panic!("an authorized direct source supports bounded ranges")
+                }
+            }
+        }
+        assert_eq!(
+            count,
+            Some(1),
+            "a one-record source must not require phase-only network continuations while its original work allowance remains"
+        );
+    }
+    #[tokio::test]
+    async fn requested_export_keeps_one_allowance_across_preparation_stages() {
+        use crate::eventlog::sync::network::{ExportPageBudget, RequestedExportStatus};
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation =
+            crate::node::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+        let mut target = None;
+        for _ in 0..17 {
+            target = Some(
+                node.append_event_with_profile_parent(
+                    conversation,
+                    crate::eventlog::EventKind::Message,
+                    vec![7],
+                    None,
+                )
+                .unwrap()
+                .1,
+            );
+        }
+        let target = target.unwrap();
+        let owner = node.sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        store.bind_session_peer(&peer.public());
+        let view = store.open_view(&conversation).unwrap();
+        let budget = PreparationBudget {
+            rows: 8,
+            edges: 16,
+            bytes: 64 * 1024,
+        };
+        let mut complete = false;
+        for _ in 0..256 {
+            let response = store
+                .requested_export(
+                    &view,
+                    &[target],
+                    ExportPageBudget {
+                        examined: 1,
+                        events: 1,
+                        encoded_bytes: 64 * 1024,
+                        allocated_bytes: 256 * 1024,
+                    },
+                    budget,
+                )
+                .unwrap();
+            assert!(
+                response.work.rows <= budget.rows
+                    && response.work.edges <= budget.edges
+                    && response.work.bytes <= budget.bytes,
+                "completed preparation phases must share the caller's original total allowance"
+            );
+            match response.status {
+                RequestedExportStatus::Preparing => assert!(response.events.is_empty()),
+                RequestedExportStatus::Unsupported => {
+                    panic!("authorized direct export must be supported")
+                }
+                RequestedExportStatus::More => {}
+                RequestedExportStatus::Complete => {
+                    assert_eq!(
+                        response
+                            .events
+                            .iter()
+                            .map(|event| event.id)
+                            .collect::<Vec<_>>(),
+                        vec![target]
+                    );
+                    complete = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            complete,
+            "small bounded stages must eventually prepare the exact requested event"
+        );
     }
 }

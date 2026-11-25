@@ -62,6 +62,7 @@ pub(in crate::node) struct GuardedSyncStore<'a> {
     use_node_preparation: bool,
     received_work: std::collections::HashSet<ConversationId>,
     track_reception: bool,
+    received_notify: std::sync::Arc<tokio::sync::Notify>,
 }
 // Field order keeps the actual SQL retirement alive until its work permit ends.
 struct PreparedViewsRetirement {
@@ -78,6 +79,11 @@ impl GuardedSyncStore<'_> {
     #[cfg(test)]
     pub(in crate::node) fn take_received_work(&mut self) -> bool {
         !self.take_received_conversations().is_empty()
+    }
+
+    /// Coalesced wake from durable admission, without a timer or a log scan.
+    pub(in crate::node) fn reception_notify(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.received_notify.clone()
     }
 
     pub(in crate::node) fn take_received_conversations(
@@ -164,6 +170,7 @@ impl Node {
             use_node_preparation: false,
             track_reception: false,
             received_work: Default::default(),
+            received_notify: Default::default(),
         })
     }
     pub(in crate::node) fn pull_sync_store(
@@ -182,6 +189,7 @@ impl Node {
             use_node_preparation: false,
             track_reception: false,
             received_work: Default::default(),
+            received_notify: Default::default(),
         })
     }
 
@@ -201,6 +209,7 @@ impl Node {
             use_node_preparation: false,
             track_reception: true,
             received_work: Default::default(),
+            received_notify: Default::default(),
         })
     }
 
@@ -688,6 +697,7 @@ impl GuardedSyncStore<'_> {
                 self.denied = true;
             } else if self.track_reception {
                 self.received_work.insert(conversation);
+                self.received_notify.notify_one();
             }
             return Some(result);
         }
@@ -1883,6 +1893,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         // above remains connection-local until its approved atomic commit.
         if result.is_ok() && self.track_reception {
             self.received_work.insert(conversation);
+            self.received_notify.notify_one();
         }
         result
     }

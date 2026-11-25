@@ -92,12 +92,13 @@ pub(in crate::node) async fn serve<S: NetworkSyncStore, IO: AsyncRead + AsyncWri
     {
         let stored = {
             let source = store.lock().expect("store lock");
-            source.validate_view(view)?;
-            let stored = if state.token.is_some() {
-                source.durable_have_in_view(view, &conversation, &event_id)?
-            } else {
-                false
-            };
+            // A token describes an earlier range root, not readiness or current
+            // exact custody. Resumed preparation and later appends must use the
+            // independent prepared responder without retiring this continuation.
+            if !source.reusable_view(view)? {
+                return Ok(None);
+            }
+            let stored = source.durable_have_in_view(view, &conversation, &event_id)?;
             source.validate_view(view)?;
             stored
         };
@@ -432,11 +433,24 @@ pub(in crate::node) async fn request<S: NetworkSyncStore, IO: AsyncRead + AsyncW
         512 * 1024,
     )
     .await;
-    let ordered_active = store
-        .lock()
-        .expect("store lock")
-        .range_checkpoint(&view)?
-        .is_some_and(|checkpoint| checkpoint.ordered_cursor().is_some());
+    let ordered_active = {
+        let source = store.lock().expect("store lock");
+        match source.range_checkpoint(&view) {
+            Ok(checkpoint) => {
+                checkpoint.is_some_and(|checkpoint| checkpoint.ordered_cursor().is_some())
+            }
+            Err(crate::eventlog::LogError::StaleCursor) if matches!(&forward, Ok(Turn::More(report)) if report.applied > 0) =>
+            {
+                // Accepted controls can invalidate our own captured authority.
+                // Discard that derived view and requalify next turn; its
+                // accepted reception work must not become a socket failure.
+                drop(source);
+                drop(store.lock().expect("store lock").retain_range_view(view));
+                return forward;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     drop(store.lock().expect("store lock").retain_range_view(view));
     let forward = forward?;
     let reverse_required = store.lock().expect("store lock").range_reverse_required();
@@ -472,10 +486,24 @@ pub(in crate::node) async fn request<S: NetworkSyncStore, IO: AsyncRead + AsyncW
         } => (token, revision),
         _ => {
             service.retire(store);
-            return Ok(match forward {
-                Turn::Complete(report) | Turn::More(report) => Turn::More(report),
-                Turn::Limited(report) => Turn::Limited(report),
-                Turn::Unsupported => Turn::Unsupported,
+            let status = match &forward {
+                Turn::Complete(_) => 1,
+                Turn::Limited(_) => 2,
+                _ => 0,
+            };
+            channel
+                .send(&[b"MRF1".as_slice(), conversation.as_bytes(), &[status]].concat())
+                .await?;
+            if channel.recv().await? != [b"MRA1".as_slice(), conversation.as_bytes()].concat() {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            return Ok(match (ready, forward) {
+                (RangeProgress::Unsupported, Turn::Complete(report) | Turn::More(report)) => {
+                    Turn::Limited(report)
+                }
+                (_, Turn::Complete(report) | Turn::More(report)) => Turn::More(report),
+                (_, Turn::Limited(report)) => Turn::Limited(report),
+                (_, Turn::Unsupported) => Turn::Unsupported,
             });
         }
     };
@@ -635,6 +663,9 @@ async fn request_ready<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
                 }
                 result
             })?;
+        if applied_view_invalidated(&*source, view, &report)? {
+            return Ok(Turn::More(report));
+        }
         if checkpoint.ordered_is_warm() && report.applied > 0 {
             checkpoint.acknowledge_ordered_page(response.next, true);
         } else if !missing_parents.is_empty() {
@@ -741,6 +772,9 @@ async fn request_ready<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
                     }
                     result
                 })?;
+            if applied_view_invalidated(&*source, view, &report)? {
+                return Ok(Turn::More(report));
+            }
         }
         if !missing_parents.is_empty() && allow_ordered {
             checkpoint.begin_ordered_repair_with_anchors(&missing_parents);
@@ -772,6 +806,24 @@ async fn request_ready<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
         Ok(Turn::Limited(report))
     } else {
         Ok(Turn::More(report))
+    }
+}
+
+/// An accepted batch can change principal controls. This is unfinished work,
+/// never a completed comparison, and the old cursor must not be retained.
+/// Staleness before admission or without any accepted record remains an error.
+fn applied_view_invalidated<S: NetworkSyncStore>(
+    source: &S,
+    view: &S::View,
+    report: &ApplyReport,
+) -> Result<bool, SessionError> {
+    if report.applied == 0 {
+        return Ok(false);
+    }
+    match source.validate_view(view) {
+        Ok(()) => Ok(false),
+        Err(crate::eventlog::LogError::StaleCursor) => Ok(true),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1033,6 +1085,40 @@ mod production_tests {
                 "the next fresh pooled snapshot must include concurrent appends"
             );
         }
+        // Accepted owner controls invalidate the receiver's captured principal
+        // view. The pooled protocol must yield/requalify, not close its socket
+        // or pretend that this now-obsolete comparison completed.
+        left.rename_channel(group, "Range production renamed")
+            .await
+            .unwrap();
+        let rename = left
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == EventKind::ChannelRename)
+            .expect("real owner rename");
+        complete = false;
+        for _ in 0..8192 {
+            if matches!(
+                request(&mut channel, &store, group).await.unwrap(),
+                Turn::Complete(_)
+            ) {
+                complete = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            complete,
+            "an accepted control must requalify and converge on the same stream"
+        );
+        assert_eq!(
+            right.log.lock().unwrap().get(&rename.id).unwrap(),
+            Some(rename)
+        );
         drop(store);
         drop(channel);
         task.await.unwrap();
@@ -1185,5 +1271,188 @@ mod ordered_wire_tests {
         page.complete = true;
         page.next = -2;
         assert!(validate_ordered_records(&page, scope, [2; 32], -1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod account_delivery_tests {
+    use super::*;
+    use crate::{
+        discovery::Announce,
+        identity::{account::Account, device::DeviceIdentity},
+    };
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn account_dm_range_turns_deliver_without_collecting_fallback() {
+        account_dm_range_fixture(false).await;
+    }
+
+    #[tokio::test]
+    async fn account_dm_range_continuation_survives_interleaved_exact_custody() {
+        account_dm_range_fixture(true).await;
+    }
+
+    async fn account_dm_range_fixture(interleave_custody: bool) {
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let sender_account = Account::generate();
+        let receiver_account = Account::generate();
+        let ap = Announce::new_with_account(&a, &sender_account, "sender", 9);
+        let bp = Announce::new_with_account(&b, &receiver_account, "receiver", 9);
+        let (sender, _, _) =
+            crate::node::test_support::node_with_files(dirs[0].path(), a, sender_account, &bp);
+        let (receiver, _, _) =
+            crate::node::test_support::node_with_files(dirs[1].path(), b, receiver_account, &ap);
+        sender.cached_peer_snapshot_async().await.unwrap();
+        receiver.cached_peer_snapshot_async().await.unwrap();
+        sender
+            .send_to_account(&receiver.account_id(), b"bounded account DM", None)
+            .await
+            .unwrap();
+        let scope = crate::node::conversation::dm_conversation_id(
+            &sender.identity.public(),
+            &receiver.identity.public(),
+        );
+        let events = sender.log.lock().unwrap().events(&scope).unwrap();
+        assert_eq!(events.len(), 1);
+        let id = events[0].id;
+        let (a, b) = tokio::io::duplex(256 * 1024);
+        let server = Arc::clone(&receiver);
+        let task = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &server.identity).await.unwrap();
+            let store = server.serve_sync_store(channel.peer_identity());
+            let mut service = Service::default();
+            while let Ok(bytes) = channel.recv().await {
+                if serve(&mut channel, &store, &mut service, &bytes)
+                    .await
+                    .unwrap()
+                    .is_none()
+                {
+                    assert!(
+                        matches!(decode(&bytes), Ok(SyncWire::DurableHaveRequest { .. })),
+                        "account delivery must not fall back to collecting history"
+                    );
+                    serve_wire_bytes_paged(&mut channel, &store, &bytes)
+                        .await
+                        .unwrap();
+                }
+            }
+            service.retire(&store);
+        });
+        let mut channel =
+            SecureChannel::connect(a, &sender.identity, Some(&receiver.identity.public()))
+                .await
+                .unwrap();
+        let store = sender.sync_store(channel.peer_identity());
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for _ in 0..128 {
+                match request(&mut channel, &store, scope).await? {
+                    Turn::Complete(_) => return Ok::<(), SessionError>(()),
+                    Turn::More(_) => {
+                        if interleave_custody {
+                            request_durable_have(&mut channel, scope, id).await?;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    _ => panic!("one authorized message must fit the range budget"),
+                }
+            }
+            panic!("bounded account delivery must finish its finite cut");
+        })
+        .await;
+        drop(channel);
+        task.await.unwrap();
+        outcome.unwrap().unwrap();
+        assert!(
+            receiver.log.lock().unwrap().get(&id).unwrap().is_some(),
+            "a completed two-way turn must transfer the sender's exact DM"
+        );
+    }
+}
+
+#[cfg(test)]
+mod custody_readiness_tests {
+    use super::*;
+    use crate::eventlog::Event;
+    use crate::{
+        discovery::Announce,
+        identity::{account::Account, device::DeviceIdentity},
+    };
+
+    #[tokio::test]
+    async fn stale_range_token_does_not_qualify_unprepared_exact_custody() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "peer", 9);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation =
+            crate::node::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+        let event = Event::new(
+            &peer,
+            conversation,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![7],
+        );
+        let id = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        let store = node.serve_sync_store(&peer.public());
+        let view = {
+            let mut source = store.lock().unwrap();
+            source.bind_session_peer(&peer.public());
+            source.open_view(&conversation).unwrap()
+        };
+        // A token can outlive readiness when a retained range resumes work.
+        // It certifies a previous range root, not the current preparation state.
+        let mut state = Service {
+            view: Some((conversation, view)),
+            token: Some([7; 32]),
+            ..Default::default()
+        };
+        let (a, b) = tokio::io::duplex(65536);
+        let node_public = node.identity.public();
+        let (client, server) = tokio::join!(
+            SecureChannel::connect(a, &peer, Some(&node_public)),
+            SecureChannel::accept(b, &node.identity),
+        );
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+        let range_state = &mut state;
+        let serving_store = &store;
+        let (held, served) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                request_durable_have(&mut client, conversation, id),
+                async move {
+                    let bytes = server.recv().await?;
+                    match serve(&mut server, serving_store, range_state, &bytes).await? {
+                        Some(served) => Ok::<_, SessionError>(served),
+                        None => serve_wire_bytes_paged(&mut server, serving_store, &bytes).await,
+                    }
+                }
+            )
+        })
+        .await
+        .expect("exact custody must finish without draining the range service");
+        served.expect("an old range token must not expose an unfinished selection");
+        assert!(
+            held.unwrap(),
+            "fresh prepared authority must qualify the retained exact message"
+        );
+        assert!(
+            state.view.is_some(),
+            "independent custody must preserve range continuation ownership"
+        );
+        state.retire(&store);
     }
 }

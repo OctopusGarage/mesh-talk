@@ -58,8 +58,8 @@ impl IndexedRelayState {
             .query_row([], |r| r.get(0))?;
         let (epoch, revision): (i64, i64) = c.prepare_cached("SELECT destructive_epoch,revision FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![RELAY_EVENTS.0.as_slice(),conv.as_bytes().as_slice()], |r| Ok((r.get(0)?,r.get(1)?))).optional()?.unwrap_or((0,0));
         let after: i64 = c
-            .prepare_cached("SELECT next_commit FROM event_domains WHERE domain=?1")?
-            .query_row([RELAY_EVENTS.0.as_slice()], |r| r.get(0))?;
+            .prepare_cached("SELECT coalesce(max(commit_ordinal)+1,0) FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2")?
+            .query_row(params![RELAY_EVENTS.0.as_slice(), conv.as_bytes().as_slice()], |r| r.get(0))?;
         if epoch < 0 || revision < 0 || after < 0 {
             return Err(invalid("negative mailbox checkpoint authority"));
         }

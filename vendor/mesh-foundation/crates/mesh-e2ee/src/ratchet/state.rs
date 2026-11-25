@@ -59,8 +59,8 @@ impl Header {
     }
 }
 
-/// A Double Ratchet session's state (one peer). In-memory for now (durable storage
-/// is a later plan).
+/// One peer's Double Ratchet state. Hosts securely persist serialized state and
+/// atomically commit accepted plaintext with the corresponding receive state.
 pub struct RatchetState {
     dhs_secret: StaticSecret, // our current ratchet private key
     dhs_public: PublicKey,    // our current ratchet public key

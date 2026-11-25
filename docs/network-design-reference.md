@@ -2913,6 +2913,18 @@ without weakening privacy, erasure or authority invalidation. History uploads
 retain their existing binding/refresh lifecycle, including dormant upload caches;
 they do not inherit this ordinary exchange lease.
 
+Retained range selections can still be partially prepared. Cache checkout
+requalifies ownership and authority; it does not certify readiness. Compatibility
+rounds and exact-custody responses enter through the backend's prepared-view
+operation, which resumes cached preparation under the same validation,
+yielding and cancellation rules used for fresh views. Bounded rounds retain
+their preparation limit and unfinished continuation; they do not acquire an
+unbounded fallback by reusing a cached selection. An active range token also
+describes only its issued root: direct exact-custody handling reuses that view
+only after readiness and the current source/authority stamp are qualified.
+Otherwise the query uses the prepared responder, preserving the separate range
+continuation instead of fabricating a negative answer or closing the stream.
+
 Direct participant fingerprint probes consult the existing bounded projection
 metadata cache before constructing a historical selection. Paged summaries are
 qualified by the exact current history stamp, including source, identity,
@@ -3992,3 +4004,11 @@ Periodic discovery, lease refresh and anti-entropy remain required recovery path
 Regression evidence belongs to owning unit/loopback suites and validation contracts.
 Native cross-platform lifecycle and large-workload throughput acceptance remain
 separate from mocked browser behavior and local focused test results.
+
+A range turn may admit a valid owner control that invalidates its own captured
+principal view. After actual record admission, stop using that view, discard its
+old derived checkpoint and return unfinished progress for fresh qualification.
+Do not close a healthy framed stream or acknowledge the obsolete comparison as
+complete. Staleness before admission, staleness with no admitted record, and
+non-staleness storage failures retain their explicit error paths. No invalidated
+view may serve further exports or publish a retained cursor.

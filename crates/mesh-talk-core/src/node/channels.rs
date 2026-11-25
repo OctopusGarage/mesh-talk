@@ -15,7 +15,7 @@ use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
 use crate::node::channel::seal_keys_for;
-use crate::node::session::{request_durable_have, request_range_round_paged as request_round};
+use crate::node::session::request_durable_have;
 use futures_util::future::join_all;
 use futures_util::stream::{self, StreamExt};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -26,6 +26,10 @@ use tokio::sync::Notify;
 /// Limit one background recovery tick even when routes are stale or a peer stalls.
 const CHANNEL_RECOVERY_PEERS_PER_TICK: usize = 3;
 const CHANNEL_RECOVERY_PEER_TIMEOUT: Duration = Duration::from_secs(15);
+// One stalled peer must not delay another peer's clean range continuation.
+// Each child retains the existing whole-attempt deadline, protocol turn limits
+// and 500ms fair cadence; a finite batch hands unfinished work back to its owner.
+const CHANNEL_FANOUT_PEER_TURNS: usize = 4;
 const CHANNEL_RECOVERY_INTERVAL: Duration = Duration::from_secs(3);
 const CHANNEL_RECOVERY_WAKE_BATCH: usize = 8;
 const CHANNEL_RECOVERY_MAX_INTERVAL: Duration = Duration::from_secs(60);
@@ -173,11 +177,12 @@ struct ChannelControlReplay {
     upper: Option<[u8; 32]>,
     after: Option<[u8; 32]>,
     resweep: bool,
-    failed: BTreeSet<[u8; 32]>,
+    pending: BTreeSet<[u8; 32]>,
     retrying: bool,
     quiet: bool,
     at: tokio::time::Instant,
     backoff: ChannelRecoveryBackoff,
+    pending_progress: FanoutProgress,
 }
 impl ChannelControlReplay {
     fn new() -> Self {
@@ -186,11 +191,19 @@ impl ChannelControlReplay {
             upper: None,
             after: None,
             resweep: false,
-            failed: BTreeSet::new(),
+            pending: BTreeSet::new(),
             retrying: false,
             quiet: false,
             at: tokio::time::Instant::now(),
             backoff: ChannelRecoveryBackoff::default(),
+            pending_progress: FanoutProgress::Complete,
+        }
+    }
+    fn pending_delay(&mut self) -> Duration {
+        match self.pending_progress {
+            FanoutProgress::More => Duration::from_millis(500),
+            FanoutProgress::Limited => CHANNEL_RECOVERY_QUIET_INTERVAL,
+            _ => self.backoff.next_delay(0),
         }
     }
     fn invalidate(&mut self) {
@@ -256,6 +269,49 @@ impl ChannelControlInputs {
 struct ChannelDistributionOutcome {
     deferred: bool,
     failed: bool,
+    more: bool,
+    limited: bool,
+}
+
+/// Completion belongs to the original journal owner across bounded turns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::node) enum FanoutProgress {
+    Complete,
+    More,
+    Limited,
+    Deferred,
+}
+
+impl FanoutProgress {
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Deferred, _) | (_, Self::Deferred) => Self::Deferred,
+            (Self::More, _) | (_, Self::More) => Self::More,
+            (Self::Limited, _) | (_, Self::Limited) => Self::Limited,
+            _ => Self::Complete,
+        }
+    }
+}
+
+impl ChannelDistributionOutcome {
+    fn progress(&self) -> FanoutProgress {
+        if self.deferred {
+            FanoutProgress::Deferred
+        } else if self.more {
+            FanoutProgress::More
+        } else if self.limited {
+            FanoutProgress::Limited
+        } else {
+            FanoutProgress::Complete
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ChannelSyncTurn {
+    bytes: u64,
+    complete: bool,
+    limited: bool,
 }
 
 const SMALL_CHANNEL_MEMBER_LIMIT: usize = 5;
@@ -1226,8 +1282,9 @@ impl Node {
 
     async fn replay_channel_controls_turn(self: &Arc<Self>, replay: &mut ChannelControlReplay) {
         if !replay.active {
+            replay.pending_progress = FanoutProgress::Complete;
             replay.upper = if replay.retrying {
-                replay.failed.last().copied()
+                replay.pending.last().copied()
             } else {
                 self.channels
                     .lock()
@@ -1243,7 +1300,7 @@ impl Node {
                 if replay.retrying {
                     use std::ops::Bound::{Excluded, Included, Unbounded};
                     let mut rows = replay
-                        .failed
+                        .pending
                         .range((replay.after.map_or(Unbounded, Excluded), Included(upper)));
                     let ids: Vec<_> = rows.by_ref().take(32).copied().collect();
                     let more = rows.next().is_some();
@@ -1277,7 +1334,7 @@ impl Node {
                 .pending_control_state(channel, &self.user_id())
                 .is_none()
             {
-                replay.failed.remove(channel.as_bytes());
+                replay.pending.remove(channel.as_bytes());
                 continue;
             }
             // One preparation/distribution per owner turn. Unvisited book rows
@@ -1285,7 +1342,8 @@ impl Node {
             more |= offset + 1 < page_len;
             if let Err(error) = self.await_channel_metadata(channel).await {
                 log::warn!("channel replay preparation deferred: {error}");
-                replay.failed.insert(*channel.as_bytes());
+                replay.pending.insert(*channel.as_bytes());
+                replay.pending_progress = FanoutProgress::Deferred;
                 break;
             }
             let members = self
@@ -1298,17 +1356,23 @@ impl Node {
                 let outcome = self
                     .distribute_channel_targets_outcome(channel, &members, None, true, None)
                     .await;
-                if outcome.failed || outcome.deferred {
-                    replay.failed.insert(*channel.as_bytes());
+                let progress = if outcome.failed {
+                    FanoutProgress::Deferred
                 } else {
-                    replay.failed.remove(channel.as_bytes());
+                    outcome.progress()
+                };
+                replay.pending_progress = replay.pending_progress.combine(progress);
+                if progress != FanoutProgress::Complete {
+                    replay.pending.insert(*channel.as_bytes());
+                } else {
+                    replay.pending.remove(channel.as_bytes());
                 }
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
                     format!("channel_control_retry_distributed {channel:?}")
                 });
             } else {
-                replay.failed.remove(channel.as_bytes());
+                replay.pending.remove(channel.as_bytes());
             }
             break;
         }
@@ -1323,9 +1387,9 @@ impl Node {
             replay.retrying = false;
             replay.at = tokio::time::Instant::now();
             replay.quiet = false;
-        } else if !replay.failed.is_empty() {
+        } else if !replay.pending.is_empty() {
             replay.retrying = true;
-            replay.at = tokio::time::Instant::now() + replay.backoff.next_delay(0);
+            replay.at = tokio::time::Instant::now() + replay.pending_delay();
             replay.quiet = false;
         } else {
             replay.retrying = false;
@@ -2906,14 +2970,10 @@ impl Node {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let own = self.user_id();
             let mut controls = std::collections::HashMap::new();
-            for (id, members) in book
-                .pending_departures(&own)
-                .into_iter()
-                .chain(book.pending_acceptances(&own))
-                .chain(book.pending_transfers(&own))
-                .chain(book.pending_replica_preferences(&own))
-            {
-                controls.insert(id, members);
+            for id in book.channel_ids() {
+                if let Some(members) = book.pending_control_members(id, &own) {
+                    controls.insert(id, members);
+                }
             }
             for channel in released {
                 if let Some(state) = book.state(&channel) {
@@ -3148,16 +3208,17 @@ impl Node {
         channel: ConversationId,
         members: &'a [PublicIdentity],
         event: Option<EventId>,
-    ) -> impl std::future::Future<Output = bool> + Send + 'a {
+    ) -> impl std::future::Future<Output = FanoutProgress> + Send + 'a {
         let origin = std::panic::Location::caller();
         async move {
             self.observe_distribution_origin(origin, true);
             if let Err(error) = self.await_channel_metadata(channel).await {
                 log::warn!("accepted channel control preparation deferred: {error}");
-                return false;
+                return FanoutProgress::Deferred;
             }
-            self.distribute_channel_targets(channel, members, None, true, event)
+            self.distribute_channel_targets_outcome(channel, members, None, true, event)
                 .await
+                .progress()
         }
     }
 
@@ -3571,9 +3632,24 @@ impl Node {
         event_id: EventId,
         peer: &PeerRecord,
     ) -> u64 {
-        self.sync_and_confirm_custody_admitted(channel, event_id, peer)
-            .await
-            .unwrap_or(0)
+        let mut bytes = 0u64;
+        for tick in 0..CHANNEL_FANOUT_PEER_TURNS {
+            let Ok(turn) = self
+                .sync_and_confirm_custody_admitted(channel, event_id, peer)
+                .await
+            else {
+                break;
+            };
+            bytes = bytes.saturating_add(turn.bytes);
+            if turn.complete || turn.limited {
+                break;
+            }
+            self.schedule_channel_recovery(channel);
+            if tick + 1 < CHANNEL_FANOUT_PEER_TURNS {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        bytes
     }
 
     async fn sync_and_confirm_custody_admitted(
@@ -3581,15 +3657,33 @@ impl Node {
         channel: ConversationId,
         event_id: EventId,
         peer: &PeerRecord,
-    ) -> Result<u64, super::session::SessionError> {
+    ) -> Result<ChannelSyncTurn, super::session::SessionError> {
         let mut conn = self.privacy_sync_dial(peer.addr, &peer.public).await?;
         let before = conn.sent_frame_bytes();
         let store = self.sync_store(conn.peer_identity());
         let _reception = self
             .request_reception_scope(&store, &conn)
             .ok_or(crate::transport::TransportError::AdmissionDenied)?;
-        let round = request_round(&mut conn, &store, channel).await;
+        let round = super::session::request_sync_turn_paged(&mut conn, &store, channel).await;
         self.dispatch_received_sync_work(&store);
+        if let Ok(outcome) = &round
+            && !outcome.complete
+        {
+            // A bounded turn is not a failed exchange or proof about one exact
+            // message. Retire its captured view before asking for fresh custody.
+            let bytes = conn.sent_frame_bytes().saturating_sub(before);
+            let continue_history = !outcome.limited;
+            drop(_reception);
+            drop(store);
+            self.recycle_sync_channel(conn);
+            self.recheck_channel_custody_peer(channel, event_id, peer)
+                .await;
+            return Ok(ChannelSyncTurn {
+                bytes,
+                complete: false,
+                limited: !continue_history,
+            });
+        }
         if let Err(error) = round {
             // A failed whole-history exchange cannot establish completion. Its
             // partially consumed connection and reception capacity must retire
@@ -3646,7 +3740,11 @@ impl Node {
         if reusable {
             self.recycle_sync_channel(conn);
         }
-        Ok(bytes)
+        Ok(ChannelSyncTurn {
+            bytes,
+            complete: true,
+            limited: false,
+        })
     }
 
     /// Periodically verify one old claim without first syncing the missing
@@ -3724,21 +3822,46 @@ impl Node {
         peer: &PeerRecord,
     ) {
         let check = async {
-            let mut conn = self.privacy_sync_dial(peer.addr, &peer.public).await.ok()?;
-            let held = request_durable_have(&mut conn, channel, event_id)
-                .await
-                .ok()?;
+            // Exact custody uses the responder's qualified prepared-view entry
+            // point independently of any range continuation on this session.
+            let mut conn = match self.privacy_sync_dial(peer.addr, &peer.public).await {
+                Ok(conn) => conn,
+                Err(_error) => {
+                    #[cfg(test)]
+                    self.trace_account_client(&peer.public, || {
+                        format!("custody_probe_failed stage=dial error={_error}")
+                    });
+                    return None;
+                }
+            };
+            let held = match request_durable_have(&mut conn, channel, event_id).await {
+                Ok(held) => held,
+                Err(_error) => {
+                    #[cfg(test)]
+                    self.trace_account_client(&peer.public, || {
+                        format!("custody_probe_failed stage=query error={_error}")
+                    });
+                    return None;
+                }
+            };
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || format!("custody_probe_result held={held}"));
             self.recycle_sync_channel(conn);
             Some(held)
         };
         let Ok(Some(held)) = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, check).await
         else {
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || "custody_probe_unconfirmed".into());
             return;
         };
-        if self
-            .publish_channel_custody(channel, event_id, &peer.public, held, false, false)
-            .is_err()
+        if let Err(_error) =
+            self.publish_channel_custody(channel, event_id, &peer.public, held, false, false)
         {
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || {
+                format!("custody_probe_failed stage=publish error={_error}")
+            });
             return;
         }
         let changed = {
@@ -3751,6 +3874,10 @@ impl Node {
             };
             recorded.is_ok() && store.revision() != before
         };
+        #[cfg(test)]
+        self.trace_account_client(&peer.public, || {
+            format!("custody_probe_recorded changed={changed}")
+        });
         if changed {
             self.delivery_status_notify.notify_waiters();
         }
@@ -4039,7 +4166,83 @@ impl Node {
             confirming,
         )
         .await
-        .deferred
+        .progress()
+            != FanoutProgress::Complete
+    }
+
+    /// Sharing-off must still publish this device's own public preference.
+    /// This supplements reconciliation; its exact Have never completes other
+    /// pending group effects or grants access to another author's history.
+    async fn publish_own_replica_preference(
+        &self,
+        channel: ConversationId,
+        peer: &PeerRecord,
+    ) -> Result<(), super::session::SessionError> {
+        let current = || {
+            let book = self.channels.lock().expect("channels mutex");
+            let state = book.state(&channel)?;
+            (!state.is_dissolved()
+                && state.is_accepted_member(&self.user_id())
+                && state.is_accepted_member(&peer.public.user_id())
+                && state.members().contains(&peer.public)
+                && state.members().contains(&self.identity.public())
+                && !book.replica_enabled(channel, &self.user_id()))
+            .then(|| book.replica_preference_event(channel, &self.user_id()))
+            .flatten()
+        };
+        let Some(event_id) = current() else {
+            return Ok(());
+        };
+        let Some(event) = self.log.lock().expect("log mutex").get(&event_id)? else {
+            return Err(super::session::SessionError::ResourceUnavailable);
+        };
+        if event.conversation_id != channel
+            || event.kind != EventKind::ChannelReplica
+            || event.author.ed25519_pub() != &self.identity.public().ed25519_pub
+            || event.ciphertext != [0]
+        {
+            return Err(super::session::SessionError::ResourceUnavailable);
+        }
+        let permitted = || -> Result<bool, super::session::SessionError> {
+            if current() != Some(event_id) {
+                return Ok(false);
+            }
+            let projection = self
+                .account_group_projection(channel)
+                .map_err(|_| super::session::SessionError::ResourceUnavailable)?;
+            if projection.authority.current_event().is_none() {
+                return Ok(true);
+            }
+            let Some(proof) = self
+                .historical_author(&peer.public.ed25519_pub)
+                .filter(|proof| proof.public() == peer.public)
+            else {
+                return Ok(false);
+            };
+            Ok(projection
+                .authority
+                .grant_for_device(&peer.public, &proof)
+                .is_some()
+                && projection
+                    .authority
+                    .grant_for_device(&self.identity.public(), &self.own_group_proof())
+                    .is_some())
+        };
+        if !permitted()? {
+            return Err(super::session::SessionError::ResourceUnavailable);
+        }
+        let mut connection = self.privacy_sync_dial(peer.addr, &peer.public).await?;
+        if !permitted()? {
+            return Err(super::session::SessionError::ResourceUnavailable);
+        }
+        let _stored = super::session::push_signed_record(&mut connection, &event).await?;
+        if !permitted()? {
+            return Err(super::session::SessionError::ResourceUnavailable);
+        }
+        // No fanout completion or effective preference is inferred here. A
+        // missing parent/unsupported peer leaves the original retry work intact.
+        self.recycle_sync_channel(connection);
+        Ok(())
     }
 
     async fn distribute_channel_targets_outcome(
@@ -4051,6 +4254,8 @@ impl Node {
         confirming: Option<EventId>,
     ) -> ChannelDistributionOutcome {
         let failed = std::sync::atomic::AtomicBool::new(false);
+        let more = std::sync::atomic::AtomicBool::new(false);
+        let limited = std::sync::atomic::AtomicBool::new(false);
         let result: Result<bool, NodeError> = async {
             let me = self.identity.public().user_id();
             let peers: Vec<PeerRecord> = {
@@ -4081,25 +4286,53 @@ impl Node {
                 .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| {
                     let deferred = &deferred;
                     let failed = &failed;
+                    let more = &more;
+                    let limited = &limited;
                     async move {
                         let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
-                            if let Some(event) = confirming {
-                                self.sync_and_confirm_custody_admitted(channel, event, &peer)
-                                    .await
-                                    .map(|_| ())
-                            } else {
-                                let mut ch =
-                                    self.privacy_sync_dial(peer.addr, &peer.public).await?;
-                                let store = self.sync_store(ch.peer_identity());
-                                let _reception = self
-                                    .request_reception_scope(&store, &ch)
-                                    .ok_or(crate::transport::TransportError::AdmissionDenied)?;
-                                let round = request_round(&mut ch, &store, channel).await;
-                                self.dispatch_received_sync_work(&store);
-                                #[cfg(test)]
-                                self.trace_account_client(&peer.public, || {
-                                    match &round {
-                                        Ok(_) => "control_fanout_round_ok",
+                            self.publish_own_replica_preference(channel, &peer).await?;
+                            for turn in 0..CHANNEL_FANOUT_PEER_TURNS {
+                                let continuing = std::sync::atomic::AtomicBool::new(false);
+                                let result = if let Some(event) = confirming {
+                                    self.sync_and_confirm_custody_admitted(channel, event, &peer)
+                                        .await
+                                        .map(|turn| {
+                                            if !turn.complete {
+                                                if turn.limited { limited } else { &continuing }
+                                                    .store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                            }
+                                        })
+                                } else {
+                                    let mut ch =
+                                        self.privacy_sync_dial(peer.addr, &peer.public).await?;
+                                    let store = self.sync_store(ch.peer_identity());
+                                    let _reception = self
+                                        .request_reception_scope(&store, &ch)
+                                        .ok_or(crate::transport::TransportError::AdmissionDenied)?;
+                                    let round = super::session::request_sync_turn_paged(
+                                        &mut ch, &store, channel,
+                                    )
+                                    .await;
+                                    if round.as_ref().is_ok_and(|outcome| !outcome.complete) {
+                                        // Preserve the existing fanout ticket across a
+                                        // successful bounded turn with more work.
+                                        if round.as_ref().is_ok_and(|turn| turn.limited) {
+                                            limited
+                                        } else {
+                                            &continuing
+                                        }
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    self.dispatch_received_sync_work(&store);
+                                    #[cfg(test)]
+                                    self.trace_account_client(&peer.public, || {
+                                        match &round {
+                                        Ok(turn) if turn.complete => "control_fanout_round_ok",
+                                        Ok(turn) if turn.limited => "control_fanout_round_limited",
+                                        Ok(_) => "control_fanout_round_more",
                                         Err(super::session::SessionError::Store(
                                             LogError::StaleCursor,
                                         )) => "control_fanout_round_stale",
@@ -4128,32 +4361,46 @@ impl Node {
                                         }
                                     }
                                     .into()
-                                });
-                                if round.as_ref().is_err_and(|error| {
-                                    !matches!(
-                                        error,
-                                        super::session::SessionError::Transport(
-                                            crate::transport::TransportError::AdmissionDenied
+                                    });
+                                    if round.as_ref().is_err_and(|error| {
+                                        !matches!(
+                                            error,
+                                            super::session::SessionError::Transport(
+                                                crate::transport::TransportError::AdmissionDenied
+                                            )
                                         )
-                                    )
-                                }) {
-                                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }) {
+                                        failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    if round.is_ok() {
+                                        self.recycle_sync_channel(ch);
+                                    } else if round.as_ref().is_err_and(|error| {
+                                        matches!(
+                                            error,
+                                            super::session::SessionError::Store(
+                                                LogError::StaleCursor
+                                            )
+                                        ) || super::session_pool::retryable_sync_error(error)
+                                    }) {
+                                        // A changed local view or closed remote session did
+                                        // not finish this round. Keep the journal ticket
+                                        // for a fresh view through the existing backoff.
+                                        deferred.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    Ok::<(), super::session::SessionError>(())
+                                };
+                                if result.is_ok()
+                                    && continuing.load(std::sync::atomic::Ordering::Relaxed)
+                                {
+                                    if turn + 1 < CHANNEL_FANOUT_PEER_TURNS {
+                                        tokio::time::sleep(Duration::from_millis(500)).await;
+                                        continue;
+                                    }
+                                    more.store(true, std::sync::atomic::Ordering::Relaxed);
                                 }
-                                if round.is_ok() {
-                                    self.recycle_sync_channel(ch);
-                                } else if round.as_ref().is_err_and(|error| {
-                                    matches!(
-                                        error,
-                                        super::session::SessionError::Store(LogError::StaleCursor)
-                                    ) || super::session_pool::retryable_sync_error(error)
-                                }) {
-                                    // A changed local view or closed remote session did
-                                    // not finish this round. Keep the journal ticket
-                                    // for a fresh view through the existing backoff.
-                                    deferred.store(true, std::sync::atomic::Ordering::Relaxed);
-                                }
-                                Ok::<(), super::session::SessionError>(())
+                                return result;
                             }
+                            unreachable!("finite peer turn batch returns its final result")
                         })
                         .await;
                         if !matches!(
@@ -4214,12 +4461,15 @@ impl Node {
             Ok(deferred) => ChannelDistributionOutcome {
                 deferred,
                 failed: failed.load(std::sync::atomic::Ordering::Relaxed),
+                more: more.load(std::sync::atomic::Ordering::Relaxed),
+                limited: limited.load(std::sync::atomic::Ordering::Relaxed),
             },
             Err(error) => {
                 log::warn!("channel distribution deferred: {error}");
                 ChannelDistributionOutcome {
                     deferred: true,
                     failed: true,
+                    ..Default::default()
                 }
             }
         }
@@ -4305,7 +4555,9 @@ impl Node {
             own.ed25519_pub[1] ^ channel_id.as_bytes()[1],
         ]));
         let start = rotation.wrapping_add(cursor) % peers.len();
+        let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rounds = (0..peers.len().min(CHANNEL_RECOVERY_PEERS_PER_TICK)).map(|offset| {
+            let failed = failed.clone();
             let peer = peers[(start + offset) % peers.len()].clone();
             let node = self.clone();
             async move {
@@ -4352,58 +4604,77 @@ impl Node {
                         &conn,
                         super::reception_effects::ArrivalKind::CatchUp,
                     )?;
-                    let round =
-                        super::session::request_sync_turn_paged(&mut conn, &store, channel).await;
-                    let received = reception.dispatch();
-                    let reason = match &round {
-                        Ok(report) if report.applied > 0 => {
-                            super::work_observation::reason::CHANNEL_SYNC_OK_APPLIED
+                    for turn in 0..CHANNEL_FANOUT_PEER_TURNS {
+                        let round =
+                            super::session::request_sync_turn_paged(&mut conn, &store, channel)
+                                .await;
+                        let received = reception.dispatch();
+                        let reason = match &round {
+                            Ok(report) if report.applied > 0 => {
+                                super::work_observation::reason::CHANNEL_SYNC_OK_APPLIED
+                            }
+                            Ok(_) => super::work_observation::reason::CHANNEL_SYNC_OK_ZERO,
+                            Err(super::session::SessionError::NoProgress) => {
+                                super::work_observation::reason::CHANNEL_SYNC_NO_PROGRESS
+                            }
+                            Err(super::session::SessionError::Transport(_)) => {
+                                super::work_observation::reason::CHANNEL_SYNC_TRANSPORT_FAILED
+                            }
+                            Err(super::session::SessionError::Store(_)) => {
+                                super::work_observation::reason::CHANNEL_SYNC_STORE_FAILED
+                            }
+                            Err(
+                                super::session::SessionError::Serialization(_)
+                                | super::session::SessionError::UnexpectedMessage
+                                | super::session::SessionError::ResourceUnavailable,
+                            ) => super::work_observation::reason::CHANNEL_SYNC_PROTOCOL_FAILED,
+                        };
+                        node.observe_mailbox_work(reason, None);
+                        let report = match round {
+                            Ok(report) => report,
+                            Err(error) => {
+                                log::warn!("channel recovery exchange deferred: {error}");
+                                return None;
+                            }
+                        };
+                        #[cfg(test)]
+                        node.trace_account_client(&peer.public, || {
+                            format!("channel_recovery_sync_done channel={channel:?}")
+                        });
+                        #[cfg(test)]
+                        node.trace_account_client(&peer.public, || {
+                            format!(
+                                "channel_recovery_report applied={} rejected={}",
+                                report.applied,
+                                report.rejected.len()
+                            )
+                        });
+                        if !report.rejected.is_empty() {
+                            failed.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
-                        Ok(_) => super::work_observation::reason::CHANNEL_SYNC_OK_ZERO,
-                        Err(super::session::SessionError::NoProgress) => {
-                            super::work_observation::reason::CHANNEL_SYNC_NO_PROGRESS
+                        if report.applied == 0
+                            && report.rejected.is_empty()
+                            && !report.complete
+                            && !report.limited
+                            && turn + 1 < CHANNEL_FANOUT_PEER_TURNS
+                        {
+                            // Preparation-only progress must not wait for a different
+                            // stalled peer. Keep this clean stream and the existing
+                            // deadline, yielding on the ordinary continuation cadence.
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            continue;
                         }
-                        Err(super::session::SessionError::Transport(_)) => {
-                            super::work_observation::reason::CHANNEL_SYNC_TRANSPORT_FAILED
+                        if !report.complete && !report.limited {
+                            node.schedule_channel_recovery(channel);
                         }
-                        Err(super::session::SessionError::Store(_)) => {
-                            super::work_observation::reason::CHANNEL_SYNC_STORE_FAILED
-                        }
-                        Err(
-                            super::session::SessionError::Serialization(_)
-                            | super::session::SessionError::UnexpectedMessage
-                            | super::session::SessionError::ResourceUnavailable,
-                        ) => super::work_observation::reason::CHANNEL_SYNC_PROTOCOL_FAILED,
-                    };
-                    node.observe_mailbox_work(reason, None);
-                    let report = match round {
-                        Ok(report) => report,
-                        Err(error) => {
-                            log::warn!("channel recovery exchange deferred: {error}");
-                            return None;
-                        }
-                    };
-                    #[cfg(test)]
-                    node.trace_account_client(&peer.public, || {
-                        format!("channel_recovery_sync_done channel={channel:?}")
-                    });
-                    #[cfg(test)]
-                    node.trace_account_client(&peer.public, || {
-                        format!(
-                            "channel_recovery_report applied={} rejected={}",
+                        node.recycle_sync_channel(conn);
+                        return Some((
                             report.applied,
-                            report.rejected.len()
-                        )
-                    });
-                    if !report.complete && !report.limited {
-                        node.schedule_channel_recovery(channel);
+                            report.complete && report.rejected.is_empty(),
+                            received,
+                        ));
                     }
-                    node.recycle_sync_channel(conn);
-                    Some((
-                        report.applied,
-                        report.complete && report.rejected.is_empty(),
-                        received,
-                    ))
+                    unreachable!("finite peer turn batch returns its final result")
                 })
                 .await;
                 if result.is_err() {
@@ -4442,6 +4713,7 @@ impl Node {
                     });
                     Some((applied, clean))
                 } else {
+                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
                     None
                 }
             }
@@ -4471,13 +4743,43 @@ impl Node {
             },
             checked,
         );
-        local_failed || !checked || !clean
+        // Incomplete successful pages already own a targeted continuation.
+        // Only actual failures should arm the broad anti-entropy fallback.
+        local_failed || !checked || failed.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
 #[cfg(test)]
 mod fanout_tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn replay_progress_keeps_normal_continuations_out_of_failure_backoff() {
+        let mut replay = ChannelControlReplay::new();
+        for _ in 0..8 {
+            replay.pending_progress = FanoutProgress::More;
+            assert_eq!(replay.pending_delay(), Duration::from_millis(500));
+        }
+        assert_eq!(replay.backoff.idle_rounds, 0);
+        replay.pending_progress = FanoutProgress::Deferred;
+        assert_eq!(replay.pending_delay(), CHANNEL_RECOVERY_INTERVAL);
+        replay.pending_progress = FanoutProgress::More;
+        assert_eq!(replay.pending_delay(), Duration::from_millis(500));
+        replay.pending_progress = FanoutProgress::Deferred;
+        assert_eq!(replay.pending_delay(), CHANNEL_RECOVERY_INTERVAL * 2);
+        replay.pending_progress = FanoutProgress::Limited;
+        assert_eq!(replay.pending_delay(), CHANNEL_RECOVERY_QUIET_INTERVAL);
+        assert_eq!(replay.backoff.idle_rounds, 2);
+        assert_eq!(
+            FanoutProgress::More.combine(FanoutProgress::Limited),
+            FanoutProgress::More
+        );
+        assert_eq!(
+            FanoutProgress::More.combine(FanoutProgress::Deferred),
+            FanoutProgress::Deferred
+        );
+    }
+
     use crate::discovery::Announce;
     use crate::identity::device::DeviceIdentity;
     use std::net::{Ipv4Addr, SocketAddr};
@@ -4683,7 +4985,8 @@ mod fanout_tests {
                             == crate::node::AccountGroupExecution::Local;
                     }
                     if local { break; }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    source.distribute_account_group_effects(channel, &source.channel_members(channel)).await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             }).await.expect("cold group metadata must settle before injecting view invalidation");
             source.roster.lock().unwrap().forget(&target.identity.public());
@@ -4700,13 +5003,25 @@ mod fanout_tests {
                     crate::eventlog::event::Author::from_ed25519(source.identity.public().ed25519_pub), None, 2)
                     .unwrap().into_iter().next().unwrap().1
             };
+            tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                while source.channel_custody_count(channel, event).unwrap() != Some(1)
+                    || first.log.lock().unwrap().get(&event).unwrap().is_none() {
+                    source.distribute_channel_confirming(channel, &[first.identity.public()], Some(event)).await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }).await.expect("normal first-holder setup must finish before view invalidation");
             assert_eq!(source.channel_custody_count(channel, event).unwrap(), Some(1));
             assert!(first.log.lock().unwrap().get(&event).unwrap().is_some());
             assert!(target.log.lock().unwrap().get(&event).unwrap().is_none());
             if held {
                 target.roster.lock().unwrap().forget(&source.identity.public());
                 target.sessions.clear();
-                target.pull_channel_from_members(channel, 0, false).await;
+                tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                    while target.log.lock().unwrap().get(&event).unwrap().is_none() {
+                        target.pull_channel_from_members(channel, 0, false).await;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }).await.expect("normal adjacent member pull must finish before view invalidation");
                 assert!(target.log.lock().unwrap().get(&event).unwrap().is_some(),
                     "positive custody must be backed by a real member pull and retained original");
             }
@@ -4721,7 +5036,7 @@ mod fanout_tests {
                 let expected = target.identity.public();
                 let invalidations = invalidations.clone();
                 move |peer, phase| {
-                    if peer == expected && phase == "network_view_captured" && invalidations.load(Ordering::SeqCst) < 2 {
+                    if peer == expected && (phase == "network_view_captured" || phase == "network_view_requalified") && invalidations.load(Ordering::SeqCst) < 2 {
                         let node = weak.upgrade().unwrap();
                         let profile = node.device_sync_policy().profile;
                         // Invalidate the actual finite source view through a real
@@ -4732,12 +5047,32 @@ mod fanout_tests {
                     }
                 }
             }));
-            let failure = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT,
-                source.sync_and_confirm_custody_admitted(channel, event, &peer)).await.unwrap();
+            let failure = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                loop {
+                    let round = source.sync_and_confirm_custody_admitted(channel, event, &peer).await;
+                    match &round {
+                        Ok(turn) if !turn.complete && !turn.limited => {
+                            // A remote preparation More precedes capture of a
+                            // local view, so it has not reached the fault yet.
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                        _ => break round,
+                    }
+                }
+            }).await.expect("the real local view capture must reach its injected invalidation");
             assert!(matches!(failure, Err(super::super::session::SessionError::Store(LogError::StaleCursor))),
                 "the helper must preserve the actual local stale-view failure: {failure:?}");
-            let distribution = source.distribute_channel_targets_outcome(channel,
-                &[target.identity.public()], None, false, Some(event)).await;
+            let distribution = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                loop {
+                    let turn = source.distribute_channel_targets_outcome(channel,
+                        &[target.identity.public()], None, false, Some(event)).await;
+                    if turn.more && !turn.failed && !turn.deferred {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    } else {
+                        break turn;
+                    }
+                }
+            }).await.expect("the distribution must reach the second actual source invalidation");
             assert!(distribution.failed && distribution.deferred,
                 "independent exact custody must not falsely finish the interrupted history/control round");
             assert_eq!(invalidations.load(Ordering::SeqCst), 2);
@@ -4806,15 +5141,24 @@ mod fanout_tests {
                 )
                 .unwrap();
             let peer = source.routing_peer(&holder.user_id()).unwrap();
-            source
-                .sync_and_confirm_custody_admitted(channel, event, &peer)
-                .await
-                .unwrap();
-            holder.process_channel(channel);
-            source
-                .sync_and_confirm_custody_admitted(channel, event, &peer)
-                .await
-                .unwrap();
+            tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                loop {
+                    let turn = source
+                        .sync_and_confirm_custody_admitted(channel, event, &peer)
+                        .await
+                        .unwrap();
+                    holder.process_channel(channel);
+                    if turn.complete
+                        && holder.log.lock().unwrap().get(&event).unwrap().is_some()
+                        && source.channel_custody_count(channel, event).unwrap() == Some(1)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            })
+            .await
+            .expect("normal exact-copy setup must finish before measuring notifications");
             assert!(holder.log.lock().unwrap().get(&event).unwrap().is_some());
             // Leave the published positive witness unchanged. The first probe
             // must still notify when it repairs only the local custody fact.

@@ -613,6 +613,7 @@ async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
     source.prepare_account_group_fanout(group).await.unwrap();
 
     let injected = Arc::new(AtomicUsize::new(0));
+    let round_trace = Arc::new(Mutex::new(Vec::new()));
     let captured_views = Arc::new(AtomicUsize::new(0));
     let stale_rounds = Arc::new(AtomicUsize::new(0));
     let failed_rounds = Arc::new(AtomicUsize::new(0));
@@ -621,6 +622,7 @@ async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
     let weak_source = Arc::downgrade(&source);
     let expected_peer = external.identity.public();
     *source.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let round_trace = round_trace.clone();
         let injected = injected.clone();
         let captured_views = captured_views.clone();
         let stale_rounds = stale_rounds.clone();
@@ -631,8 +633,14 @@ async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
             if peer != expected_peer {
                 return;
             }
+            if phase.starts_with("control_fanout_round") {
+                let mut trace = round_trace.lock().unwrap();
+                if trace.len() < 64 {
+                    trace.push(phase.clone());
+                }
+            }
             match phase.as_str() {
-                "network_view_captured" => {
+                "network_view_captured" | "network_view_requalified" => {
                     captured_views.fetch_add(1, Ordering::SeqCst);
                     if !remote && injected.load(Ordering::SeqCst) < 2 {
                         // Change a real public policy after its source stamp was
@@ -767,6 +775,10 @@ async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
     }
     drop(source_listener);
     assert!(panics.is_empty(), "background task failed: {panics:?}");
+    eprintln!(
+        "fanout rounds remote={remote}: {:?}",
+        round_trace.lock().unwrap()
+    );
     assert_eq!(injected.load(Ordering::SeqCst), 2);
     assert_eq!(
         stale_rounds.load(Ordering::SeqCst),

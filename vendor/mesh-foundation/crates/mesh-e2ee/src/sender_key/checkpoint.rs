@@ -86,6 +86,17 @@ mod tests {
     }
 
     #[test]
+    fn historical_empty_receiver_checkpoint_bytes() {
+        // Independent historical layout: prefix, 32-byte chain key, BE next/count.
+        let mut fixture = b"MTRX\x01".to_vec();
+        fixture.extend_from_slice(&[23; 32]);
+        fixture.extend_from_slice(&[0; 8]);
+        let restored = SenderChain::decode_checkpoint(&fixture).unwrap();
+        assert_eq!(&*restored.encode_checkpoint().unwrap(), &fixture);
+        assert_eq!(&*receiver().encode_checkpoint().unwrap(), &fixture);
+    }
+
+    #[test]
     fn checkpoint_preserves_consumed_holes_and_exact_eviction_order() {
         let mut original = receiver();
         original.message_key(3).unwrap();

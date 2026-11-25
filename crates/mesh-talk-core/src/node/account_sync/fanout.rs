@@ -1,5 +1,5 @@
 //! Bounded public fanout scheduling; durable work remains in the source journal.
-use crate::eventlog::ConversationId;
+use crate::{eventlog::ConversationId, node::channels::FanoutProgress};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(super) const CAPACITY: usize = 128;
@@ -98,7 +98,16 @@ impl FanoutQueue {
 
     /// Keep the observed revision pending after local admission backpressure.
     /// Overflow returns ownership to the existing durable journal cursor.
+    #[cfg(test)]
     pub(super) fn defer(&mut self, group: ConversationId) -> bool {
+        self.defer_progress(group, FanoutProgress::Deferred)
+    }
+
+    pub(super) fn defer_progress(
+        &mut self,
+        group: ConversationId,
+        progress: FanoutProgress,
+    ) -> bool {
         let refreshed = self.active.remove(&group) == Some(true);
         if self.queued.len() >= CAPACITY {
             self.seen.remove(&group);
@@ -110,17 +119,17 @@ impl FanoutQueue {
         // A newer revision or semantic route wake during the worker wins over
         // the old completion and must not inherit its cooldown.
         if !refreshed {
-            let seconds = self
-                .retry_at
-                .get(&group)
-                .map_or(1, |(_, seconds)| (seconds * 2).min(300));
-            self.retry_at.insert(
-                group,
-                (
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(seconds),
-                    seconds,
-                ),
-            );
+            let previous = self.retry_at.get(&group).map_or(0, |(_, seconds)| *seconds);
+            let (delay, seconds) = match progress {
+                FanoutProgress::More => (std::time::Duration::from_millis(500), previous),
+                FanoutProgress::Limited => (std::time::Duration::from_secs(300), previous),
+                _ => {
+                    let seconds = (previous * 2).clamp(1, 300);
+                    (std::time::Duration::from_secs(seconds), seconds)
+                }
+            };
+            self.retry_at
+                .insert(group, (tokio::time::Instant::now() + delay, seconds));
         }
         true
     }
@@ -195,6 +204,39 @@ mod tests {
         assert!(!queue.finished(first));
         assert!(queue.observe(first, 1));
         assert_eq!(queue.start_next(), None);
+        assert!(queue.next_retry().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_progress_keeps_its_owner_without_spending_failure_backoff() {
+        let mut queue = FanoutQueue::default();
+        let first = group(1);
+        queue.observe(first, 1);
+        for _ in 0..4 {
+            assert_eq!(queue.start_next(), Some(first));
+            assert!(queue.defer_progress(first, FanoutProgress::More));
+            assert_eq!(
+                queue.next_retry().unwrap() - tokio::time::Instant::now(),
+                std::time::Duration::from_millis(500)
+            );
+            tokio::time::advance(std::time::Duration::from_millis(500)).await;
+        }
+        assert_eq!(queue.start_next(), Some(first));
+        assert!(queue.defer(first));
+        assert_eq!(
+            queue.next_retry().unwrap() - tokio::time::Instant::now(),
+            std::time::Duration::from_secs(1)
+        );
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert_eq!(queue.start_next(), Some(first));
+        queue.defer_progress(first, FanoutProgress::Limited);
+        assert_eq!(
+            queue.next_retry().unwrap() - tokio::time::Instant::now(),
+            std::time::Duration::from_secs(300)
+        );
+        queue.wake_pending();
+        assert_eq!(queue.start_next(), Some(first));
+        assert!(!queue.finished(first));
         assert!(queue.next_retry().is_none());
     }
 

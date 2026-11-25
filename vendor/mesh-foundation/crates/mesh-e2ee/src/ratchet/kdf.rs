@@ -1,5 +1,7 @@
 //! The Double Ratchet key schedule: root-chain step, symmetric-chain step, and
 //! per-message AEAD key/nonce derivation. All HKDF-SHA256 over 32-byte keys.
+//! Historical KDF labels are fixed cryptographic profile bytes. Changing
+//! them changes derived keys; a new profile requires explicit version negotiation.
 
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -7,7 +9,7 @@ use zeroize::Zeroize;
 
 /// Root KDF: derive the next root key + a new chain key from the current root key
 /// and a fresh DH output. `salt = rk`, `ikm = dh_out`. The HKDF output buffer is wiped
-/// before return (the returned keys are owned by the caller) — consistent with `dm.rs`.
+/// before return; the returned keys are owned by the caller.
 pub fn kdf_rk(rk: &[u8; 32], dh_out: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     derive_pair(rk, dh_out, b"MeshTalk-Ratchet-RK")
 }
@@ -49,6 +51,27 @@ pub fn message_keys(mk: &[u8; 32]) -> ([u8; 32], [u8; 12]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Expected bytes independently calculated with Python hmac/hashlib HKDF.
+    // These pin the historical profile, not merely repeat its implementation.
+    #[test]
+    fn historical_profile_known_answers() {
+        let (root, chain) = kdf_rk(&[1; 32], &[2; 32]);
+        assert_eq!(
+            hex::encode([root, chain].concat()),
+            "9a1f8e71d9d1ed2e4a9c5da71f58aa699c563ee04350321b0621498d3677e052c710ec66bd0a85ddaa89cf24f79fad5d32dbdcd948e060544d40f35a9ad7eb07"
+        );
+        let (chain, message) = kdf_ck(&[3; 32]);
+        assert_eq!(
+            hex::encode([chain, message].concat()),
+            "84fb02f9f1e1ed67e990bba3368d61e261090273bb7cacb7fe7ab240fd8c73e603d99d6bd4eedd6a4f5f21392a1f7678acf90d7c05dc91f6dc09f0c140de0288"
+        );
+        let (key, nonce) = message_keys(&[4; 32]);
+        assert_eq!(
+            hex::encode([key.as_slice(), nonce.as_slice()].concat()),
+            "e732b25796bcd2ff49b744bd2be44eb0e053b5a4aa24e78bb73f423f7db4a7028c257a261d76857de9a03b15"
+        );
+    }
 
     #[test]
     fn kdf_steps_are_deterministic_and_distinct() {

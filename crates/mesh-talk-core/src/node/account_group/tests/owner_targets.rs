@@ -62,7 +62,37 @@ async fn account_group_send_confirms_two_external_accounts_with_multiple_devices
             |commit| commit(),
         )
         .unwrap();
-    source.maintain_account_group_operations().await;
+    // Use the actual journal producer; no generic source recovery may finish
+    // this message on behalf of the bounded account fanout.
+    let mut producers = JoinSet::new();
+    producers.spawn(source.clone().run_account_history_loop());
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let status = source
+                .account_group_operation_status(&account, operation)
+                .unwrap();
+            if status.is_some_and(|status| {
+                status.phase == AccountGroupOperationPhase::Committed
+                    && status.primary_event.is_some_and(|event| {
+                        source.channel_custody_count(fixture.group, event).unwrap() == Some(2)
+                            && fixture.nodes[1..].iter().all(|member| {
+                                member.log.lock().unwrap().get(&event).unwrap().is_some()
+                            })
+                    })
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the original account fanout must confirm both external accounts");
+    producers.abort_all();
+    while let Some(result) = producers.join_next().await {
+        if let Err(error) = result {
+            assert!(error.is_cancelled());
+        }
+    }
     let status = source
         .account_group_operation_status(&account, operation)
         .unwrap()

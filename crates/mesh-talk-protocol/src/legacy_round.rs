@@ -643,9 +643,6 @@ impl SyncProgress {
 /// Serving extensions. Attachment hooks are optional and must enforce the
 /// caller's current scope; defaults publish no product-specific controls.
 pub trait ResponderBackend<E>: RoundBackend<E> {
-    fn take_custody_view(&self, _scope: &ConversationId) -> Result<Option<Self::View>, E> {
-        Ok(None)
-    }
     fn metadata(&self, view: &Self::View) -> Result<SyncMetadata, E>;
     fn durable_have_in_view(
         &self,
@@ -753,10 +750,9 @@ async fn acquire_custody_view<B, E>(
 where
     B: ResponderBackend<E>,
 {
-    match backend.take_custody_view(conversation)? {
-        Some(view) => Ok(view),
-        None => backend.open_prepared_view(conversation).await,
-    }
+    // Preparation owns cache checkout as well as fresh allocation. A cached
+    // selection can carry unfinished range work and is not yet custody proof.
+    backend.open_prepared_view(conversation).await
 }
 
 pub async fn serve<B, S, E>(channel: &mut S, backend: &B, bytes: &[u8]) -> Result<ConversationId, E>

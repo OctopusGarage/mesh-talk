@@ -8,8 +8,10 @@ exchange. Old peers use a separately bounded legacy compatibility turn. Explicit
 A new-profile turn admits at most 200 records and 1 MiB encoded bodies across both
 directions, with eight synchronization RPCs. Exact durable-custody confirmation
 is a separate bounded request. Source and receiver work each admit four pages,
-32 insertions and 250 examined rows per page. Operation counts are ceilings, not
-wall-clock latency guarantees.
+32 insertions and 250 examined rows per page. Charged ready authorization/export
+preparation reserves one of those four operation slots, leaving at most three
+index pages; its aggregate allowance remains 64 rows, 512 edges and 8 MiB.
+Operation counts are ceilings, not wall-clock latency guarantees.
 
 The first cold qualified authorization preparation remains O(N) overall, spread
 across bounded turns. Qualified ordinary appends reuse prepared prefixes. The

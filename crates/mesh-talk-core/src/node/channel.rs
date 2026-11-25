@@ -422,6 +422,16 @@ impl ChannelBook {
             .get(&(channel, member.to_string()))
             .is_none_or(|(_, _, enabled)| *enabled)
     }
+    pub(super) fn replica_preference_event(
+        &self,
+        channel: ConversationId,
+        member: &str,
+    ) -> Option<EventId> {
+        self.replica_preferences
+            .get(&(channel, member.to_owned()))
+            .map(|(_, event, _)| *event)
+    }
+
     /// Replay signed channel metadata without opening sender keys or messages.
     /// Late-invite reconstruction, admission and archived summaries share these
     /// membership/ownership/terminal-state rules.
@@ -666,9 +676,15 @@ impl ChannelBook {
         own: &str,
     ) -> Option<&ChannelState> {
         let state = self.states.get(&channel)?;
-        let pending = (!state.is_member(own) && self.departed.contains(&(channel, own.to_owned())))
+        // Owner-authored invitations/policy/rename controls also have bounded
+        // turns. Their durable channel row must survive a clean More result,
+        // just as an acceptance or departure does. This is scheduling only;
+        // each replay still prepares and authorizes the current signed state.
+        let pending = (state.is_accepted_member(own) && state.owner() == own)
+            || (!state.is_member(own) && self.departed.contains(&(channel, own.to_owned())))
             || (state.is_accepted_member(own)
-                && (state.accepted_event_id().is_some()
+                && (state.owner_account_id().is_some()
+                    || state.accepted_event_id().is_some()
                     || self
                         .replica_preferences
                         .contains_key(&(channel, own.to_owned()))))
@@ -1266,6 +1282,91 @@ mod tests {
         // Root projection control work and nested legacy parent-cut work are
         // observed separately; both remain visible to content invariance checks.
         pub(super) static MEMBERSHIP_REBUILDS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+    }
+
+    #[test]
+    fn owner_controls_remain_replayable_without_an_acceptance_or_replica_preference() {
+        let owner = DeviceIdentity::generate();
+        let member = DeviceIdentity::generate();
+        let outsider = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let meta = ChannelMeta {
+            name: "retained owner control".into(),
+            members: vec![owner.public(), member.public()],
+            epoch: 0,
+            owner: owner.public().user_id(),
+        };
+        let mut log = EventLog::default();
+        append(
+            &mut log,
+            &owner,
+            channel,
+            EventKind::MembershipChange,
+            meta.encode(),
+        );
+        let mut book = ChannelBook::new();
+        book.process(&owner, channel, &collect(&log, &channel));
+        assert!(book.state(&channel).unwrap().accepted_event_id().is_none());
+        assert!(
+            book.pending_control_state(channel, &owner.public().user_id())
+                .is_some(),
+            "an incomplete owner invitation/policy push must retain its durable replay row"
+        );
+        assert!(
+            book.pending_control_state(channel, &outsider.public().user_id())
+                .is_none(),
+            "scheduling cannot create an unrelated sender relationship"
+        );
+        assert!(
+            book.pending_control_members(channel, &owner.public().user_id())
+                .unwrap()
+                .contains(&member.public())
+        );
+    }
+
+    #[test]
+    fn account_controls_replay_without_a_legacy_message_acceptance_cut() {
+        let owner = DeviceIdentity::generate();
+        let member = DeviceIdentity::generate();
+        let invited = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let meta = ChannelMeta {
+            name: "account control".into(),
+            members: vec![owner.public(), member.public()],
+            epoch: 0,
+            owner: owner.user_id(),
+        };
+        let mut log = EventLog::default();
+        append(
+            &mut log,
+            &owner,
+            channel,
+            EventKind::MembershipChange,
+            meta.encode(),
+        );
+        let mut book = ChannelBook::new();
+        book.process(&member, channel, &collect(&log, &channel));
+        let state = book.states.get_mut(&channel).unwrap();
+        state.install_account_projection(
+            "owner account".into(),
+            vec![
+                (owner.public(), "owner account".into()),
+                (member.public(), "member account".into()),
+            ],
+            1,
+        );
+        state.install_account_invites(vec![(invited.public(), "pending account".into())]);
+        assert!(state.accepted_event_id().is_none());
+        assert!(
+            book.pending_control_state(channel, &member.user_id())
+                .is_some(),
+            "modern self controls need retry without manufacturing a legacy history cutoff"
+        );
+        assert!(
+            book.pending_control_state(channel, &invited.user_id())
+                .is_none(),
+            "an unaccepted invitation cannot create a control publisher"
+        );
     }
 
     #[test]

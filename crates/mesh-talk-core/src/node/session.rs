@@ -244,6 +244,51 @@ pub(in crate::node) fn event_fits_frame(event: &crate::eventlog::Event) -> bool 
     })
 }
 
+/// Upload one immutable signed record without requesting an inventory or any
+/// historical bodies. The peer's ordinary admission/causal checks still apply;
+/// the result qualifies only this record's storage, never whole-scope completion.
+pub(in crate::node) async fn push_signed_record<IO>(
+    channel: &mut SecureChannel<IO>,
+    event: &crate::eventlog::Event,
+) -> Result<bool, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    if !event.is_canonical()
+        || !event.verify_integrity()
+        || !event.verify_signature()
+        || !event_fits_frame(event)
+    {
+        return Err(SessionError::ResourceUnavailable);
+    }
+    let followup = SyncFollowup {
+        conversation: event.conversation_id,
+        events: vec![event.clone()],
+    };
+    // Use the smallest existing wire variant that supports this record kind.
+    // This is capability selection, never a downgrade of the signed payload.
+    let version = (1..=5)
+        .find(|version| {
+            legacy_round::supports_event_kind(
+                event.kind,
+                *version >= 2,
+                *version >= 3,
+                *version >= 4,
+                *version >= 5,
+            )
+        })
+        .ok_or(SessionError::ResourceUnavailable)?;
+    let wire = match version {
+        1 => SyncWire::Followup(followup),
+        2 => SyncWire::FollowupV2(followup),
+        3 => SyncWire::FollowupV3(followup),
+        4 => SyncWire::FollowupV4(followup),
+        _ => SyncWire::FollowupV5(followup),
+    };
+    channel.send(&encode(&wire)?).await?;
+    request_durable_have(channel, event.conversation_id, event.id).await
+}
+
 /// Errors from a sync session.
 #[derive(Debug)]
 pub enum SessionError {

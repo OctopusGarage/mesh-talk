@@ -44,7 +44,7 @@ impl PublicIdentity {
     }
 }
 
-/// A device's secret identity. Hold in memory only; persist via `keystore`.
+/// A device's secret identity. Hosts must protect any persisted secret-key bytes.
 pub struct DeviceIdentity {
     signing_key: SigningKey,
     dh_secret: StaticSecret,
@@ -57,7 +57,7 @@ impl DeviceIdentity {
         Self::from_keys(random_signing_key(), StaticSecret::random())
     }
 
-    /// Reconstruct from raw secret-key bytes (used by the keystore on load).
+    /// Reconstruct from raw secret-key bytes (after host-controlled secure loading).
     pub fn from_secret_bytes(ed25519_secret: [u8; 32], x25519_secret: [u8; 32]) -> Self {
         let signing_key = SigningKey::from_bytes(&ed25519_secret);
         let dh_secret = StaticSecret::from(x25519_secret);
@@ -76,7 +76,7 @@ impl DeviceIdentity {
         }
     }
 
-    /// The two 32-byte secret scalars, for sealing into the keystore.
+    /// The two 32-byte secret scalars, for host-controlled secure persistence.
     pub fn secret_bytes(&self) -> ([u8; 32], [u8; 32]) {
         (self.signing_key.to_bytes(), self.dh_secret.to_bytes())
     }

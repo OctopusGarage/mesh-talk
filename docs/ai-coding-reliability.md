@@ -741,6 +741,30 @@ Opt-in diagnostic emission must also work in production log configurations;
 verify the target filter and real release output rather than relying on INFO
 macros that can be compiled out.
 
+Cache checkout establishes ownership and current authority, not preparation
+completion. A retained range selection may contain unfinished work. The session
+backend must prepare both cached and newly opened views before a compatibility
+exchange or exact-custody query reads them; protocol responders must use that
+prepared entry point rather than taking a raw cache shortcut. Keep bounded turns
+and cancellation at their existing owners. The `cached_partial_view_` regressions
+in [paged session tests](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+require preparation to finish and an authenticated exact-custody response to
+succeed without collecting event IDs or bodies. Reactivating a parked selection
+must also verify that its SQL owner is still live; reacquiring a runtime permit
+does not revive retired work. Ordinary cached checkout treats `StaleCursor` as
+a miss and prepares a fresh view, while storage failures remain errors. The
+`participant_durable_have_stale_derived_cache_is_a_miss` regression in the
+[participant adapter](../crates/mesh-talk-core/src/node/privacy_sync/network.rs)
+retires derived work while retaining the durable message, then requires fresh
+authorized custody qualification. Range-service interceptors follow the same
+rule: a retained token identifies an earlier root and cannot certify readiness
+or current custody after resumed preparation or later appends. Reuse only a
+currently qualified prepared view; otherwise hand the query to the prepared
+responder while retaining range continuation ownership. The
+`stale_range_token_does_not_qualify_unprepared_exact_custody` regression in
+[range session tests](../crates/mesh-talk-core/src/node/session/range_sync.rs)
+covers the authenticated handoff with a real participant store.
+
 A deferred cursor with no remote continuation still owns local work. Retain it
 in the scheduler queue beneath its exact retry deadline; retaining a timestamp
 in an unreachable checkpoint loses recovery. The account document contention

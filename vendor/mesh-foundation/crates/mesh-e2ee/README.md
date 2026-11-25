@@ -29,3 +29,21 @@ The host authenticates key distributions and decides when recovery is permitted;
 the SDK validates the transition and rejects stale candidates. Persist checkpoints
 atomically with application state. Membership, rotation timing and gap-based
 recovery thresholds belong to the application.
+
+## Cryptographic compatibility profile
+
+The current ratchet and sender-key mechanisms retain the historical HKDF info
+labels `MeshTalk-Ratchet-RK`, `MeshTalk-Ratchet-CK` and `MeshTalk-Ratchet-MSG`.
+They select cryptographic derivations, not application schemas or permissions.
+Changing these bytes changes keys and makes existing peers/data incompatible.
+Independent known-answer tests pin all three derivations.
+
+The sender receiver-checkpoint prefix `MTRX\x01` is likewise an existing local
+format identifier. It does not make the checkpoint a chat event or account backup.
+Keep it stable when restoring existing encrypted checkpoints.
+
+Hosts must explicitly agree on compatible cryptographic formats before exchanging
+content. This crate does not negotiate profiles automatically. A future profile
+requires a distinct version, authenticated selection and a migration plan; arbitrary
+runtime KDF-label configuration is intentionally not exposed. Key distribution,
+application record encoding, membership and recovery policy remain host-owned.

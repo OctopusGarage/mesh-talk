@@ -4,7 +4,10 @@ use super::{
     wire::*,
     *,
 };
-use crate::node::delivery_store::{DeliveryTransaction, RequestRecord};
+use crate::node::{
+    channels::FanoutProgress,
+    delivery_store::{DeliveryTransaction, RequestRecord},
+};
 use std::{collections::BTreeSet, sync::Arc};
 
 fn requested_effect(
@@ -89,12 +92,12 @@ impl Node {
         self: &std::sync::Arc<Self>,
         group: ConversationId,
         members: &[crate::identity::device::PublicIdentity],
-    ) -> bool {
+    ) -> FanoutProgress {
         let message = match self.account_group_fanout_message(group) {
             Ok(message) => message,
             Err(error) => {
                 log::warn!("account group fanout lookup deferred after storage failure: {error}");
-                return true;
+                return FanoutProgress::Deferred;
             }
         };
         if let Some(event) = message {
@@ -104,7 +107,7 @@ impl Node {
                     log::warn!(
                         "account group distribution deferred after storage failure: {error}"
                     );
-                    return true;
+                    return FanoutProgress::Deferred;
                 }
             };
             let eligible = self

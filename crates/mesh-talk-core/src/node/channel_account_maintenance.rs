@@ -533,27 +533,34 @@ impl Node {
                                 self.privacy_sync_dial(peer.addr, &peer.public).await.ok()?;
                             let store = self.pull_sync_store(connection.peer_identity());
                             let _reception = self.request_reception_scope(&store, &connection)?;
-                            let round = super::session::request_sync_turn_paged(
-                                &mut connection,
-                                &store,
-                                channel,
-                            )
-                            .await;
-                            let received = self.dispatch_received_sync_work(&store);
-                            let outcome = round.ok()?;
-                            self.recycle_sync_channel(connection);
-                            if outcome.limited {
-                                // Discovery's normal refresh (or changed input)
-                                // retries limited histories without a hot queue.
-                                return Some(false);
+                            for tick in 0..4 {
+                                let round = super::session::request_sync_turn_paged(
+                                    &mut connection,
+                                    &store,
+                                    channel,
+                                )
+                                .await;
+                                let received = self.dispatch_received_sync_work(&store);
+                                let outcome = round.ok()?;
+                                if !outcome.complete && !outcome.limited && tick + 1 < 4 {
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                    continue;
+                                }
+                                self.recycle_sync_channel(connection);
+                                if outcome.limited {
+                                    // Discovery's normal refresh (or changed input)
+                                    // retries limited histories without a hot queue.
+                                    return Some(false);
+                                }
+                                if !outcome.complete {
+                                    return None;
+                                }
+                                if !received {
+                                    self.process_channel(channel);
+                                }
+                                return Some(true);
                             }
-                            if !outcome.complete {
-                                return None;
-                            }
-                            if !received {
-                                self.process_channel(channel);
-                            }
-                            Some(true)
+                            None
                         })
                         .await;
                         let maintained = self.maintain_one_account_channel(channel, work).await;
@@ -1394,6 +1401,7 @@ mod tests {
             )
             .await
             .unwrap();
+        crate::node::test_support::complete_group_fanout(relay, channel, &[moved, receiver]).await;
         let members = [
             relay.identity.public(),
             moved.identity.public(),
@@ -1600,6 +1608,8 @@ mod tests {
         } else {
             (&group.nodes[2], &group.nodes[1])
         };
+        crate::node::test_support::trace_sync_failures(source, "inherit source");
+        crate::node::test_support::trace_sync_failures(target, "inherit target");
         let member_group = owner
             .create_account_channel_invited_if(
                 "Account membership",
@@ -1608,13 +1618,29 @@ mod tests {
             )
             .await
             .unwrap();
+        crate::node::test_support::complete_group_fanout(owner, member_group, &[source]).await;
         source.accept_channel_invite(member_group).await.unwrap();
+        assert_eq!(
+            source.account_group_access(member_group).unwrap().role,
+            AccountGroupRole::Member,
+            "the exact source device must accept before sibling inheritance"
+        );
         let owned_group = source
             .create_account_channel_invited_if(
                 "Account ownership",
                 vec![group.nodes[3].account_id()],
                 |commit| commit(),
             )
+            .await
+            .unwrap();
+        // Bare inbound servers do not run the source's directory publisher.
+        // Publish its genuine accepted/owned cuts before sibling discovery.
+        source
+            .prepare_account_group_fanout(member_group)
+            .await
+            .unwrap();
+        source
+            .prepare_account_group_fanout(owned_group)
             .await
             .unwrap();
         // Only the accepted sibling is reachable; neither group owner approves
@@ -1628,6 +1654,47 @@ mod tests {
         for _ in 0..16 {
             target.maintain_account_channels(&mut target_work).await;
             source.maintain_account_channels(&mut source_work).await;
+            for group in [member_group, owned_group] {
+                if target.log.lock().unwrap().conversation_len(&group).unwrap() > 0 {
+                    target.await_channel_metadata(group).await.unwrap();
+                }
+            }
+            eprintln!(
+                "inheritance source={:?} target={:?} owned={:?}",
+                source
+                    .account_group_access(member_group)
+                    .map(|value| value.role),
+                target
+                    .account_group_access(member_group)
+                    .map(|value| value.role),
+                target
+                    .account_group_access(owned_group)
+                    .map(|value| value.role)
+            );
+        }
+        if target.account_group_access(member_group).unwrap().role != AccountGroupRole::Member {
+            for (label, node) in [("source", source), ("target", target)] {
+                let log = node.log.lock().unwrap();
+                eprintln!(
+                    "inheritance {label} public records {:?}",
+                    log.events(&member_group)
+                        .unwrap()
+                        .iter()
+                        .map(|event| (
+                            event.id,
+                            event.kind,
+                            event.author.user_id(),
+                            event.parents.clone()
+                        ))
+                        .collect::<Vec<_>>()
+                );
+            }
+            for (peer, value) in &target_work.peers {
+                eprintln!(
+                    "inheritance peer={peer} pending={:?} supported={} after={:?}",
+                    value.pending, value.supported, value.after
+                );
+            }
         }
         assert_eq!(
             target.account_group_access(member_group).unwrap().role,
@@ -1998,6 +2065,7 @@ mod tests {
             )
             .await
             .unwrap();
+        crate::node::test_support::complete_group_fanout(owner, channel, &[source, other]).await;
         let mut owner_work = ChannelAccountMaintenance::default();
         for _ in 0..12 {
             owner.maintain_account_channels(&mut owner_work).await;
@@ -2011,6 +2079,7 @@ mod tests {
                 .is_some(),
             "compatible fully bound legacy group receives an owner-signed account grant"
         );
+        crate::node::test_support::complete_group_fanout(owner, channel, &[source, other]).await;
         source
             .send_channel_message(channel, b"before inheritance")
             .await
@@ -2025,6 +2094,7 @@ mod tests {
             target.maintain_account_channels(&mut target_work).await;
             source.maintain_account_channels(&mut source_work).await;
         }
+        target.await_channel_metadata(channel).await.unwrap();
         let state = target
             .account_group_projection(channel)
             .unwrap()
@@ -2035,6 +2105,10 @@ mod tests {
             target.channel_member_account_sets(channel).unwrap().0.len(),
             3
         );
+        // Inheritance has already happened through the certified protocol.
+        // Finish only its real public handoff before ordinary wire messages.
+        crate::node::test_support::complete_group_fanout(target, channel, &[source]).await;
+        crate::node::test_support::complete_group_fanout(source, channel, &[target, other]).await;
         let shared_authors = || {
             source
                 .log
@@ -2068,6 +2142,9 @@ mod tests {
             .send_channel_message(channel, b"other account still participates")
             .await
             .unwrap();
+        for publisher in [target, source, other] {
+            crate::node::test_support::complete_group_fanout(publisher, channel, &[]).await;
+        }
         // These bare servers have no participant plaintext recovery task.
         // Drive its real bounded owners before checking history and sharing
         // the newly received author's chain; the owner stays offline.
@@ -2093,6 +2170,10 @@ mod tests {
             shared_count,
             "restarting the coordinator uses durable author coverage and does not republish keys"
         );
+        for node in [source, target, other] {
+            node.await_channel_metadata(channel).await.unwrap();
+            node.process_channel(channel);
+        }
         let projection = source.account_group_projection(channel).unwrap();
         let before = source
             .log

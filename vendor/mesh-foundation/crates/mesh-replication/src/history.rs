@@ -1,7 +1,7 @@
 //! Bounded recent-history and older-page retrieval for an authorized source.
 //!
 //! A page covers a finite source-local ordering, not global event time or
-//! whole-group equality. Controls, causal dependencies and key recovery remain
+//! whole-scope equality. Controls, causal dependencies and key recovery remain
 //! separate host obligations. Source-provided timestamps never define coverage.
 use crate::pull::Record;
 use std::collections::BTreeSet;

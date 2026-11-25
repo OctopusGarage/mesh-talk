@@ -205,49 +205,64 @@ impl GuardedSyncStore<'_> {
             .lock()
             .expect("view preparation lock")
             .enable_history_upload();
+        let mut work = PreparationStep::default();
         if !view
             .preparation
             .lock()
             .expect("view preparation lock")
             .ready()
         {
-            let mut step = self.prepare_view_step(view, budget)?;
-            if !step.ready || step.rows != 0 || step.edges != 0 || step.bytes != 0 {
-                step.ready = false;
-                return Ok((true, step));
+            work = self.prepare_view_step(view, budget)?;
+            if !work.ready {
+                return Ok((true, work));
             }
+            work.ready = false;
         }
         if self.export_preparation_needs_have(view)? {
-            return Ok((false, PreparationStep::default()));
+            return Ok((false, work));
         }
         let mut phase = view.range_export_phase.lock().expect("range export phase");
-        if *phase == 2 {
-            return Ok((
-                true,
-                PreparationStep {
-                    ready: true,
-                    ..Default::default()
-                },
-            ));
+        // Only completed stages share unused allowance. A partial/blocked stage
+        // yields instead of looping in place; 0 -> 1 -> 2 is monotonic, so at
+        // most two export steps can follow this one principal step.
+        for _ in 0..2 {
+            if *phase == 2 {
+                work.ready = true;
+                break;
+            }
+            let remaining = PreparationBudget {
+                rows: budget.rows - work.rows,
+                edges: budget.edges - work.edges,
+                bytes: budget.bytes - work.bytes,
+            };
+            if remaining.rows == 0 || remaining.edges == 0 || remaining.bytes == 0 {
+                break;
+            }
+            let next = match if *phase == 0 {
+                self.reset_export_step(view, remaining)
+            } else {
+                self.prepare_export_step(view, &HashSet::new(), remaining)
+            } {
+                Ok(step) => step,
+                Err(LogError::PageBudgetTooSmall { required })
+                    if (work.rows != 0 || work.edges != 0 || work.bytes != 0)
+                        && required <= budget.bytes =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
+            work.rows += next.rows;
+            work.edges += next.edges;
+            work.bytes += next.bytes;
+            if !next.ready {
+                break;
+            }
+            *phase += 1;
+            work.ready = *phase == 2;
         }
-        let step = if *phase == 0 {
-            let step = self.reset_export_step(view, budget)?;
-            if step.ready {
-                *phase = 1;
-            }
-            PreparationStep {
-                ready: false,
-                ..step
-            }
-        } else {
-            let step = self.prepare_export_step(view, &HashSet::new(), budget)?;
-            if step.ready {
-                *phase = 2;
-            }
-            step
-        };
         self.validate_view(view)?;
-        Ok((true, step))
+        Ok((true, work))
     }
     fn prepared_scope(
         &self,
@@ -1405,7 +1420,23 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         &mut self,
         conversation: &ConversationId,
     ) -> Result<Option<Self::View>, LogError> {
-        let Some(retained) = self.take_retained_selection(conversation)? else {
+        let retained = self.take_retained_selection(conversation);
+        #[cfg(test)]
+        if let Err(error) = &retained {
+            self.node.trace_account_client(&self.peer, || {
+                format!("history_checkout_failed error={error}")
+            });
+        }
+        let retained = match retained {
+            Ok(retained) => retained,
+            Err(LogError::StaleCursor) => {
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_VIEW_INVALID, None);
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(retained) = retained else {
             self.node
                 .observe_mailbox_work(query_reason::QUERY_VIEW_ABSENT, None);
             return Ok(None);
@@ -1460,6 +1491,9 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             Ok(()) => {
                 self.node
                     .observe_mailbox_work(query_reason::QUERY_VIEW_REUSED, None);
+                #[cfg(test)]
+                self.node
+                    .trace_account_client(&self.peer, || "network_view_requalified".into());
                 Ok(Some(view))
             }
             Err(LogError::StaleCursor) => {
@@ -1554,47 +1588,56 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         &mut self,
         mut view: Self::View,
     ) -> Result<Option<Self::View>, LogError> {
-        // Evict before admitting another selection. The existing SQL owner
-        // bounds both live selections and incremental retirement work.
-        drop(self.custody_view.take());
-        if self.node.runtime_work.is_closed() {
-            return Ok(Some(view));
-        }
-        let ready = view
-            .preparation
-            .lock()
-            .expect("view preparation lock")
-            .ready();
-        if !ready {
-            return Ok(Some(view));
-        }
-        self.validate_view(&view)?;
-        if let Some(stamp) = &view.metadata_stamp
-            && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
-        {
-            if self.use_node_preparation {
-                let result = self.cache_prepared_view(view, Purpose::Ordinary)?;
-                if result.is_none() {
-                    self.node
-                        .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
-                }
-                return Ok(result);
+        let result = (|| {
+            // Evict before admitting another selection. The existing SQL owner
+            // bounds both live selections and incremental retirement work.
+            drop(self.custody_view.take());
+            if self.node.runtime_work.is_closed() {
+                return Ok(Some(view));
             }
-            let compaction_lease = view.compaction_lease.take();
-            self.custody_view = Some(RetainedSelection {
-                purpose: Purpose::Ordinary,
-                denied: self.denied,
-                inbound: self.inbound,
-                pull_only: self.pull_only,
-                view,
+            let ready = view
+                .preparation
+                .lock()
+                .expect("view preparation lock")
+                .ready();
+            if !ready {
+                return Ok(Some(view));
+            }
+            self.validate_view(&view)?;
+            if let Some(stamp) = &view.metadata_stamp
+                && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
+            {
+                if self.use_node_preparation {
+                    let result = self.cache_prepared_view(view, Purpose::Ordinary)?;
+                    if result.is_none() {
+                        self.node
+                            .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
+                    }
+                    return Ok(result);
+                }
+                let compaction_lease = view.compaction_lease.take();
+                self.custody_view = Some(RetainedSelection {
+                    purpose: Purpose::Ordinary,
+                    denied: self.denied,
+                    inbound: self.inbound,
+                    pull_only: self.pull_only,
+                    view,
+                });
+                drop(compaction_lease);
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
+                Ok(None)
+            } else {
+                Ok(Some(view))
+            }
+        })();
+        #[cfg(test)]
+        if let Err(error) = &result {
+            self.node.trace_account_client(&self.peer, || {
+                format!("history_custody_failed stage=retain error={error}")
             });
-            drop(compaction_lease);
-            self.node
-                .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
-            Ok(None)
-        } else {
-            Ok(Some(view))
         }
+        result
     }
     fn prepare_view_step(
         &self,
@@ -1605,10 +1648,18 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         // Keep the observation that was actually validated. Recapturing here
         // could absorb an authority change between validation and preparation.
         let before = view.observed.lock().expect("view observation lock").clone();
-        let step = {
+        let (step, _phase) = {
             let mut preparation = view.preparation.lock().expect("view preparation lock");
-            preparation.step(self, view, budget)?
+            let step = preparation.step(self, view, budget);
+            (step, preparation.progress_phase())
         };
+        #[cfg(test)]
+        if let Err(error) = &step {
+            self.node.trace_account_client(&self.peer, || {
+                format!("history_preparation_failed phase={_phase} error={error}")
+            });
+        }
+        let step = step?;
         let after = self.network_observation(&view.conversation)?;
         if !before.permits_preparation_progress(&after)
             || !self.policy_unchanged(&view.conversation, &view.policy)
@@ -1619,11 +1670,21 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         Ok(step)
     }
     fn validate_view(&self, view: &Self::View) -> Result<(), LogError> {
-        NetworkSyncStore::validate_view(
+        let binding = NetworkSyncStore::validate_view(
             self.node.log.lock().expect("log lock").repository()?,
             &view.repository,
-        )?;
+        );
+        #[cfg(test)]
+        if let Err(error) = &binding {
+            self.node.trace_account_client(&self.peer, || {
+                format!("history_view_failed stage=repository error={error}")
+            });
+        }
+        binding?;
         if !self.policy_unchanged(&view.conversation, &view.policy) {
+            #[cfg(test)]
+            self.node
+                .trace_account_client(&self.peer, || "history_view_failed stage=policy".into());
             return Err(LogError::StaleCursor);
         }
         let current = self.network_observation(&view.conversation)?;
@@ -1643,6 +1704,22 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             observed.permits_preparation_progress(&current)
         };
         if !unchanged {
+            #[cfg(test)]
+            let changed = (
+                observed.destructive_policy != current.destructive_policy,
+                observed.roster != current.roster,
+                observed.proofs != current.proofs,
+                observed.file_scopes != current.file_scopes,
+                observed.controls != current.controls,
+                observed.delivery_controls != current.delivery_controls,
+                observed.established != current.established,
+            );
+            drop(observed);
+            #[cfg(test)]
+            self.node.trace_account_client(&self.peer, || {
+                let preparation = view.preparation.lock().expect("preparation");
+                format!("history_view_failed stage=observation ready={ready} scope={} changed(destructive,roster,proofs,files,controls,receipts,established)={changed:?} phase={} generation={:?}", hex::encode(view.conversation.as_bytes()), preparation.progress_phase(), preparation.history_generation().map(|value| (value.source_revision, value.count)))
+            });
             return Err(LogError::StaleCursor);
         }
         *observed = current;
@@ -2069,7 +2146,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         if !supported {
             return Ok(RangeProgress::Unsupported);
         }
-        if !work.ready || work.rows != 0 || work.edges != 0 || work.bytes != 0 {
+        if !work.ready {
             return Ok(RangeProgress::More);
         }
         let mut range = view.range.lock().expect("range build");
@@ -2080,7 +2157,12 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
                 .selection()?
                 .range_index(0),
         )?;
-        let result = range.advance(None, |cursor, budget| {
+        let pages = if work.rows != 0 || work.edges != 0 || work.bytes != 0 {
+            3
+        } else {
+            4
+        };
+        let result = range.advance_with_page_limit(None, pages, |cursor, budget| {
             self.requested_inventory_page(view, cursor.copied(), budget)?
                 .ok_or(LogError::StaleCursor)
         });
@@ -2116,6 +2198,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             .lock()
             .expect("preparation")
             .enable_history_upload();
+        let mut charged = false;
         if !view
             .preparation
             .lock()
@@ -2123,7 +2206,8 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             .ready()
         {
             let step = self.prepare_view_step(view, PreparationBudget::default())?;
-            if !step.ready || step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+            charged = step.rows != 0 || step.edges != 0 || step.bytes != 0;
+            if !step.ready {
                 return Ok(RangeReceiverProgress::More);
             }
         }
@@ -2136,7 +2220,10 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
                 .selection()?
                 .range_index(1),
         )?;
-        let progress = build.advance(None, |cursor, budget| self.have_page(view, cursor, budget));
+        let progress =
+            build.advance_with_page_limit(None, if charged { 3 } else { 4 }, |cursor, budget| {
+                self.have_page(view, cursor, budget)
+            });
         if progress
             .as_ref()
             .is_err_and(crate::eventlog::sync::range::is_index_capacity_error)
@@ -2267,31 +2354,47 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         conversation: &ConversationId,
         id: &EventId,
     ) -> Result<bool, LogError> {
-        if *conversation != view.conversation {
-            return Err(LogError::StaleCursor);
-        }
-        self.validate_view(view)?;
-        let retained = {
-            let preparation = view.preparation.lock().expect("view preparation lock");
-            if !preparation.ready() {
+        let mut _stage = "scope";
+        let result = (|| {
+            if *conversation != view.conversation {
                 return Err(LogError::StaleCursor);
             }
-            let log = self.node.log.lock().expect("log lock");
-            let selected = log
-                .repository()?
-                .selected_contains(preparation.selection()?, *id)?;
-            if selected {
-                log.sync()?;
-            }
-            selected
-        };
-        let stored = retained
-            || (!self.denied
-                && self
-                    .node
-                    .historical_file_completion(*conversation, *id, &self.peer)?);
-        self.validate_view(view)?;
-        Ok(stored)
+            _stage = "validate_before";
+            self.validate_view(view)?;
+            let retained = {
+                let preparation = view.preparation.lock().expect("view preparation lock");
+                _stage = "preparation";
+                if !preparation.ready() {
+                    return Err(LogError::StaleCursor);
+                }
+                let log = self.node.log.lock().expect("log lock");
+                _stage = "selection";
+                let selected = log
+                    .repository()?
+                    .selected_contains(preparation.selection()?, *id)?;
+                if selected {
+                    _stage = "sync";
+                    log.sync()?;
+                }
+                selected
+            };
+            _stage = "completion";
+            let stored = retained
+                || (!self.denied
+                    && self
+                        .node
+                        .historical_file_completion(*conversation, *id, &self.peer)?);
+            _stage = "validate_after";
+            self.validate_view(view)?;
+            Ok(stored)
+        })();
+        #[cfg(test)]
+        if let Err(error) = &result {
+            self.node.trace_account_client(&self.peer, || {
+                format!("history_custody_failed stage=read operation={_stage} error={error}")
+            });
+        }
+        result
     }
     fn file_consent(
         &self,
@@ -5482,6 +5585,139 @@ mod control_publication_tests {
             drop(channel);
             task.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn participant_empty_range_does_not_defer_zero_work_export_phases() {
+        use crate::eventlog::sync::range::RangeProgress;
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let owner = node.serve_sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = open_prepared(&store, &conversation);
+        assert!(
+            matches!(
+                store.range_prepare(&view).unwrap(),
+                RangeProgress::Ready { count: 0, .. }
+            ),
+            "an empty authorized range must not require network round trips for zero-work export transitions"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_small_dm_preparation_uses_remaining_turn_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(Event::new(
+                &peer,
+                conversation,
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                vec![7],
+            ))
+            .unwrap();
+        let owner = node.serve_sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let budget = PreparationBudget::default();
+        let mut ready = false;
+        for _ in 0..2 {
+            let step = NetworkSyncStore::prepare_view_step(&*store, &view, budget).unwrap();
+            assert!(
+                step.rows <= budget.rows
+                    && step.edges <= budget.edges
+                    && step.bytes <= budget.bytes,
+                "phase coalescing must preserve the existing complete turn allowance"
+            );
+            if step.ready {
+                ready = true;
+                break;
+            }
+        }
+        assert!(
+            ready,
+            "one small DM should finish within two original-budget turns, not one turn per setup phase"
+        );
+        assert_eq!(NetworkSyncStore::metadata(&*store, &view).unwrap().count, 1);
+    }
+
+    #[tokio::test]
+    async fn participant_durable_have_stale_derived_cache_is_a_miss() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let scope = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let event = Event::new(&peer, scope, 1, vec![], 1, 0, EventKind::Message, vec![7]);
+        let id = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        let owner = node.serve_sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        NetworkSyncStore::bind_session_peer(&mut *store, &peer.public());
+        let view = open_prepared(&store, &scope);
+        assert!(
+            NetworkSyncStore::retain_custody_view(&mut *store, view)
+                .unwrap()
+                .is_none()
+        );
+        // Derived SQL selections may retire independently of durable messages.
+        // An expired cached handle must reopen with fresh authority, not close
+        // the authenticated request or invent a negative custody observation.
+        node.storage
+            .database()
+            .selection_work_transaction(|c| {
+                c.execute(
+                    "UPDATE participant_work.participant_sync_views SET retired=1 WHERE retired=0",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            NetworkSyncStore::take_custody_view(&mut *store, &scope)
+                .unwrap()
+                .is_none(),
+            "a stale derived handle must be classified as a cache miss"
+        );
+        let view = open_prepared(&store, &scope);
+        assert!(NetworkSyncStore::durable_have_in_view(&*store, &view, &scope, &id).unwrap());
     }
 
     #[tokio::test]

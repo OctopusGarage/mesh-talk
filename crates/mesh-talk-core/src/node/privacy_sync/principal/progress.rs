@@ -236,6 +236,16 @@ impl Preparation {
                 .ok_or(LogError::StaleCursor)?;
             self.restore_progress(store, view, &bytes)?;
         }
+        // A committed ready selection needs validation, not another write.
+        // Parked owners deliberately dropped reducers from RAM: encoding that
+        // compact shell would erase the persisted classified/legacy state
+        // needed to resume a later source append.
+        if self.ready() {
+            return Ok(PreparationStep {
+                ready: true,
+                ..Default::default()
+            });
+        }
         let result = (|| {
             let mut step = PreparationStep::default();
             let mut pending = Vec::new();
@@ -243,10 +253,8 @@ impl Preparation {
             // per historical header. Its row, edge and byte caps still include
             // rejected work, and the session yields after this finite turn.
             for transition in 0..budget.rows {
-                let spent = step.rows != 0 || step.edges != 0 || step.bytes != 0;
                 if transition > 0
-                    && ((spent && matches!(self.phase, Phase::Authority | Phase::Order))
-                        || step.rows == budget.rows
+                    && (step.rows == budget.rows
                         || step.edges == budget.edges
                         || budget.bytes - step.bytes < 64)
                 {
@@ -258,12 +266,22 @@ impl Preparation {
                     break;
                 }
                 let phase = self.phase;
-                let separate_turn = matches!(phase, Phase::Authority | Phase::Order);
                 let remaining = PreparationBudget {
                     rows: budget.rows - step.rows,
                     edges: budget.edges - step.edges,
                     bytes: budget.bytes - step.bytes,
                 };
+                // The shared authority reducer may consume a header and its
+                // decision together, and both shared phases admit order work
+                // in 128-byte units. A valid whole-turn allowance can leave an
+                // unusable tail: checkpoint it instead of passing an invalid
+                // sub-budget to the next owner.
+                if transition > 0
+                    && matches!(self.phase, Phase::Order | Phase::Authority)
+                    && (remaining.rows < 2 || remaining.bytes < 128)
+                {
+                    break;
+                }
                 let next = match self.step_inner(store, view, remaining, &mut pending) {
                     Ok(next) => next,
                     Err(LogError::PageBudgetTooSmall { required })
@@ -277,16 +295,16 @@ impl Preparation {
                 step.edges += next.edges;
                 step.bytes += next.bytes;
                 step.ready = next.ready;
-                // An already-current order/authority owner may advance its
-                // phase without spending work. Keep that finite transition in
-                // this allowance instead of persisting and yielding an empty
-                // turn. A working owner still gets its original exclusive turn.
+                // All phases share the remaining allowance above. Small order
+                // and authority work must not force another network round while
+                // budget remains. A shared owner that made no progress still
+                // yields instead of polling repeatedly in this synchronous turn.
                 if step.ready
-                    || (separate_turn
-                        && (next.rows != 0
-                            || next.edges != 0
-                            || next.bytes != 0
-                            || self.phase == phase))
+                    || (matches!(phase, Phase::Authority | Phase::Order)
+                        && next.rows == 0
+                        && next.edges == 0
+                        && next.bytes == 0
+                        && self.phase == phase)
                 {
                     break;
                 }

@@ -986,6 +986,7 @@ enum Fault {
 /// through a long known prefix; this store cannot accidentally use SDK fallback.
 struct TinyPagedStore {
     repo: EventRepository,
+    retained_view: Option<<EventRepository as NetworkSyncStore>::View>,
     fault: Fault,
     have_calls: AtomicUsize,
     export_calls: AtomicUsize,
@@ -998,6 +999,7 @@ impl TinyPagedStore {
     fn new(repo: EventRepository) -> Self {
         Self {
             repo,
+            retained_view: None,
             fault: Fault::None,
             have_calls: AtomicUsize::new(0),
             export_calls: AtomicUsize::new(0),
@@ -1045,6 +1047,20 @@ impl NetworkSyncStore for TinyPagedStore {
     type ExportCursor = <EventRepository as NetworkSyncStore>::ExportCursor;
     fn open_view(&self, c: &ConversationId) -> Result<Self::View, LogError> {
         self.repo.open_view(c)
+    }
+    fn take_custody_view(&mut self, _: &ConversationId) -> Result<Option<Self::View>, LogError> {
+        Ok(self.retained_view.take())
+    }
+    fn durable_have_in_view(
+        &self,
+        _: &Self::View,
+        c: &ConversationId,
+        id: &EventId,
+    ) -> Result<bool, LogError> {
+        if self.preparation_rows.load(Ordering::Relaxed) != 0 {
+            return Err(LogError::StaleCursor);
+        }
+        NetworkSyncStore::durable_have(self, c, id)
     }
     fn prepare_view_step(
         &self,
@@ -3589,7 +3605,7 @@ async fn channel_exact_custody_after_no_progress_fixture(held: bool) {
         let fresh_probe = task.await.unwrap();
         assert!(fresh_probe, "NoProgress must not suppress independent exact custody evidence");
         assert_eq!(source.channel_custody_count(conversation, target).unwrap(), Some(usize::from(held)));
-        assert!(deferred, "exact custody does not finish the unrelated control fanout");
+        assert_eq!(deferred, super::super::channels::FanoutProgress::Deferred, "exact custody does not finish the unrelated control fanout");
     }).await.expect("exact custody regression timed out");
 }
 
@@ -3633,7 +3649,7 @@ async fn legacy_optional_custody_close_does_not_defer_completed_control_fanout()
         });
         let deferred = source.distribute_channel_confirming(conversation, &[proof.public()], Some(event)).await;
         server.await.unwrap();
-        assert!(!deferred, "an unsupported optional check cannot retire a successfully completed control round as unfinished");
+        assert_eq!(deferred, super::super::channels::FanoutProgress::Complete, "an unsupported optional check cannot retire a successfully completed control round as unfinished");
         assert_eq!(source.channel_custody_count(conversation, event).unwrap(), Some(0));
         assert!(source.channel_custody_observations(conversation, event).is_empty(),
             "a closed optional query must publish neither positive nor negative custody evidence");
@@ -3730,5 +3746,57 @@ async fn paged_reconciliation_accepts_an_alternate_frame_session() {
             .get(&event.id)
             .unwrap()
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn cached_partial_view_finishes_preparation_before_use() {
+    let (_dir, mut store, _, scope) = tiny_fixture();
+    store.retained_view = Some(NetworkSyncStore::open_view(&store, &scope).unwrap());
+    store.preparation_rows.store(257, Ordering::Relaxed);
+    let store = Mutex::new(store);
+    let backend = PagedNetworkBackend(&store, None);
+    let _view = backend::open_prepared_view(&backend, &scope).await.unwrap();
+    let store = store.lock().unwrap();
+    assert_eq!(store.preparation_rows.load(Ordering::Relaxed), 0);
+    assert!(store.preparation_calls.load(Ordering::Relaxed) >= 2);
+}
+
+#[tokio::test]
+async fn cached_partial_view_answers_exact_custody_over_authenticated_channel() {
+    let (_dir, mut store, signer, scope) = tiny_fixture();
+    let event = Event::new(&signer, scope, 1, vec![], 1, 0, EventKind::Message, vec![1]);
+    let id = event.id;
+    store.repo.append(&event).unwrap();
+    store.retained_view = Some(NetworkSyncStore::open_view(&store, &scope).unwrap());
+    store.preparation_rows.store(257, Ordering::Relaxed);
+    let store = Arc::new(Mutex::new(store));
+    let peer = DeviceIdentity::generate();
+    let (a, b) = tokio::io::duplex(65536);
+    let (client, server) = tokio::join!(
+        SecureChannel::connect(a, &peer, None),
+        SecureChannel::accept(b, &signer)
+    );
+    let mut client = client.unwrap();
+    let mut server = server.unwrap();
+    let serving = store.clone();
+    let response = async move {
+        let bytes = server.recv().await.unwrap();
+        serve_wire_bytes_paged(&mut server, &serving, &bytes).await
+    };
+    let (held, served) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(request_durable_have(&mut client, scope, id), response)
+    })
+    .await
+    .expect("the owned exact-custody exchange must finish");
+    served.expect("partial cached preparation must not close the authenticated channel");
+    assert!(held.unwrap());
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .preparation_rows
+            .load(Ordering::Relaxed),
+        0
     );
 }

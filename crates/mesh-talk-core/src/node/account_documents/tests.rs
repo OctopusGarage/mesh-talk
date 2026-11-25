@@ -1016,6 +1016,22 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
             .await
             .unwrap();
         let event = source.channel_history(channel, 10).unwrap()[0].id;
+        let peer = source.routing_peer(&holder.user_id()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                source
+                    .distribute_channel_confirming(channel, &[peer.public.clone()], Some(event))
+                    .await;
+                if holder.log.lock().unwrap().get(&event).unwrap().is_some()
+                    && source.channel_custody_count(channel, event).unwrap() == Some(1)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("normal exact fanout setup must finish before injecting blob loss");
         assert!(
             holder.log.lock().unwrap().get(&event).unwrap().is_some(),
             "the real holder must retain the exact original encrypted event"
@@ -1891,22 +1907,25 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     for (label, current, peer) in [
         ("source", &a, sibling.identity.public()),
         ("sibling", &sibling, a.identity.public()),
+        ("holder", &bob, a.identity.public()),
     ] {
         let trace = custody_trace.clone();
         let omitted = custody_trace_omitted.clone();
         let important = custody_important.clone();
         *current.account_client_test_hook.lock().unwrap() =
             Some(std::sync::Arc::new(move |observed, phase| {
-                if observed != peer
-                    || !(phase.starts_with("page_")
-                        || phase.starts_with("negotiation_")
-                        || phase.starts_with("session_")
-                        || phase.starts_with("dial_authentication_")
-                        || phase.starts_with("dial_outbound_")
-                        || phase.starts_with("wake_")
-                        || phase.starts_with("fixture_")
-                        || phase.starts_with("history_")
-                        || phase.starts_with("favorite_"))
+                if !phase.starts_with("custody_probe_")
+                    && !phase.starts_with("history_wire_failed")
+                    && (observed != peer
+                        || !(phase.starts_with("page_")
+                            || phase.starts_with("negotiation_")
+                            || phase.starts_with("session_")
+                            || phase.starts_with("dial_authentication_")
+                            || phase.starts_with("dial_outbound_")
+                            || phase.starts_with("wake_")
+                            || phase.starts_with("fixture_")
+                            || phase.starts_with("history_")
+                            || phase.starts_with("favorite_")))
                 {
                     return;
                 }
@@ -1917,6 +1936,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                     phase,
                 );
                 if entry.3.starts_with("fixture_")
+                    || entry.3.starts_with("custody_probe_")
                     || (entry.3.contains("outcome=") && !entry.3.contains("outcome=ok"))
                 {
                     let mut important = important.lock().unwrap();
@@ -2127,8 +2147,10 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             custody_trace.lock().unwrap()
         );
     }
-    for current in [&a, &sibling] {
-        *current.account_client_test_hook.lock().unwrap() = None;
+    if std::env::var_os("MESH_TALK_CUSTODY_TRACE").is_none() {
+        for current in [&a, &sibling, &bob] {
+            *current.account_client_test_hook.lock().unwrap() = None;
+        }
     }
     assert!(
         actual.is_ok(),
@@ -2169,7 +2191,14 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             }
         })
         .await
-        .expect("the returning external holder must confirm this exact message");
+        .unwrap_or_else(|error| {
+            let holder_has_event = bob.log.lock().unwrap().get(&event).unwrap().is_some();
+            let holder_store = bob.sync_store(&a.identity.public());
+            let exact_visible = crate::eventlog::sync::SyncStore::durable_have(
+                &*holder_store.lock().unwrap(), &channel, &event,
+            );
+            panic!("the returning external holder must confirm this exact message: {error}; retained={holder_has_event}; exact_visible={exact_visible:?}; source_count={:?}", a.channel_custody_count(channel, event));
+        });
         assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(1));
         assert_eq!(
             bob.channel_custody_count(channel, event).unwrap(),
@@ -2368,7 +2397,12 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         );
         wait_custody_source_count(&a, channel, event, 1, repair_deadline)
             .await
-            .expect("the recovery owner must confirm the repaired external copy");
+            .unwrap_or_else(|error| {
+                let retained = lost.log.lock().unwrap().get(&event).unwrap().is_some();
+                let holder_store = lost.sync_store(&a.identity.public());
+                let visible = crate::eventlog::sync::SyncStore::durable_have(&*holder_store.lock().unwrap(), &channel, &event);
+                panic!("the recovery owner must confirm the repaired external copy: {error}; retained={retained}; exact_visible={visible:?}");
+            });
         assert_eq!(
             a.channel_custody_count(channel, event).unwrap(),
             Some(1),

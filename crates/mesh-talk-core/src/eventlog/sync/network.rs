@@ -206,9 +206,11 @@ pub trait NetworkSyncStore {
         Ok(())
     }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
-    /// Optionally transfer an exclusively owned, currently qualified prepared
-    /// view to the caller. It must not share mutable export/Have state with any
-    /// other request. A miss uses ordinary bounded authorization preparation.
+    /// Optionally transfer an exclusively owned view with a qualified owner and
+    /// authorization binding. Retained range work may still be partially prepared:
+    /// finish `prepare_view_step` unless `reusable_view` qualifies current readiness.
+    /// Mutable export/Have state must not be shared with another request. A miss
+    /// uses ordinary bounded authorization preparation.
     fn take_custody_view(
         &mut self,
         _conversation: &ConversationId,

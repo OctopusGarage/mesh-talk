@@ -1465,11 +1465,51 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn personal_dm_keep_clear_and_authenticated_new_message_preserve_the_floor() {
         use std::net::IpAddr;
+        async fn wait_rows(
+            a: &Node,
+            b: &Node,
+            conv: &crate::eventlog::ConversationId,
+            wanted: usize,
+            phase: &str,
+        ) {
+            tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                while b.received.lock().unwrap().entries(conv).len() < wanted {
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap_or_else(|error| {
+                let wire = crate::node::conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
+                let sender_events = a.log.lock().unwrap().conversation_len(&wire);
+                let receiver_events = b.log.lock().unwrap().conversation_len(&wire);
+                let state = b.conversation_personal_state(&DocumentConversation::Account(a.account_id()));
+                panic!("{phase} missed its original deadline: {error}; sender_events={sender_events:?}; receiver_events={receiver_events:?}; personal_state={state:?}");
+            });
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let a_account = Account::generate();
         let b_account = Account::generate();
         let a = super::super::tests::node(&dir.path().join("a"), &a_account);
         let b = super::super::tests::node(&dir.path().join("b"), &b_account);
+        if std::env::var_os("MESH_QA_TRACE").is_some() {
+            let remaining = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(32));
+            for (label, node) in [("sender", &a), ("receiver", &b)] {
+                let remaining = remaining.clone();
+                *node.account_client_test_hook.lock().unwrap() =
+                    Some(std::sync::Arc::new(move |_, phase| {
+                        if (phase.starts_with("history_") || phase.starts_with("delivery_range_"))
+                            && remaining
+                                .try_update(
+                                    std::sync::atomic::Ordering::Relaxed,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                    |n| n.checked_sub(1),
+                                )
+                                .is_ok()
+                        {
+                            eprintln!("personal DM {label} {phase}");
+                        }
+                    }));
+            }
+        }
         let al = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         for (node, peer, account, port) in [
@@ -1487,8 +1527,14 @@ mod tests {
                 &node.user_id(),
             );
         }
-        let aserver = tokio::spawn(a.clone().run_accept_loop(al));
-        let bserver = tokio::spawn(b.clone().run_accept_loop(bl));
+        let mut aserver =
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(a.clone(), al)
+                .await;
+        let mut bserver =
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(b.clone(), bl)
+                .await;
+        aserver.launch();
+        bserver.launch();
         let conversation = DocumentConversation::Account(a.account_id());
         let conv =
             crate::node::conversation::account_conversation_id(&a.account_id(), &b.account_id());
@@ -1500,13 +1546,7 @@ mod tests {
             a.send_to_account(&b.account_id(), b"old live row", None)
                 .await
                 .unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(4), async {
-                while b.received.lock().unwrap().entries(&conv).is_empty() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
+            wait_rows(&a, &b, &conv, 1, "first live DM").await;
             b.delete_account_contact_if(&b.account_id(), &a.account_id(), false, |commit| commit())
                 .unwrap();
             assert!(b.conversation_personal_state(&conversation).hidden);
@@ -1516,13 +1556,7 @@ mod tests {
             a.send_to_account(&b.account_id(), b"new keep row", None)
                 .await
                 .unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(4), async {
-                while b.received.lock().unwrap().entries(&conv).len() < 2 {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
+            wait_rows(&a, &b, &conv, 2, "new DM after keep").await;
             assert!(!b.conversation_personal_state(&conversation).hidden);
             b.delete_account_contact_if(&b.account_id(), &a.account_id(), true, |commit| commit())
                 .unwrap();
@@ -1531,13 +1565,7 @@ mod tests {
             a.send_to_account(&b.account_id(), b"new clear row", None)
                 .await
                 .unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(4), async {
-                while b.received.lock().unwrap().entries(&conv).is_empty() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
+            wait_rows(&a, &b, &conv, 1, "new DM after clear").await;
             assert_eq!(b.received.lock().unwrap().entries(&conv).len(), 1);
             let state = b.conversation_personal_state(&conversation);
             assert!(!state.hidden && state.local_cleanup_complete);
@@ -1545,10 +1573,8 @@ mod tests {
         };
         // Drain all owners before propagating an assertion failure.
         let result = tokio::spawn(outcome).await;
-        aserver.abort();
-        bserver.abort();
-        let _ = aserver.await;
-        let _ = bserver.await;
+        aserver.stop().await;
+        bserver.stop().await;
         a.runtime_work.drain().await;
         b.runtime_work.drain().await;
         result.unwrap();

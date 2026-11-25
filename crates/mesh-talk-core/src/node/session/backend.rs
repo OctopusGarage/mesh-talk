@@ -689,6 +689,11 @@ pub(super) async fn prepare_view<B: SessionBackend>(
     backend: &B,
     view: &B::View,
 ) -> Result<(), SessionError> {
+    // A qualified ready cache hit must stay read-only. Partial or changed
+    // selections still pass through bounded preparation and fresh validation.
+    if backend.reusable_view(view)? {
+        return Ok(());
+    }
     loop {
         if backend
             .prepare_view_step(view, PreparationBudget::default())?
@@ -706,10 +711,12 @@ pub(super) async fn open_prepared_view<B: SessionBackend>(
 ) -> Result<B::View, SessionError> {
     // Check out the existing exclusive connection lease before allocating a
     // new durable selection. The backend rechecks exact source and authority.
-    if let Some(view) = backend.take_custody_view(conversation)? {
-        return Ok(view);
-    }
-    let view = backend.open_view(conversation)?;
+    // A retained range selection may still be partially prepared. Checkout
+    // qualifies its owner and authority, but does not establish readiness.
+    let view = match backend.take_custody_view(conversation)? {
+        Some(view) => view,
+        None => backend.open_view(conversation)?,
+    };
     prepare_view(backend, &view).await?;
     Ok(view)
 }
@@ -1200,13 +1207,6 @@ impl<B: SessionBackend> legacy_round::RoundBackend<SessionError> for RoundStoreA
     }
 }
 impl<B: SessionBackend> legacy_round::ResponderBackend<SessionError> for RoundStoreAdapter<'_, B> {
-    fn take_custody_view(
-        &self,
-        scope: &ConversationId,
-    ) -> Result<Option<Self::View>, SessionError> {
-        Ok(self.0.take_custody_view(scope)?)
-    }
-
     fn metadata(&self, view: &Self::View) -> Result<SyncMetadata, SessionError> {
         Ok(self.0.metadata(view)?)
     }

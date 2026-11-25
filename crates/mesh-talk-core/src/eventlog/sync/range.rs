@@ -163,9 +163,22 @@ impl<C> RangeBuild<C> {
     pub fn advance(
         &mut self,
         expected: Option<u64>,
+        page: impl FnMut(Option<&C>, IdPageBudget) -> Result<SyncPage<EventId, C>, LogError>,
+    ) -> Result<RangeProgress, LogError> {
+        self.advance_with_page_limit(expected, 4, page)
+    }
+    /// Reserve a turn's existing operation slots for preceding preparation.
+    /// This can only reduce the original four-page ceiling.
+    pub(crate) fn advance_with_page_limit(
+        &mut self,
+        expected: Option<u64>,
+        pages: usize,
         mut page: impl FnMut(Option<&C>, IdPageBudget) -> Result<SyncPage<EventId, C>, LogError>,
     ) -> Result<RangeProgress, LogError> {
-        let result = self.advance_inner(expected, &mut page);
+        if !(1..=4).contains(&pages) {
+            return Err(LogError::InvalidPageBudget);
+        }
+        let result = self.advance_inner(expected, pages, &mut page);
         if result
             .as_ref()
             .is_err_and(|error| !is_index_capacity_error(error))
@@ -184,6 +197,7 @@ impl<C> RangeBuild<C> {
     fn advance_inner(
         &mut self,
         expected: Option<u64>,
+        pages: usize,
         page: &mut impl FnMut(Option<&C>, IdPageBudget) -> Result<SyncPage<EventId, C>, LogError>,
     ) -> Result<RangeProgress, LogError> {
         if self.resetting {
@@ -203,7 +217,7 @@ impl<C> RangeBuild<C> {
         }
         if !self.ready {
             let mut examined = 0;
-            for _ in 0..4 {
+            for _ in 0..pages {
                 let remaining = 1000usize.saturating_sub(examined);
                 if remaining == 0 {
                     break;
@@ -293,6 +307,56 @@ mod tests {
         id[..8].copy_from_slice(&(n as u64).to_be_bytes());
         EventId::new(id)
     }
+    #[test]
+    fn reduced_range_page_allowance_preserves_its_cursor_and_default_ceiling() {
+        use std::cell::Cell;
+        let mut build = RangeBuild::<usize>::default();
+        let calls = Cell::new(0);
+        let examined = Cell::new(0);
+        let mut page = |after: Option<&usize>, budget: IdPageBudget| {
+            calls.set(calls.get() + 1);
+            assert!(budget.ids <= 32 && budget.examined <= 250);
+            let after = after.copied().unwrap_or(0);
+            let end = (after + budget.ids).min(130);
+            examined.set(examined.get() + end - after);
+            Ok(SyncPage {
+                items: (after..end).map(id).collect(),
+                next: (end < 130).then_some(end),
+                examined: end - after,
+            })
+        };
+        assert!(matches!(
+            build
+                .advance_with_page_limit(Some(130), 2, &mut page)
+                .unwrap(),
+            RangeProgress::More
+        ));
+        assert_eq!((calls.get(), examined.get()), (2, 64));
+        assert!(build.snapshot().is_none());
+        assert!(matches!(
+            build
+                .advance_with_page_limit(Some(130), 2, &mut page)
+                .unwrap(),
+            RangeProgress::More
+        ));
+        assert_eq!((calls.get(), examined.get()), (4, 128));
+        assert!(matches!(
+            build
+                .advance_with_page_limit(Some(130), 2, &mut page)
+                .unwrap(),
+            RangeProgress::Ready { count: 130, .. }
+        ));
+        assert_eq!(
+            (calls.get(), examined.get()),
+            (5, 130),
+            "reducing a turn must not restart already examined records"
+        );
+        assert!(matches!(
+            build.advance_with_page_limit(Some(130), 5, &mut page),
+            Err(LogError::InvalidPageBudget)
+        ));
+    }
+
     #[test]
     fn bounded_range_build_never_exposes_a_partial_snapshot() {
         let mut build = RangeBuild::<usize>::default();

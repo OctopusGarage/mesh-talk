@@ -210,10 +210,12 @@ impl Chain {
         super::session::request_round(&mut connection, &store, channel)
             .await
             .unwrap();
-        self.nodes[from].process_channel(channel);
+        // This topology has no recovery worker. Complete only the local
+        // reception admitted by this exact round before observing its result.
+        self.settle_retained(from, channel).await;
         // The server processes the final appended round after its response.
         tokio::task::yield_now().await;
-        self.nodes[to].process_channel(channel);
+        self.settle_retained(to, channel).await;
     }
 
     // No background recovery is running in this topology fixture. Advance only
@@ -308,8 +310,25 @@ impl Chain {
         // The original recovery deadline includes deferred local processing.
         // No worker or additional network route is introduced by this barrier.
         tokio::time::timeout(Duration::from_secs(5), async {
-            self.nodes[index].pull_one_channel_from_member(0).await;
-            self.settle_retained(index, channel).await;
+            let node = &self.nodes[index];
+            for _ in 0..128 {
+                node.channel_recovery_pending
+                    .lock()
+                    .unwrap()
+                    .remove(&channel);
+                node.pull_one_channel_from_member(0).await;
+                self.settle_retained(index, channel).await;
+                if !node
+                    .channel_recovery_pending
+                    .lock()
+                    .unwrap()
+                    .remove(&channel)
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("the admitted adjacent recovery must settle its bounded continuations");
         })
         .await
         .expect("bounded adjacent recovery and retained projection");
@@ -618,7 +637,10 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
         .set_channel_replica_enabled(group, true)
         .await
         .unwrap();
-    chain.settle_retained(3, group).await;
+    // Seed D only from its existing C edge before cutting the bridge. A full
+    // D recovery sweep also contacts E and can legitimately forward the seed
+    // before the test installs its partition.
+    chain.round(3, 2, group).await;
     assert!(chain.has_text(3, group, b"held behind C"));
     // D stops serving before E copies the event. No other cross-site edge exists.
     let server = chain.servers[3].take().unwrap();
@@ -1317,8 +1339,18 @@ async fn exercise_bounded_peer_round_owner(cancel_parent: bool, borrowed_parent:
     let second_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let outcome = std::panic::AssertUnwindSafe(async {
         let group = source.create_channel("bounded peer rounds", vec![nodes[1].identity.public(), nodes[2].identity.public()]).await.unwrap();
+        // The deliberately unlaunched source has no account fanout worker.
+        // Drive that same signed-control owner before the fresh message exists.
         tokio::time::timeout(Duration::from_secs(30), async {
             while !nodes[1..].iter().all(|node| node.channel_members(group).contains(&source.identity.public())) {
+                match source.prepare_account_group_fanout(group).await {
+                    Ok(()) => {
+                        let members = source.channel_members(group);
+                        source.distribute_account_group_effects(group, &members).await;
+                    }
+                    Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {},
+                    Err(error) => panic!("signed receiver setup failed: {error}"),
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.expect("real receiver membership must precede the new message");
@@ -1562,6 +1594,8 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     }
     let initialized = Arc::new(Mutex::new([false; 6]));
     let maintenance_active = Arc::new(Mutex::new([false; 6]));
+    let custody_active = Arc::new(Mutex::new([false; 6]));
+    let fallback_active = Arc::new(Mutex::new([false; 6]));
     let initial_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let initial_started = std::time::Instant::now();
     let fixture_peers = Arc::new(
@@ -1577,6 +1611,8 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let initialized = initialized.clone();
             let maintenance_active = maintenance_active.clone();
+            let custody_active = custody_active.clone();
+            let fallback_active = fallback_active.clone();
             let node = Arc::downgrade(node);
             let trace = initial_trace.clone();
             let fixture_peers = fixture_peers.clone();
@@ -1603,6 +1639,18 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                     }
                     "channel_recovery_maintenance_done" => {
                         maintenance_active.lock().unwrap()[index] = false;
+                    }
+                    "channel_recovery_custody_input_begin" => {
+                        custody_active.lock().unwrap()[index] = true
+                    }
+                    "channel_recovery_custody_cycle_done" => {
+                        custody_active.lock().unwrap()[index] = false
+                    }
+                    "channel_recovery_fallback_begin" => {
+                        fallback_active.lock().unwrap()[index] = true
+                    }
+                    "channel_recovery_fallback_done" => {
+                        fallback_active.lock().unwrap()[index] = false
                     }
                     _ => {}
                 }
@@ -1636,7 +1684,8 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     for host in hosts.iter_mut().flatten() {
         host.launch();
     }
-    // Cold setup uses normal recovery, then drains already-started maintenance.
+    // Cold setup uses normal recovery, then drains already-started maintenance,
+    // custody and fallback work before installing measurement hooks.
     // The unchanged post-send window starts with periodic work disabled on all nodes.
     let prepared = tokio::time::timeout(Duration::from_secs(30), async {
         while !initialized.lock().unwrap().iter().all(|ready| *ready)
@@ -1645,6 +1694,8 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                 .unwrap()
                 .iter()
                 .any(|active| *active)
+            || custody_active.lock().unwrap().iter().any(|active| *active)
+            || fallback_active.lock().unwrap().iter().any(|active| *active)
         {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -1753,8 +1804,9 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     // shared functional watchdog; held-peer latency controls keep their own bound.
     let deadline = Duration::from_secs(30);
     let cutoff = deadline_started + deadline;
-    // Sender retirement must not grant other hosts unmeasured propagation.
-    hosts[0].take().unwrap().stop().await;
+    // Local acceptance is not a remote copy. Retire the author only after the
+    // adjacent member proves the seed, inside this same measured deadline.
+    let mut sender_shutdown = None;
     let mut receipts = GossipReadReceipts::default();
     let mut history_reads = [0_u64; 5];
     let mut stale_reads = [0_u64; 5];
@@ -1835,6 +1887,18 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                         if let Some(id) = id {
                             receipts.record(slot, id, completed, cutoff);
                         }
+                        if slot == 0
+                            && receipts.completed[0].is_some()
+                            && let Some(sender) = hosts[0].take()
+                        {
+                            sender_shutdown = Some(tokio::spawn(sender.stop()));
+                            sender_shutdown
+                                .as_mut()
+                                .unwrap()
+                                .await
+                                .expect("the seeded sender must retire through its owner");
+                            sender_shutdown.take();
+                        }
                     }
                     Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
                         stale_reads[slot] = stale_reads[slot].saturating_add(1);
@@ -1858,6 +1922,11 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     .await;
     let deadline_elapsed = deadline_started.elapsed();
     let deadline_elapsed_ms = deadline_elapsed.as_millis();
+    if let Some(sender) = sender_shutdown.take() {
+        sender
+            .await
+            .expect("sender retirement admitted before cutoff must join");
+    }
     if let Some((slot, query)) = pending_query.take() {
         // Join only the read admitted before the cutoff. Its immutable completion
         // stamp may prove timely work despite late async delivery; a late read
@@ -2040,6 +2109,9 @@ async fn channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet() {
         .send_channel_message(group, b"wake once")
         .await
         .unwrap();
+    // No sender/recovery runtime is launched in this fixture. Drive its normal
+    // authenticated round before asserting the committed-reception signal.
+    chain.round(1, 0, group).await;
     tokio::time::timeout(
         Duration::from_secs(1),
         receiver.channel_recovery_notify.notified(),

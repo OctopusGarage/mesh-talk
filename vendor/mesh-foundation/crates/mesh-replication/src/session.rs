@@ -77,7 +77,7 @@ impl<E: std::error::Error + 'static> std::error::Error for HaveError<E> {
 }
 
 /// Receive a bounded inventory from framed I/O. The codec checks the protocol
-/// variant, conversation and frame contents before returning IDs. This function
+/// variant, scope and frame contents before returning IDs. This function
 /// preserves raw order and duplicates for the caller's admission logic.
 pub async fn receive_have<S, Id>(
     session: &mut S,
