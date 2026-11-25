@@ -1020,7 +1020,11 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
         tokio::time::timeout(std::time::Duration::from_secs(8), async {
             loop {
                 source
-                    .distribute_channel_confirming(channel, &[peer.public.clone()], Some(event))
+                    .distribute_channel_confirming(
+                        channel,
+                        std::slice::from_ref(&peer.public),
+                        Some(event),
+                    )
                     .await;
                 if holder.log.lock().unwrap().get(&event).unwrap().is_some()
                     && source.channel_custody_count(channel, event).unwrap() == Some(1)

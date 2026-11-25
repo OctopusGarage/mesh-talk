@@ -1207,6 +1207,7 @@
     {
       "id": "frontend-sync-reconciliation",
       "paths": [
+        "frontend/e2e/privacy.spec.ts",
         "frontend/src/lib/readDeadline.ts",
         "frontend/src/lib/readDeadline.test.ts",
         "frontend/src/lib/syncInvalidation.ts",

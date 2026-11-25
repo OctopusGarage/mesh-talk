@@ -199,6 +199,7 @@
     {
       "id": "validation-tooling",
       "paths": [
+        ".claude/agents/e2e-runner.md",
         "scripts/validation/affected.mjs",
         "scripts/validation/changed.mjs",
         "scripts/validation/frontend-graph.mjs",
@@ -371,6 +372,8 @@
     {
       "id": "workspace-toolchain",
       "paths": [
+        "vendor/mesh-foundation/Cargo.toml",
+        "vendor/mesh-foundation/SOURCE",
         "Cargo.toml",
         "Cargo.lock",
         ".cargo/",

@@ -703,6 +703,7 @@ impl ChannelBook {
             .map(|state| state.members().to_vec())
     }
 
+    #[cfg(test)]
     pub fn pending_departures(&self, own: &str) -> Vec<(ConversationId, Vec<PublicIdentity>)> {
         self.states
             .iter()
@@ -713,6 +714,7 @@ impl ChannelBook {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn pending_acceptances(&self, own: &str) -> Vec<(ConversationId, Vec<PublicIdentity>)> {
         self.states
             .iter()
@@ -723,18 +725,7 @@ impl ChannelBook {
             .collect()
     }
 
-    pub fn pending_transfers(&self, own: &str) -> Vec<(ConversationId, Vec<PublicIdentity>)> {
-        self.states
-            .iter()
-            .filter(|(id, state)| {
-                state.is_member(own)
-                    && state.owner() != own
-                    && self.transferred.contains(&(**id, own.to_string()))
-            })
-            .map(|(id, state)| (*id, state.members().to_vec()))
-            .collect()
-    }
-
+    #[cfg(test)]
     pub fn pending_replica_preferences(
         &self,
         own: &str,

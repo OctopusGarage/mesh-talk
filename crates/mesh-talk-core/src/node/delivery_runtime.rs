@@ -3706,88 +3706,93 @@ impl Node {
             let mut held = false;
             let mut timed_out = false;
             if let Some(peer) = direct_peer {
-                let outcome = self
-                    .adaptive_control_timeout(&peer.public, async {
-                        let receipt_ready = tokio::sync::Notify::new();
-                        if !independent_receipts {
+                let outcome = Box::pin(self.adaptive_control_timeout(&peer.public, async {
+                    let receipt_ready = tokio::sync::Notify::new();
+                    if !independent_receipts {
+                        receipt_ready.notify_one();
+                    }
+                    let messages = async {
+                        let held = self
+                            .transfer_delivery_destination_with_admission(
+                                &peer,
+                                destination,
+                                destination.event.conversation_id,
+                                super::session_pool::AuthenticationAdmission::RouteProgress,
+                                Some(&receipt_ready),
+                            )
+                            .await;
+                        self.emit_new_messages(destination.event.conversation_id);
+                        if held.0 == TransferOutcome::More {
+                            direct_more.store(true, Ordering::Release);
+                        }
+                        if held.0 == TransferOutcome::Limited {
+                            direct_limited.store(true, Ordering::Release);
+                        }
+                        (held.0 == TransferOutcome::Held, held.1)
+                    };
+                    let receipts = || async {
+                        let control = super::delivery_receipt::delivery_conversation_id(
+                            &self.identity.public(),
+                            &peer.public,
+                        );
+                        let control_outcome =
+                            Box::pin(self.transfer_delivery_destination_with_admission(
+                                &peer,
+                                destination,
+                                control,
+                                super::session_pool::AuthenticationAdmission::RouteProgress,
+                                None,
+                            ))
+                            .await;
+                        if control_outcome.0 == TransferOutcome::More {
+                            direct_more.store(true, Ordering::Release);
+                        }
+                        if control_outcome.0 == TransferOutcome::Limited {
+                            direct_limited.store(true, Ordering::Release);
+                        }
+                        self.emit_new_messages(control);
+                    };
+                    if independent_receipts {
+                        // Existing receipt evidence must not wait behind
+                        // ordinary history, and new messages must not wait
+                        // behind receipt history. Both scopes remain owned
+                        // by this one deadline/cancellation boundary and
+                        // the shared TCP capacity. Only receipt validation
+                        // may retire this exact destination as delivered.
+                        tokio::pin!(messages);
+                        let early = async {
+                            receipts().await;
+                            // An empty early comparison must still allow the
+                            // original's authenticated stream to query again
+                            // after its exact Have has completed.
                             receipt_ready.notify_one();
-                        }
-                        let messages = async {
-                            let held = self
-                                .transfer_delivery_destination_with_admission(
-                                    &peer,
-                                    destination,
-                                    destination.event.conversation_id,
-                                    super::session_pool::AuthenticationAdmission::RouteProgress,
-                                    (!independent_receipts).then_some(&receipt_ready),
-                                )
-                                .await;
-                            self.emit_new_messages(destination.event.conversation_id);
-                            if held.0 == TransferOutcome::More {
-                                direct_more.store(true, Ordering::Release);
-                            }
-                            if held.0 == TransferOutcome::Limited {
-                                direct_limited.store(true, Ordering::Release);
-                            }
-                            (held.0 == TransferOutcome::Held, held.1)
                         };
-                        let receipts = || async {
-                            let control = super::delivery_receipt::delivery_conversation_id(
-                                &self.identity.public(),
-                                &peer.public,
-                            );
-                            let control_outcome =
-                                Box::pin(self.transfer_delivery_destination_with_admission(
-                                    &peer,
-                                    destination,
-                                    control,
-                                    super::session_pool::AuthenticationAdmission::RouteProgress,
-                                    None,
-                                ))
-                                .await;
-                            if control_outcome.0 == TransferOutcome::More {
-                                direct_more.store(true, Ordering::Release);
+                        tokio::pin!(early);
+                        let held = tokio::select! {
+                            result = &mut messages => {
+                                if !result.0 { early.await; }
+                                result.0
                             }
-                            if control_outcome.0 == TransferOutcome::Limited {
-                                direct_limited.store(true, Ordering::Release);
-                            }
-                            self.emit_new_messages(control);
+                            _ = &mut early => messages.await.0,
                         };
-                        if independent_receipts {
-                            // Existing receipt evidence must not wait behind
-                            // ordinary history, and new messages must not wait
-                            // behind receipt history. Both scopes remain owned
-                            // by this one deadline/cancellation boundary and
-                            // the shared TCP capacity. Only receipt validation
-                            // may retire this exact destination as delivered.
-                            tokio::pin!(messages);
-                            let early = receipts();
-                            tokio::pin!(early);
-                            let held = tokio::select! {
-                                result = &mut messages => {
-                                    if !result.0 { early.await; }
-                                    result.0
-                                }
-                                _ = &mut early => messages.await.0,
-                            };
-                            // Positive Have finishes the original-message phase.
-                            // The same bounded destination lane collects receipts
-                            // separately without reading/resending its ciphertext.
-                            if held {
-                                direct_more.store(true, Ordering::Release);
-                            }
-                            held
-                        } else {
-                            // Immediate flushes, own copies and receipt transfers
-                            // keep their payload-before-control exchange contract.
-                            let (held, followed) = messages.await;
-                            if held && !followed {
-                                receipts().await;
-                            }
-                            held
+                        // Positive Have finishes the original-message phase.
+                        // The same bounded destination lane collects receipts
+                        // separately without reading/resending its ciphertext.
+                        if held {
+                            direct_more.store(true, Ordering::Release);
                         }
-                    })
-                    .await;
+                        held
+                    } else {
+                        // Immediate flushes, own copies and receipt transfers
+                        // keep their payload-before-control exchange contract.
+                        let (held, followed) = messages.await;
+                        if held && !followed {
+                            receipts().await;
+                        }
+                        held
+                    }
+                }))
+                .await;
                 timed_out = outcome.is_none();
                 held = outcome.unwrap_or(false);
             }
