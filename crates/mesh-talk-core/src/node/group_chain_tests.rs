@@ -436,7 +436,9 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
         .await
         .unwrap();
     for i in 1..6 {
-        chain.recover_retained(i, group).await;
+        chain
+            .recover_until(i, group, Some(&[b"A to F through members"]))
+            .await;
         assert!(
             chain.has_text(i, group, b"A to F through members"),
             "member {i} decrypts original author's event"
@@ -460,7 +462,9 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
         "no group metadata, keys, or content disclosed to a nonmember"
     );
     // A second reconciliation does not duplicate the delivered message.
-    chain.recover_retained(5, group).await;
+    chain
+        .recover_until(5, group, Some(&[b"A to F through members"]))
+        .await;
     assert_eq!(chain.nodes[5].channel_history(group, 100).unwrap().len(), 1);
     // Removal rotates the epoch. Even a formerly accepted member cannot
     // recover the later sender key or ciphertext by guessing the group id.
@@ -476,7 +480,9 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
         .await
         .unwrap();
     for i in 1..5 {
-        chain.recover_retained(i, group).await;
+        chain
+            .recover_until(i, group, Some(&[b"after F removal"]))
+            .await;
     }
     assert!(chain.has_text(4, group, b"after F removal"));
     let mut removed_connection = chain.nodes[5]

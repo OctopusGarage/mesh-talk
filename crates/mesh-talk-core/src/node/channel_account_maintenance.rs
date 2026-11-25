@@ -1771,6 +1771,20 @@ mod tests {
         let mut target_work = ChannelAccountMaintenance::default();
         for _ in 0..16 {
             target.maintain_account_channels(&mut target_work).await;
+            // The admitted inheritance can leave bounded canonical work. This
+            // bare-listener fixture must finish it before reading membership;
+            // this does not publish ReceiveKeys or fetch plaintext history.
+            if target
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .has_kind(&channel, EventKind::MembershipChange)
+                .unwrap()
+            {
+                crate::node::test_support::settle_group_metadata(target, channel);
+            }
             if target
                 .account_group_projection(channel)
                 .unwrap()

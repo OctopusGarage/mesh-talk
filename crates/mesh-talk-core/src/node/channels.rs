@@ -1511,14 +1511,41 @@ impl Node {
                 }
                 tokio::task::yield_now().await;
             } else {
-                tokio::select! {
+                let wait = async {
+                    tokio::select! {
                     _ = tokio::time::sleep_until(replay.at),
                         if !replay.quiet || self.channel_recovery_periodic_enabled(periodic) => {},
-                    changed = inputs.changed(&self) => match changed {
-                        Some(true) => replay.invalidate(),
-                        Some(false) => {},
-                        None => return,
-                    },
+                    changed = inputs.changed(&self) => return changed,
+                    }
+                    Some(false)
+                };
+                #[cfg(not(test))]
+                let changed = wait.await;
+                #[cfg(test)]
+                let changed = {
+                    let quiet = replay.quiet && !replay.active && replay.pending.is_empty();
+                    tokio::pin!(wait);
+                    let mut observed = false;
+                    std::future::poll_fn(|cx| {
+                        let result = std::future::Future::poll(wait.as_mut(), cx);
+                        if quiet
+                            && result.is_pending()
+                            && tokio::task::coop::has_budget_remaining()
+                            && !observed
+                        {
+                            observed = true;
+                            self.trace_account_client(&self.identity.public(), || {
+                                "channel_control_retry_idle_wait".into()
+                            });
+                        }
+                        result
+                    })
+                    .await
+                };
+                match changed {
+                    Some(true) => replay.invalidate(),
+                    Some(false) => {}
+                    None => return,
                 }
             }
         }
@@ -4407,6 +4434,7 @@ impl Node {
                     async move {
                         let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
                             self.publish_own_replica_preference(channel, &peer).await?;
+                            let mut force_fresh = false;
                             for turn in 0..CHANNEL_FANOUT_PEER_TURNS {
                                 let continuing = std::sync::atomic::AtomicBool::new(false);
                                 let result = if let Some(event) = confirming {
@@ -4427,8 +4455,15 @@ impl Node {
                                             }
                                         })
                                 } else {
-                                    let mut ch =
-                                        self.privacy_sync_dial(peer.addr, &peer.public).await?;
+                                    let (mut ch, reused) = if force_fresh {
+                                        (self.privacy_dial(peer.addr, &peer.public).await?, false)
+                                    } else {
+                                        self.privacy_sync_dial_with_reuse(peer.addr, &peer.public)
+                                            .await?
+                                    };
+                                    // Only the recovery attempt bypasses the pool;
+                                    // later clean continuations can reuse it again.
+                                    force_fresh = false;
                                     let store = self.sync_store(ch.peer_identity());
                                     let _reception = self
                                         .request_reception_scope(&store, &ch)
@@ -4483,6 +4518,24 @@ impl Node {
                                     }
                                     .into()
                                     });
+                                    if reused
+                                        && round.as_ref().is_err_and(
+                                            super::session_pool::retryable_sync_error,
+                                        )
+                                        && turn + 1 < CHANNEL_FANOUT_PEER_TURNS
+                                    {
+                                        // A remote close can race pooled liveness checking.
+                                        // Spend one existing turn on a fresh authenticated
+                                        // stream before deferring this committed fanout.
+                                        drop(ch);
+                                        force_fresh = true;
+                                        #[cfg(test)]
+                                        self.trace_account_client(&peer.public, || {
+                                            "control_fanout_retry_fresh".into()
+                                        });
+                                        tokio::task::yield_now().await;
+                                        continue;
+                                    }
                                     if round.as_ref().is_err_and(|error| {
                                         !matches!(
                                             error,
@@ -5487,6 +5540,7 @@ mod fanout_tests {
         completed: tokio::sync::mpsc::UnboundedReceiver<()>,
         selected: tokio::sync::mpsc::UnboundedReceiver<()>,
         local_idle: tokio::sync::mpsc::UnboundedReceiver<()>,
+        control_idle: tokio::sync::mpsc::UnboundedReceiver<(usize, usize)>,
     }
 
     fn control_retry_probe(node: &Node) -> ControlRetryProbe {
@@ -5500,6 +5554,7 @@ mod fanout_tests {
         let (completed, completion_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (selected, receiver) = tokio::sync::mpsc::unbounded_channel();
         let (local_idle, idle_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (control_idle, control_idle_receiver) = tokio::sync::mpsc::unbounded_channel();
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let scans = scans.clone();
             let dispatches = dispatches.clone();
@@ -5507,6 +5562,12 @@ mod fanout_tests {
             let per_group = per_group.clone();
             let local_lanes = local_lanes.clone();
             move |_, phase| {
+                if phase == "channel_control_retry_idle_wait" {
+                    let _ = control_idle.send((
+                        scans.load(Ordering::SeqCst),
+                        dispatches.load(Ordering::SeqCst),
+                    ));
+                }
                 if phase.starts_with("channel_recovery_") && phase.ends_with("_entered") {
                     *local_lanes
                         .lock()
@@ -5546,6 +5607,7 @@ mod fanout_tests {
             completed: completion_receiver,
             selected: receiver,
             local_idle: idle_receiver,
+            control_idle: control_idle_receiver,
         }
     }
 
@@ -5833,7 +5895,7 @@ mod fanout_tests {
         for node in &nodes {
             node.set_post_office_enabled(false);
         }
-        let probes = [
+        let mut probes = [
             control_retry_probe(&nodes[0]),
             control_retry_probe(&nodes[1]),
         ];
@@ -5883,7 +5945,21 @@ mod fanout_tests {
                     assert!(!metadata.query_pending);
                     assert_eq!(metadata.announcement.unwrap().content.as_deref(), Some("signed metadata before observation"));
                 }
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                // Observe each actual owner parked after consuming its retained
+                // inputs. Counter matching rejects acknowledgements queued
+                // before a later scan or distribution completed.
+                for probe in &mut probes {
+                    loop {
+                        let acknowledged = probe.control_idle.recv().await
+                            .expect("the real control owner must acknowledge its quiet wait");
+                        if acknowledged == (
+                            probe.scans.load(Ordering::SeqCst),
+                            probe.dispatches.load(Ordering::SeqCst),
+                        ) {
+                            break;
+                        }
+                    }
+                }
                 let snapshot = || nodes.iter().zip(&probes).map(|(node, probe)| (
                     node.log.lock().unwrap().repository().unwrap().source_revision().unwrap(),
                     probe.scans.load(Ordering::SeqCst),

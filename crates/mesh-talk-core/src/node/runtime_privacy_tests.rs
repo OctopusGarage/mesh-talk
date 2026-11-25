@@ -1082,11 +1082,14 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
         let mut establishment_phase = "first enqueue";
         let mut establishment_id = None;
         let mut establishment_index = 0;
+        let establishment_started = std::time::Instant::now();
+        let mut establishment_completions = Vec::new();
         let established = tokio::time::timeout(Duration::from_secs(8), async {
             let first = a.node.enqueue_to_account(&recipient_account, b"before restart", None).await.unwrap();
             establishment_id = Some(first);
             establishment_phase = "first receipt";
             received_and_confirmed(a, b, first, b"before restart", None).await;
+            establishment_completions.push(("first", establishment_started.elapsed().as_millis()));
             establishment_phase = "reply enqueue";
             establishment_index = 1;
             establishment_id = None;
@@ -1094,6 +1097,7 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
             establishment_id = Some(reply);
             establishment_phase = "reply receipt";
             received_and_confirmed(b, a, reply, b"established reply", None).await;
+            establishment_completions.push(("reply", establishment_started.elapsed().as_millis()));
             for (index, (label, body)) in [("unicode", "你好 🌍 café".as_bytes().to_vec()), ("multiline", b"first\nsecond\nthird".to_vec()), ("long unicode", "mesh消息🙂 ".repeat(300).into_bytes())].into_iter().enumerate() {
                 establishment_index = index + 2;
                 establishment_phase = label;
@@ -1101,6 +1105,7 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
                 let id = a.node.enqueue_to_account(&recipient_account, &body, None).await.unwrap();
                 establishment_id = Some(id);
                 received_and_confirmed(a, b, id, &body, None).await;
+                establishment_completions.push((label, establishment_started.elapsed().as_millis()));
             }
         }).await;
         let establishment_status = if established.is_err() {
@@ -1111,7 +1116,15 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
         } else {
             None
         };
-        assert!(established.is_ok(), "full bounded runtimes must establish bidirectional persisted ratchets: exchange={establishment_index}, phase={establishment_phase}, enqueued={}, delivery={establishment_status:?}", establishment_id.is_some());
+        let establishment_received = if established.is_err() {
+            establishment_id.map(|id| {
+                let (source, target) = if establishment_index == 1 { (b, a) } else { (a, b) };
+                target.account_history(source.account_id(), 20)
+                    .map(|rows| rows.iter().any(|row| row.id == id))
+                    .map_err(|_| "history observation unavailable")
+            })
+        } else { None };
+        assert!(established.is_ok(), "full bounded runtimes must establish bidirectional persisted ratchets: exchange={establishment_index}, phase={establishment_phase}, enqueued={}, delivery={establishment_status:?}, received={establishment_received:?}, completed_ms={establishment_completions:?}", establishment_id.is_some());
 
         recipient.take().unwrap().stop().await;
         assert!(old_node.upgrade().is_none(), "full old receiver runtime must release its Node");

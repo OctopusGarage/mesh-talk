@@ -5943,12 +5943,26 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
         .lock()
         .unwrap()
         .forget(&dana_node.identity.public());
+    let before_second_send = dana_node.channel_history(channel, 10).unwrap().len();
+    let before_second_routes = (
+        alice_node.routing_peer(&dana_node.user_id()).is_some(),
+        dana_node.routing_peer(&alice_node.user_id()).is_some(),
+        bob_node.routing_peer(&dana_node.user_id()).is_some(),
+    );
     alice_node
         .send_channel_message(channel, b"Bob does not relay")
         .await
         .unwrap();
+    let before_explicit_pull = dana_node.channel_history(channel, 10).unwrap().len();
     dana_node.pull_one_channel_from_member(0).await;
-    assert_eq!(dana_node.channel_history(channel, 10).unwrap().len(), 1);
+    assert_eq!(
+        dana_node.channel_history(channel, 10).unwrap().len(),
+        1,
+        "sharing-off boundary: before_send={before_second_send}, before_pull={before_explicit_pull}, initial_routes(author_to_recipient,recipient_to_author,relay_to_recipient)={before_second_routes:?}, author_route_to_recipient={}, relay_local_sharing={}, recipient_observed_relay_sharing={}",
+        alice_node.routing_peer(&dana_node.user_id()).is_some(),
+        bob_node.channel_replica_enabled(channel, &bob_node.user_id()),
+        dana_node.channel_replica_enabled(channel, &bob_node.user_id()),
+    );
 
     // Bob resumes sharing, but has no direct address for Dana: only Dana's pull
     // from Bob can deliver the missed second message.
