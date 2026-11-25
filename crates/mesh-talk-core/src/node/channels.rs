@@ -1587,15 +1587,21 @@ impl Node {
                     let result = std::future::Future::poll(wait.as_mut(), cx);
                     // Cooperative budget exhaustion can also return Pending
                     // while an input is ready. Only observe an actual idle wait.
-                    if result.is_pending()
-                        && tokio::task::coop::has_budget_remaining()
-                        && quiet
-                        && !observed
+                    if result.is_pending() && tokio::task::coop::has_budget_remaining() && !observed
                     {
                         observed = true;
                         self.trace_account_client(&self.identity.public(), || {
-                            "channel_recovery_local_idle_wait".into()
+                            "channel_recovery_local_wait".into()
                         });
+                        self.trace_account_client(&self.identity.public(), || {
+                            format!("channel_recovery_local_wait_state continuation={local_continuation} retry_ms={:?} fallback_retry={fallback_retry}",
+                                local_at.map(|at| at.saturating_duration_since(tokio::time::Instant::now()).as_millis()))
+                        });
+                        if quiet {
+                            self.trace_account_client(&self.identity.public(), || {
+                                "channel_recovery_local_idle_wait".into()
+                            });
+                        }
                     }
                     result
                 })
@@ -1892,7 +1898,7 @@ impl Node {
         enabled: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -1934,7 +1940,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -2231,11 +2237,11 @@ impl Node {
             Ok(())
         })?;
         let (channel, members) = distribution.expect("authorized channel commit executed");
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         self.distribute_my_sender_key(channel, &members)?;
         // Key publication advances the signed source too. Complete that local
         // intent before exposing a newly created channel to immediate sends.
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         // This grants automatic account migration permission. Grant it only
         // after creation's final source read, so maintenance cannot append an
         // authority upgrade between sender publication and metadata completion.
@@ -2367,7 +2373,7 @@ impl Node {
         require_account_sibling: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<bool, NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         let upgraded = self
             .account_group_projection(channel)?
             .authority
@@ -2538,7 +2544,7 @@ impl Node {
         member_user_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         // Policy serialization precedes host authorization and membership locks.
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
@@ -2642,7 +2648,7 @@ impl Node {
         account_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         // Policy serialization precedes host authorization and membership locks.
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
@@ -2758,7 +2764,7 @@ impl Node {
         new_name: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -2817,7 +2823,7 @@ impl Node {
         new_owner: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         let mut owner_control = None;
         let mut transfer = None;
@@ -2882,7 +2888,7 @@ impl Node {
         let Some(members) = distribution else {
             return Ok(());
         };
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         if let Some(event) = transfer {
             let projection = self.account_group_projection(channel)?;
             if projection.ownership != Some(event)
@@ -2911,7 +2917,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         let own_proof = self.own_group_proof();
         let mut distribution = None;
         authorize(&mut || {
@@ -2938,7 +2944,7 @@ impl Node {
         let Some((members, event)) = distribution else {
             return Ok(());
         };
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         if !self
             .account_group_projection(channel)?
             .is_authorized(event)?
@@ -2978,7 +2984,7 @@ impl Node {
         automatic: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<bool, NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         let own_proof = self.own_group_proof();
         // Route collection may advance unrelated channel admission. Capture
         // bindings before serialization, then check this group's signed state.
@@ -3024,7 +3030,7 @@ impl Node {
         let Some((members, event)) = distribution else {
             return Ok(false);
         };
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         if let Some(event) = event
             && !self
                 .account_group_projection(channel)?
@@ -3137,7 +3143,7 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         let id = self.enqueue_channel_message_reply_expiring_if(
             channel,
             text,
@@ -3146,7 +3152,7 @@ impl Node {
             &mut authorize,
         )?;
         self.flush_accepted_channel_message(channel, id).await;
-        if let Err(error) = self.await_channel_metadata_owned(channel).await {
+        if let Err(error) = self.await_channel_metadata(channel).await {
             log::debug!("accepted channel metadata preparation deferred: {error}");
         }
         Ok(())
@@ -3190,7 +3196,7 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata_owned(channel).await?;
+        self.await_channel_metadata(channel).await?;
         let id = self.enqueue_sticker_channel_expiring_if(
             channel,
             sticker_id,
@@ -3199,7 +3205,7 @@ impl Node {
             &mut authorize,
         )?;
         self.flush_accepted_channel_message(channel, id).await;
-        if let Err(error) = self.await_channel_metadata_owned(channel).await {
+        if let Err(error) = self.await_channel_metadata(channel).await {
             log::debug!("accepted channel metadata preparation deferred: {error}");
         }
         Ok(())
@@ -4743,9 +4749,11 @@ impl Node {
                         #[cfg(test)]
                         node.trace_account_client(&peer.public, || {
                             format!(
-                                "channel_recovery_report applied={} rejected={}",
+                                "channel_recovery_report applied={} rejected={} complete={} limited={}",
                                 report.applied,
-                                report.rejected.len()
+                                report.rejected.len(),
+                                report.complete,
+                                report.limited
                             )
                         });
                         if !report.rejected.is_empty() {
@@ -4757,10 +4765,12 @@ impl Node {
                             && !report.limited
                             && turn + 1 < CHANNEL_FANOUT_PEER_TURNS
                         {
-                            // Preparation-only progress must not wait for a different
-                            // stalled peer. Keep this clean stream and the existing
-                            // deadline, yielding on the ordinary continuation cadence.
-                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            // More is a bounded continuation, not a failed attempt:
+                            // preparation, comparison and parent repair can advance
+                            // without applying a message in this turn. Keep the clean
+                            // stream and yield fairly; the four-turn cap still bounds
+                            // this peer's slot and failures retain their own backoff.
+                            tokio::task::yield_now().await;
                             continue;
                         }
                         if !report.complete && !report.limited {
@@ -4851,6 +4861,74 @@ impl Node {
 #[cfg(test)]
 mod fanout_tests {
     use super::*;
+
+    // Keep paused Tokio time fixed while a real blocking worker acknowledges
+    // its phase. A fixed count of reactor yields cannot certify OS-thread work.
+    async fn await_owner_phase(budget: Duration, mut ready: impl FnMut() -> bool) -> bool {
+        let until = Instant::now() + budget;
+        loop {
+            if ready() {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_channel_send_does_not_wait_for_unrelated_repair_capacity() {
+        use crate::{identity::account::Account, node::test_support::node_with_files};
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "fixture",
+            9,
+        );
+        let (node, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("independent send", Vec::new())
+            .await
+            .unwrap();
+        let capacity = node.runtime_work.local_repair_capacity().await.unwrap();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let worker = node
+            .runtime_work
+            .admit()
+            .unwrap()
+            .spawn_local_repair_blocking(capacity, move || {
+                entered.send(()).unwrap();
+                held.recv().unwrap();
+            });
+        started.await.unwrap();
+        let sent = tokio::time::timeout(
+            Duration::from_millis(200),
+            node.send_channel_message(channel, b"independent"),
+        )
+        .await;
+        // Always release and join the actual held owner before asserting.
+        release.send(()).unwrap();
+        worker.await.unwrap().into_inner();
+        node.runtime_work.drain().await;
+        assert!(
+            sent.as_ref().is_ok_and(|result| result.is_ok()),
+            "a ready local send cannot borrow unrelated repair capacity: {sent:?}"
+        );
+        assert!(
+            node.channel_history(channel, 10)
+                .unwrap()
+                .iter()
+                .any(|row| row.text == b"independent")
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn replay_progress_keeps_normal_continuations_out_of_failure_backoff() {
@@ -5900,12 +5978,10 @@ mod fanout_tests {
             node.clone()
                 .run_accept_loop_without_account_repair(listener),
         );
-        let started = tokio::time::timeout(Duration::from_secs(5), probe.selected.recv())
-            .await
-            .is_ok_and(|value| value.is_some());
-        for _ in 0..256 {
-            tokio::task::yield_now().await;
-        }
+        let started = await_owner_phase(Duration::from_secs(5), || {
+            probe.dispatches.load(Ordering::SeqCst) > 0 && probe.completed.try_recv().is_ok()
+        })
+        .await;
         let before = probe.dispatches.load(Ordering::SeqCst);
         tokio::time::advance(Duration::from_secs(10)).await;
         for _ in 0..128 {
@@ -5924,12 +6000,12 @@ mod fanout_tests {
         node.set_channel_replica_enabled(channel, true)
             .await
             .unwrap();
-        let value_selected = tokio::time::timeout(Duration::from_secs(1), probe.selected.recv())
-            .await
-            .is_ok_and(|v| v.is_some());
-        let value_completed = tokio::time::timeout(Duration::from_secs(1), probe.completed.recv())
-            .await
-            .is_ok_and(|v| v.is_some());
+        let value_selected =
+            await_owner_phase(Duration::from_secs(1), || probe.selected.try_recv().is_ok()).await;
+        let value_completed = await_owner_phase(Duration::from_secs(1), || {
+            probe.completed.try_recv().is_ok()
+        })
+        .await;
         for _ in 0..128 {
             tokio::task::yield_now().await;
         }
@@ -6403,19 +6479,18 @@ mod fanout_tests {
                 node.complete_channel_recovery_turn(remote.as_mut()).await
             }
         });
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
         node.channel_recovery_notify.notify_one();
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
+        let progressed = await_owner_phase(Duration::from_secs(5), || {
+            entered.load(Ordering::SeqCst) > 0
+        })
+        .await;
         let local_progress = entered.load(Ordering::SeqCst);
         let held_alive = !worker.is_finished();
         release.send(()).unwrap();
         let _ = worker.await.unwrap();
+        node.runtime_work.drain().await;
         assert!(
-            local_progress > 0,
+            progressed && local_progress > 0,
             "local SQL work progresses before remote release"
         );
         assert!(
@@ -6465,11 +6540,21 @@ mod fanout_tests {
         let entered = Arc::new(AtomicUsize::new(0));
         let history = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let lanes = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
+        let idle = Arc::new(AtomicUsize::new(0));
+        let wait_state = Arc::new(std::sync::Mutex::new(String::new()));
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let entered = entered.clone();
             let history = history.clone();
             let lanes = lanes.clone();
+            let idle = idle.clone();
+            let wait_state = wait_state.clone();
             move |_, phase| {
+                if phase.starts_with("channel_recovery_local_wait_state ") {
+                    *wait_state.lock().unwrap() = phase.clone();
+                }
+                if phase == "channel_recovery_local_idle_wait" {
+                    idle.fetch_add(1, Ordering::SeqCst);
+                }
                 if (phase.ends_with("_entered") && phase.starts_with("channel_recovery_"))
                     || phase == "channel_recovery_fallback_begin"
                 {
@@ -6487,9 +6572,26 @@ mod fanout_tests {
             node.clone()
                 .run_local_channel_recovery_loop(Arc::new(Notify::new()), true),
         );
+        // The fixture has 65 independent durable publications. A scheduler
+        // yield cannot acknowledge their blocking work, and a single startup
+        // wall-clock budget measures database throughput rather than settling.
+        // Bound each observable owner step; retain the original finite turn cap.
+        let mut completed = false;
         for _ in 0..4096 {
-            tokio::task::yield_now().await;
+            if history.lock().unwrap().len() == 65 && idle.load(Ordering::SeqCst) > 0 {
+                completed = true;
+                break;
+            }
+            let before = entered.load(Ordering::SeqCst);
+            assert!(
+                await_owner_phase(Duration::from_secs(5), || {
+                    entered.load(Ordering::SeqCst) > before || idle.load(Ordering::SeqCst) > 0
+                })
+                .await,
+                "each admitted owner step must finish before its progress deadline"
+            );
         }
+        node.runtime_work.drain().await;
         let before = entered.load(Ordering::SeqCst);
         let visited = history.lock().unwrap().len();
         let before_lanes = lanes.lock().unwrap().clone();
@@ -6509,12 +6611,19 @@ mod fanout_tests {
         for _ in 0..512 {
             tokio::task::yield_now().await;
         }
-        let after = entered.load(Ordering::SeqCst);
-        let after_lanes = lanes.lock().unwrap().clone();
         worker.abort();
         let _ = worker.await;
+        node.runtime_work.drain().await;
+        let after = entered.load(Ordering::SeqCst);
+        let after_lanes = lanes.lock().unwrap().clone();
         eprintln!(
-            "valid65 owner turns {before}->{after}; entered lanes before={before_lanes:?} after={after_lanes:?}"
+            "valid65 owner turns {before}->{after}; visited={visited} idle={} state={}; entered lanes before={before_lanes:?} after={after_lanes:?}",
+            idle.load(Ordering::SeqCst),
+            wait_state.lock().unwrap()
+        );
+        assert!(
+            completed,
+            "all 65 channels must reach the actual completed owner boundary"
         );
         assert_eq!(
             indexed, 65,
@@ -6573,10 +6682,20 @@ mod fanout_tests {
         }).unwrap();
         let failures = Arc::new(AtomicUsize::new(0));
         let entered = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicUsize::new(0));
+        let idle = Arc::new(AtomicUsize::new(0));
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let failures = failures.clone();
             let entered = entered.clone();
+            let waits = waits.clone();
+            let idle = idle.clone();
             move |_, phase| {
+                if phase == "channel_recovery_local_wait" {
+                    waits.fetch_add(1, Ordering::SeqCst);
+                }
+                if phase == "channel_recovery_local_idle_wait" {
+                    idle.fetch_add(1, Ordering::SeqCst);
+                }
                 if phase == "channel_recovery_local_failure" {
                     failures.fetch_add(1, Ordering::SeqCst);
                 }
@@ -6589,19 +6708,22 @@ mod fanout_tests {
             node.clone()
                 .run_local_channel_recovery_loop(Arc::new(Notify::new()), false),
         );
-        for _ in 0..256 {
-            tokio::task::yield_now().await;
-        }
+        let started = await_owner_phase(Duration::from_secs(5), || {
+            failures.load(Ordering::SeqCst) > 0 && waits.load(Ordering::SeqCst) > 0
+        })
+        .await;
         let first = failures.load(Ordering::SeqCst);
         tokio::time::advance(Duration::from_secs(2)).await;
         for _ in 0..128 {
             tokio::task::yield_now().await;
         }
         let early = failures.load(Ordering::SeqCst);
+        let before_waits = waits.load(Ordering::SeqCst);
         tokio::time::advance(Duration::from_secs(1)).await;
-        for _ in 0..128 {
-            tokio::task::yield_now().await;
-        }
+        let retried_observed = await_owner_phase(Duration::from_secs(5), || {
+            failures.load(Ordering::SeqCst) > first && waits.load(Ordering::SeqCst) > before_waits
+        })
+        .await;
         let retried = failures.load(Ordering::SeqCst);
         node.channel_checkpoints
             .profile()
@@ -6612,9 +6734,10 @@ mod fanout_tests {
             })
             .unwrap();
         node.channel_recovery_notify.notify_one();
-        for _ in 0..512 {
-            tokio::task::yield_now().await;
-        }
+        let recovered_observed = await_owner_phase(Duration::from_secs(5), || {
+            entered.load(Ordering::SeqCst) > 0 && idle.load(Ordering::SeqCst) > 0
+        })
+        .await;
         let recovered = entered.load(Ordering::SeqCst);
         let settled = failures.load(Ordering::SeqCst);
         tokio::time::advance(Duration::from_secs(9)).await;
@@ -6624,14 +6747,15 @@ mod fanout_tests {
         let final_failures = failures.load(Ordering::SeqCst);
         worker.abort();
         let _ = worker.await;
-        assert!(first > 0, "a real SQL error was injected");
+        node.runtime_work.drain().await;
+        assert!(started && first > 0, "a real SQL error was injected");
         assert_eq!(early, first, "failure backoff does not admit an early turn");
         assert!(
-            retried > early,
+            retried_observed && retried > early,
             "failure retries at its owned three-second deadline"
         );
         assert!(
-            recovered > 0,
+            recovered_observed && recovered > 0,
             "Notify resumes successful discovery without waiting for quiet repair"
         );
         assert_eq!(final_failures, settled);
@@ -6676,6 +6800,7 @@ mod fanout_tests {
         let visits = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
         let injected = Arc::new(AtomicBool::new(false));
         let turns = Arc::new(AtomicUsize::new(0));
+        let parked = Arc::new(AtomicBool::new(false));
         let weak = Arc::downgrade(&node);
         let second = format!("{:?}", channels[1]);
         let first_channel = channels[0];
@@ -6683,7 +6808,14 @@ mod fanout_tests {
             let visits = visits.clone();
             let injected = injected.clone();
             let turns = turns.clone();
+            let parked = parked.clone();
             move |_, phase| {
+                if phase == "channel_recovery_local_wait" {
+                    parked.store(true, Ordering::SeqCst);
+                }
+                if phase == "channel_recovery_plaintext_entered" {
+                    parked.store(false, Ordering::SeqCst);
+                }
                 if phase == "channel_recovery_plaintext_done" {
                     turns.fetch_add(1, Ordering::SeqCst);
                 }
@@ -6709,18 +6841,32 @@ mod fanout_tests {
             node.clone()
                 .run_local_channel_recovery_loop(Arc::new(Notify::new()), true),
         );
-        for _ in 0..2048 {
-            tokio::task::yield_now().await;
-        }
+        let completed = await_owner_phase(Duration::from_secs(5), || {
+            let observed = visits.lock().unwrap();
+            parked.load(Ordering::SeqCst)
+                && observed
+                    .get(&format!("{first_channel:?}"))
+                    .copied()
+                    .unwrap_or(0)
+                    >= 2
+                && observed.contains_key(&format!("{after_cut:?}"))
+        })
+        .await;
+        node.runtime_work.drain().await;
         let before = turns.load(Ordering::SeqCst);
         let observed = visits.lock().unwrap().clone();
         tokio::time::advance(Duration::from_secs(9)).await;
         for _ in 0..256 {
             tokio::task::yield_now().await;
         }
-        let after = turns.load(Ordering::SeqCst);
         worker.abort();
         let _ = worker.await;
+        node.runtime_work.drain().await;
+        let after = turns.load(Ordering::SeqCst);
+        assert!(
+            completed,
+            "the finite post-cut sweep must reach its actual wait boundary"
+        );
         assert!(injected.load(Ordering::SeqCst));
         assert!(
             observed
@@ -6766,10 +6912,15 @@ mod fanout_tests {
         }).unwrap();
         let failures = Arc::new(AtomicUsize::new(0));
         let turns = Arc::new(AtomicUsize::new(0));
+        let idle = Arc::new(AtomicUsize::new(0));
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let failures = failures.clone();
             let turns = turns.clone();
+            let idle = idle.clone();
             move |_, phase| {
+                if phase == "channel_recovery_local_idle_wait" {
+                    idle.fetch_add(1, Ordering::SeqCst);
+                }
                 if phase == "channel_recovery_file_failure" {
                     failures.fetch_add(1, Ordering::SeqCst);
                 }
@@ -6782,9 +6933,10 @@ mod fanout_tests {
             node.clone()
                 .run_local_channel_recovery_loop(Arc::new(Notify::new()), false),
         );
-        for _ in 0..256 {
-            tokio::task::yield_now().await;
-        }
+        let started = await_owner_phase(Duration::from_secs(5), || {
+            failures.load(Ordering::SeqCst) > 0
+        })
+        .await;
         let first = failures.load(Ordering::SeqCst);
         let retained = node
             .channel_checkpoints
@@ -6820,6 +6972,7 @@ mod fanout_tests {
                     .next_runtime(None)
                     .unwrap()
                     .is_none()
+                    && idle.load(Ordering::SeqCst) > 0
                 {
                     break;
                 }
@@ -6833,11 +6986,12 @@ mod fanout_tests {
         for _ in 0..128 {
             tokio::task::yield_now().await;
         }
-        let after = turns.load(Ordering::SeqCst);
         worker.abort();
         let _ = worker.await;
+        node.runtime_work.drain().await;
+        let after = turns.load(Ordering::SeqCst);
         assert!(
-            first > 0,
+            started && first > 0,
             "a real file-discovery SQL error reached the owner"
         );
         assert!(
@@ -6916,9 +7070,14 @@ mod fanout_tests {
         node.clear_metadata_display_values_for_test();
         let consumer_failed = node.channel_metadata(channel).is_err();
         let failures = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicUsize::new(0));
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let failures = failures.clone();
+            let waits = waits.clone();
             move |_, phase| {
+                if phase == "channel_recovery_local_wait" {
+                    waits.fetch_add(1, Ordering::SeqCst);
+                }
                 if phase == "channel_recovery_metadata_failed" {
                     failures.fetch_add(1, Ordering::SeqCst);
                 }
@@ -6929,9 +7088,10 @@ mod fanout_tests {
             node.clone()
                 .run_local_channel_recovery_loop(Arc::new(Notify::new()), true),
         );
-        for _ in 0..512 {
-            tokio::task::yield_now().await;
-        }
+        let failed_observed = await_owner_phase(Duration::from_secs(5), || {
+            failures.load(Ordering::SeqCst) > 0 && waits.load(Ordering::SeqCst) > 0
+        })
+        .await;
         let failed = failures.load(Ordering::SeqCst);
         ui.borrow_and_update();
         node.channel_checkpoints
@@ -6944,10 +7104,12 @@ mod fanout_tests {
                 Ok(())
             })
             .unwrap();
+        let before_waits = waits.load(Ordering::SeqCst);
         tokio::time::advance(Duration::from_secs(3)).await;
-        for _ in 0..512 {
-            tokio::task::yield_now().await;
-        }
+        let recovered = await_owner_phase(Duration::from_secs(5), || {
+            waits.load(Ordering::SeqCst) > before_waits && ui.has_changed().unwrap()
+        })
+        .await;
         let recovered_ui = ui.has_changed().unwrap();
         let metadata = node.channel_metadata(channel).unwrap();
         ui.borrow_and_update();
@@ -6955,20 +7117,21 @@ mod fanout_tests {
         for _ in 0..128 {
             tokio::task::yield_now().await;
         }
-        let repeated_ui = ui.has_changed().unwrap();
         let after_source = node.channel_checkpoints.source_binding(channel).unwrap();
         worker.abort();
         let _ = worker.await;
+        node.runtime_work.drain().await;
+        let repeated_ui = ui.has_changed().unwrap();
         assert!(
             consumer_failed,
             "the actual display query encountered the field I/O failure"
         );
         assert!(
-            failed > 0,
+            failed_observed && failed > 0,
             "a real field hydration SELECT failed after index readiness"
         );
         assert!(
-            recovered_ui,
+            recovered && recovered_ui,
             "successful owner retry refreshes consumers that swallowed the first field error"
         );
         assert!(!metadata.query_pending);
@@ -7006,10 +7169,15 @@ mod fanout_tests {
         assert_eq!(node.joined_channel_count(), 0);
         let entered = Arc::new(AtomicUsize::new(0));
         let fallbacks = Arc::new(AtomicUsize::new(0));
+        let idle = Arc::new(AtomicUsize::new(0));
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let entered = entered.clone();
             let fallbacks = fallbacks.clone();
+            let idle = idle.clone();
             move |_, phase| {
+                if phase == "channel_recovery_local_idle_wait" {
+                    idle.fetch_add(1, Ordering::SeqCst);
+                }
                 // This existing hook runs only after orphan/discovery/resume and
                 // next-runtime SQL completed; it is not a scheduler mirror count.
                 if phase.starts_with("channel_recovery_runtime_queue ") {
@@ -7029,7 +7197,9 @@ mod fanout_tests {
                 tokio::task::yield_now().await;
             }
         }
-        drain_ready().await;
+        let started =
+            await_owner_phase(Duration::from_secs(5), || idle.load(Ordering::SeqCst) > 0).await;
+        node.runtime_work.drain().await;
         // Permit all legitimate cold-start work. The old repair backoff grows
         // through 3/6/12/24 seconds; four 60-second steps put its next repair beyond the
         // following nine-second measurement. A settled 300-second owner has no due repair either.
@@ -7049,15 +7219,16 @@ mod fanout_tests {
             tokio::time::advance(CHANNEL_RECOVERY_INTERVAL).await;
             drain_ready().await;
         }
-        let after = entered.load(Ordering::SeqCst);
-        let after_fallbacks = fallbacks.load(Ordering::SeqCst);
         worker.abort();
         let _ = worker.await;
+        node.runtime_work.drain().await;
+        let after = entered.load(Ordering::SeqCst);
+        let after_fallbacks = fallbacks.load(Ordering::SeqCst);
         eprintln!(
             "settled local owner measured postSQL turns {baseline}->{after}, fallback turns {before_fallbacks}->{after_fallbacks}, empty={empty}"
         );
         assert!(
-            baseline > 0,
+            started && baseline > 0,
             "Actual owner startup must have entered business work"
         );
         assert!(
@@ -8121,15 +8292,18 @@ mod fanout_tests {
             .create_channel("reconnect", vec![DeviceIdentity::generate().public()])
             .await
             .unwrap();
+        let mut probe = control_retry_probe(&node);
         let worker = tokio::spawn(
             node.clone()
                 .run_channel_recovery_loop(Arc::new(Notify::new())),
         );
         // Establish the real owner's settled startup before observing its
         // sparse quiet-repair deadline. No peer/transport failure owns a retry.
-        for _ in 0..256 {
-            tokio::task::yield_now().await;
-        }
+        let startup_completed = await_owner_phase(Duration::from_secs(5), || {
+            node.channel_recovery.lock().unwrap().contains_key(&channel)
+                && probe.local_idle.try_recv().is_ok()
+        })
+        .await;
         let startup = node.channel_recovery.lock().unwrap().contains_key(&channel);
         node.channel_recovery.lock().unwrap().clear();
         tokio::time::advance(CHANNEL_RECOVERY_QUIET_INTERVAL - Duration::from_secs(1)).await;
@@ -8138,9 +8312,11 @@ mod fanout_tests {
         }
         let early = node.channel_recovery.lock().unwrap().contains_key(&channel);
         tokio::time::advance(Duration::from_secs(1)).await;
-        for _ in 0..256 {
-            tokio::task::yield_now().await;
-        }
+        let repair_completed = await_owner_phase(Duration::from_secs(5), || {
+            node.channel_recovery.lock().unwrap().contains_key(&channel)
+                && probe.local_idle.try_recv().is_ok()
+        })
+        .await;
         let repaired = node.channel_recovery.lock().unwrap().contains_key(&channel);
         node.channel_recovery.lock().unwrap().clear();
         tokio::time::advance(CHANNEL_RECOVERY_QUIET_INTERVAL - Duration::from_secs(1)).await;
@@ -8151,13 +8327,20 @@ mod fanout_tests {
         let notified_at = tokio::time::Instant::now();
         node.network_changes
             .send_modify(|revision| *revision = revision.wrapping_add(1));
-        for _ in 0..256 {
-            tokio::task::yield_now().await;
-        }
+        let network_completed = await_owner_phase(Duration::from_secs(5), || {
+            node.channel_recovery.lock().unwrap().contains_key(&channel)
+                && probe.local_idle.try_recv().is_ok()
+        })
+        .await;
         let restored = node.channel_recovery.lock().unwrap().contains_key(&channel);
         let completed_at = tokio::time::Instant::now();
         worker.abort();
         let _ = worker.await;
+        node.runtime_work.drain().await;
+        assert!(
+            startup_completed && repair_completed && network_completed,
+            "each recovery turn reaches its actual parked boundary"
+        );
         assert!(startup, "startup repair visits the joined channel");
         assert!(
             !early,
@@ -8214,13 +8397,16 @@ mod fanout_tests {
         channels.sort_unstable_by_key(|id| *id.as_bytes());
         // Creation notifications precede subscription. Startup must drain the
         // captured sweep of 12 groups in bounded turns of 8 and 4 groups before it can settle.
+        let mut probe = control_retry_probe(&node);
         let worker = tokio::spawn(
             node.clone()
                 .run_channel_recovery_loop(Arc::new(Notify::new())),
         );
-        for _ in 0..512 {
-            tokio::task::yield_now().await;
-        }
+        let startup_completed = await_owner_phase(Duration::from_secs(5), || {
+            node.channel_recovery.lock().unwrap().len() == channels.len()
+                && probe.local_idle.try_recv().is_ok()
+        })
+        .await;
         let startup = node.channel_recovery.lock().unwrap().len();
         node.channel_recovery.lock().unwrap().clear();
         let target = channels[11];
@@ -8228,9 +8414,11 @@ mod fanout_tests {
             node.schedule_channel_recovery(target);
         }
         let coalesced = node.channel_recovery_pending.lock().unwrap().len();
-        for _ in 0..256 {
-            tokio::task::yield_now().await;
-        }
+        let target_completed = await_owner_phase(Duration::from_secs(5), || {
+            node.channel_recovery.lock().unwrap().contains_key(&target)
+                && probe.local_idle.try_recv().is_ok()
+        })
+        .await;
         let targeted = node.channel_recovery.lock().unwrap().contains_key(&target);
         let unrelated = node
             .channel_recovery
@@ -8249,12 +8437,19 @@ mod fanout_tests {
         // No further notification is sent. At the owned repair deadline the
         // rotating fallback must still visit every group, including the tail.
         tokio::time::advance(Duration::from_secs(1)).await;
-        for _ in 0..512 {
-            tokio::task::yield_now().await;
-        }
+        let repair_completed = await_owner_phase(Duration::from_secs(5), || {
+            node.channel_recovery.lock().unwrap().len() == channels.len()
+                && probe.local_idle.try_recv().is_ok()
+        })
+        .await;
         let repaired = node.channel_recovery.lock().unwrap().len();
         worker.abort();
         let _ = worker.await;
+        node.runtime_work.drain().await;
+        assert!(
+            startup_completed && target_completed && repair_completed,
+            "each finite sweep must reach its actual parked boundary"
+        );
         assert_eq!(
             startup,
             channels.len(),

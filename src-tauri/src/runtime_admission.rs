@@ -369,8 +369,8 @@ mod integration_lease_tests {
             "retirement must still wait for the active producer"
         );
         assert!(
-            sent.is_ok_and(|result| result.is_ok()),
-            "a stalled producer must not queue an unrelated channel send"
+            sent.as_ref().is_ok_and(|result| result.is_ok()),
+            "a stalled producer must not queue an unrelated channel send: {sent:?}"
         );
     }
 

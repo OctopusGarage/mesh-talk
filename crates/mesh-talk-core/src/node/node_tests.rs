@@ -6930,13 +6930,19 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .unwrap();
     let changes = bob_node.roster.lock().unwrap().changes();
     let recovery_task = tokio::spawn(Arc::clone(&bob_node).run_channel_recovery_loop(changes));
-    let retried = tokio::time::timeout(Duration::from_secs(5), b_ch_r.recv())
+    // Record and terminal marker are separate publications from the real
+    // recovery worker; both must arrive within the original total budget.
+    let recovery_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let retried = tokio::time::timeout_at(recovery_deadline, b_ch_r.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(retried.text, b"retry after disk recovery");
     assert_eq!(retried.arrival_kind, "catch_up");
-    let completed = b_ch_r.try_recv().unwrap();
+    let completed = tokio::time::timeout_at(recovery_deadline, b_ch_r.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(completed.reception_only && completed.batch_complete);
     assert!(completed.text.is_empty() && completed.wrapped.is_empty());
     assert_eq!(bob_node.channel_history(channel, 10).unwrap().len(), 3);

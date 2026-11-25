@@ -27,29 +27,38 @@ async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
     let mut chain = tokio::time::timeout(Duration::from_secs(30), Chain::new())
         .await
         .expect("independent group hosts must initialize before the protocol window");
+    let phase = std::cell::Cell::new("create owner invitation");
     tokio::time::timeout(Duration::from_secs(20), async {
         let group = chain.nodes[0]
             .create_channel_invited("metadata", vec![chain.nodes[1].identity.public()])
             .await
             .unwrap();
+        phase.set("accepted holder pulls owner invitation");
         chain.round(1, 0, group).await;
+        phase.set("holder accepts owner invitation");
         chain.nodes[1].accept_channel_invite(group).await.unwrap();
+        phase.set("holder pushes acceptance to owner");
         chain.round(1, 0, group).await;
+        phase.set("owner publishes history policy");
         chain.nodes[0]
             .set_channel_history_policy(group, crate::channel::HistoryPolicy::Off)
             .await
             .unwrap();
+        phase.set("owner publishes announcement");
         chain.nodes[0]
             .set_channel_announcement_if(group, Some("Current announcement"), None, |commit| {
                 commit()
             })
             .await
             .unwrap();
+        phase.set("owner invites downstream member");
         chain.nodes[0]
             .add_channel_member(group, chain.nodes[2].identity.public())
             .await
             .unwrap();
+        phase.set("holder pulls current owner metadata and downstream invitation");
         chain.round(1, 0, group).await;
+        phase.set("unaccepted downstream pulls accepted holder");
         chain.round(2, 1, group).await;
         let mut denied = false;
         for _ in 0..128 {
@@ -71,7 +80,9 @@ async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
             tokio::task::yield_now().await;
         }
         assert!(denied, "prepared metadata must deny unaccepted membership");
+        phase.set("downstream accepts invitation");
         chain.nodes[2].accept_channel_invite(group).await.unwrap();
+        phase.set("holder pulls downstream acceptance");
         chain.round(1, 2, group).await;
         chain.servers[0].take().unwrap().abort();
         assert!(
@@ -81,6 +92,7 @@ async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
                 .announcement
                 .is_none()
         );
+        phase.set("holder retries retained authorized metadata with owner offline");
         let mut released = Vec::new();
         for _ in 0..128 {
             released = chain.nodes[1].retry_group_metadata().unwrap();
@@ -90,6 +102,7 @@ async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
             tokio::task::yield_now().await;
         }
         assert_eq!(released, vec![group]);
+        phase.set("accepted downstream pulls metadata from reachable holder with owner offline");
         chain.round(2, 1, group).await;
         let mut metadata = None;
         for _ in 0..128 {
@@ -118,7 +131,12 @@ async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
         );
     })
     .await
-    .expect("group metadata must converge over a reachable accepted holder");
+    .unwrap_or_else(|_| {
+        panic!(
+            "group metadata must converge over a reachable accepted holder: phase={}",
+            phase.get()
+        )
+    });
 }
 
 impl Drop for Chain {
@@ -223,8 +241,10 @@ impl Chain {
     async fn settle_retained(&self, index: usize, channel: ConversationId) {
         let node = &self.nodes[index];
         tokio::time::timeout(Duration::from_secs(5), async {
-            node.await_channel_metadata(channel).await.unwrap();
             loop {
+                // The independent server may append after the previous cut.
+                // Reprepare retained canonical metadata before retrying plaintext.
+                node.await_channel_metadata(channel).await.unwrap();
                 match node.process_channel_reception_inner(channel, "live") {
                     Ok(()) | Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
                     }
@@ -306,18 +326,61 @@ impl Chain {
         channel
     }
 
+    // A sharing barrier or partition deliberately prevents full convergence.
+    // Exercise one real adjacent attempt and settle only its retained local work.
+    async fn attempt_blocked_recovery(&self, index: usize, channel: ConversationId) {
+        let phase = std::cell::Cell::new("adjacent network pull");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let node = &self.nodes[index];
+            node.channel_recovery_pending
+                .lock()
+                .unwrap()
+                .remove(&channel);
+            node.pull_one_channel_from_member(0).await;
+            phase.set("retained local canonical and plaintext settle");
+            self.settle_retained(index, channel).await;
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "bounded blocked adjacent recovery: node_index={index} phase={}",
+                phase.get()
+            )
+        });
+    }
+
     async fn recover_retained(&self, index: usize, channel: ConversationId) {
         // The original recovery deadline includes deferred local processing.
         // No worker or additional network route is introduced by this barrier.
+        let phase = std::cell::Cell::new("admission");
+        let iteration = std::cell::Cell::new(0usize);
         tokio::time::timeout(Duration::from_secs(5), async {
             let node = &self.nodes[index];
-            for _ in 0..128 {
+            for turn in 0..128 {
+                iteration.set(turn + 1);
                 node.channel_recovery_pending
                     .lock()
                     .unwrap()
                     .remove(&channel);
-                node.pull_one_channel_from_member(0).await;
+                // These independent hosts have no maintenance loop. A server
+                // can retain the previous exchange before its local projection
+                // is ready to serve the next one. Drive that already-admitted
+                // local work just as `round` does, without adding network edges.
+                phase.set("adjacent retained local preparation");
+                for adjacent in [index.checked_sub(1), index.checked_add(1)]
+                    .into_iter()
+                    .flatten()
+                    .filter(|adjacent| *adjacent < self.nodes.len())
+                {
+                    if self.servers[adjacent].is_some() {
+                        self.settle_retained(adjacent, channel).await;
+                    }
+                }
+                phase.set("adjacent network pull");
+                node.pull_one_channel_from_member(turn).await;
+                phase.set("retained local canonical and plaintext settle");
                 self.settle_retained(index, channel).await;
+                phase.set("continuation check");
                 if !node
                     .channel_recovery_pending
                     .lock()
@@ -331,7 +394,13 @@ impl Chain {
             panic!("the admitted adjacent recovery must settle its bounded continuations");
         })
         .await
-        .expect("bounded adjacent recovery and retained projection");
+        .unwrap_or_else(|_| {
+            panic!(
+                "bounded adjacent recovery and retained projection: node_index={index} iteration={} phase={}",
+                iteration.get(),
+                phase.get()
+            )
+        });
     }
 
     fn has_text(&self, index: usize, channel: ConversationId, text: &[u8]) -> bool {
@@ -620,7 +689,7 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
         .await
         .unwrap();
     for i in 3..6 {
-        chain.recover_retained(i, group).await;
+        chain.attempt_blocked_recovery(i, group).await;
     }
     for i in 3..6 {
         assert!(!chain.has_text(i, group, b"held behind C"));
@@ -646,8 +715,8 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
     let server = chain.servers[3].take().unwrap();
     server.abort();
     let _ = server.await;
-    chain.recover_retained(4, group).await;
-    chain.recover_retained(5, group).await;
+    chain.attempt_blocked_recovery(4, group).await;
+    chain.attempt_blocked_recovery(5, group).await;
     assert!(!chain.has_text(5, group, b"held behind C"));
     let listener = TcpListener::bind(chain.addresses[3]).await.unwrap();
     chain.servers[3] = Some(Chain::serve(Arc::clone(&chain.nodes[3]), listener));

@@ -177,11 +177,17 @@ regression `scheduling_input_waits_for_history_without_blocking_its_reactor`
 holds real history while probing the observer's own reactor, then releases and
 joins both owners before checking the unchanged digest. A separate full-host
 SessionReady test retains the real network boundary and its original deadline.
-Channel recovery and control replay likewise prepare each bounded metadata,
-plaintext or join-history turn through the same repair owner. A notification
-received during remote work retains one local turn and one dirty follow-up;
-the remote future remains polled while the local turn waits for storage.
-Never hold repair capacity across the subsequent network exchange.
+Top-level channel plaintext, join-history and metadata discovery share the
+serial repair owner. A notification received during remote work retains one
+local turn and one dirty follow-up; the remote future remains polled while the
+local turn waits for storage. Bounded network metadata preparation uses tracked
+leaf workers under its existing control/fanout owner, independently of the
+serial maintenance slot. Never hold repair capacity across a network exchange
+or make a network leaf wait for unrelated top-level maintenance.
+Keep foreground channel acceptance independent of that serial background queue.
+The host admission regression holds an unrelated producer while sending; the
+channel regression separately holds actual repair capacity. Both retain their
+200 ms progress bound and join the held owner before asserting the result.
 
 Check that the UI event loop, accept loop and control scheduler can still make
 progress while the worker is paused. Offloading a scan does not help other

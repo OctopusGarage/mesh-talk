@@ -1076,16 +1076,42 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
         let recipient_device = b.user_id().to_owned();
         let old_port = b.listen_tcp_port();
         let old_node = Arc::downgrade(&b.node);
-        tokio::time::timeout(Duration::from_secs(8), async {
+        // Keep the original shared deadline. Fixed phase labels distinguish
+        // ratchet setup from the additional payload checks without exposing IDs
+        // or message contents in hosted failure output.
+        let mut establishment_phase = "first enqueue";
+        let mut establishment_id = None;
+        let mut establishment_index = 0;
+        let established = tokio::time::timeout(Duration::from_secs(8), async {
             let first = a.node.enqueue_to_account(&recipient_account, b"before restart", None).await.unwrap();
+            establishment_id = Some(first);
+            establishment_phase = "first receipt";
             received_and_confirmed(a, b, first, b"before restart", None).await;
+            establishment_phase = "reply enqueue";
+            establishment_index = 1;
+            establishment_id = None;
             let reply = b.node.enqueue_to_account(a.account_id(), b"established reply", None).await.unwrap();
+            establishment_id = Some(reply);
+            establishment_phase = "reply receipt";
             received_and_confirmed(b, a, reply, b"established reply", None).await;
-            for body in ["你好 🌍 café".as_bytes().to_vec(), b"first\nsecond\nthird".to_vec(), "mesh消息🙂 ".repeat(300).into_bytes()] {
+            for (index, (label, body)) in [("unicode", "你好 🌍 café".as_bytes().to_vec()), ("multiline", b"first\nsecond\nthird".to_vec()), ("long unicode", "mesh消息🙂 ".repeat(300).into_bytes())].into_iter().enumerate() {
+                establishment_index = index + 2;
+                establishment_phase = label;
+                establishment_id = None;
                 let id = a.node.enqueue_to_account(&recipient_account, &body, None).await.unwrap();
+                establishment_id = Some(id);
                 received_and_confirmed(a, b, id, &body, None).await;
             }
-        }).await.expect("full bounded runtimes must establish bidirectional persisted ratchets");
+        }).await;
+        let establishment_status = if established.is_err() {
+            establishment_id.and_then(|id| {
+                let source = if establishment_index == 1 { b } else { a };
+                source.node.delivery_status(id)
+            })
+        } else {
+            None
+        };
+        assert!(established.is_ok(), "full bounded runtimes must establish bidirectional persisted ratchets: exchange={establishment_index}, phase={establishment_phase}, enqueued={}, delivery={establishment_status:?}", establishment_id.is_some());
 
         recipient.take().unwrap().stop().await;
         assert!(old_node.upgrade().is_none(), "full old receiver runtime must release its Node");

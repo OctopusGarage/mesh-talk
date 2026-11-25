@@ -10481,27 +10481,60 @@ async fn automatic_text_and_sticker_delivery_survives_established_recipient_cold
     recipient_runtime.as_mut().unwrap().launch();
     let outcome = std::panic::AssertUnwindSafe(async {
         // Establish both ratchet directions before closing the real receiver.
-        tokio::time::timeout(Duration::from_secs(8), async {
+        // Fixed labels locate a failed exchange without exposing message IDs
+        // or payloads. All five exchanges retain their original shared budget.
+        let mut establishment_index = 0;
+        let mut establishment_phase = "enqueue";
+        let mut establishment_id = None;
+        let established = tokio::time::timeout(Duration::from_secs(8), async {
             let first = sender.enqueue_to_account(&recipient_account_id, b"before restart", None).await.unwrap();
+            establishment_id = Some(first);
+            establishment_phase = "receive";
             let received = recipient_received.recv().await.unwrap();
             assert_eq!(received.message_id, Some(first));
             assert_eq!(received.text, b"before restart");
+            establishment_phase = "receipt";
             wait_for_durable_delivery(&sender, first).await;
+            establishment_index = 1;
+            establishment_phase = "enqueue";
+            establishment_id = None;
             let reply = recipient_node.as_ref().unwrap().enqueue_to_account(&sender.account_id(), b"established reply", None).await.unwrap();
+            establishment_id = Some(reply);
+            establishment_phase = "receive";
             let received = sender_received.recv().await.unwrap();
             assert_eq!(received.message_id, Some(reply));
             assert_eq!(received.text, b"established reply");
+            establishment_phase = "receipt";
             wait_for_durable_delivery(recipient_node.as_ref().unwrap(), reply).await;
             // Native CI confirms three more sender messages after the reply:
             // persist the new receiving chain before the receiver goes cold.
-            for body in ["你好 🌍 café".as_bytes().to_vec(), b"first\nsecond\nthird".to_vec(), "mesh消息🙂 ".repeat(300).into_bytes()] {
+            for (index, body) in ["你好 🌍 café".as_bytes().to_vec(), b"first\nsecond\nthird".to_vec(), "mesh消息🙂 ".repeat(300).into_bytes()].into_iter().enumerate() {
+                establishment_index = index + 2;
+                establishment_phase = "enqueue";
+                establishment_id = None;
                 let id = sender.enqueue_to_account(&recipient_account_id, &body, None).await.unwrap();
+                establishment_id = Some(id);
+                establishment_phase = "receive";
                 let received = recipient_received.recv().await.unwrap();
                 assert_eq!(received.message_id, Some(id));
                 assert_eq!(received.text, body);
+                establishment_phase = "receipt";
                 wait_for_durable_delivery(&sender, id).await;
             }
-        }).await.expect("automatic bidirectional delivery must establish the persisted session");
+        }).await;
+        let establishment_status = if established.is_err() {
+            establishment_id.and_then(|id| {
+                let source = if establishment_index == 1 {
+                    recipient_node.as_ref().unwrap()
+                } else {
+                    &sender
+                };
+                source.delivery_status(id)
+            })
+        } else {
+            None
+        };
+        assert!(established.is_ok(), "automatic bidirectional delivery must establish the persisted session: exchange={establishment_index}, phase={establishment_phase}, enqueued={}, delivery={establishment_status:?}", establishment_id.is_some());
 
         recipient_runtime.take().unwrap().stop().await;
         drop(recipient_node.take());

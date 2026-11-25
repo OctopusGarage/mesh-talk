@@ -2202,12 +2202,23 @@ impl Node {
         channel: ConversationId,
     ) -> Result<(), NodeError> {
         loop {
-            if self
-                .run_channel_repair_turn(move |node| {
-                    node.prepare_channel_metadata_wait_turn(channel)
-                })
-                .await?
+            // This is a bounded leaf of an already-owned control/fanout lane,
+            // not a top-level maintenance turn. Taking the serial repair slot
+            // here would couple network progress to unrelated local maintenance.
+            let work = self
+                .runtime_work
+                .admit()
+                .ok_or_else(|| LogError::AdmissionRejected("participant runtime retired".into()))?;
+            let node = self.clone();
+            let ready = match work
+                .spawn_blocking(move || node.prepare_channel_metadata_wait_turn(channel))
+                .await
             {
+                Ok(value) => value.into_inner()?,
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(error) => return Err(LogError::Io(std::io::Error::other(error)).into()),
+            };
+            if ready {
                 return Ok(());
             }
             tokio::task::yield_now().await;
