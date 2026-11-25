@@ -82,6 +82,21 @@ impl Reconciliation {
             other => retries.finished(key, routes, other == Self::Advanced, now),
         }
     }
+    fn schedule_destination_peer<K: Eq + std::hash::Hash + Clone, R: Eq + Clone>(
+        self,
+        retries: &mut super::delivery_retry::RetrySchedule<K, R>,
+        key: K,
+        routes: R,
+        now: std::time::Instant,
+    ) {
+        if self == Self::Quiet {
+            // Quiet custody belongs to the exact event's receipt hints. A healthy
+            // completed poll must not park a newly queued event on this peer.
+            retries.forget(&key);
+        } else {
+            self.schedule(retries, key, routes, now);
+        }
+    }
     fn receipt_result(custody: bool, failed: bool, continuation: TransferContinuation) -> Self {
         if failed {
             Self::Deferred
@@ -2949,7 +2964,7 @@ impl Node {
                                         let delay = quiet_destinations.remaining(&hint, &input, now)
                                             .unwrap_or(Duration::from_millis(500));
                                         receipt_polls.settled(hint, input.clone(), delay, now);
-                                        retries.settled(key.retry_key(&routes.peer), input, Duration::from_millis(500), now);
+                                        progress.schedule_destination_peer(&mut retries, key.retry_key(&routes.peer), input, now);
                                     } else {
                                         progress.schedule(&mut retries, key.retry_key(&routes.peer), input, now);
                                     }
@@ -7042,6 +7057,34 @@ mod bounded_sync_retry_tests {
             Reconciliation::Limited.combine(Reconciliation::More),
             Reconciliation::More
         );
+    }
+    #[test]
+    fn quiet_destination_keeps_exact_receipt_sparse_without_parking_new_event() {
+        let now = std::time::Instant::now();
+        let peer = crate::identity::device::DeviceIdentity::generate().public();
+        let old = ControlWork::Destination(EventId::new([1; 32]));
+        let new = ControlWork::Destination(EventId::new([2; 32]));
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        let mut receipt_polls = super::super::delivery_retry::RetrySchedule::default();
+        let old_hint = ([1; 32], peer.ed25519_pub, peer.x25519_pub);
+        receipt_polls.settled(old_hint, (), QUIET_REPAIR_INTERVAL, now);
+        Reconciliation::Quiet.schedule_destination_peer(
+            &mut retries,
+            old.retry_key(&peer),
+            (),
+            now,
+        );
+        assert!(!receipt_polls.ready(&old_hint, &(), now));
+        assert!(retries.ready(&new.retry_key(&peer), &(), now));
+        // An actual failure still paces all destinations on this peer lane.
+        Reconciliation::Deferred.schedule_destination_peer(
+            &mut retries,
+            old.retry_key(&peer),
+            (),
+            now,
+        );
+        assert!(!retries.ready(&new.retry_key(&peer), &(), now));
+        assert!(!receipt_polls.ready(&old_hint, &(), now));
     }
     #[test]
     fn incomplete_receipt_is_continuation_without_custody() {

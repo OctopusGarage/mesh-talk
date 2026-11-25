@@ -6846,7 +6846,9 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
     )
     .unwrap();
 
-    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+    // This fixture asserts direct live arrival. Keep the production inbound
+    // owner without a competing receiver-initiated catch-up scheduler.
+    tokio::spawn(Arc::clone(&bob_node).run_inbound_connections_for_test(listener));
     // Ordinary wire acceptance requires the same retained outgoing owner as
     // the app. This fixture does not assert delivery from one bounded turn.
     let source_runtime = start_outgoing_wire_fixture(alice_node.clone()).await;
@@ -6855,6 +6857,8 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .create_channel("general", vec![bob_pub])
         .await
         .unwrap();
+    crate::node::test_support::complete_group_fanout(&alice_node, channel, &[&bob_node]).await;
+    crate::node::test_support::settle_group_metadata(&bob_node, channel);
     alice_node
         .send_channel_message(channel, b"m0")
         .await
