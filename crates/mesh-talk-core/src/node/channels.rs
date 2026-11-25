@@ -3340,10 +3340,18 @@ impl Node {
     ) {
         self.distribute_channel_targets(channel, members, None, false, confirming)
             .await;
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "inline_fanout_offer_done".into()
+        });
         if automatic_inline {
             self.distribute_channel_targets(file, members, None, false, None)
                 .await;
         }
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "inline_fanout_chunks_done".into()
+        });
         let recipients: Vec<_> = members
             .iter()
             .filter(|member| member.user_id() != self.user_id())
@@ -3751,7 +3759,9 @@ impl Node {
             }
             self.schedule_channel_recovery(channel);
             if tick + 1 < CHANNEL_FANOUT_PEER_TURNS {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                // A bounded successful continuation is active work, not retry
+                // backoff. Yield without delaying exact custody publication.
+                tokio::task::yield_now().await;
             }
         }
         bytes
@@ -4361,33 +4371,34 @@ impl Node {
         let failed = std::sync::atomic::AtomicBool::new(false);
         let more = std::sync::atomic::AtomicBool::new(false);
         let limited = std::sync::atomic::AtomicBool::new(false);
-        let result: Result<bool, NodeError> = async {
-            let me = self.identity.public().user_id();
-            let peers: Vec<PeerRecord> = {
-                members
-                    .iter()
-                    .filter(|m| m.user_id() != me)
-                    .filter_map(|m| {
-                        self.routing_peer(&m.user_id())
-                            .filter(|peer| peer.public == *m)
-                    })
-                    .collect()
-            };
-            let targets = if let Some(limit) = fanout {
-                let start = self
-                    .log
-                    .lock()
-                    .expect("log mutex not poisoned")
-                    .conversation_len(&channel)?
-                    .wrapping_add(self.identity.public().ed25519_pub[0] as usize);
-                select_channel_targets(peers, members.len(), start, limit)
-            } else {
-                peers
-            };
-            // Controls still reach every routed member, but a stalled route must
-            // neither block healthy members nor create an unbounded dial burst.
-            let deferred = std::sync::atomic::AtomicBool::new(false);
-            stream::iter(targets)
+        let result: Result<bool, NodeError> =
+            async {
+                let me = self.identity.public().user_id();
+                let peers: Vec<PeerRecord> = {
+                    members
+                        .iter()
+                        .filter(|m| m.user_id() != me)
+                        .filter_map(|m| {
+                            self.routing_peer(&m.user_id())
+                                .filter(|peer| peer.public == *m)
+                        })
+                        .collect()
+                };
+                let targets = if let Some(limit) = fanout {
+                    let start = self
+                        .log
+                        .lock()
+                        .expect("log mutex not poisoned")
+                        .conversation_len(&channel)?
+                        .wrapping_add(self.identity.public().ed25519_pub[0] as usize);
+                    select_channel_targets(peers, members.len(), start, limit)
+                } else {
+                    peers
+                };
+                // Controls still reach every routed member, but a stalled route must
+                // neither block healthy members nor create an unbounded dial burst.
+                let deferred = std::sync::atomic::AtomicBool::new(false);
+                stream::iter(targets)
                 .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| {
                     let deferred = &deferred;
                     let failed = &failed;
@@ -4402,6 +4413,11 @@ impl Node {
                                     self.sync_and_confirm_custody_admitted(channel, event, &peer)
                                         .await
                                         .map(|turn| {
+                                            #[cfg(test)]
+                                            self.trace_account_client(&peer.public, || format!(
+                                                "control_fanout_custody complete={} limited={}",
+                                                turn.complete, turn.limited
+                                            ));
                                             if !turn.complete {
                                                 if turn.limited { limited } else { &continuing }
                                                     .store(
@@ -4498,7 +4514,9 @@ impl Node {
                                     && continuing.load(std::sync::atomic::Ordering::Relaxed)
                                 {
                                     if turn + 1 < CHANNEL_FANOUT_PEER_TURNS {
-                                        tokio::time::sleep(Duration::from_millis(500)).await;
+                                        // Preserve the four-turn owner budget while
+                                        // advancing preparation/comparison promptly.
+                                        tokio::task::yield_now().await;
                                         continue;
                                     }
                                     more.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4537,31 +4555,31 @@ impl Node {
                     }
                 })
                 .await;
-            if replicate_to_post_office {
-                let result = self
-                    .replicate_to_post_office_targets_observing(
-                        channel,
-                        members
-                            .iter()
-                            .filter(|member| member.user_id() != me)
-                            .cloned()
-                            .collect(),
-                        confirming,
-                        Some(&failed),
-                    )
-                    .await;
-                if result.is_err() {
-                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                if replicate_to_post_office {
+                    let result = self
+                        .replicate_to_post_office_targets_observing(
+                            channel,
+                            members
+                                .iter()
+                                .filter(|member| member.user_id() != me)
+                                .cloned()
+                                .collect(),
+                            confirming,
+                            Some(&failed),
+                        )
+                        .await;
+                    if result.is_err() {
+                        failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if let Err(super::session::SessionError::Transport(error)) = result
+                        && super::session_pool::local_capacity_busy(&error)
+                    {
+                        deferred.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
-                if let Err(super::session::SessionError::Transport(error)) = result
-                    && super::session_pool::local_capacity_busy(&error)
-                {
-                    deferred.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
+                Ok(deferred.load(std::sync::atomic::Ordering::Relaxed))
             }
-            Ok(deferred.load(std::sync::atomic::Ordering::Relaxed))
-        }
-        .await;
+            .await;
         match result {
             Ok(deferred) => ChannelDistributionOutcome {
                 deferred,

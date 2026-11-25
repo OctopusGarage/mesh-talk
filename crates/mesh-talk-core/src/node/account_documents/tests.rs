@@ -4862,6 +4862,23 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         })
         .await
         .expect("both real legacy holders must confirm before their certificate bindings change");
+        // These inbound-only hosts have no participant recovery owner. Finish
+        // their retained membership projections before testing fresh exact
+        // custody views, independently of the baseline range continuations.
+        for holder in [&bob, &bob2] {
+            crate::node::test_support::settle_group_metadata(holder, channel);
+            let peer = source.routing_peer(&holder.user_id()).unwrap();
+            let mut connection = source
+                .privacy_dial(peer.addr, &peer.public)
+                .await
+                .expect("authenticate a fresh baseline exact-custody connection");
+            assert!(
+                crate::node::session::request_durable_have(&mut connection, channel, event)
+                    .await
+                    .expect("complete a fresh baseline exact-custody query"),
+                "each settled legacy holder must confirm custody on a fresh connection"
+            );
+        }
         assert_eq!(
             source.channel_custody_count(channel, event).unwrap(),
             Some(2),

@@ -3612,7 +3612,10 @@ impl Node {
                     Ok(outcome) => {
                         self.observe_control_exchange(&channel, started);
                         if current() && !outcome.complete && !outcome.limited && tick + 1 < 4 {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            // This clean four-turn receipt exchange still has bounded
+                            // work. Retry pacing belongs to the scheduling boundary,
+                            // not between its preparation and comparison turns.
+                            tokio::task::yield_now().await;
                             continue;
                         }
                         self.recycle_sync_channel(channel);

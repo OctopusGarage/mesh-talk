@@ -350,6 +350,15 @@ impl Chain {
     }
 
     async fn recover_retained(&self, index: usize, channel: ConversationId) {
+        self.recover_until(index, channel, None).await;
+    }
+
+    async fn recover_until(
+        &self,
+        index: usize,
+        channel: ConversationId,
+        messages: Option<&[&[u8]]>,
+    ) {
         // The original recovery deadline includes deferred local processing.
         // No worker or additional network route is introduced by this barrier.
         let phase = std::cell::Cell::new("admission");
@@ -381,12 +390,18 @@ impl Chain {
                 phase.set("retained local canonical and plaintext settle");
                 self.settle_retained(index, channel).await;
                 phase.set("continuation check");
-                if !node
+                let pending = node
                     .channel_recovery_pending
                     .lock()
                     .unwrap()
-                    .remove(&channel)
-                {
+                    .remove(&channel);
+                // Delivery across a restored bridge is witnessed by exact local
+                // history, independently of an unfinished reverse comparison
+                // with another adjacent holder. Other fixtures still require
+                // the recovery queue itself to finish.
+                if messages.map_or(!pending, |messages| {
+                    messages.iter().all(|text| self.has_text(index, channel, text))
+                }) {
                     return;
                 }
                 tokio::task::yield_now().await;
@@ -720,8 +735,9 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
     assert!(!chain.has_text(5, group, b"held behind C"));
     let listener = TcpListener::bind(chain.addresses[3]).await.unwrap();
     chain.servers[3] = Some(Chain::serve(Arc::clone(&chain.nodes[3]), listener));
-    chain.recover_retained(4, group).await;
-    chain.recover_retained(5, group).await;
+    let messages: &[&[u8]] = &[b"held behind C", b"C while not sharing"];
+    chain.recover_until(4, group, Some(messages)).await;
+    chain.recover_until(5, group, Some(messages)).await;
     assert!(chain.has_text(5, group, b"held behind C"));
     assert!(
         chain.has_text(5, group, b"C while not sharing"),

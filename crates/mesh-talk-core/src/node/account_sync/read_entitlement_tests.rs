@@ -52,10 +52,14 @@ async fn certified_reference_receives_owner_history_and_attachment_without_devic
         .await
         .unwrap();
     source.publish_account_group_access(&mut None);
+    // This is an explicit source-authorization protocol fixture. Prepare its
+    // retained signed state, then use the production bounded inbound owner
+    // without concurrently starting autonomous account/channel maintenance.
+    crate::node::test_support::settle_group_metadata(&source, group);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer = sibling_peer(&receiver, &source, listener.local_addr().unwrap());
     sibling_peer(&source, &receiver, "127.0.0.1:9".parse().unwrap());
-    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let server = tokio::spawn(source.clone().run_inbound_connections_for_test(listener));
     pull_real_group_head(&receiver, &peer, group).await;
     assert!(receiver.channel_members(group).is_empty());
     assert!(
@@ -92,6 +96,17 @@ async fn certified_reference_receives_owner_history_and_attachment_without_devic
     }
     assert!(history.iter().any(|entry| entry.id == file_event));
     assert!(receiver.channel_members(group).is_empty());
+    // This fixture only serves inbound protocols. Finish retained local source
+    // preparation after the history exchange, as the participant's separate
+    // recovery owner would, before querying current attachment entitlement.
+    crate::node::test_support::settle_group_metadata(&source, group);
+    assert!(
+        source
+            .account_private_channel_export_scope(group, &receiver.identity.public())
+            .unwrap()
+            .is_some(),
+        "the source's current signed scope must authorize the certified sibling"
+    );
     receiver
         .pull_account_attachment(&peer, file, AccountSyncVersion::V2)
         .await
@@ -322,15 +337,19 @@ async fn retired_account_source_cannot_stream_private_group_history_after_adopti
         )
         .unwrap();
     source.publish_account_group_access(&mut None);
+    // This is an explicit source-authorization protocol fixture. Prepare its
+    // retained signed state, then use the production bounded inbound owner
+    // without concurrently starting autonomous account/channel maintenance.
+    crate::node::test_support::settle_group_metadata(&source, group);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer = sibling_peer(&receiver, &source, listener.local_addr().unwrap());
     sibling_peer(&source, &receiver, "127.0.0.1:9".parse().unwrap());
-    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let server = tokio::spawn(source.clone().run_inbound_connections_for_test(listener));
     pull_real_group_head(&receiver, &peer, group).await;
     receiver
         .pull_account_history_page(&peer, None, [0; 32])
         .await
-        .expect("the current source must actually deliver a private page before adoption");
+        .unwrap();
     assert_eq!(receiver.history(group, 10).unwrap().len(), 1);
     let destination = crate::identity::account::Account::generate();
     source

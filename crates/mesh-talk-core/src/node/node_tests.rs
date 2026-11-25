@@ -8502,13 +8502,24 @@ async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_memb
     let payload = b"\x89PNG\r\n\x1a\ninline photo payload";
     let path = root.path().join("photo.png");
     std::fs::write(&path, payload).unwrap();
+    let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
+    *sender.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let phases = phases.clone();
+        move |_, phase| {
+            if phase.starts_with("inline_fanout_") || phase.starts_with("control_fanout_") {
+                phases.lock().unwrap().push(phase);
+            }
+        }
+    }));
     let sending = tokio::spawn(async move {
         sender
             .send_file_channel(channel, &path, crate::file::FileKind::Media)
             .await
     });
+    let mut offered = false;
     let bytes = tokio::time::timeout(Duration::from_secs(3), async {
         let offer = received.recv().await.expect("file offer");
+        offered = true;
         loop {
             if let Some(bytes) = recipient.read_media(offer.file_conv) {
                 break bytes;
@@ -8520,8 +8531,14 @@ async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_memb
     sending.abort();
     relay_task.abort();
     receiver.abort();
+    let _ = sending.await;
+    let _ = relay_task.await;
+    let _ = receiver.await;
     assert_eq!(
-        bytes.expect("an optional stalled relay must not hold back online photo bytes"),
+        bytes.unwrap_or_else(|_| panic!(
+            "an optional stalled relay must not hold back online photo bytes: offered={offered}, phases={:?}",
+            phases.lock().unwrap()
+        )),
         payload
     );
 }
