@@ -2159,28 +2159,56 @@ impl Node {
         channel: ConversationId,
     ) -> Result<(), NodeError> {
         loop {
-            match self.prepare_channel_metadata_turn(channel) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {}
-                Err(LogError::StaleCursor) => {
-                    // The source may change between bounded preparation and
-                    // installation. Retry only while this exact participant
-                    // owner is still valid; adoption also returns StaleCursor.
-                    self.channel_checkpoints.check_account()?;
-                    // Physical retirement may have finished before derived
-                    // checkpoint cleanup. That empty source cannot advance.
-                    let retained = self
-                        .log
-                        .lock()
-                        .expect("log lock")
-                        .repository()?
-                        .metadata(&channel)?
-                        .is_some_and(|metadata| metadata.count > 0);
-                    if !retained {
-                        return Err(LogError::StaleCursor.into());
-                    }
+            if self.prepare_channel_metadata_wait_turn(channel)? {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn prepare_channel_metadata_wait_turn(
+        &self,
+        channel: ConversationId,
+    ) -> Result<bool, LogError> {
+        match self.prepare_channel_metadata_turn(channel) {
+            Ok(ready) => Ok(ready),
+            Err(LogError::StaleCursor) => {
+                // The source may change between bounded preparation and
+                // installation. Retry only while this exact participant
+                // owner is still valid; adoption also returns StaleCursor.
+                self.channel_checkpoints.check_account()?;
+                // Physical retirement may have finished before derived
+                // checkpoint cleanup. That empty source cannot advance.
+                let retained = self
+                    .log
+                    .lock()
+                    .expect("log lock")
+                    .repository()?
+                    .metadata(&channel)?
+                    .is_some_and(|metadata| metadata.count > 0);
+                if !retained {
+                    return Err(LogError::StaleCursor);
                 }
-                Err(error) => return Err(error.into()),
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Runtime recovery must keep the transport reactor free even when a
+    /// bounded metadata turn is waiting for a contended synchronous store.
+    pub(in crate::node) async fn await_channel_metadata_owned(
+        self: &Arc<Self>,
+        channel: ConversationId,
+    ) -> Result<(), NodeError> {
+        loop {
+            if self
+                .run_channel_repair_turn(move |node| {
+                    node.prepare_channel_metadata_wait_turn(channel)
+                })
+                .await?
+            {
+                return Ok(());
             }
             tokio::task::yield_now().await;
         }

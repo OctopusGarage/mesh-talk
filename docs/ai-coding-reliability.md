@@ -177,6 +177,11 @@ regression `scheduling_input_waits_for_history_without_blocking_its_reactor`
 holds real history while probing the observer's own reactor, then releases and
 joins both owners before checking the unchanged digest. A separate full-host
 SessionReady test retains the real network boundary and its original deadline.
+Channel recovery and control replay likewise prepare each bounded metadata,
+plaintext or join-history turn through the same repair owner. A notification
+received during remote work retains one local turn and one dirty follow-up;
+the remote future remains polled while the local turn waits for storage.
+Never hold repair capacity across the subsequent network exchange.
 
 Check that the UI event loop, accept loop and control scheduler can still make
 progress while the worker is paused. Offloading a scan does not help other

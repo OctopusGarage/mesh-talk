@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     onmessage?: (value: unknown) => void;
   },
 }));
-import { updates } from "./diagnostics";
+import { obs, updates } from "./diagnostics";
 
 beforeEach(() => vi.resetAllMocks());
 
@@ -78,4 +78,30 @@ it("prepares only the selected build and installs host-owned bytes without accep
     mocks.invoke.mock.calls.length - 1
   ][1].onProgress.onmessage("restarting");
   expect(progress).toHaveBeenCalledWith("restarting");
+});
+
+it("keeps resource reads and retirement bound to the native sampling ticket", async () => {
+  mocks.invoke.mockResolvedValueOnce(42);
+  const ticket = await obs.startHostResourceSampling();
+  const sample = { sampled_at_ms: 100, cpu_percent: 1 };
+  mocks.invoke.mockResolvedValueOnce(sample);
+  expect(await obs.hostResources(ticket, false)).toBe(sample);
+  expect(mocks.invoke).toHaveBeenLastCalledWith("host_resource_sample", {
+    ticket: 42,
+    includeBacklog: false,
+  });
+  mocks.invoke.mockResolvedValueOnce(null);
+  expect(await obs.hostResources(ticket, true)).toBeNull();
+  expect(mocks.invoke).toHaveBeenLastCalledWith("host_resource_sample", {
+    ticket: 42,
+    includeBacklog: true,
+  });
+  await obs.stopHostResourceSampling(ticket);
+  expect(mocks.invoke).toHaveBeenLastCalledWith("stop_host_resource_sampling", {
+    ticket: 42,
+  });
+  mocks.invoke.mockRejectedValueOnce(new Error("retired sampling ticket"));
+  await expect(obs.hostResources(ticket, false)).rejects.toThrow(
+    "retired sampling ticket",
+  );
 });

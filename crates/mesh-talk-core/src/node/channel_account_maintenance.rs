@@ -1741,6 +1741,33 @@ mod tests {
             .send_channel_message(channel, b"before inheritance")
             .await
             .unwrap();
+        // This fixture owns bare inbound listeners, so no host publisher has
+        // committed the source's owned directory cut. Use the real publication
+        // path before discovery; this does not run ReceiveKeys maintenance.
+        source.prepare_account_group_fanout(channel).await.unwrap();
+        let channel_id = hex::encode(channel.as_bytes());
+        for key in [
+            super::super::account_documents::AccountDocumentKey::GroupInventory {
+                channel: channel_id.clone(),
+                source_device: source.user_id(),
+            },
+            super::super::account_documents::AccountDocumentKey::GroupControl {
+                channel: channel_id.clone(),
+                source_device: source.user_id(),
+            },
+        ] {
+            let document = source
+                .account_document(&key)
+                .unwrap()
+                .expect("the real publisher must commit the owned directory cut");
+            assert!(!document.payload().is_empty());
+        }
+        let inventory = source.group_inventory_references();
+        let reference = inventory
+            .get(&channel_id)
+            .expect("the durable inventory must expose this owned group");
+        assert_eq!(reference.owner_account_id, Some(source.account_id()));
+        assert!(!reference.pending_invite);
         let mut target_work = ChannelAccountMaintenance::default();
         for _ in 0..16 {
             target.maintain_account_channels(&mut target_work).await;

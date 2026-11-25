@@ -717,6 +717,8 @@
         "src/lib/rosterObservation.test.ts",
         "src/store/rosterRefresh.test.ts",
         "src/lib/readDeadline.test.ts",
+        "src/lib/nativeWindowVisibility.test.ts",
+        "src/features/chat/PrivacySettings.test.ts",
         "src/features/chat/PresenceAvailability.test.ts"
       ],
       "capability": {
@@ -1229,6 +1231,8 @@
         "frontend/src/store/contactPolicy.ts",
         "frontend/src/store/contactPolicy.test.ts",
         "frontend/src/lib/nativeWindowVisibility.ts",
+        "frontend/src/lib/nativeWindowVisibility.test.ts",
+        "frontend/src/features/chat/PrivacySettings.test.ts",
         "frontend/src/features/chat/useSerialPoll.ts",
         "frontend/src/features/chat/useSerialPoll.test.ts",
         "frontend/src/features/chat/PersonalDevices.tsx",
@@ -2230,7 +2234,9 @@
         "frontend/e2e/media-device-check.spec.ts",
         "frontend/src/store/groupVoice.ts",
         "frontend/src/store/groupVoice.test.ts",
+        "frontend/src/store/groupVoice.lifecycle.test.ts",
         "frontend/src/features/chat/GroupVoiceControls.tsx",
+        "frontend/src/features/chat/GroupVoiceControls.test.ts",
         "frontend/src/store/calls.ts",
         "frontend/src/store/calls.test.ts",
         "frontend/src/features/chat/CallDialog.tsx",
@@ -2245,6 +2251,8 @@
       ],
       "frontend": [
         "src/store/groupVoice.test.ts",
+        "src/store/groupVoice.lifecycle.test.ts",
+        "src/features/chat/GroupVoiceControls.test.ts",
         "src/store/calls.test.ts",
         "src/features/chat/CallDialog.test.ts",
         "src/lib/localeParity.test.ts",
@@ -2338,6 +2346,7 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/src/features/chat/MediaPreview.tsx",
         "frontend/src/features/chat/ImageQrResult.tsx",
+        "frontend/src/features/chat/ImageQrResult.test.ts",
         "frontend/src/features/chat/imageQr.worker.ts",
         "frontend/src/features/chat/MessageBubble.tsx",
         "frontend/src/features/chat/mediaFile.tsx",
@@ -2364,6 +2373,7 @@
       ],
       "frontend": [
         "src/features/chat/MediaPreview.test.ts",
+        "src/features/chat/ImageQrResult.test.ts",
         "src/features/chat/mediaObjectUrlCache.test.ts",
         "src/features/chat/mediaFileRead.test.ts",
         "src/features/chat/mediaFile.test.ts",
@@ -2612,12 +2622,14 @@
       "id": "frontend-voice-message",
       "paths": [
         "frontend/src/features/chat/VoiceCaptureDialog.tsx",
+        "frontend/src/features/chat/VoiceCaptureDialog.test.ts",
         "frontend/src/features/chat/attachments/voiceRecording.ts",
         "frontend/src/features/chat/attachments/voiceRecording.test.ts",
         "frontend/e2e/voice-message.spec.ts"
       ],
       "frontend": [
         "src/features/chat/attachments/voiceRecording.test.ts",
+        "src/features/chat/VoiceCaptureDialog.test.ts",
         "src/features/chat/attachments/conversationIntake.test.ts",
         "src/lib/localeParity.test.ts"
       ],

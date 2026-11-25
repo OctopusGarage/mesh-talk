@@ -349,7 +349,15 @@ async fn custody_report_progresses_while_unrelated_channel_recovery_is_held() {
             "the held Noise bytes belong to this exact recovery parent's dial, not another publisher");
         assert!(!*held.release.borrow());
         assert!(source.channel_custody_observations(group, event).is_empty(), "no report was warmed before the unrelated hold");
+        // Keep the sibling genuinely empty while the production recovery owner
+        // runs: a range exchange could otherwise install the original and
+        // legitimately supersede the negative observation before inspection.
+        // Only exact Have is served; all other authenticated request frames stay
+        // held on their own connection, without retaining a store mutex.
+        let negative_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served_negative_queries = Arc::clone(&negative_queries);
         let serving = Arc::clone(&sibling);
+        let expected_source = source.identity.public();
         tasks.spawn(async move {
             let mut children = tokio::task::JoinSet::new();
             loop {
@@ -358,13 +366,35 @@ async fn custody_report_progresses_while_unrelated_channel_recovery_is_held() {
                         let (stream, _) = accepted.unwrap();
                         let Some(permit) = serving.runtime_work.admit() else { return; };
                         let peer = Arc::clone(&serving);
+                        let queries = Arc::clone(&served_negative_queries);
+                        let expected_source = expected_source.clone();
                         children.spawn(permit.track(Box::pin(async move {
-                            if let Ok(channel) = peer.privacy_accept(stream).await {
-                                peer.serve_connection(channel).await;
+                            let Ok(mut channel) = peer.privacy_accept(stream).await else { return; };
+                            assert_eq!(channel.peer_identity(), &expected_source);
+                            let store = peer.sync_store(channel.peer_identity());
+                            let Some(_reception) = peer.request_reception_scope(&store, &channel) else { return; };
+                            while let Ok(bytes) = channel.recv().await {
+                                if super::super::session::durable_have_query_for_test(&bytes) != Some((group, event)) {
+                                    std::future::pending::<()>().await;
+                                    return;
+                                }
+                                assert!(peer.log.lock().unwrap().get(&event).unwrap().is_none(),
+                                    "the negative responder must not acquire the original through concurrent recovery");
+                                queries.fetch_add(1, Ordering::Release);
+                                match super::super::session::serve_wire_bytes(&mut channel, &store, &bytes).await {
+                                    Ok(super::super::session::Served::Handled(id)) => {
+                                        assert_eq!(id, group);
+                                    }
+                                    _ => return,
+                                }
                             }
                         })));
                     }
-                    _ = children.join_next(), if !children.is_empty() => {}
+                    result = children.join_next(), if !children.is_empty() => {
+                        if let Some(Err(error)) = result {
+                            assert!(error.is_cancelled(), "negative Have responder failed: {error}");
+                        }
+                    }
                 }
             }
         });
@@ -382,11 +412,20 @@ async fn custody_report_progresses_while_unrelated_channel_recovery_is_held() {
         }).await.expect("authenticated custody report must publish while unrelated recovery remains held");
         assert!(started.elapsed() < Duration::from_secs(8));
         assert!(!*held.release.borrow(), "the report cannot borrow completion of the unrelated exchange");
+        assert!(negative_queries.load(Ordering::Acquire) > 0,
+            "the report must follow the sibling's real exact-event Have response");
+        assert!(sibling.log.lock().unwrap().get(&event).unwrap().is_none(),
+            "original transfer remains held throughout the negative report measurement");
         let observations = source.channel_custody_observations(group, event);
+        let expected_key = AccountDocumentKey::ChannelCustody {
+            channel: hex::encode(group.as_bytes()),
+            event: event.to_hex(),
+            holder: sibling.user_id(),
+        };
         assert!(observations.iter().any(|meta| {
             meta.valid(&account.public().ed25519_pub) && meta.tombstone
-                && matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if holder == &sibling.user_id())
-        }), "the current sibling authenticated a negative exact durable-have claim");
+                && meta.writer_device == source.user_id() && meta.key == expected_key
+        }), "the source signed the current sibling's negative exact-event durable-have observation");
     }).catch_unwind().await;
     held.release.send_replace(true);
     source.runtime_work.close();

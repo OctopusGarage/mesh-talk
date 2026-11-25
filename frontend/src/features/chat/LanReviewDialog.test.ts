@@ -138,3 +138,187 @@ it("withholds the local preview when the selected message expires", async () => 
   expect(button("Create temporary link").disabled).toBe(true);
   expect(invoke).toHaveBeenCalledOnce();
 });
+
+it("reports preview failure and cancels without issuing a grant", async () => {
+  invoke.mockRejectedValueOnce(new Error("preview unavailable"));
+  const close = await renderDialog();
+  expect(document.querySelector("[role=alert]")?.textContent).toBeTruthy();
+  expect(button("Create temporary link").disabled).toBe(true);
+  await act(async () => button("Cancel").click());
+  expect(close).toHaveBeenCalledOnce();
+  expect(invoke).toHaveBeenCalledOnce();
+});
+it("retries grant creation and handles clipboard failure then success", async () => {
+  const writeText = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("denied"))
+    .mockResolvedValueOnce(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  invoke
+    .mockResolvedValueOnce("selected text")
+    .mockRejectedValueOnce(new Error("start failed"))
+    .mockResolvedValueOnce({ id: grantId, url })
+    .mockResolvedValue(undefined);
+  await renderDialog();
+  await act(async () => button("Create temporary link").click());
+  expect(document.querySelector("[role=alert]")).not.toBeNull();
+  await act(async () => button("Create temporary link").click());
+  const input = document.querySelector("input")!;
+  await act(async () => input.focus());
+  expect(input.selectionEnd! - input.selectionStart!).toBe(url.length);
+  const copy = () =>
+    Array.from(document.querySelectorAll("button")).find((element) =>
+      /copy/i.test(element.textContent ?? ""),
+    )!;
+  await act(async () => copy().click());
+  expect(writeText).toHaveBeenCalledWith(url);
+  expect(document.querySelector("[role=alert]")).not.toBeNull();
+  await act(async () => copy().click());
+  expect(document.querySelector("[role=alert]")).toBeNull();
+  expect(document.body.textContent).toContain("Link copied");
+});
+
+it("closes a preview on Escape and revokes an active link before Escape closes it", async () => {
+  invoke.mockResolvedValueOnce("preview");
+  const close = await renderDialog();
+  await act(async () =>
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  expect(close).toHaveBeenCalledOnce();
+  invoke
+    .mockResolvedValueOnce({ id: grantId, url })
+    .mockResolvedValue(undefined);
+  await act(async () => button("Create temporary link").click());
+  await act(async () =>
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  expect(invoke).toHaveBeenLastCalledWith("owner_revoke_lan_review", {
+    owner: "alice",
+    grantId,
+  });
+  expect(close).toHaveBeenCalledTimes(2);
+});
+
+it("rejects create and copy actions after the owner changes", async () => {
+  invoke
+    .mockResolvedValueOnce("preview")
+    .mockResolvedValueOnce({ id: grantId, url });
+  await renderDialog();
+  owner.current = false;
+  await act(async () => button("Create temporary link").click());
+  expect(invoke).toHaveBeenCalledOnce();
+  owner.current = true;
+  await act(async () => button("Create temporary link").click());
+  const writeText = vi.fn();
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  owner.current = false;
+  await act(async () => button("Copy link").click());
+  expect(writeText).not.toHaveBeenCalled();
+});
+
+it("discards preview failures after the owner changes", async () => {
+  let reject!: (error: Error) => void;
+  invoke.mockReturnValueOnce(
+    new Promise<string>((_, fail) => {
+      reject = fail;
+    }),
+  );
+  await renderDialog();
+  owner.current = false;
+  await act(async () => reject(new Error("retired")));
+  expect(document.querySelector("[role=alert]")).toBeNull();
+});
+it("does not close or publish request failures after retirement", async () => {
+  let finish!: () => void;
+  invoke
+    .mockResolvedValueOnce("preview")
+    .mockResolvedValueOnce({ id: grantId, url })
+    .mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+  const close = await renderDialog();
+  await act(async () => button("Create temporary link").click());
+  await act(async () => button("Revoke link").click());
+  owner.current = false;
+  await act(async () => finish());
+  expect(close).not.toHaveBeenCalled();
+});
+it("does not expose a grant issued after owner retirement", async () => {
+  let finish!: (value: { id: string; url: string }) => void;
+  invoke.mockResolvedValueOnce("preview").mockReturnValueOnce(
+    new Promise<{ id: string; url: string }>((resolve) => {
+      finish = resolve;
+    }),
+  );
+  await renderDialog();
+  await act(async () => button("Create temporary link").click());
+  owner.current = false;
+  await act(async () => finish({ id: grantId, url }));
+  expect(document.querySelector("input")).toBeNull();
+  expect(invoke).toHaveBeenCalledTimes(2);
+});
+it("discards clipboard completion and errors after owner replacement", async () => {
+  let finish!: () => void;
+  let fail!: (error: Error) => void;
+  const writeText = vi
+    .fn()
+    .mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    )
+    .mockReturnValueOnce(
+      new Promise<void>((_, reject) => {
+        fail = reject;
+      }),
+    );
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  invoke
+    .mockResolvedValueOnce("preview")
+    .mockResolvedValueOnce({ id: grantId, url });
+  await renderDialog();
+  await act(async () => button("Create temporary link").click());
+  await act(async () => button("Copy link").click());
+  owner.current = false;
+  await act(async () => finish());
+  expect(document.body.textContent).not.toContain("Link copied");
+  owner.current = true;
+  await act(async () => button("Copy link").click());
+  owner.current = false;
+  await act(async () => fail(new Error("late")));
+  expect(document.querySelector("[role=alert]")).toBeNull();
+});
+
+it("discards start failures after owner replacement", async () => {
+  let fail!: (error: Error) => void;
+  invoke.mockResolvedValueOnce("preview").mockReturnValueOnce(
+    new Promise<void>((_, reject) => {
+      fail = reject;
+    }),
+  );
+  await renderDialog();
+  await act(async () => button("Create temporary link").click());
+  owner.current = false;
+  await act(async () => fail(new Error("retired")));
+  expect(document.querySelector("[role=alert]")).toBeNull();
+});
+it("does not request preview under a retired lease", async () => {
+  owner.current = false;
+  await renderDialog();
+  expect(invoke).not.toHaveBeenCalled();
+});

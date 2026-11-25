@@ -131,3 +131,24 @@ it("forwards account profile projections and releases their listener", async () 
   stop();
   await vi.waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
 });
+
+it("preserves runtime identity on roster invalidations and releases the registration", async () => {
+  let forward!: (event: { payload: unknown }) => void;
+  const unlisten = vi.fn();
+  listen.mockImplementation((name, callback) => {
+    expect(name).toBe("node-roster-changed");
+    forward = callback;
+    return Promise.resolve(unlisten);
+  });
+  const onRosterChanged = vi.fn();
+  const stop = subscribeNodeEvents({ onRosterChanged });
+  const scope = {
+    owner: "local-user",
+    account_id: "account",
+    device_id: "device",
+  };
+  forward({ payload: scope });
+  expect(onRosterChanged).toHaveBeenCalledWith(scope);
+  stop();
+  await vi.waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
+});

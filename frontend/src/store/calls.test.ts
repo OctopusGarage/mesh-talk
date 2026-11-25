@@ -1352,4 +1352,84 @@ describe("window sharing", () => {
     expect(sender.replaceTrack).not.toHaveBeenCalled();
     expect(useCalls.getState().sharedWindow).toBeNull();
   });
+  it("ignores capture without a call and duplicate requests", async () => {
+    const getDisplayMedia = vi.fn();
+    vi.stubGlobal("navigator", {
+      mediaDevices: { getUserMedia, getDisplayMedia },
+    });
+    await useCalls.getState().startWindowShare();
+    await useCalls.getState().stopWindowShare();
+    expect(getDisplayMedia).not.toHaveBeenCalled();
+    await connectedVideo();
+    const { stream } = capture("window");
+    getDisplayMedia.mockResolvedValue(stream);
+    await useCalls.getState().stopWindowShare();
+    await useCalls.getState().startWindowShare();
+    await useCalls.getState().startWindowShare();
+    expect(getDisplayMedia).toHaveBeenCalledOnce();
+  });
+  it("restores camera when capture ends during replacement", async () => {
+    const { sender, camera } = await connectedVideo();
+    const { stream, track } = capture("window");
+    sender.replaceTrack.mockImplementationOnce(async () => {
+      track.readyState = "ended";
+    });
+    vi.stubGlobal("navigator", {
+      mediaDevices: { getUserMedia, getDisplayMedia: async () => stream },
+    });
+    await useCalls.getState().startWindowShare();
+    expect(sender.replaceTrack).toHaveBeenLastCalledWith(camera);
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(useCalls.getState()).toMatchObject({
+      sharedWindow: null,
+      windowShareBusy: false,
+    });
+  });
+  it("reports restoration failure and releases capture", async () => {
+    const { sender } = await connectedVideo();
+    const { stream, track } = capture("window");
+    vi.stubGlobal("navigator", {
+      mediaDevices: { getUserMedia, getDisplayMedia: async () => stream },
+    });
+    await useCalls.getState().startWindowShare();
+    sender.replaceTrack.mockRejectedValueOnce(new Error("unavailable"));
+    await useCalls.getState().stopWindowShare();
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(useCalls.getState()).toMatchObject({
+      sharedWindow: null,
+      windowShareBusy: false,
+      windowShareError: "restoreFailed",
+    });
+  });
+  it.each(["resolve", "reject"])(
+    "ignores stale replacement %s",
+    async (outcome) => {
+      const { sender } = await connectedVideo();
+      const { stream, track } = capture("window");
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      sender.replaceTrack.mockImplementationOnce(
+        () =>
+          new Promise<void>((yes, no) => {
+            resolve = yes;
+            reject = no;
+          }),
+      );
+      vi.stubGlobal("navigator", {
+        mediaDevices: { getUserMedia, getDisplayMedia: async () => stream },
+      });
+      const started = useCalls.getState().startWindowShare();
+      await Promise.resolve();
+      useCalls.getState().hangup();
+      if (outcome === "resolve") resolve();
+      else reject(new Error("retired"));
+      await started;
+      expect(track.stop).toHaveBeenCalledOnce();
+      expect(useCalls.getState()).toMatchObject({
+        phase: "idle",
+        sharedWindow: null,
+        windowShareError: null,
+      });
+    },
+  );
 });

@@ -832,7 +832,33 @@ impl Node {
     pub(in crate::node) async fn auto_enroll_one_channel_sibling(
         self: &Arc<Self>,
     ) -> Result<bool, NodeError> {
-        let Some((channel, device)) = self.auto_enrollment_candidate()? else {
+        // Candidate selection reads a published canonical membership cut. Local
+        // control appended since the last turn must be prepared before an
+        // idempotence check can distinguish "already enrolled" from stale data.
+        let channels = self
+            .run_channel_repair_turn(|node| {
+                let me = node.user_id();
+                let book = node.channels.lock().expect("channels mutex not poisoned");
+                Ok(book
+                    .channel_ids()
+                    .into_iter()
+                    .filter(|id| {
+                        book.state(id).is_some_and(|state| {
+                            state.owner() == me
+                                && !state.is_dissolved()
+                                && state.owner_account_id().is_none()
+                        })
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .await?;
+        for channel in channels {
+            self.await_channel_metadata_owned(channel).await?;
+        }
+        let candidate = self
+            .run_channel_repair_turn(|node| Ok(node.auto_enrollment_candidate()))
+            .await??;
+        let Some((channel, device)) = candidate else {
             return Ok(false);
         };
         self.add_channel_member_checked_if(channel, device, true, |commit| commit())
@@ -993,6 +1019,48 @@ impl Node {
         self.note_join_history_recovery_input();
     }
 
+    pub(in crate::node) async fn run_channel_repair_turn<T: Send + 'static>(
+        self: &Arc<Self>,
+        turn: impl FnOnce(&Self) -> Result<T, LogError> + Send + 'static,
+    ) -> Result<T, LogError> {
+        let retired = || LogError::AdmissionRejected("participant runtime retired".into());
+        let capacity = self
+            .runtime_work
+            .local_repair_capacity()
+            .await
+            .ok_or_else(retired)?;
+        let work = self.runtime_work.admit().ok_or_else(retired)?;
+        let node = self.clone();
+        match work
+            .spawn_local_repair_blocking(capacity, move || turn(&node))
+            .await
+        {
+            Ok(value) => value.into_inner(),
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(LogError::Io(std::io::Error::other(error))),
+        }
+    }
+
+    async fn prepare_local_channel_recovery_owned(
+        self: &Arc<Self>,
+        input: bool,
+    ) -> LocalRecoveryWork {
+        self.run_channel_repair_turn(move |node| {
+            if input {
+                node.note_local_channel_recovery_input();
+            }
+            Ok(node.prepare_local_channel_recovery_turn())
+        })
+        .await
+        .unwrap_or_else(|error| {
+            log::warn!("channel local recovery deferred: {error}");
+            LocalRecoveryWork {
+                more: false,
+                retry_after: Some(CHANNEL_RECOVERY_INTERVAL),
+            }
+        })
+    }
+
     fn prepare_local_channel_recovery_turn(&self) -> LocalRecoveryWork {
         let work = match self.retry_channel_plaintext_turn() {
             Ok(work) => work,
@@ -1018,19 +1086,31 @@ impl Node {
     /// Keep one remote turn and its leases alive while notified local work advances.
     /// The outer selection is inactive here, so this Notify has one consumer.
     async fn complete_channel_recovery_turn(
-        &self,
+        self: &Arc<Self>,
         mut remote: std::pin::Pin<&mut impl std::future::Future<Output = LocalRecoveryWork>>,
     ) -> LocalRecoveryWork {
         let mut work = LocalRecoveryWork::default();
         let mut consumed_notification = false;
+        let mut local: Option<futures_util::future::BoxFuture<'_, LocalRecoveryWork>> = None;
+        let mut dirty = false;
         loop {
             tokio::select! {
                 result = remote.as_mut() => { work.merge(result); break; },
                 () = self.channel_recovery_notify.notified() => {
                     consumed_notification = true;
-                    self.note_local_channel_recovery_input();
-                    work.merge(self.prepare_local_channel_recovery_turn());
-                    tokio::task::yield_now().await;
+                    if local.is_none() {
+                        local = Some(Box::pin(self.prepare_local_channel_recovery_owned(true)));
+                    } else {
+                        dirty = true;
+                    }
+                }
+                result = async { local.as_mut().expect("active local turn").await }, if local.is_some() => {
+                    work.merge(result);
+                    local = if std::mem::take(&mut dirty) {
+                        Some(Box::pin(self.prepare_local_channel_recovery_owned(true)))
+                    } else {
+                        None
+                    };
                 }
             }
         }
@@ -1340,7 +1420,7 @@ impl Node {
             // One preparation/distribution per owner turn. Unvisited book rows
             // stay behind this cursor, so other local/remote lanes get a turn.
             more |= offset + 1 < page_len;
-            if let Err(error) = self.await_channel_metadata(channel).await {
+            if let Err(error) = self.await_channel_metadata_owned(channel).await {
                 log::warn!("channel replay preparation deferred: {error}");
                 replay.pending.insert(*channel.as_bytes());
                 replay.pending_progress = FanoutProgress::Deferred;
@@ -1485,7 +1565,7 @@ impl Node {
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
                             },
                             _ = tokio::time::sleep_until(local_at.unwrap_or_else(tokio::time::Instant::now)), if local_at.is_some() => { input = !local_continuation; },
-                            _ = tokio::time::sleep_until(fallback_at), if self.channel_recovery_periodic_enabled(periodic) || fallback_retry => { input = fallback_remaining == 0; },
+                            _ = tokio::time::sleep_until(fallback_at), if self.channel_recovery_periodic_enabled(periodic) => { input = fallback_remaining == 0; },
                         }
                         true
                     }
@@ -1534,19 +1614,23 @@ impl Node {
                 }
             }
             if input {
-                self.note_local_channel_recovery_input();
                 membership_needed = true;
                 history_retry_at = None;
                 metadata_retry_at = metadata_retry_at.map(|_| tokio::time::Instant::now());
                 membership_retry_at = None;
             }
-            let mut work = self.prepare_local_channel_recovery_turn();
+            let mut work = self.prepare_local_channel_recovery_owned(input).await;
             let remote = async {
                 let mut result = LocalRecoveryWork::default();
                 let mut failure_delay = None;
                 if history_retry_at.is_none_or(|at| tokio::time::Instant::now() >= at) {
                     history_retry_at = None;
-                    match self.retry_join_history_owned() {
+                    match self
+                        .run_channel_repair_turn(|node| Ok(node.retry_join_history_owned()))
+                        .await
+                        .map_err(NodeError::from)
+                        .and_then(|result| result)
+                    {
                         Ok((channels, more)) => {
                             result.more |= more;
                             for channel in channels {
@@ -1567,7 +1651,12 @@ impl Node {
                 });
                 if metadata_retry_at.is_none_or(|at| tokio::time::Instant::now() >= at) {
                     let recovering = metadata_retry_at.take().is_some();
-                    match self.retry_group_metadata_turn() {
+                    match self
+                        .run_channel_repair_turn(|node| Ok(node.retry_group_metadata_turn()))
+                        .await
+                        .map_err(NodeError::from)
+                        .and_then(|result| result)
+                    {
                         Ok((channels, more)) => {
                             if recovering {
                                 if more {
@@ -1666,9 +1755,8 @@ impl Node {
                     "channel_recovery_targets_done".into()
                 });
                 // Notification-only tests exclude discovery-triggered repair as well.
-                if (self.channel_recovery_periodic_enabled(periodic)
-                    && (discovered || tokio::time::Instant::now() >= fallback_at))
-                    || (fallback_retry && tokio::time::Instant::now() >= fallback_at)
+                if self.channel_recovery_periodic_enabled(periodic)
+                    && (discovered || tokio::time::Instant::now() >= fallback_at)
                 {
                     #[cfg(test)]
                     self.trace_account_client(&self.identity.public(), || {
@@ -1734,7 +1822,7 @@ impl Node {
                 if let Some(delay) = failure_delay {
                     // Only failed attempted work owns an early repair deadline.
                     // Successful target invalidations do not rearm quiet scans.
-                    fallback_retry = true;
+                    fallback_retry = self.channel_recovery_periodic_enabled(periodic);
                     fallback_at = fallback_at.min(tokio::time::Instant::now() + delay);
                 }
                 result.merge(LocalRecoveryWork {
@@ -1804,7 +1892,7 @@ impl Node {
         enabled: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -1846,7 +1934,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -2143,11 +2231,11 @@ impl Node {
             Ok(())
         })?;
         let (channel, members) = distribution.expect("authorized channel commit executed");
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         self.distribute_my_sender_key(channel, &members)?;
         // Key publication advances the signed source too. Complete that local
         // intent before exposing a newly created channel to immediate sends.
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         // This grants automatic account migration permission. Grant it only
         // after creation's final source read, so maintenance cannot append an
         // authority upgrade between sender publication and metadata completion.
@@ -2279,7 +2367,7 @@ impl Node {
         require_account_sibling: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<bool, NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         let upgraded = self
             .account_group_projection(channel)?
             .authority
@@ -2450,7 +2538,7 @@ impl Node {
         member_user_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         // Policy serialization precedes host authorization and membership locks.
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
@@ -2554,7 +2642,7 @@ impl Node {
         account_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         // Policy serialization precedes host authorization and membership locks.
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
@@ -2670,7 +2758,7 @@ impl Node {
         new_name: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -2729,7 +2817,7 @@ impl Node {
         new_owner: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         let mut distribution = None;
         let mut owner_control = None;
         let mut transfer = None;
@@ -2794,7 +2882,7 @@ impl Node {
         let Some(members) = distribution else {
             return Ok(());
         };
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         if let Some(event) = transfer {
             let projection = self.account_group_projection(channel)?;
             if projection.ownership != Some(event)
@@ -2823,7 +2911,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         let own_proof = self.own_group_proof();
         let mut distribution = None;
         authorize(&mut || {
@@ -2850,7 +2938,7 @@ impl Node {
         let Some((members, event)) = distribution else {
             return Ok(());
         };
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         if !self
             .account_group_projection(channel)?
             .is_authorized(event)?
@@ -2890,7 +2978,7 @@ impl Node {
         automatic: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<bool, NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         let own_proof = self.own_group_proof();
         // Route collection may advance unrelated channel admission. Capture
         // bindings before serialization, then check this group's signed state.
@@ -2936,7 +3024,7 @@ impl Node {
         let Some((members, event)) = distribution else {
             return Ok(false);
         };
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         if let Some(event) = event
             && !self
                 .account_group_projection(channel)?
@@ -3049,7 +3137,7 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         let id = self.enqueue_channel_message_reply_expiring_if(
             channel,
             text,
@@ -3058,7 +3146,7 @@ impl Node {
             &mut authorize,
         )?;
         self.flush_accepted_channel_message(channel, id).await;
-        if let Err(error) = self.await_channel_metadata(channel).await {
+        if let Err(error) = self.await_channel_metadata_owned(channel).await {
             log::debug!("accepted channel metadata preparation deferred: {error}");
         }
         Ok(())
@@ -3102,7 +3190,7 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
-        self.await_channel_metadata(channel).await?;
+        self.await_channel_metadata_owned(channel).await?;
         let id = self.enqueue_sticker_channel_expiring_if(
             channel,
             sticker_id,
@@ -3111,7 +3199,7 @@ impl Node {
             &mut authorize,
         )?;
         self.flush_accepted_channel_message(channel, id).await;
-        if let Err(error) = self.await_channel_metadata(channel).await {
+        if let Err(error) = self.await_channel_metadata_owned(channel).await {
             log::debug!("accepted channel metadata preparation deferred: {error}");
         }
         Ok(())
@@ -3191,7 +3279,7 @@ impl Node {
         let origin = std::panic::Location::caller();
         async move {
             self.observe_distribution_origin(origin, false);
-            if let Err(error) = self.await_channel_metadata(channel).await {
+            if let Err(error) = self.await_channel_metadata_owned(channel).await {
                 log::warn!("accepted channel control preparation deferred: {error}");
                 return;
             }
@@ -3212,7 +3300,18 @@ impl Node {
         let origin = std::panic::Location::caller();
         async move {
             self.observe_distribution_origin(origin, true);
-            if let Err(error) = self.await_channel_metadata(channel).await {
+            // An empty target list proves completion only for an installed
+            // channel. Unknown scopes have no accepted control to distribute.
+            if self
+                .channels
+                .lock()
+                .expect("channels mutex")
+                .state(&channel)
+                .is_none()
+            {
+                return FanoutProgress::Deferred;
+            }
+            if let Err(error) = self.await_channel_metadata_owned(channel).await {
                 log::warn!("accepted channel control preparation deferred: {error}");
                 return FanoutProgress::Deferred;
             }

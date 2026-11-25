@@ -1727,3 +1727,52 @@ it("sends oversized-pixel images without creating an optimistic original decode"
     null,
   );
 });
+
+it("sends a voice clip as an attachment and closes capture only after handoff", async () => {
+  let intake!: ReturnType<typeof useAttachmentIntake>;
+  function Probe() {
+    intake = useAttachmentIntake(i18n.t);
+    return null;
+  }
+  await act(async () => root.render(createElement(Probe)));
+  await act(async () => intake.openVoice());
+  expect(intake.voiceOpen).toBe(true);
+  native.invoke.mockResolvedValue("/tmp/voice.m4a");
+  let accepted: boolean | undefined;
+  await act(async () => {
+    accepted = await intake.sendVoice(file("voice.m4a", "audio/mp4"));
+  });
+  expect(accepted).toBe(true);
+  expect(useChat.getState().sendFile).toHaveBeenCalledWith(
+    "/tmp/voice.m4a",
+    false,
+  );
+  expect(intake.voiceOpen).toBe(false);
+});
+it("retains failed voice capture for retry and rejects stale submissions", async () => {
+  let intake!: ReturnType<typeof useAttachmentIntake>;
+  function Probe() {
+    intake = useAttachmentIntake(i18n.t);
+    return null;
+  }
+  await act(async () => root.render(createElement(Probe)));
+  await act(async () => intake.openVoice());
+  native.invoke.mockRejectedValueOnce(new Error("disk unavailable"));
+  let accepted: boolean | undefined;
+  await act(async () => {
+    accepted = await intake.sendVoice(file("voice.m4a", "audio/mp4"));
+  });
+  expect(accepted).toBe(false);
+  expect(intake.voiceOpen).toBe(true);
+  expect(useChat.getState().error).toContain("disk unavailable");
+  const stale = intake.sendVoice;
+  await switchConversation();
+  await act(async () => {
+    accepted = await stale(file("voice.m4a", "audio/mp4"));
+  });
+  expect(accepted).toBe(false);
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+  await act(async () => intake.openVoice());
+  await act(async () => intake.cancelVoice());
+  expect(intake.voiceOpen).toBe(false);
+});
