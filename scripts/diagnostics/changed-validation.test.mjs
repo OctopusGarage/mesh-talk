@@ -412,6 +412,7 @@ function configureCLI(f, body) {
     "scripts/validation/validation.json",
     "frontend/validation.json",
     "crates/mesh-talk-core/validation.json",
+    "crates/mesh-talk-protocol/validation.json",
     "src-tauri/validation.json",
     "crates/mesh-talk-integrations/validation.json",
     "crates/mesh-talk-mcp/validation.json",

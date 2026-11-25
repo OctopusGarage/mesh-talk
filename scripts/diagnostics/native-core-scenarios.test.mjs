@@ -859,3 +859,23 @@ test("successful privacy confirmation retires its closing backdrop before settli
   assert.deepEqual(await settledPrivacyMode(c), { confirmationDismissed: true, dialogSettled: true });
   assert.equal(settled, true);
 });
+
+
+test("profile geometry waits for actual pointer hit after a closing modal", async () => {
+  const { profileLayout } = await import("./native-core-scenarios.mjs");
+  let samples = 0, opened = false;
+  const c = {
+    focusOwnedWindow: async () => {},
+    execute: async () => ({ avatar: { x: 100, y: 100, right: 140, bottom: 140 }, topEdgeHit: ++samples > 1 }),
+    until: async (label, poll) => {
+      if (label.includes("pointer input")) { assert.equal(await poll(), false); return await poll(); }
+      assert.equal(await poll(), true);
+    },
+    command: async () => ({ Ok: { buttons: Array.from({ length: 3 }, () => ({ x: 0, y: 0, right: 20, bottom: 20 })) } }),
+    openDialog: async () => { assert.equal(samples, 2); opened = true; },
+    settledDialog: async () => {}, element: async () => {}, key: async () => {}, exists: async () => false,
+  };
+  assert.equal((await profileLayout(c)).topEdgeHit, true);
+  assert.equal(opened, true);
+  await assert.rejects(profileLayout({ ...c, execute: async () => ({ topEdgeHit: false }), until: async (_label, poll) => { assert.equal(await poll(), false); throw new Error("pointer remains blocked"); } }), /pointer remains blocked/);
+});

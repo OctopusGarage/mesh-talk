@@ -693,9 +693,12 @@ export async function coreScenarios(c) {
   return { outbound, inbound, contents, selectedTheme: "light", rendered, minimumWindow: settingsTargets[1].request };
 }
 
-async function profileLayout(c) {
+export async function profileLayout(c) {
   await c.focusOwnedWindow();
-  const layout = await c.execute("const e=document.querySelector('[data-testid=open-profile]'),r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+1);return {viewport:{width:innerWidth,height:innerHeight},avatar:{x:r.x,y:r.y,right:r.right,bottom:r.bottom},topEdgeHit:!!hit && (hit===e || e.contains(hit))};");
+  const layout = await c.until("profile trigger receives pointer input after modal retirement", async () => {
+    const observed = await c.execute("const e=document.querySelector('[data-testid=open-profile]');if(!e)return null;const r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+1);return {viewport:{width:innerWidth,height:innerHeight},avatar:{x:r.x,y:r.y,right:r.right,bottom:r.bottom},topEdgeHit:!!hit && (hit===e || e.contains(hit))};");
+    return observed?.topEdgeHit && observed;
+  });
   assert.equal(layout.topEdgeHit, true, "own avatar top edge receives pointer input");
   layout.chrome = null;
   if (process.platform === "darwin") {

@@ -189,7 +189,7 @@ fn initialize_runtime_charge(c: &Connection) -> Result<(), LogError> {
     }
     // BEFORE also covers INSERT OR REPLACE; UPSERT may conservatively charge a
     // growth twice, but must never omit a newly larger context.
-    c.execute_batch("CREATE TRIGGER IF NOT EXISTS participant_work.participant_sync_charge_progress BEFORE INSERT ON participant_sync_progress BEGIN UPDATE participant_sync_cache_charge SET bytes=bytes+max(0,length(NEW.context)-coalesce((SELECT length(context) FROM participant_sync_progress WHERE view=NEW.view),-256)) WHERE view=NEW.view; END;")?;
+    c.execute_batch("CREATE TRIGGER IF NOT EXISTS participant_work.participant_sync_charge_progress BEFORE INSERT ON participant_sync_progress WHEN NOT EXISTS(SELECT 1 FROM participant_sync_progress WHERE view=NEW.view) OR length(NEW.context)>(SELECT length(context) FROM participant_sync_progress WHERE view=NEW.view) BEGIN UPDATE participant_sync_cache_charge SET bytes=bytes+max(0,length(NEW.context)-coalesce((SELECT length(context) FROM participant_sync_progress WHERE view=NEW.view),-256)) WHERE view=NEW.view; END;")?;
     c.execute_batch("CREATE TRIGGER IF NOT EXISTS participant_work.participant_sync_charge_context AFTER UPDATE OF context ON participant_sync_progress WHEN length(NEW.context)>length(OLD.context) BEGIN UPDATE participant_sync_cache_charge SET bytes=bytes+length(NEW.context)-length(OLD.context) WHERE view=NEW.view; END;")?;
     Ok(())
 }
