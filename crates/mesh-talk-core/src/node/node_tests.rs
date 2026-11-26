@@ -8534,6 +8534,7 @@ async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_memb
     };
     let (sender, _) = open("sender", alice, roster.clone());
     let (recipient, mut received) = open("recipient", bob, bob_roster);
+    crate::node::test_support::trace_sync_failures(&recipient, "inline recipient");
     for (name, node, port) in [
         ("sender", &sender, source_port),
         (
@@ -8550,9 +8551,15 @@ async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_memb
         )
         .unwrap();
     }
-    let mut receiver = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+    let mut receiver = crate::node::test_support::IndependentPeerRuntime::start_multithreaded_with(
         recipient.clone(),
         listener,
+        |node, listener| async move {
+            tokio::select! {
+                _ = node.clone().run_accept_loop(listener) => {},
+                _ = node.run_file_receive_recovery() => {},
+            }
+        },
     )
     .await;
     receiver.launch();

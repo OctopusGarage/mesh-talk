@@ -125,6 +125,61 @@ impl Node {
             }
         }
     }
+    /// The ordinary participant owner for accepted attachment recovery and local media.
+    pub(super) async fn run_file_receive_recovery(self: Arc<Self>) {
+        let node = self;
+        let mut network = node.network_changes.subscribe();
+        let mut roster = node
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .subscribe_changes();
+        let mut available = node.subscribe_sibling_availability();
+        let mut channels = node.subscribe_channel_changes();
+        let mut peers = node.file_pull_peers();
+        let mut delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS);
+        loop {
+            let Some(permit) = node.runtime_work.admit() else {
+                break;
+            };
+            let receiving = Arc::clone(&node);
+            // The blocking owner destroys captured Node references
+            // before releasing retirement admission, including when
+            // the awaiting producer is cancelled.
+            if let Err(error) = permit
+                .spawn_blocking(move || {
+                    receiving.retry_file_receives();
+                    if let Err(error) = receiving.maintain_media() {
+                        log::warn!("media maintenance deferred: {error}");
+                    }
+                })
+                .await
+            {
+                log::warn!("file receive worker failed: {error}");
+            }
+            tokio::select! {
+                _ = node.pull_pending_files_direct() => {},
+                _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },
+            }
+            let (wait, _pending) = node.file_pull_schedule(delay);
+            let changed = node
+                .wait_for_file_pull(
+                    &mut network,
+                    &mut roster,
+                    &mut available,
+                    &mut channels,
+                    &mut peers,
+                    wait,
+                )
+                .await;
+            delay = if changed {
+                Duration::from_secs(FILE_PULL_INTERVAL_SECS)
+            } else {
+                (delay * 2).min(Duration::from_secs(FILE_REPAIR_INTERVAL_SECS))
+            };
+        }
+    }
+
     pub(super) fn group_file_schedule(&self) -> (Duration, bool) {
         let pending = self.group_file_work_pending();
         let wait = Duration::from_secs(if pending {
@@ -410,41 +465,7 @@ impl PreparedParticipant {
             let node = Arc::clone(&node);
             tasks.push(tokio::spawn(node.run_bridge_directory()));
         }
-        {
-            let node = Arc::clone(&node);
-            tasks.push(tokio::spawn(async move {
-                let mut network = node.network_changes.subscribe();
-                let mut roster = node.roster.lock().expect("roster lock not poisoned").subscribe_changes();
-                let mut available = node.subscribe_sibling_availability();
-                let mut channels = node.subscribe_channel_changes();
-                let mut peers = node.file_pull_peers();
-                let mut delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS);
-                loop {
-                    let Some(permit) = node.runtime_work.admit() else { break; };
-                    let receiving = Arc::clone(&node);
-                    // The blocking owner destroys captured Node references
-                    // before releasing retirement admission, including when
-                    // the awaiting producer is cancelled.
-                    if let Err(error) = permit.spawn_blocking(move || {
-                        receiving.retry_file_receives();
-                        if let Err(error)=receiving.maintain_media(){log::warn!("media maintenance deferred: {error}");}
-                    }).await {
-                        log::warn!("file receive worker failed: {error}");
-                    }
-                    tokio::select! {
-                        _ = node.pull_pending_files_direct() => {},
-                        _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },
-                    }
-                    let (wait, _pending) = node.file_pull_schedule(delay);
-                    let changed = node.wait_for_file_pull(&mut network, &mut roster, &mut available, &mut channels, &mut peers, wait).await;
-                    delay = if changed {
-                        Duration::from_secs(FILE_PULL_INTERVAL_SECS)
-                    } else {
-                        (delay * 2).min(Duration::from_secs(FILE_REPAIR_INTERVAL_SECS))
-                    };
-                }
-            }));
-        }
+        tasks.push(tokio::spawn(Arc::clone(&node).run_file_receive_recovery()));
 
         {
             let node = Arc::clone(&node);
