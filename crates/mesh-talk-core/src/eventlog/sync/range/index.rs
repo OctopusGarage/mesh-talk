@@ -652,19 +652,19 @@ impl Checkpoint {
             return Ok(Err(RemoteError::InvalidFrame));
         }
         let equal = local.summary(prefix)? == frame.summary || frame.summary.count == 0;
+        let mut overlap_known = self.overlap_known;
+        let mut overlap_missing = self.overlap_missing;
         if equal && frame.summary.count > 0 {
-            self.overlap_known = self
-                .overlap_known
-                .saturating_add(frame.summary.count as u64);
+            overlap_known = overlap_known.saturating_add(frame.summary.count as u64);
         }
         let mut missing = Vec::new();
         if !equal {
             for id in frame.leaves.iter().copied().chain(frame.singleton) {
                 if !local.contains(&id)? {
-                    self.overlap_missing = self.overlap_missing.saturating_add(1);
+                    overlap_missing = overlap_missing.saturating_add(1);
                     missing.push(id);
                 } else {
-                    self.overlap_known = self.overlap_known.saturating_add(1);
+                    overlap_known = overlap_known.saturating_add(1);
                 }
             }
             if frame.leaves.is_empty()
@@ -675,6 +675,10 @@ impl Checkpoint {
                 return Ok(Err(RemoteError::InvalidFrame));
             }
         }
+        // Counts decide repair strategy too. Commit them with the frontier,
+        // never before a fallible leaf read that may retry this same prefix.
+        self.overlap_known = overlap_known;
+        self.overlap_missing = overlap_missing;
         if prefix.bits() == 0 {
             self.remote_root = Some(frame.summary);
         }
@@ -878,5 +882,357 @@ mod ordered_repair_tests {
         cp.acknowledge_ordered_page(200, true);
         assert_eq!(cp.ordered_cursor(), None);
         assert!(cp.has_pending());
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    const SCOPE: EventId = [1; 32];
+    const AUTHORITY: EventId = [2; 32];
+    const VIEW: EventId = [3; 32];
+
+    fn branching_remote() -> RangeIndex {
+        let mut remote = RangeIndex::default();
+        // More than 32 leaves forces a summary exchange before leaf discovery.
+        for n in 0..33u8 {
+            let mut id = [0; 32];
+            id[0] = n.saturating_mul(7);
+            remote.insert(id);
+        }
+        remote
+    }
+
+    #[test]
+    fn sparse_index_removal_collapses_branches_without_changing_survivor_summary() {
+        let ids = [[0; 32], [1; 32], [128; 32], [255; 32]];
+        let mut index = RangeIndex::default();
+        for id in ids {
+            assert!(index.insert(id));
+        }
+        for removed in &ids[..3] {
+            assert!(index.remove(removed));
+            let mut rebuilt = RangeIndex::default();
+            for id in ids.into_iter().filter(|id| index.ids.contains(id)) {
+                rebuilt.insert(id);
+            }
+            for prefix in [Prefix::root(), Prefix::new(1, ids[3]).unwrap()] {
+                assert_eq!(index.summary(prefix), rebuilt.summary(prefix));
+            }
+            assert!(index.stored_summaries() < 2 * index.ids.len());
+        }
+        assert_eq!(
+            index.frame(SCOPE, VIEW, Prefix::root()).singleton,
+            Some(ids[3])
+        );
+        assert!(index.remove(&ids[3]));
+        assert_eq!(index.summary(Prefix::root()), empty());
+        assert_eq!(index.stored_summaries(), 0);
+        let revision = index.revision();
+        assert!(!index.remove(&ids[3]));
+        assert_eq!(index.revision(), revision);
+    }
+
+    #[test]
+    fn local_comparison_resumes_within_budget_and_rejects_same_root_new_revision() {
+        let mut local = RangeIndex::default();
+        let mut remote = RangeIndex::default();
+        remote.insert([255; 32]);
+        let mut checkpoint = Checkpoint::new(SCOPE, AUTHORITY, &local, &remote);
+        let zero = checkpoint.advance(SCOPE, AUTHORITY, &local, &remote, 0);
+        assert_eq!(zero.progress, Progress::More);
+        assert_eq!(zero.examined, 0);
+        let mut missing = Vec::new();
+        loop {
+            let page = checkpoint.advance(SCOPE, AUTHORITY, &local, &remote, 7);
+            assert!(page.examined <= 7);
+            missing.extend(page.missing);
+            if page.progress == Progress::Complete {
+                break;
+            }
+        }
+        assert_eq!(missing, vec![[255; 32]]);
+        assert_eq!(
+            checkpoint
+                .advance(SCOPE, AUTHORITY, &local, &remote, 7)
+                .examined,
+            0
+        );
+        local.insert([9; 32]);
+        local.remove(&[9; 32]);
+        let stale = checkpoint.advance(SCOPE, AUTHORITY, &local, &remote, 7);
+        assert_eq!(stale.progress, Progress::Invalidated);
+        assert!(stale.missing.is_empty());
+        assert_eq!(stale.examined, 0);
+        assert!(!checkpoint.acknowledge_insertions(&mut local, &missing));
+        assert_eq!(local.summary(Prefix::root()), empty());
+    }
+
+    #[tokio::test]
+    async fn remote_exchange_failure_rolls_back_prior_queries_before_retry() {
+        let local = RangeIndex::default();
+        let remote = branching_remote();
+        let mut checkpoint = Checkpoint::for_remote(SCOPE, AUTHORITY, &local, remote.revision());
+        let mut calls = 0;
+        let error = checkpoint
+            .advance_remote(
+                &local,
+                VIEW,
+                AUTHORITY,
+                remote.revision(),
+                2,
+                || true,
+                async |prefix| {
+                    calls += 1;
+                    if calls == 2 {
+                        Err("disconnected")
+                    } else {
+                        Ok(remote.frame(SCOPE, VIEW, prefix))
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RemoteError::Exchange("disconnected")));
+        assert_eq!(calls, 2);
+        assert_eq!(checkpoint.next_query(), Some(Prefix::root()));
+        // Failed work must not pin the remote view either.
+        assert!(checkpoint.valid_remote_binding(
+            &local,
+            SCOPE,
+            [4; 32],
+            AUTHORITY,
+            remote.revision()
+        ));
+        let mut missing = Vec::new();
+        loop {
+            let page = checkpoint
+                .advance_remote(
+                    &local,
+                    VIEW,
+                    AUTHORITY,
+                    remote.revision(),
+                    2,
+                    || true,
+                    async |prefix| Ok::<_, ()>(remote.frame(SCOPE, VIEW, prefix)),
+                )
+                .await
+                .unwrap();
+            assert!(page.examined <= 2);
+            missing.extend(page.missing);
+            if page.progress == Progress::Complete {
+                break;
+            }
+        }
+        assert_eq!(missing.into_iter().collect::<BTreeSet<_>>(), remote.ids);
+        assert!(!checkpoint.has_pending());
+    }
+
+    #[tokio::test]
+    async fn cancelled_remote_exchange_retains_original_frontier_and_snapshot_binding() {
+        let local = RangeIndex::default();
+        let remote = branching_remote();
+        let mut checkpoint = Checkpoint::for_remote(SCOPE, AUTHORITY, &local, remote.revision());
+        let calls = std::cell::Cell::new(0);
+        {
+            let turn = checkpoint.advance_remote(
+                &local,
+                VIEW,
+                AUTHORITY,
+                remote.revision(),
+                2,
+                || true,
+                async |prefix| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 2 {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok::<_, ()>(remote.frame(SCOPE, VIEW, prefix))
+                },
+            );
+            tokio::pin!(turn);
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(turn.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        assert_eq!(calls.get(), 2);
+        assert_eq!(checkpoint.next_query(), Some(Prefix::root()));
+        assert!(checkpoint.valid_remote_binding(
+            &local,
+            SCOPE,
+            [4; 32],
+            AUTHORITY,
+            remote.revision()
+        ));
+        let page = checkpoint
+            .advance_remote(
+                &local,
+                VIEW,
+                AUTHORITY,
+                remote.revision(),
+                1,
+                || true,
+                async |prefix| Ok::<_, ()>(remote.frame(SCOPE, VIEW, prefix)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.examined, 1);
+        assert_eq!(page.progress, Progress::More);
+    }
+
+    #[tokio::test]
+    async fn authorization_revoked_during_exchange_discards_reply_and_allows_retry() {
+        let local = RangeIndex::default();
+        let mut remote = RangeIndex::default();
+        remote.insert([5; 32]);
+        let mut checkpoint = Checkpoint::for_remote(SCOPE, AUTHORITY, &local, remote.revision());
+        let authorized = std::cell::Cell::new(true);
+        let error = checkpoint
+            .advance_remote(
+                &local,
+                VIEW,
+                AUTHORITY,
+                remote.revision(),
+                1,
+                || authorized.get(),
+                async |prefix| {
+                    authorized.set(false);
+                    Ok::<_, ()>(remote.frame(SCOPE, VIEW, prefix))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RemoteError::Invalidated));
+        assert_eq!(checkpoint.next_query(), Some(Prefix::root()));
+        let page = checkpoint
+            .advance_remote(
+                &local,
+                VIEW,
+                AUTHORITY,
+                remote.revision(),
+                1,
+                || true,
+                async |prefix| Ok::<_, ()>(remote.frame(SCOPE, VIEW, prefix)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.missing, vec![[5; 32]]);
+        assert_eq!(page.progress, Progress::Complete);
+    }
+
+    #[test]
+    fn accepted_discovery_requires_exact_local_acknowledgment_before_continuation() {
+        let mut local = RangeIndex::default();
+        local.insert([5; 32]);
+        let mut remote = RangeIndex::default();
+        remote.insert([5; 32]);
+        remote.insert([6; 32]);
+        let mut checkpoint = Checkpoint::for_remote(SCOPE, AUTHORITY, &local, remote.revision());
+        let mut malformed = remote.frame(SCOPE, VIEW, Prefix::root());
+        malformed.leaves.swap(0, 1);
+        assert!(matches!(
+            checkpoint.accept_query(&local, SCOPE, VIEW, AUTHORITY, remote.revision(), malformed,),
+            Err(RemoteError::InvalidFrame)
+        ));
+        assert_eq!(checkpoint.next_query(), Some(Prefix::root()));
+        let missing = checkpoint
+            .accept_query(
+                &local,
+                SCOPE,
+                VIEW,
+                AUTHORITY,
+                remote.revision(),
+                remote.frame(SCOPE, VIEW, Prefix::root()),
+            )
+            .unwrap();
+        assert_eq!(missing, vec![[6; 32]]);
+        assert!(checkpoint.acknowledge_insertions(&mut local, &missing));
+        checkpoint.defer_missing(&missing);
+        let leaf = checkpoint.next_query().unwrap();
+        assert!(
+            checkpoint
+                .accept_query(
+                    &local,
+                    SCOPE,
+                    VIEW,
+                    AUTHORITY,
+                    remote.revision(),
+                    remote.frame(SCOPE, VIEW, leaf),
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!checkpoint.has_pending());
+        assert_eq!(
+            local.summary(Prefix::root()),
+            remote.summary(Prefix::root())
+        );
+    }
+
+    #[test]
+    fn reader_retry_does_not_double_count_overlap_or_mark_cold_repair_warm() {
+        struct FailFifthContains {
+            index: RangeIndex,
+            calls: std::cell::Cell<usize>,
+        }
+        impl RangeRead for FailFifthContains {
+            type Error = &'static str;
+            fn revision(&self) -> u64 {
+                self.index.revision()
+            }
+            fn summary(&self, prefix: Prefix) -> Result<Summary, Self::Error> {
+                Ok(self.index.summary(prefix))
+            }
+            fn contains(&self, id: &EventId) -> Result<bool, Self::Error> {
+                let call = self.calls.get() + 1;
+                self.calls.set(call);
+                if call == 5 {
+                    Err("interrupted leaf read")
+                } else {
+                    Ok(self.index.ids.contains(id))
+                }
+            }
+        }
+        let mut local = FailFifthContains {
+            index: RangeIndex::default(),
+            calls: std::cell::Cell::new(0),
+        };
+        let mut remote = RangeIndex::default();
+        for n in 0..8u8 {
+            remote.insert([n; 32]);
+            if n < 4 {
+                local.index.insert([n; 32]);
+            }
+        }
+        let mut checkpoint =
+            Checkpoint::for_reader(SCOPE, AUTHORITY, &local, remote.revision()).unwrap();
+        let frame = remote.frame(SCOPE, VIEW, Prefix::root());
+        assert_eq!(
+            checkpoint
+                .accept_reader(
+                    &local,
+                    SCOPE,
+                    VIEW,
+                    AUTHORITY,
+                    remote.revision(),
+                    frame.clone(),
+                )
+                .unwrap_err(),
+            "interrupted leaf read"
+        );
+        assert_eq!(checkpoint.next_query(), Some(Prefix::root()));
+        let missing = checkpoint
+            .accept_reader(&local, SCOPE, VIEW, AUTHORITY, remote.revision(), frame)
+            .unwrap()
+            .unwrap();
+        assert_eq!(missing, (4..8u8).map(|n| [n; 32]).collect::<Vec<_>>());
+        checkpoint.begin_ordered_repair_with_anchors(&missing);
+        assert!(
+            !checkpoint.ordered_is_warm(),
+            "four shared IDs and four missing IDs are cold; failed reads must not inflate overlap"
+        );
     }
 }

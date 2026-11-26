@@ -2368,7 +2368,7 @@ impl Node {
             destination,
             conversation,
             super::session_pool::AuthenticationAdmission::Backpressure,
-            None,
+            false,
         )
         .await
         .0 == TransferOutcome::Held
@@ -2380,7 +2380,7 @@ impl Node {
         destination: &DeliveryDestination,
         conversation: ConversationId,
         admission: super::session_pool::AuthenticationAdmission,
-        receipt_ready: Option<&tokio::sync::Notify>,
+        follow_receipts: bool,
     ) -> (TransferOutcome, bool) {
         for fresh in [false, true] {
             let started = std::time::Instant::now();
@@ -2465,14 +2465,14 @@ impl Node {
                     });
                     self.observe_control_exchange(&channel, started);
                     let held = held && self.delivery_destination_allowed(destination);
-                    if let Some(ready) = receipt_ready.filter(|_| held) {
-                        // Finish original reception promptly even if the early
-                        // control round is still in flight.
+                    if held && follow_receipts {
                         self.emit_new_messages(conversation);
-                        ready.notified().await;
                     }
+                    // This authenticated original stream owns its follow-up.
+                    // A separate early receipt probe can remain blocked on a
+                    // different snapshot or connection; it is not a prerequisite.
                     let follow_receipt = held
-                        && receipt_ready.is_some()
+                        && follow_receipts
                         && self.delivery_destination_allowed(destination)
                         && self
                             .delivery
@@ -3732,10 +3732,6 @@ impl Node {
             let mut timed_out = false;
             if let Some(peer) = direct_peer {
                 let outcome = Box::pin(self.adaptive_control_timeout(&peer.public, async {
-                    let receipt_ready = tokio::sync::Notify::new();
-                    if !independent_receipts {
-                        receipt_ready.notify_one();
-                    }
                     let messages = async {
                         let held = self
                             .transfer_delivery_destination_with_admission(
@@ -3743,7 +3739,7 @@ impl Node {
                                 destination,
                                 destination.event.conversation_id,
                                 super::session_pool::AuthenticationAdmission::RouteProgress,
-                                Some(&receipt_ready),
+                                true,
                             )
                             .await;
                         self.emit_new_messages(destination.event.conversation_id);
@@ -3766,7 +3762,7 @@ impl Node {
                                 destination,
                                 control,
                                 super::session_pool::AuthenticationAdmission::RouteProgress,
-                                None,
+                                false,
                             ))
                             .await;
                         if control_outcome.0 == TransferOutcome::More {
@@ -3785,13 +3781,7 @@ impl Node {
                         // the shared TCP capacity. Only receipt validation
                         // may retire this exact destination as delivered.
                         tokio::pin!(messages);
-                        let early = async {
-                            receipts().await;
-                            // An empty early comparison must still allow the
-                            // original's authenticated stream to query again
-                            // after its exact Have has completed.
-                            receipt_ready.notify_one();
-                        };
+                        let early = receipts();
                         tokio::pin!(early);
                         let held = tokio::select! {
                             result = &mut messages => {

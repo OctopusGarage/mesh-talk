@@ -157,3 +157,221 @@ impl Node {
         .map_err(|_| NodeError::InvalidInput("history page timed out; retry this page".into()))?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    fn fixture() -> (tempfile::TempDir, Arc<Node>) {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "unreachable source",
+            9,
+        );
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        (directory, node)
+    }
+
+    #[tokio::test]
+    async fn history_cursor_validation_precedes_group_lookup_and_network() {
+        let (_directory, node) = fixture();
+        let group = ConversationId::new([7; 32]);
+        for cursor in [
+            "x".to_owned(),
+            "zz".to_owned(),
+            "a".repeat(2050),
+            "00".into(),
+        ] {
+            assert!(matches!(
+                node.fetch_channel_history_page(group, Some(&cursor)).await,
+                Err(NodeError::InvalidInput(message)) if message == "invalid history continuation"
+            ));
+        }
+        for (scope, cursor) in [
+            (ConversationId::new([8; 32]), vec![]),
+            (group, vec![0; 513]),
+        ] {
+            let encoded = hex::encode(
+                bincode::serialize(&Continuation {
+                    scope,
+                    peer: "source".into(),
+                    cursor,
+                })
+                .unwrap(),
+            );
+            assert!(matches!(
+                node.fetch_channel_history_page(group, Some(&encoded)).await,
+                Err(NodeError::InvalidInput(message)) if message == "history continuation scope differs"
+            ));
+        }
+        let mut trailing = bincode::serialize(&Continuation {
+            scope: group,
+            peer: "source".into(),
+            cursor: vec![],
+        })
+        .unwrap();
+        trailing.push(0);
+        assert!(matches!(
+            node.fetch_channel_history_page(group, Some(&hex::encode(trailing))).await,
+            Err(NodeError::InvalidInput(message)) if message == "invalid history continuation"
+        ));
+    }
+
+    #[tokio::test]
+    async fn history_without_an_eligible_source_preserves_explicit_navigation() {
+        let (_directory, node) = fixture();
+        let unknown = ConversationId::new([9; 32]);
+        assert!(matches!(
+            node.fetch_channel_history_page(unknown, None).await,
+            Err(NodeError::InvalidInput(message)) if message == "unknown group"
+        ));
+        let group = node.create_channel("local history", vec![]).await.unwrap();
+        let first = node.fetch_channel_history_page(group, None).await.unwrap();
+        assert_eq!(first.status, RemoteHistoryStatus::Offline);
+        assert_eq!(first.applied, 0);
+        assert!(first.cursor.is_none());
+        let cursor = hex::encode(
+            bincode::serialize(&Continuation {
+                scope: group,
+                peer: "unavailable source".into(),
+                cursor: vec![1, 2, 3],
+            })
+            .unwrap(),
+        );
+        let older = node
+            .fetch_channel_history_page(group, Some(&cursor))
+            .await
+            .unwrap();
+        assert_eq!(older.status, RemoteHistoryStatus::Offline);
+        assert_eq!(older.applied, 0);
+        assert_eq!(older.cursor.as_deref(), Some(cursor.as_str()));
+        node.dissolve_channel(group).await.unwrap();
+        assert!(matches!(
+            node.fetch_channel_history_page(group, None).await,
+            Err(NodeError::InvalidInput(message)) if message == "group history access unavailable"
+        ));
+    }
+
+    #[tokio::test]
+    async fn foreground_history_uses_one_source_and_requires_explicit_older_navigation() {
+        let directories = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let source_identity = DeviceIdentity::generate();
+        let target_identity = DeviceIdentity::generate();
+        let source_account = Account::generate();
+        let target_account = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_proof = Announce::new_with_account(
+            &source_identity,
+            &source_account,
+            "history source",
+            listener.local_addr().unwrap().port(),
+        );
+        let target_proof =
+            Announce::new_with_account(&target_identity, &target_account, "reader", 9);
+        let (source, _, _) = crate::node::test_support::node_with_files(
+            directories[0].path(),
+            source_identity,
+            source_account,
+            &target_proof,
+        );
+        let (target, _, _) = crate::node::test_support::node_with_files(
+            directories[1].path(),
+            target_identity,
+            target_account,
+            &source_proof,
+        );
+        source.cached_peer_snapshot_async().await.unwrap();
+        target.cached_peer_snapshot_async().await.unwrap();
+        let group = source
+            .create_channel("bounded foreground history", vec![target.identity.public()])
+            .await
+            .unwrap();
+        source.await_channel_metadata(group).await.unwrap();
+        for event in source.log.lock().unwrap().events(&group).unwrap() {
+            target.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        crate::node::test_support::settle_group_metadata(&target, group);
+        // Signed opaque bodies exercise the history transport independently of
+        // application plaintext decoding, as in the owning session regression.
+        let mut messages = Vec::new();
+        for _ in 0..201 {
+            let (_, id) = source
+                .append_event_with_profile_parent(
+                    group,
+                    crate::eventlog::EventKind::Message,
+                    vec![1],
+                    None,
+                )
+                .unwrap();
+            messages.push(id);
+        }
+        let mut host = crate::node::test_support::IndependentPeerRuntime::start_multithreaded_with(
+            source.clone(),
+            listener,
+            |node, listener| node.run_inbound_connections_for_test(listener),
+        )
+        .await;
+        host.launch();
+        async fn page(
+            node: &Arc<Node>,
+            group: ConversationId,
+            cursor: Option<&str>,
+        ) -> RemoteHistoryPage {
+            for _ in 0..128 {
+                let page = node
+                    .fetch_channel_history_page(group, cursor)
+                    .await
+                    .unwrap();
+                if page.status != RemoteHistoryStatus::Preparing {
+                    return page;
+                }
+                assert_eq!(page.applied, 0);
+                assert_eq!(page.cursor.as_deref(), cursor);
+                tokio::task::yield_now().await;
+            }
+            panic!("finite history preparation must finish within bounded foreground retries");
+        }
+        let first = page(&target, group, None).await;
+        assert_eq!(first.status, RemoteHistoryStatus::Blocked);
+        assert_eq!(
+            first.applied, 0,
+            "missing old ancestry is an explicit gap, never a false committed page"
+        );
+        let cursor = first
+            .cursor
+            .expect("201 records require explicit older navigation");
+        let held = messages
+            .iter()
+            .filter(|id| target.log.lock().unwrap().get(id).unwrap().is_some())
+            .count();
+        assert!(
+            held <= 200,
+            "one foreground action must not drain group history"
+        );
+        let token: Continuation = bincode::deserialize(&hex::decode(&cursor).unwrap()).unwrap();
+        assert_eq!(token.scope, group);
+        assert_eq!(token.peer, source.user_id());
+        let older = page(&target, group, Some(&cursor)).await;
+        assert_eq!(older.status, RemoteHistoryStatus::Page);
+        assert!(older.applied <= 200);
+        assert!(
+            older.cursor.is_none(),
+            "the older action exhausts only its pinned source snapshot"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|id| target.log.lock().unwrap().get(id).unwrap().is_some())
+        );
+        host.stop().await;
+    }
+}

@@ -524,6 +524,12 @@ retaining store guards or increasing TCP capacity. The real inbound-only
 require a genuine pre-existing authenticated receipt through held ordinary
 history, fresh plaintext through held control history without false Delivered,
 and first-send confirmation after a deliberately early empty control round.
+A positive original Have must also allow its authenticated stream to collect
+its own receipt while an independent early probe remains held. Awaiting that
+probe's completion before the follow-up recreates the serial dependency inside
+otherwise concurrent futures. The held-early-probe regression requires the exact
+signed receipt and Delivered before releasing the other connection, while the
+held-all-receipts control still requires Awaiting despite positive custody.
 
 Do not encode failed, unchanged and completed work as one empty-result boolean
 when their retry policies differ. A qualified unchanged result needs fresh exact
@@ -1355,6 +1361,13 @@ read is silently treated as empty state; cleanup after a partial failure destroy
 recoverable user data.
 
 Identify the commit point, serialization owner and restart/replay behavior.
+A fallible range-reader turn must commit overlap counts together with its
+comparison frontier after every required read succeeds. Retaining the prefix
+while keeping partial counts makes its retry double-count known IDs and can
+misclassify cold repair as warm. The
+[range index regression](../crates/mesh-talk-core/src/eventlog/sync/range/index.rs)
+injects a mid-leaf read failure, retries that same prefix and checks the public
+repair classification, alongside remote cancellation and authority rollback.
 Keep local ingress evidence separate from message authorship and arrival timing.
 Capture it from the authenticated application peer at raw acceptance; transfer
 it with the canonical transcript commit, never infer it from a catch-up flag or

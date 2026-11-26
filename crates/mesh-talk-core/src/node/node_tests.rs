@@ -6875,6 +6875,16 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .unwrap();
     crate::node::test_support::complete_group_fanout(&alice_node, channel, &[&bob_node]).await;
     crate::node::test_support::settle_group_metadata(&bob_node, channel);
+    // Incoming source changes can defer local preparation to another bounded
+    // turn. Retain the normal local/control owner while excluding independent
+    // account catch-up and periodic joined-group pulls from this live fixture.
+    let changes = bob_node.roster.lock().unwrap().changes();
+    let initial_recovery = tokio::spawn(bob_node.clone().run_channel_recovery_with_maintenance(
+        changes,
+        false,
+        std::future::pending(),
+    ));
+    let _initial_recovery_guard = AbortStalledFixtureTasks(vec![initial_recovery.abort_handle()]);
     alice_node
         .send_channel_message(channel, b"m0")
         .await
@@ -6962,8 +6972,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .unwrap()
         .fail_appends_for_test(false)
         .unwrap();
-    let changes = bob_node.roster.lock().unwrap().changes();
-    let recovery_task = tokio::spawn(Arc::clone(&bob_node).run_channel_recovery_loop(changes));
+    let recovery_task = initial_recovery;
     // Record and terminal marker are separate publications from the real
     // recovery worker; both must arrive within the original total budget.
     let recovery_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -7076,6 +7085,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         "retention prune must cancel queued user messages"
     );
     recovery_task.abort();
+    let _ = recovery_task.await;
 }
 
 #[tokio::test]

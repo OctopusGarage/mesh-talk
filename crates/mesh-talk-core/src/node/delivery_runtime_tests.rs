@@ -12123,12 +12123,18 @@ async fn automatic_first_send_rechecks_receipts_after_early_empty_control_round(
     receipt_scope_progress_fixture(ReceiptScopeCase::EmptyReceiptsFirst).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_first_send_collects_receipt_while_early_receipt_probe_is_held() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::HeldEarlyReceipts).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReceiptScopeCase {
     HeldMessages,
     HeldManifest,
     HeldReceipts,
     EmptyReceiptsFirst,
+    HeldEarlyReceipts,
 }
 
 async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
@@ -12237,8 +12243,18 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                                             same_stream_followup.store(true, Ordering::SeqCst);
                                         }
                                     }
+                                    if active && scope == Some(dm) && case == ReceiptScopeCase::HeldEarlyReceipts {
+                                        // Establish the independent early probe's real
+                                        // TCP hold before serving the original payload.
+                                        loop {
+                                            let ready = entered.notified(); tokio::pin!(ready); ready.as_mut().enable();
+                                            if held_requests.load(Ordering::SeqCst) > 0 { break; }
+                                            ready.await;
+                                        }
+                                    }
                                     if active && ((scope == Some(dm) && holds_messages)
-                                        || (scope == Some(control) && case == ReceiptScopeCase::HeldReceipts)) {
+                                        || (scope == Some(control) && (case == ReceiptScopeCase::HeldReceipts
+                                            || (case == ReceiptScopeCase::HeldEarlyReceipts && !confirmed_original)))) {
                                         held_requests.fetch_add(1, Ordering::SeqCst);
                                         entered.notify_waiters();
                                         // No store guard spans the injected wait.
@@ -12307,7 +12323,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
         let mut destination = message.destinations[0].clone();
         assert_eq!(destination.event.conversation_id, dm);
         let peer = sender.routing_peer(&recipient.user_id()).unwrap();
-        if case != ReceiptScopeCase::EmptyReceiptsFirst {
+        if !matches!(case, ReceiptScopeCase::EmptyReceiptsFirst | ReceiptScopeCase::HeldEarlyReceipts) {
             // Retain the original through real transport before holding any
             // history. Never fabricate or manually install its receipt.
             assert!(tokio::time::timeout(Duration::from_secs(30), sender.transfer_delivery_destination(
@@ -12385,12 +12401,20 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
             assert!(sender.log.lock().unwrap().get(&receipt.destination.event.id).unwrap().is_none());
         } else {
             let recovered = tokio::time::timeout(Duration::from_secs(3), async {
-                while sender.delivery_status(id) != Some(DeliveryStatus::Delivered) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                loop {
+                    let changed = sender.delivery_status_notify.notified(); tokio::pin!(changed); changed.as_mut().enable();
+                    if sender.delivery_status(id) == Some(DeliveryStatus::Delivered) { break; }
+                    changed.await;
                 }
             }).await;
             assert!(recovered.is_ok(), "a genuine queued recipient receipt must recover independently; control_requests={}", control_requests.load(Ordering::SeqCst));
             assert_eq!(sender.log.lock().unwrap().get(&receipt.destination.event.id).unwrap().unwrap(), receipt.destination.event);
+            if case == ReceiptScopeCase::HeldEarlyReceipts {
+                assert!(held_requests.load(Ordering::SeqCst) > 0);
+                assert!(exact_have.load(Ordering::SeqCst) > have_before);
+                assert!(same_stream_followup.load(Ordering::SeqCst),
+                    "the original's authenticated stream must collect its receipt before the early probe is released");
+            }
             if case == ReceiptScopeCase::EmptyReceiptsFirst {
                 assert_eq!(empty_controls.load(Ordering::SeqCst), 1);
                 assert!(same_stream_followup.load(Ordering::SeqCst),
