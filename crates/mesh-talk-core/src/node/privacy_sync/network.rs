@@ -4609,6 +4609,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_share_off_precedes_lagging_channel_presentation() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation = ConversationId::new([194; 32]);
+        let genesis = Event::new(
+            &peer,
+            conversation,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "lagging sharing presentation".into(),
+                members: vec![node.identity.public(), peer.public()],
+                epoch: 0,
+                owner: peer.user_id(),
+            }
+            .encode(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(genesis.clone())
+            .unwrap();
+        node.process_channel(conversation);
+        super::super::super::test_support::settle_group_metadata(&node, conversation);
+        assert!(node.shares_replica(&conversation).unwrap());
+        let share_off = Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![genesis.id],
+            2,
+            0,
+            EventKind::ChannelReplica,
+            vec![0],
+        );
+        let third_party = Event::new(
+            &peer,
+            conversation,
+            2,
+            vec![share_off.id],
+            3,
+            0,
+            EventKind::Message,
+            vec![1],
+        );
+        for event in [&share_off, &third_party] {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(event.clone())
+                .unwrap();
+        }
+        // No presentation refresh: network authorization must use the durable
+        // control projection prepared for its own source, not the older UI book.
+        assert!(node.shares_replica(&conversation).unwrap());
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = open_prepared(&store, &conversation);
+        let outgoing = collect(&store, &view, &HashSet::new());
+        assert!(
+            !outgoing.contains(&third_party.id),
+            "a durable sharing revocation must block third-party export before presentation catches up"
+        );
+    }
+
+    #[tokio::test]
     async fn participant_network_share_off_closure_and_source_revocation_are_fresh() {
         let directory = tempfile::tempdir().unwrap();
         let peer = DeviceIdentity::generate();

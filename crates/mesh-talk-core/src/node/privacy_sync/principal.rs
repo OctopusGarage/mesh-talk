@@ -239,6 +239,16 @@ impl Preparation {
         store: &GuardedSyncStore<'_>,
         view: &ParticipantView,
     ) -> Result<PreparationStep, LogError> {
+        if self.policy_local_channel {
+            self.replica_shared = store
+                .node
+                .channel_checkpoints
+                .replica_enabled_for_network_prefix(
+                    view.conversation,
+                    self.generation.ok_or(LogError::StaleCursor)?,
+                    &store.node.user_id(),
+                )?;
+        }
         let mut principal = store.principal_with_prefix(
             view.conversation,
             self.replica_shared,

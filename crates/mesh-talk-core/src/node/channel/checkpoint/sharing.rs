@@ -9,6 +9,31 @@ use std::collections::BTreeMap;
 
 const SCHEMA: &str = "CREATE TABLE channel_receive_shipments(job BLOB NOT NULL,channel BLOB NOT NULL,recipient_ed BLOB NOT NULL,recipient_x BLOB NOT NULL,grant_account BLOB NOT NULL,grant_incarnation BLOB NOT NULL,epoch BLOB NOT NULL,author TEXT NOT NULL,position INTEGER NOT NULL CHECK(position>=0 AND position<=4294967295),PRIMARY KEY(job,channel,recipient_ed,recipient_x,grant_account,grant_incarnation,epoch,author)) WITHOUT ROWID;";
 impl ChannelCheckpointStore {
+    /// Network policy follows its prepared durable control prefix even while
+    /// the independent presentation owner still holds an older ChannelBook.
+    pub(in crate::node) fn replica_enabled_for_network_prefix(
+        &self,
+        channel: ConversationId,
+        target: crate::eventlog::repository::order::OrderGeneration,
+        member: &str,
+    ) -> Result<bool, LogError> {
+        let count =
+            i64::try_from(target.count).map_err(|_| LogError::RepositoryCounterExhausted)?;
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            super::super::graph::require_source_prefix_on(c, channel, target.job, target.source_revision)?;
+            let covered: bool = c.query_row(
+                "SELECT COALESCE((SELECT next_rank FROM channel_projection_work WHERE job=?1 AND channel=?2),0)>=?3",
+                params![target.job.as_slice(), channel.as_bytes().as_slice(), count], |r| r.get(0),
+            )?;
+            if !covered { return Err(LogError::StaleCursor); }
+            Ok(c.query_row(
+                "SELECT enabled FROM channel_replica_preferences WHERE job=?1 AND channel=?2 AND member=?3",
+                params![target.job.as_slice(), channel.as_bytes().as_slice(), member], |r| r.get(0),
+            ).optional()?.unwrap_or(true))
+        })
+    }
+
     pub(in crate::node) fn replica_enabled_at(
         &self,
         source: &ChannelSource,
