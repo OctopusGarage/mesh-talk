@@ -1530,7 +1530,22 @@ async fn exercise_bounded_peer_round_owner(cancel_parent: bool, borrowed_parent:
                             eprintln!("peer round failed index={index} side={side} error={error} known={known} own_accepted={own_accepted} other_accepted={other_accepted} own_sharing={own_sharing} canonical={readiness}");
                         }
                     }
-                    let report = result.unwrap();
+                    let report = match result {
+                        Ok(report) => report,
+                        Err(error)
+                            if index == 0
+                                && super::session_pool::retryable_sync_error(&error) =>
+                        {
+                            // This peer's real public view was deliberately held.
+                            // Its receiver may expire the idle stream before release;
+                            // production peer rounds retain this failed exchange as
+                            // None. The unheld peer must still complete successfully.
+                            drop(store);
+                            drop(channel);
+                            return None;
+                        }
+                        Err(error) => panic!("unheld or nonretryable peer round failed: {error}"),
+                    };
                     drop(store);
                     producer.recycle_sync_channel(channel);
                     Some((report.applied, report.rejected.is_empty()))

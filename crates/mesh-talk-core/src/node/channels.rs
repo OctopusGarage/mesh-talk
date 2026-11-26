@@ -1542,6 +1542,10 @@ impl Node {
                     })
                     .await
                 };
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_control_retry_wait_resumed".into()
+                });
                 match changed {
                     Some(true) => replay.invalidate(),
                     Some(false) => {}
@@ -5540,7 +5544,7 @@ mod fanout_tests {
         completed: tokio::sync::mpsc::UnboundedReceiver<()>,
         selected: tokio::sync::mpsc::UnboundedReceiver<()>,
         local_idle: tokio::sync::mpsc::UnboundedReceiver<()>,
-        control_idle: tokio::sync::mpsc::UnboundedReceiver<(usize, usize)>,
+        control_idle: tokio::sync::watch::Receiver<Option<(usize, usize)>>,
     }
 
     fn control_retry_probe(node: &Node) -> ControlRetryProbe {
@@ -5554,7 +5558,7 @@ mod fanout_tests {
         let (completed, completion_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (selected, receiver) = tokio::sync::mpsc::unbounded_channel();
         let (local_idle, idle_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (control_idle, control_idle_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (control_idle, control_idle_receiver) = tokio::sync::watch::channel(None);
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let scans = scans.clone();
             let dispatches = dispatches.clone();
@@ -5562,11 +5566,16 @@ mod fanout_tests {
             let per_group = per_group.clone();
             let local_lanes = local_lanes.clone();
             move |_, phase| {
+                if phase == "channel_control_retry_wait_resumed"
+                    || phase.starts_with("channel_control_retry_selected count=")
+                {
+                    control_idle.send_replace(None);
+                }
                 if phase == "channel_control_retry_idle_wait" {
-                    let _ = control_idle.send((
+                    control_idle.send_replace(Some((
                         scans.load(Ordering::SeqCst),
                         dispatches.load(Ordering::SeqCst),
-                    ));
+                    )));
                 }
                 if phase.starts_with("channel_recovery_") && phase.ends_with("_entered") {
                     *local_lanes
@@ -5945,19 +5954,27 @@ mod fanout_tests {
                     assert!(!metadata.query_pending);
                     assert_eq!(metadata.announcement.unwrap().content.as_deref(), Some("signed metadata before observation"));
                 }
-                // Observe each actual owner parked after consuming its retained
-                // inputs. Counter matching rejects acknowledgements queued
-                // before a later scan or distribution completed.
-                for probe in &mut probes {
-                    loop {
-                        let acknowledged = probe.control_idle.recv().await
-                            .expect("the real control owner must acknowledge its quiet wait");
-                        if acknowledged == (
-                            probe.scans.load(Ordering::SeqCst),
-                            probe.dispatches.load(Ordering::SeqCst),
-                        ) {
-                            break;
+                // Observe retained CURRENT idle state, not queued historical
+                // acknowledgements. Leaving the real wait clears this state.
+                loop {
+                    for probe in &mut probes {
+                        loop {
+                            let idle = *probe.control_idle.borrow_and_update();
+                            if idle == Some((
+                                probe.scans.load(Ordering::SeqCst),
+                                probe.dispatches.load(Ordering::SeqCst),
+                            )) {
+                                break;
+                            }
+                            probe.control_idle.changed().await
+                                .expect("the actual control owner must remain observable");
                         }
+                    }
+                    if probes.iter().all(|probe| *probe.control_idle.borrow() == Some((
+                        probe.scans.load(Ordering::SeqCst),
+                        probe.dispatches.load(Ordering::SeqCst),
+                    ))) {
+                        break;
                     }
                 }
                 let snapshot = || nodes.iter().zip(&probes).map(|(node, probe)| (
