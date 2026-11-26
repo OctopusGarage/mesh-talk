@@ -1328,3 +1328,13 @@ This does not lower the configured patch target for ordinary new changes or
 replace dev's current-head protected integration checks. Large ordinary diffs
 remain fully measured within a bounded 32 MiB Git output budget; over-budget
 input fails rather than becoming an empty or truncated patch.
+
+ASan archive builds use `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and
+`CARGO_PROFILE_TEST_DEBUG=line-tables-only` throughout the workflow. This retains
+source/line backtraces while avoiding full variable/type DWARF generation in the
+instrumented core test binary. The existing archive identity seals these profile
+variables across producer and consumers. Sanitizer instrumentation, leak detection,
+assertions, the complete test inventory and deadlines remain required. Two hosted
+archive attempts lost runner communication during compilation; this reduces build
+resource demand but does not establish OOM as their cause. See the
+[Cargo debug profile reference](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).

@@ -29,6 +29,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Retain source/line backtraces without full variable/type DWARF in the
+  # instrumented monolithic test archive. All consumers seal the same profile.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # Upgrade through a reviewed PR with all eight native instrumentation controls.
   MESH_ASAN_TOOLCHAIN: nightly-2026-11-07
   RUSTFLAGS: "-Zsanitizer=address"

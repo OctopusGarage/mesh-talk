@@ -295,6 +295,9 @@ test("ASan producer installs the declared reviewed nightly once before strict co
   assert.ok(producer.indexOf("components: rust-src") < producer.indexOf("asan.mjs cohort"));
   assert.ok(producer.indexOf("asan.mjs cohort") < producer.indexOf("Swatinem/rust-cache"));
   assert.match(producer, /shared-key: sanitizers-shards/u);
+  for (const profile of ["DEV", "TEST"]) {
+    assert.match(workflow, new RegExp(`^  CARGO_PROFILE_${profile}_DEBUG: line-tables-only$`, "mu"));
+  }
   for (const [key, value] of [["RUSTFLAGS", "-Zsanitizer=address"], ["RUSTDOCFLAGS", "-Zsanitizer=address"], ["ASAN_OPTIONS", "detect_leaks=1"], ["RUST_TEST_THREADS", "1"]]) assert.ok(workflow.includes(`  ${key}: "${value}"`));
 });
 
