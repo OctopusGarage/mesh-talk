@@ -144,6 +144,21 @@ pub(in crate::node) struct ParticipantExportCursor {
     have: [u8; 32],
 }
 impl GuardedSyncStore<'_> {
+    #[cfg(test)]
+    pub(in crate::node) fn prepare_range_selection_for_test(
+        &self,
+        view: &ParticipantView,
+    ) -> Result<(), LogError> {
+        // Stop at the real boundary between selection preparation and range
+        // index construction, retaining the actual partial range owner.
+        loop {
+            let (supported, work) = self.requested_prepare(view, PreparationBudget::default())?;
+            assert!(supported);
+            if work.ready {
+                return Ok(());
+            }
+        }
+    }
     fn evict_idle_range_pressure(&self) -> bool {
         let retired = {
             let mut cache = self
@@ -1815,14 +1830,33 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             return Err(LogError::StaleCursor);
         }
         let metadata = preparation.metadata;
+        #[cfg(test)]
+        let diagnostic_cut = (
+            preparation.history_only(),
+            preparation
+                .history_generation()
+                .map(|generation| generation.count),
+        );
         drop(preparation);
         #[cfg(test)]
-        self.node.trace_account_client(&self.peer, || {
+        {
+            let stamp_matches = self.history_sync_stamp(&view.conversation)?.as_ref()
+                == view.metadata_stamp.as_ref();
+            let live_count = self
+                .node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .metadata(&view.conversation)?
+                .map(|metadata| metadata.count);
+            self.node.trace_account_client(&self.peer, || {
             format!(
-                "peer_round_diag_metadata count={} inbound={}",
-                metadata.count, self.inbound
+                "peer_round_diag_metadata count={} inbound={} history_only={} prepared_count={:?} live_count={live_count:?} stamp_matches={stamp_matches}",
+                metadata.count, self.inbound, diagnostic_cut.0, diagnostic_cut.1
             )
         });
+        }
         if metadata.fingerprint.is_some()
             && let Some(stamp) = &view.metadata_stamp
             && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)

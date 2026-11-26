@@ -3800,3 +3800,86 @@ async fn cached_partial_view_answers_exact_custody_over_authenticated_channel() 
         0
     );
 }
+
+#[tokio::test]
+async fn independent_custody_refreshes_retained_range_cut_after_incoming_append() {
+    use crate::{discovery::Announce, identity::account::Account};
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+    let (node, _, _) = crate::node::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let scope =
+        crate::node::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+    let first = Event::new(&peer, scope, 1, vec![], 1, 0, EventKind::Message, vec![7]);
+    node.log
+        .lock()
+        .unwrap()
+        .append_durable(first.clone())
+        .unwrap();
+    let owner = node.serve_sync_store(&peer.public());
+    let adapter = PagedNetworkBackend(&owner, None);
+    // Warm the ordinary metadata index before capturing the actual range cut.
+    drop(backend::open_prepared_view(&adapter, &scope).await.unwrap());
+    let view = owner.lock().unwrap().open_view(&scope).unwrap();
+    owner
+        .lock()
+        .unwrap()
+        .prepare_range_selection_for_test(&view)
+        .unwrap();
+    let before = owner.lock().unwrap().metadata(&view).unwrap().count;
+    assert_eq!(before, 1);
+    let continuation = owner.lock().unwrap().open_view(&scope).unwrap();
+    owner
+        .lock()
+        .unwrap()
+        .prepare_range_selection_for_test(&continuation)
+        .unwrap();
+    assert!(
+        owner
+            .lock()
+            .unwrap()
+            .retain_custody_view(view)
+            .unwrap()
+            .is_none()
+    );
+    let second = Event::new(
+        &peer,
+        scope,
+        2,
+        vec![first.id],
+        2,
+        0,
+        EventKind::Message,
+        vec![8],
+    );
+    assert!(matches!(
+        crate::eventlog::sync::network::NetworkSyncStore::ingest(
+            &mut *owner.lock().unwrap(),
+            second.clone()
+        )
+        .unwrap(),
+        crate::eventlog::AppendOutcome::Appended
+    ));
+    // A live range continuation keeps its valid finite prefix across append.
+    owner.lock().unwrap().validate_view(&continuation).unwrap();
+    assert_eq!(
+        owner.lock().unwrap().metadata(&continuation).unwrap().count,
+        before
+    );
+    // The retained range-owned custody slot still carries that old prefix.
+    // Independent legacy checkout must refresh it rather than reuse the cut.
+    let refreshed = backend::open_prepared_view(&adapter, &scope).await.unwrap();
+    assert_eq!(owner.lock().unwrap().metadata(&refreshed).unwrap().count, 2);
+    assert!(
+        owner
+            .lock()
+            .unwrap()
+            .durable_have_in_view(&refreshed, &scope, &second.id)
+            .unwrap()
+    );
+}

@@ -2629,6 +2629,12 @@ the actual cache owner at view capture and requires an unchanged revision;
 the original full-host scenario retains group access and DM/call rejection.
 Keep genuine authority-change invalidation intact rather than retrying over it.
 
+A retained range continuation may legitimately keep a finite cut after an append.
+An independent custody or legacy Have request must separately qualify source
+freshness before using that same selection. A valid retained lease does not prove
+that its answer includes a newly accepted record. Cover both boundaries together:
+the original continuation stays valid, while a fresh custody query sees the append.
+
 Keep fixture validation at the narrow boundary it owns. A full-host scenario
 whose only assertion concerns another test helper adds unrelated synchronization
 and scheduling prerequisites without a product oracle. Reuse the real protocol

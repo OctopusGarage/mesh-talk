@@ -714,7 +714,14 @@ pub(super) async fn open_prepared_view<B: SessionBackend>(
     // A retained range selection may still be partially prepared. Checkout
     // qualifies its owner and authority, but does not establish readiness.
     let view = match backend.take_custody_view(conversation)? {
-        Some(view) => view,
+        Some(view) if backend.reusable_view(&view)? => view,
+        Some(view) => {
+            // An independent custody request needs the current source cut.
+            // Range checkout may legitimately preserve an older continuation;
+            // that exception must not become a completed legacy Have answer.
+            drop(view);
+            backend.open_view(conversation)?
+        }
         None => backend.open_view(conversation)?,
     };
     prepare_view(backend, &view).await?;
