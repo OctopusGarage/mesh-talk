@@ -232,7 +232,7 @@ Windows uses the same `windows-latest` runner as the full suite; Chromium contex
 settings match the standalone portable configuration. The collector reopens evidence on Linux with
 an explicit expected source platform, rather than trusting a producer verdict.
 Linux and desktop shards call one reusable `ui-shards.yml` implementation: four
-Linux, eight macOS and four Windows runners. Linux coverage depends on its own shards
+Linux, sixteen macOS and four Windows runners. Linux coverage depends on its own shards
 and Health, so late desktop scheduling cannot delay that merge. Portable collection
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
@@ -1517,7 +1517,7 @@ WebKit core and extended inventories use parallel producers and retain the stabl
 The existing portable evidence owner validates every source/run/attempt-bound
 partition and the complete scenario inventory; missing producers do not pass.
 
-Full Chromium tests use eight Playwright shards on macOS and four each on Linux
+Full Chromium tests use sixteen Playwright shards on macOS and four each on Linux
 and Windows, with one worker and zero retries per runner. Desktop admission allows
 four concurrent shards per OS after Health and WebKit; Linux starts independently.
 The platform-specific inventory owner rejects incomplete or mismatched layouts.

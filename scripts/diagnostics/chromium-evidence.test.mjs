@@ -89,7 +89,7 @@ for (const platform of ["win32", "darwin"]) test(`real ${platform} shard files s
 
 test("platform shard layouts preserve exact partitions and reject invalid discovery", async () => {
   const { chromiumShardCount, validateShardLayout, validateShardInventory } = await import("../evals/chromium-evidence.mjs");
-  for (const [os, platform, total] of [["ubuntu-24.04", "linux", 4], ["windows-latest", "win32", 4], ["macos-26-intel", "darwin", 8]]) {
+  for (const [os, platform, total] of [["ubuntu-24.04", "linux", 4], ["windows-latest", "win32", 4], ["macos-26-intel", "darwin", 16]]) {
     const shards = Array.from({ length: total }, (_, index) => index + 1);
     assert.equal(chromiumShardCount(os), total);
     assert.equal(chromiumShardCount(platform), total);
@@ -102,10 +102,10 @@ test("platform shard layouts preserve exact partitions and reject invalid discov
   assert.throws(() => chromiumShardCount("unknown"));
   const identity = { sourceSha: "a".repeat(40), runId: "17", runAttempt: "2", platform: "darwin" };
   const paths = requiredBrowserPaths("core");
-  const manifests = Array.from({ length: 8 }, (_, index) => ({ schema: 1, ...identity, shard: index + 1, total: 8, paths: paths.filter((_, item) => item % 8 === index) }));
+  const manifests = Array.from({ length: 16 }, (_, index) => ({ schema: 1, ...identity, shard: index + 1, total: 16, paths: paths.filter((_, item) => item % 16 === index) }));
   assert.doesNotThrow(() => validateShardInventory(manifests, identity));
   assert.throws(() => validateShardInventory(manifests.slice(0, 4), identity));
-  const duplicate = structuredClone(manifests); duplicate[7].shard = 1;
+  const duplicate = structuredClone(manifests); duplicate[15].shard = 1;
   assert.throws(() => validateShardInventory(duplicate, identity));
 });
 
@@ -128,7 +128,7 @@ test("downloaded collectors preserve attempt, OS partitions and diagnostic produ
     await collectDownloadedShards(join(root, "portable"), join(root, "collected"), identity, {
       collect: async (directory, actual) => collected.push({ files: await readdir(directory), actual }),
     });
-    assert.deepEqual(collected.map(row => row.files.length), [4, 8, 4]);
+    assert.deepEqual(collected.map(row => row.files.length), [4, 16, 4]);
     assert.deepEqual(collected.map(row => row.actual), ["linux", "darwin", "win32"].map(platform => ({ ...identity, platform })));
     const rendered = [];
     const options = { merge: async (_directory, os) => rendered.push(os), log() {} };
@@ -146,7 +146,7 @@ test("downloaded collectors preserve attempt, OS partitions and diagnostic produ
     for (const change of [{ runAttempt: "1" }, { linuxResult: "unknown" }, { linuxResult: "skipped", desktopResult: "skipped", windowsResult: "skipped" }]) {
       await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "negative"), { runAttempt: "2", linuxResult: "success", desktopResult: "success", windowsResult: "success", ...change }, options), /incomplete/);
     }
-    await rm(join(root, "reports", "playwright-ui-macos-26-intel-8-2"), { recursive: true });
+    await rm(join(root, "reports", "playwright-ui-macos-26-intel-16-2"), { recursive: true });
     rendered.length = 0;
     await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "missing"), { runAttempt: "2", linuxResult: "success", desktopResult: "success", windowsResult: "success" }, options));
     assert.deepEqual(rendered, [systems[0], systems[2]], "missing Mac evidence does not suppress available OS diagnostics");

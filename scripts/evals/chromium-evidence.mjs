@@ -9,7 +9,7 @@ import { requiredBrowserPaths, validateBrowserReport, validateBrowserEvidence } 
 const platforms = { linux: "linux", darwin: "darwin", win32: "win32", "ubuntu-24.04": "linux", "macos-26-intel": "darwin", "windows-latest": "win32" };
 export function chromiumShardCount(platform) {
   assert.ok(Object.hasOwn(platforms, platform), "Unknown Chromium shard platform");
-  return platforms[platform] === "darwin" ? 8 : 4;
+  return platforms[platform] === "darwin" ? 16 : 4;
 }
 export function validateShardLayout(os, shards, total, shard, platform = process.platform) {
   const count = chromiumShardCount(os);

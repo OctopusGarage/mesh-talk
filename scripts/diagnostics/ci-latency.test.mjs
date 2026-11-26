@@ -867,7 +867,7 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8\]'\n      shard_total: 8/);
+  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16\]'\n      shard_total: 16/);
   assert.match(job("desktop-windows"), /operating_systems: '\["windows-latest"\]'\n      shards: '\[1,2,3,4\]'\n      shard_total: 4/);
   assert.match(job("portable-shards"), /runs-on: macos-26-intel/);
   assert.match(job("portable"), /name: Portable UI \(macos-26-intel, webkit\)/);
