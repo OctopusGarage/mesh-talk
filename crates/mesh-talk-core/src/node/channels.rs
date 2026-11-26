@@ -87,6 +87,10 @@ where
                 clean &= peer_clean;
                 if applied > 0 {
                     applied_progress = true;
+                    #[cfg(test)]
+                    node.trace_account_client(&node.identity.public(), || {
+                        "channel_recovery_parent_first_applied".into()
+                    });
                     break;
                 }
             }
@@ -100,6 +104,10 @@ where
     }
     // Abort is a request, not retirement. A first applied page keeps this
     // group's lane until every cancelled child has actually dropped its scope.
+    #[cfg(test)]
+    node.trace_account_client(&node.identity.public(), || {
+        "channel_recovery_parent_retirement_begin".into()
+    });
     children.abort_all();
     while let Some(result) = children.join_next().await {
         if let Err(error) = result
@@ -109,6 +117,10 @@ where
             failure = Some(error);
         }
     }
+    #[cfg(test)]
+    node.trace_account_client(&node.identity.public(), || {
+        "channel_recovery_parent_retirement_complete".into()
+    });
     if let Some(error) = failure {
         if error.is_panic() {
             std::panic::resume_unwind(error.into_panic());
@@ -4476,6 +4488,12 @@ impl Node {
                                         &mut ch, &store, channel,
                                     )
                                     .await;
+                                    #[cfg(test)]
+                                    if let Ok(report) = &round {
+                                        self.trace_account_client(&peer.public, || format!(
+                                            "control_fanout_scope scope={channel:?} turn={turn} applied={} complete={} limited={}", report.applied, report.complete, report.limited,
+                                        ));
+                                    }
                                     if round.as_ref().is_ok_and(|outcome| !outcome.complete) {
                                         // Preserve the existing fanout ticket across a
                                         // successful bounded turn with more work.

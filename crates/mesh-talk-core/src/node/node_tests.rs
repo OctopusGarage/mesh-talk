@@ -8471,10 +8471,40 @@ async fn a_dm_reaction_is_visible_to_both_peers() {
 /// the same path the creator-only-send fix repaired for messages.
 #[tokio::test]
 async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_member() {
+    use futures_util::FutureExt;
+    fn file_snapshot(node: &Node, file: ConversationId) -> String {
+        let progress = node
+            .file_progress(file)
+            .map(|progress| progress.map(|value| (value.done, value.total)))
+            .map_err(|error| error.to_string());
+        let consent = node
+            .attachment_consent_status(file)
+            .map_err(|error| error.to_string());
+        let chunks = {
+            node.log
+                .lock()
+                .unwrap()
+                .count_kind(&file, EventKind::Message)
+                .map_err(|error| error.to_string())
+        };
+        let media = node
+            .read_media_checked(file)
+            .map(|bytes| bytes.map(|bytes| bytes.len()))
+            .map_err(|error| error.to_string());
+        let readable = node
+            .read_file_internal(file)
+            .map(|bytes| bytes.len())
+            .map_err(|error| error.to_string());
+        format!(
+            "progress={progress:?} consent={consent:?} retained_chunks={chunks:?} media_bytes={media:?} readable_bytes={readable:?}"
+        )
+    }
     let root = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let bob_public = bob.public();
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_port = source_listener.local_addr().unwrap().port();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let roster = seed_roster(
         &bob,
@@ -8482,7 +8512,7 @@ async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_memb
         listener.local_addr().unwrap().port(),
         &alice.user_id(),
     );
-    let bob_roster = seed_roster(&alice, "Alice", 1, &bob.user_id());
+    let bob_roster = seed_roster(&alice, "Alice", source_port, &bob.user_id());
     let open = |name: &str, identity, roster| {
         let directory = root.path().join(name);
         std::fs::create_dir_all(&directory).unwrap();
@@ -8505,7 +8535,7 @@ async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_memb
     let (sender, _) = open("sender", alice, roster.clone());
     let (recipient, mut received) = open("recipient", bob, bob_roster);
     for (name, node, port) in [
-        ("sender", &sender, 1),
+        ("sender", &sender, source_port),
         (
             "recipient",
             &recipient,
@@ -8520,12 +8550,28 @@ async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_memb
         )
         .unwrap();
     }
-    let receiver = tokio::spawn(recipient.clone().run_accept_loop(listener));
+    let mut receiver = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        recipient.clone(),
+        listener,
+    )
+    .await;
+    receiver.launch();
     let channel = sender
         .create_channel("Photos", vec![bob_public])
         .await
         .unwrap();
     crate::node::test_support::complete_group_fanout(&sender, channel, &[&recipient]).await;
+    // Foreground file acceptance performs a bounded best-effort fanout. Keep
+    // the ordinary sender Host that owns a limited turn's durable continuation.
+    // Advertise the retained Host's actual endpoint: a bounded initial push
+    // can leave the accepted receiver responsible for fetching signed chunks.
+    let mut source_runtime =
+        crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+            sender.clone(),
+            source_listener,
+        )
+        .await;
+    source_runtime.launch();
     let relay = DeviceIdentity::generate();
     let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     roster.lock().unwrap().update(
@@ -8546,42 +8592,70 @@ async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_memb
     let payload = b"\x89PNG\r\n\x1a\ninline photo payload";
     let path = root.path().join("photo.png");
     std::fs::write(&path, payload).unwrap();
-    let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let phase_started = std::time::Instant::now();
     *sender.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let phases = phases.clone();
         move |_, phase| {
             if phase.starts_with("inline_fanout_") || phase.starts_with("control_fanout_") {
-                phases.lock().unwrap().push(phase);
+                let mut phases = phases.lock().unwrap();
+                if phases.len() == 256 {
+                    phases.pop_front();
+                }
+                phases.push_back((
+                    phase_started.elapsed().as_millis(),
+                    tokio::task::try_id(),
+                    phase,
+                ));
             }
         }
     }));
-    let sending = tokio::spawn(async move {
+    let observed_sender = sender.clone();
+    let sending = source_runtime.runtime_handle().spawn(async move {
         sender
             .send_file_channel(channel, &path, crate::file::FileKind::Media)
             .await
     });
     let mut offered = false;
-    let bytes = tokio::time::timeout(Duration::from_secs(3), async {
+    let mut offered_file = None;
+    let mut initial_state = None;
+    let bytes = std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(3), async {
         let offer = received.recv().await.expect("file offer");
         offered = true;
+        offered_file = Some(offer.file_conv);
+        initial_state = Some((
+            file_snapshot(&observed_sender, offer.file_conv),
+            file_snapshot(&recipient, offer.file_conv),
+        ));
         loop {
             if let Some(bytes) = recipient.read_media(offer.file_conv) {
                 break bytes;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    })
+    }))
+    .catch_unwind()
     .await;
+    *observed_sender.account_client_test_hook.lock().unwrap() = None;
+    let phase_snapshot = phases.lock().unwrap().clone();
+    let final_state = offered_file.map(|file| {
+        (
+            file_snapshot(&observed_sender, file),
+            file_snapshot(&recipient, file),
+        )
+    });
     sending.abort();
     relay_task.abort();
-    receiver.abort();
     let _ = sending.await;
     let _ = relay_task.await;
-    let _ = receiver.await;
+    tokio::join!(receiver.stop(), source_runtime.stop());
+    let bytes = match bytes {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
     assert_eq!(
         bytes.unwrap_or_else(|_| panic!(
-            "an optional stalled relay must not hold back online photo bytes: offered={offered}, phases={:?}",
-            phases.lock().unwrap()
+            "an optional stalled relay must not hold back online photo bytes: offered={offered}, initial={initial_state:?}, final={final_state:?}, phases={phase_snapshot:?}"
         )),
         payload
     );
@@ -13827,6 +13901,10 @@ async fn group_reception_projection_failure_case(failed_rollback: bool, restart:
                 reopened_rx.try_recv().is_err(),
                 "startup recovery uses durable reception observations"
             );
+            // Cancelling the async recovery owner does not cancel an already
+            // admitted blocking turn. Retire its actual captures before reopen.
+            reopened.runtime_work.close();
+            reopened.runtime_work.drain().await;
             reopened.close_profile().unwrap();
             let (warm, _) = open(DeviceIdentity::from_secret_bytes(secret.0, secret.1));
             assert_eq!(warm.reception_effects.head().unwrap().sequence, 66);

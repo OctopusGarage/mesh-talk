@@ -20,6 +20,7 @@ struct Chain {
     nodes: Vec<Arc<Node>>,
     addresses: Vec<SocketAddr>,
     servers: Vec<Option<JoinHandle<()>>>,
+    recovery_trace: Arc<Mutex<std::collections::VecDeque<(u128, usize, String)>>>,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -197,6 +198,24 @@ impl Chain {
             nodes,
             addresses,
             servers,
+            recovery_trace: Arc::default(),
+        }
+    }
+
+    fn enable_recovery_trace(&self) {
+        let started = std::time::Instant::now();
+        for (index, node) in self.nodes.iter().enumerate() {
+            let trace = self.recovery_trace.clone();
+            *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+                if !phase.starts_with("channel_recovery_") && !phase.starts_with("dial_") {
+                    return;
+                }
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 256 {
+                    trace.pop_front();
+                }
+                trace.push_back((started.elapsed().as_millis(), index, phase));
+            }));
         }
     }
 
@@ -410,10 +429,16 @@ impl Chain {
         })
         .await
         .unwrap_or_else(|_| {
+            let expected_present = messages.map(|expected| {
+                self.nodes[index].channel_history(channel, 100).map(|history| {
+                    expected.iter().all(|text| history.iter().any(|entry| entry.text == *text))
+                }).map_err(|error| error.to_string())
+            });
             panic!(
-                "bounded adjacent recovery and retained projection: node_index={index} iteration={} phase={}",
+                "bounded adjacent recovery and retained projection: node_index={index} iteration={} phase={} expected_present={expected_present:?} trace={:?}",
                 iteration.get(),
-                phase.get()
+                phase.get(),
+                self.recovery_trace.lock().unwrap()
             )
         });
     }
@@ -430,6 +455,7 @@ impl Chain {
 #[tokio::test]
 async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
     let chain = Chain::new().await;
+    chain.enable_recovery_trace();
     let group = chain.accepted_group().await;
     chain.nodes[0]
         .send_channel_message(group, b"A to F through members")
