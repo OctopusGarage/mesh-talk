@@ -2183,6 +2183,12 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     ) -> Result<crate::eventlog::sync::range::RangeProgress, LogError> {
         use crate::eventlog::sync::range::RangeProgress;
         let (supported, work) = self.requested_prepare(view, PreparationBudget::default())?;
+        #[cfg(test)]
+        self.node.trace_account_client(&self.peer, || format!(
+            "range_prepare_progress inbound={} supported={supported} ready={} rows={} edges={} bytes={} phase={}",
+            self.inbound, work.ready, work.rows, work.edges, work.bytes,
+            view.preparation.lock().expect("preparation").progress_phase(),
+        ));
 
         if !supported {
             return Ok(RangeProgress::Unsupported);

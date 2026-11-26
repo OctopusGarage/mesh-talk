@@ -5932,6 +5932,7 @@ mod fanout_tests {
             tokio::spawn(nodes[0].clone().run_accept_loop(left_listener)),
             tokio::spawn(nodes[1].clone().run_accept_loop(right_listener)),
         ];
+        let phase = std::cell::Cell::new("invitation setup");
         let outcome = std::panic::AssertUnwindSafe(async {
             tokio::time::timeout(Duration::from_secs(20), async {
                 let group = nodes[0].create_channel_invited("settled duplex controls", vec![nodes[1].identity.public()]).await.unwrap();
@@ -5949,6 +5950,7 @@ mod fanout_tests {
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
+                phase.set("authenticated duplex warmup");
                 // Explicit authenticated warmup is not the measured oracle: each
                 // full parent must serve the real session in both directions.
                 for (from, to) in [(0, 1), (1, 0)] {
@@ -5956,6 +5958,7 @@ mod fanout_tests {
                     let store = nodes[from].sync_store(&nodes[to].identity.public());
                     super::super::session::request_round(&mut connection, &store, group).await.unwrap();
                 }
+                phase.set("local metadata query readiness");
                 for node in &nodes {
                     settle_group_metadata(node, group);
                     assert!(node.channels.lock().unwrap().pending_control_state(group, &node.user_id()).is_some(), "retained signed controls remain permanent replay facts after successful sync");
@@ -5972,6 +5975,7 @@ mod fanout_tests {
                     assert!(!metadata.query_pending);
                     assert_eq!(metadata.announcement.unwrap().content.as_deref(), Some("signed metadata before observation"));
                 }
+                phase.set("control owners idle observation");
                 // Observe retained CURRENT idle state, not queued historical
                 // acknowledgements. Leaving the real wait clears this state.
                 loop {
@@ -6000,6 +6004,7 @@ mod fanout_tests {
                     probe.scans.load(Ordering::SeqCst),
                     probe.dispatches.load(Ordering::SeqCst),
                 )).collect::<Vec<_>>();
+                phase.set("unchanged-source quiet window");
                 let before = snapshot();
                 assert!(before.iter().all(|(_, scans, dispatches)| *scans > 0 && *dispatches > 0), "both real control owners must have selected and completed outbound work before observation: {before:?}");
                 // No foreground preparation, manual retry, fake publisher or
@@ -6009,7 +6014,7 @@ mod fanout_tests {
                 eprintln!("two full authenticated parents (source, scans, distributions): {before:?} -> {after:?}");
                 assert_eq!(before.iter().map(|row| row.0).collect::<Vec<_>>(), after.iter().map(|row| row.0).collect::<Vec<_>>(), "source movement indicates unfinished catch-up rather than a qualified unchanged-source replay regression");
                 assert_eq!(after, before, "successful retained controls must settle across two full authenticated parents before sparse repair");
-            }).await.expect("real two-parent control fixture must finish within its bounded protocol window");
+            }).await.unwrap_or_else(|_| panic!("real two-parent control fixture must finish within its bounded protocol window: phase={}", phase.get()));
         }).catch_unwind().await;
         for (node, worker) in nodes.iter().zip(workers) {
             stop_control_retry_owner(node, worker).await;

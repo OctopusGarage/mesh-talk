@@ -1038,6 +1038,21 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
         }
     }
 
+    let trace = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let trace_started = std::time::Instant::now();
+    let install_trace = |runtime: &NodeRuntime, index: usize| {
+        let trace = trace.clone();
+        *runtime.node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if !phase.starts_with("delivery_") && !phase.starts_with("range_prepare_") {
+                return;
+            }
+            let mut trace = trace.lock().unwrap();
+            if trace.len() == 256 {
+                trace.pop_front();
+            }
+            trace.push_back((trace_started.elapsed().as_millis(), index, phase));
+        }));
+    };
     let root = tempfile::tempdir().unwrap();
     // Suppress LAN disclosure BEFORE startup launches discovery. This fixture
     // keeps all auxiliary tasks with explicit private grants in the original
@@ -1058,6 +1073,8 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
         recipient = Some(start_bounded(root.path(), "recipient", public_regrant).await);
         let a = sender.as_ref().unwrap();
         let b = recipient.as_ref().unwrap();
+        install_trace(a, 0);
+        install_trace(b, 1);
         let a_proof = a.node.signed_announce("sender", a.listen_tcp_port());
         let b_proof = b.node.signed_announce("recipient", b.listen_tcp_port());
         for (runtime, proof) in [(a, &b_proof), (b, &a_proof)] {
@@ -1124,7 +1141,8 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
                     .map_err(|_| "history observation unavailable")
             })
         } else { None };
-        assert!(established.is_ok(), "full bounded runtimes must establish bidirectional persisted ratchets: exchange={establishment_index}, phase={establishment_phase}, enqueued={}, delivery={establishment_status:?}, received={establishment_received:?}, completed_ms={establishment_completions:?}", establishment_id.is_some());
+        let establishment_trace = established.is_err().then(|| trace.lock().unwrap().clone());
+        assert!(established.is_ok(), "full bounded runtimes must establish bidirectional persisted ratchets: exchange={establishment_index}, phase={establishment_phase}, enqueued={}, delivery={establishment_status:?}, received={establishment_received:?}, completed_ms={establishment_completions:?}, trace={establishment_trace:?}", establishment_id.is_some());
 
         recipient.take().unwrap().stop().await;
         assert!(old_node.upgrade().is_none(), "full old receiver runtime must release its Node");
@@ -1154,6 +1172,7 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
         };
         recipient = Some(start_bounded(root.path(), "recipient", public_regrant).await);
         let b = recipient.as_ref().unwrap();
+        install_trace(b, 2);
         let public_generation = b.node.privacy.generation.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(b.account_id(), recipient_account);
         assert_eq!(b.user_id(), recipient_device);
@@ -1205,7 +1224,8 @@ async fn bounded_runtime_cold_recovery_case(public_regrant: bool) {
             }
             labels
         });
-        assert!(recovered.is_ok(), "full runtime cold recovery failed: sender(status,last-attempt)={sender_evidence:?}; receiver(ciphertext-held,plaintext-processed)={evidence:?}");
+        let recovery_trace = recovered.is_err().then(|| trace.lock().unwrap().clone());
+        assert!(recovered.is_ok(), "full runtime cold recovery failed: sender(status,last-attempt)={sender_evidence:?}; receiver(ciphertext-held,plaintext-processed)={evidence:?}; trace={recovery_trace:?}");
         if !public_regrant {
             drop(old_listener);
             return;

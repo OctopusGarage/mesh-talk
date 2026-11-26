@@ -2494,6 +2494,14 @@ impl Node {
                         let result =
                             super::session::request_sync_turn_paged(&mut channel, &store, control)
                                 .await;
+                        #[cfg(test)]
+                        self.trace_account_client(&peer.public, || match &result {
+                            Ok(outcome) => format!(
+                                "delivery_receipt_followup complete={} limited={} applied={}",
+                                outcome.complete, outcome.limited, outcome.applied
+                            ),
+                            Err(error) => format!("delivery_receipt_followup error={error}"),
+                        });
                         self.dispatch_received_sync_work(&store);
                         self.emit_new_messages(control);
                         if result.is_err() {

@@ -207,7 +207,10 @@ impl Chain {
         for (index, node) in self.nodes.iter().enumerate() {
             let trace = self.recovery_trace.clone();
             *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
-                if !phase.starts_with("channel_recovery_") && !phase.starts_with("dial_") {
+                if !phase.starts_with("channel_recovery_")
+                    && !phase.starts_with("dial_")
+                    && !phase.starts_with("range_prepare_")
+                {
                     return;
                 }
                 let mut trace = trace.lock().unwrap();
