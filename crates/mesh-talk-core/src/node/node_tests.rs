@@ -13919,7 +13919,11 @@ async fn group_reception_projection_failure_case(failed_rollback: bool, restart:
     // The transcript and receiver now commit together. A committed row cannot
     // be a missing sidecar projection; explicit erasure remains authoritative.
     node.delete_message(conv, ids[1], false).unwrap();
-    drop(node);
+    // Joining the recovery parent does not retire an already admitted blocking
+    // storage turn. Drain its real owner before closing the exclusive profile.
+    node.runtime_work.close();
+    node.runtime_work.drain().await;
+    node.close_profile().unwrap();
     let (reopened, mut reopened_rx) = open(DeviceIdentity::from_secret_bytes(secret.0, secret.1));
     let history = reopened.channel_history(conv, 100).unwrap();
     assert_eq!(history.len(), 64);
@@ -13937,7 +13941,9 @@ async fn group_reception_projection_failure_case(failed_rollback: bool, restart:
         .remove_where(|entry| entry.event_id == ids[2])
         .unwrap();
     reopened.clear_conversation(conv).unwrap();
-    drop(reopened);
+    reopened.runtime_work.close();
+    reopened.runtime_work.drain().await;
+    reopened.close_profile().unwrap();
     let (cleared, mut cleared_rx) = open(DeviceIdentity::from_secret_bytes(secret.0, secret.1));
     assert!(cleared.channel_history(conv, 100).unwrap().is_empty());
     assert!(cleared_rx.try_recv().is_err());

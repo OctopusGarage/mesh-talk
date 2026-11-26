@@ -1816,6 +1816,13 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         }
         let metadata = preparation.metadata;
         drop(preparation);
+        #[cfg(test)]
+        self.node.trace_account_client(&self.peer, || {
+            format!(
+                "peer_round_diag_metadata count={} inbound={}",
+                metadata.count, self.inbound
+            )
+        });
         if metadata.fingerprint.is_some()
             && let Some(stamp) = &view.metadata_stamp
             && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
@@ -2330,6 +2337,20 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         let message =
             (event.kind == EventKind::Message).then_some((event.conversation_id, event.id));
         let result = SyncStore::ingest(self, event);
+        #[cfg(test)]
+        self.node.trace_account_client(&self.peer, || {
+            let outcome = match &result {
+                Ok(AppendOutcome::Appended) => "appended",
+                Ok(_) => "retained",
+                Err(LogError::AdmissionRejected(_)) => "admission_rejected",
+                Err(LogError::StaleCursor) => "stale",
+                Err(_) => "other_error",
+            };
+            format!(
+                "peer_round_diag_ingest outcome={outcome} inbound={} denied={}",
+                self.inbound, self.denied
+            )
+        });
         #[cfg(test)]
         if matches!(result, Ok(AppendOutcome::Appended))
             && let Some((channel, id)) = message

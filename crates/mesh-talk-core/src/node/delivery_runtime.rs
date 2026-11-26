@@ -76,7 +76,7 @@ impl Reconciliation {
         now: std::time::Instant,
     ) {
         match self {
-            Self::More => retries.settled(key, routes, std::time::Duration::from_millis(500), now),
+            Self::More => retries.settled(key, routes, std::time::Duration::ZERO, now),
             Self::Limited => retries.settled(key, routes, QUIET_REPAIR_INTERVAL, now),
             Self::Quiet => retries.settled(key, routes, QUIET_REPAIR_INTERVAL, now),
             other => retries.finished(key, routes, other == Self::Advanced, now),
@@ -2972,6 +2972,13 @@ impl Node {
                                     progress.schedule(&mut retries, key.retry_key(&routes.peer), input, now);
                                 }
                                 if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
+                                if progress == Reconciliation::More {
+                                    // A completed bounded exchange retained work. Return
+                                    // through normal cursor/capacity admission promptly;
+                                    // failures and sparse polls keep their own pacing.
+                                    tokio::task::yield_now().await;
+                                    self.delivery_notify.notify_one();
+                                }
                             }
                             if persistence_failed {
                                 diagnostic.warn_if_due();
@@ -7113,8 +7120,17 @@ mod bounded_sync_retry_tests {
             Reconciliation::Deferred.schedule(&mut retries, "peer", (), now);
         }
         Reconciliation::More.schedule(&mut retries, "peer", (), now);
-        assert!(!retries.ready(&"peer", &(), now + std::time::Duration::from_millis(499)));
-        assert!(retries.ready(&"peer", &(), now + std::time::Duration::from_millis(500)));
+        assert!(retries.ready(&"peer", &(), now));
+        for paced in [
+            Reconciliation::Limited,
+            Reconciliation::Quiet,
+            Reconciliation::Deferred,
+        ] {
+            paced.schedule(&mut retries, "peer", (), now);
+            assert!(!retries.ready(&"peer", &(), now));
+            Reconciliation::More.schedule(&mut retries, "peer", (), now);
+            assert!(retries.ready(&"peer", &(), now));
+        }
         assert_eq!(
             Reconciliation::More.combine(Reconciliation::Quiet),
             Reconciliation::More

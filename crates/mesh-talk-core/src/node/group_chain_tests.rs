@@ -1448,6 +1448,16 @@ async fn exercise_bounded_peer_round_owner(cancel_parent: bool, borrowed_parent:
         let message = source.enqueue_channel_message_reply_expiring_if(
             group, b"notification-driven background gossip", None, None, |commit| commit(),
         ).unwrap();
+        for (index, receiver) in nodes[1..].iter().enumerate() {
+            let observations = std::sync::atomic::AtomicUsize::new(0);
+            *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+                if phase.starts_with("peer_round_diag_")
+                    && observations.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 32
+                {
+                    eprintln!("peer round receiver index={index} {phase}");
+                }
+            }));
+        }
         let source_weak = Arc::downgrade(&source);
         let receivers = nodes[1..].iter().map(Arc::downgrade).collect::<Vec<_>>();
         let held_peer = nodes[1].identity.public();
@@ -1479,6 +1489,7 @@ async fn exercise_bounded_peer_round_owner(cancel_parent: bool, borrowed_parent:
         let peer_count = if cancel_parent { 1 } else { 2 };
         let peers = nodes[1..].iter().take(peer_count).map(|node| source.routing_peer(&node.user_id()).unwrap()).collect::<Vec<_>>();
         let producer = source.clone();
+        let round_receivers = nodes[1..].to_vec();
         let second_activity = second_polled.clone();
         let permit = source.runtime_work.admit().unwrap();
         let cutoff = std::time::Instant::now() + Duration::from_secs(8);
@@ -1486,6 +1497,7 @@ async fn exercise_bounded_peer_round_owner(cancel_parent: bool, borrowed_parent:
             let mut second_started = Some(second_started);
             let rounds = peers.into_iter().enumerate().map(|(index, peer)| {
                 let producer = producer.clone();
+                let receiver = round_receivers[index].clone();
                 let second_activity = second_activity.clone();
                 let start = (index == 1).then(|| second_started.take().unwrap());
                 async move {
@@ -1495,7 +1507,30 @@ async fn exercise_bounded_peer_round_owner(cancel_parent: bool, borrowed_parent:
                     }
                     let mut channel = producer.privacy_dial(peer.addr, &peer.public).await.unwrap();
                     let store = producer.sync_store(channel.peer_identity());
-                    let report = super::session::request_round_paged(&mut channel, &store, group).await.unwrap();
+                    let result = super::session::request_round_paged(&mut channel, &store, group).await;
+                    if let Err(error) = &result {
+                        for (side, node) in [("producer", &producer), ("receiver", &receiver)] {
+                            let (known, own_accepted, other_accepted, own_sharing) = {
+                                let book = node.channels.lock().unwrap();
+                                let state = book.state(&group);
+                                let other = if side == "producer" { &receiver } else { &producer };
+                                (
+                                    state.is_some(),
+                                    state.is_some_and(|state| state.is_accepted_member(&node.user_id())),
+                                    state.is_some_and(|state| state.is_accepted_member(&other.user_id())),
+                                    book.replica_enabled(group, &node.user_id()),
+                                )
+                            };
+                            let readiness = match node.channel_checkpoints.current_state(group) {
+                                Ok(Some(_)) => "ready",
+                                Ok(None) => "absent",
+                                Err(crate::eventlog::LogError::StaleCursor) => "pending",
+                                Err(_) => "failed",
+                            };
+                            eprintln!("peer round failed index={index} side={side} error={error} known={known} own_accepted={own_accepted} other_accepted={other_accepted} own_sharing={own_sharing} canonical={readiness}");
+                        }
+                    }
+                    let report = result.unwrap();
                     drop(store);
                     producer.recycle_sync_channel(channel);
                     Some((report.applied, report.rejected.is_empty()))
