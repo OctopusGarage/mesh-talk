@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       rust: ${{ steps.compiler.outputs.rust }}
+      producer_attempt: ${{ steps.compiler.outputs.attempt }}
       archive_id: ${{ steps.workspace_archive.outputs.artifact-id }}
     defaults:
       run:
@@ -69,7 +70,9 @@ jobs:
       - name: Pin producer compiler for consumers
         if: ${{ steps.scope.outputs.full == 'true' }}
         id: compiler
-        run: rustc --version | awk '{print "rust=" $2}' >> "$GITHUB_OUTPUT"
+        run: |
+          rustc --version | awk '{print "rust=" $2}' >> "$GITHUB_OUTPUT"
+          echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
         if: ${{ steps.scope.outputs.full == 'true' }}
         env:
@@ -179,6 +182,7 @@ jobs:
       - name: Run validated serial shard and export partial coverage
         if: ${{ steps.scope.outputs.full == 'true' }}
         env:
+          MESH_WINDOWS_PRODUCER_ATTEMPT: ${{ needs.build.outputs.producer_attempt }}
           CARGO_NET_OFFLINE: 'true'
           # Collect every selected case so one failure does not hide later defects.
           MESH_WINDOWS_FAIL_FAST: '0'
