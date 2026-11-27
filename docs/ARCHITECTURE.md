@@ -64,7 +64,7 @@ session authorization continues to enclose synchronous commits.
 
 ### Mesh Foundation libraries
 
-Mesh Talk composes seven libraries from the [Mesh Foundation source snapshot](../vendor/mesh-foundation/README.md).
+Mesh Talk composes selected mechanisms from the seven-crate [Mesh Foundation source snapshot](../vendor/mesh-foundation/README.md). The application-owned `mesh-talk-protocol` retains historical identity, discovery and mailbox formats.
 
 | Library | Reusable implementation |
 | --- | --- |
@@ -80,14 +80,16 @@ Replication accepts session and authorized store adapters. Mesh Talk uses its
 existing authenticated protocol and indexed event repository to implement them.
 The node owns group membership, key distribution, and account trust. It also
 schedules discovery, reconnects, and relay maintenance. Its mailbox service
-uses the library's request dispatcher with the existing indexed custody store.
+uses the application-owned compatibility dispatcher and indexed custody store;
+only generic capacity mechanisms come from the SDK.
 Other hosts can use the library's bounded spool with their own admission and
 expiry scheduling. File transfers use the library's chunk primitives while
 Mesh Talk owns the manifest and transfer lifecycle.
 
 Group range exchange uses the SDK's canonical prefix, summary frame codec, and
-leaf proof validation. The application owns authorization-bound snapshots, its
-resumable traversal checkpoint, and the scheduling of unavailable records.
+leaf proof validation. The SDK owns the canonical in-memory index and fallible `RangeRead` contract.
+The application owns SQL storage and authorization-bound snapshots, its
+causal-repair checkpoint, and the scheduling of unavailable records.
 The signed attachment lane applies each body through the event repository:
 source selection, per-attempt consent, authenticated author checks and durable
 event admission stay with the node. The generic blob downloader works with a

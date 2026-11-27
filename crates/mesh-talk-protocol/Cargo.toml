@@ -25,6 +25,6 @@ zeroize.workspace = true
 rand_core.workspace = true
 
 [dev-dependencies]
-mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect" }
+mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect", default-features = false }
 tokio.workspace = true
 tempfile.workspace = true

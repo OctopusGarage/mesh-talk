@@ -22,6 +22,8 @@ mesh-connect = { package = "mesh-foundation-connect", version = "=0.1.0-alpha.2"
 tokio = { version = "1", features = ["io-util"], optional = true }
 
 [dev-dependencies]
+rusqlite = { version = "0.42", features = ["bundled"] }
+tempfile = "3"
 hex = "0.4"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 x25519-dalek = { version = "3", features = ["static_secrets"] }

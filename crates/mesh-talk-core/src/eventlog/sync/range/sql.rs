@@ -3,7 +3,6 @@
 use super::index::{self, Prefix, RangeRead, Summary, SummaryFrame};
 use crate::eventlog::{LogError, repository::RepositoryOwner};
 use rusqlite::{Connection, OptionalExtension, params};
-use sha2::{Digest, Sha256};
 
 pub(crate) struct SqlIndex {
     database: RepositoryOwner,
@@ -117,7 +116,7 @@ impl SqlIndex {
                 let first:[u8;32]=tx.query_row("SELECT id FROM participant_work.participant_sync_range_ids WHERE view=?1 AND lane=?2 ORDER BY id LIMIT 1",params![self.view.as_slice(),self.lane.as_slice()],|r|r.get::<_,Vec<u8>>(0))?.try_into().map_err(|_|LogError::StaleCursor)?;
                 let last:[u8;32]=tx.query_row("SELECT id FROM participant_work.participant_sync_range_ids WHERE view=?1 AND lane=?2 ORDER BY id DESC LIMIT 1",params![self.view.as_slice(),self.lane.as_slice()],|r|r.get::<_,Vec<u8>>(0))?.try_into().map_err(|_|LogError::StaleCursor)?;
                 let shared=common(first,last);
-                let mut carry=Summary{count:1,digest:Sha256::digest([b"mesh-range-id-v1".as_slice(),id].concat()).into()};
+                let mut carry=Summary::leaf(*id);
                 self.put(tx,Prefix::new(256,*id).unwrap(),carry)?;
                 for bits in (0..256).rev(){
                     if bits<shared || closest.is_none_or(|depth| bits>depth) {carry=if id[usize::from(bits)/8]&(128>>(bits%8))!=0 {index::combine(bits,index::empty(),carry)}else{index::combine(bits,carry,index::empty())};continue;}

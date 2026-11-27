@@ -1,132 +1,23 @@
-// MIT. Mesh Foundation range primitive from commit
-// 4bf8f92269d81b8f20e0f807e04d7a7cf6fe2588. Application adaptations use an
-// imperative query checkpoint and explicit blocked-frontier scheduling.
-//! Incrementally maintained binary-prefix summaries for authorized ID sets.
-//! Hosts bind an index to one scope and authorization generation; rebuilding an
-//! index is explicit work, never performed by a summary query.
+//! Application-owned causal-repair checkpoint over SDK canonical range primitives.
+//! SQL selection lifetime, blocked ancestors and recovery scheduling stay here.
 type EventId = [u8; 32];
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
-
-pub use mesh_replication::range::{Prefix, RemoteError, Summary, SummaryFrame};
+pub use mesh_replication::range::{
+    Prefix, RangeIndex, RangeRead, RemoteError, Summary, SummaryFrame, singleton_summary,
+};
+use std::collections::BTreeSet;
 
 pub(super) fn empty() -> Summary {
-    Summary {
-        count: 0,
-        digest: Sha256::digest(b"mesh-range-empty-v1").into(),
-    }
+    Summary::empty()
 }
-pub(super) fn combine(bits: u16, a: Summary, b: Summary) -> Summary {
-    let mut h = Sha256::new();
-    h.update(b"mesh-range-node-v1");
-    h.update(bits.to_le_bytes());
-    h.update(a.digest);
-    h.update(b.digest);
-    Summary {
-        count: a.count + b.count,
-        digest: h.finalize().into(),
-    }
+pub(super) fn combine(bits: u16, left: Summary, right: Summary) -> Summary {
+    Summary::combine(
+        Prefix::new(bits, [0; 32]).expect("canonical prefix"),
+        left,
+        right,
+    )
+    .expect("valid non-leaf summary with bounded count")
 }
-#[derive(Default)]
-pub struct RangeIndex {
-    ids: BTreeSet<EventId>,
-    nodes: BTreeMap<Prefix, Summary>,
-    revision: u64,
-}
-impl RangeIndex {
-    /// Number of cached branching and leaf summaries. For N IDs this is at most
-    /// 2*N-1; unary paths are reconstructed with at most 256 fixed-depth hashes.
-    pub fn stored_summaries(&self) -> usize {
-        self.nodes.len()
-    }
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-    pub fn summary(&self, p: Prefix) -> Summary {
-        if let Some(summary) = self.nodes.get(&p) {
-            return *summary;
-        }
-        let mut upper = p.key();
-        for bit in usize::from(p.bits())..256 {
-            upper[bit / 8] |= 128 >> (bit % 8);
-        }
-        let mut range = self.ids.range(p.key()..=upper);
-        let Some(first) = range.next() else {
-            return empty();
-        };
-        let last = range.next_back().unwrap_or(first);
-        let mut depth = 256u16;
-        if first != last {
-            depth = (0..256)
-                .find(|bit| (first[bit / 8] ^ last[bit / 8]) & (128 >> (bit % 8)) != 0)
-                .unwrap() as u16;
-        }
-        let base = Prefix::new(depth, *first).unwrap();
-        let mut summary = *self.nodes.get(&base).expect("branch/leaf summary exists");
-        for bits in (p.bits()..depth).rev() {
-            let right = first[usize::from(bits) / 8] & (128 >> (bits % 8)) != 0;
-            summary = if right {
-                combine(bits, empty(), summary)
-            } else {
-                combine(bits, summary, empty())
-            };
-        }
-        summary
-    }
-    pub fn insert(&mut self, id: EventId) -> bool {
-        if !self.ids.insert(id) {
-            return false;
-        }
-        self.update(id);
-        true
-    }
-    pub fn remove(&mut self, id: &EventId) -> bool {
-        if !self.ids.remove(id) {
-            return false;
-        }
-        self.update(*id);
-        true
-    }
-    fn update(&mut self, id: EventId) {
-        let leaf = Prefix::new(256, id).unwrap();
-        if self.ids.contains(&id) {
-            self.nodes.insert(
-                leaf,
-                Summary {
-                    count: 1,
-                    digest: Sha256::digest([b"mesh-range-id-v1".as_slice(), &id].concat()).into(),
-                },
-            );
-        } else {
-            self.nodes.remove(&leaf);
-        }
-        let mut carry = self.nodes.get(&leaf).copied().unwrap_or_else(empty);
-        for bits in (0..256).rev() {
-            let p = Prefix::new(bits, id).unwrap();
-            let children = p.children().unwrap();
-            let right = id[usize::from(bits) / 8] & (128 >> (bits % 8)) != 0;
-            let (a, b) = if right {
-                (self.summary(children[0]), carry)
-            } else {
-                (carry, self.summary(children[1]))
-            };
-            carry = if a.count + b.count == 0 {
-                empty()
-            } else {
-                combine(bits, a, b)
-            };
-            if a.count == 0 || b.count == 0 {
-                self.nodes.remove(&p);
-            } else {
-                self.nodes.insert(p, carry);
-            }
-        }
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .expect("range index revision exhausted");
-    }
-}
+
 #[derive(Clone, Debug)]
 pub struct Checkpoint {
     scope: [u8; 32],
@@ -167,10 +58,10 @@ impl Checkpoint {
         Self {
             scope,
             authority,
-            local: local.revision,
+            local: local.revision(),
             local_root: local.summary(Prefix::root()),
             remote_root: Some(remote.summary(Prefix::root())),
-            remote: remote.revision,
+            remote: remote.revision(),
             pending: vec![Prefix::root()],
             remote_view: None,
             repair_after: None,
@@ -196,9 +87,9 @@ impl Checkpoint {
         if self.scope != scope
             || self.authority != authority
             || self.local_root != local.summary(Prefix::root())
-            || self.local != local.revision
+            || self.local != local.revision()
             || self.remote_root != Some(remote.summary(Prefix::root()))
-            || self.remote != remote.revision
+            || self.remote != remote.revision()
         {
             return Difference {
                 progress: Progress::Invalidated,
@@ -280,7 +171,7 @@ impl Checkpoint {
         mut query: impl AsyncFnMut(Prefix) -> Result<SummaryFrame, E>,
     ) -> Result<Difference, RemoteError<E>> {
         if self.local_root != local.summary(Prefix::root())
-            || self.local != local.revision
+            || self.local != local.revision()
             || self.remote != remote_revision
             || self.authority != authority
             || self.remote_view.is_some_and(|v| v != view)
@@ -325,7 +216,7 @@ impl Checkpoint {
                     frame
                         .leaves
                         .iter()
-                        .filter(|id| !local.ids.contains(*id))
+                        .filter(|id| !local.contains(id))
                         .copied(),
                 );
                 continue;
@@ -334,7 +225,7 @@ impl Checkpoint {
                 if b.count != 1 || singleton_summary(prefix, id) != Some(b) {
                     return Err(RemoteError::InvalidFrame);
                 }
-                if !local.ids.contains(&id) {
+                if !local.contains(&id) {
                     missing.push(id);
                 }
                 continue;
@@ -369,7 +260,7 @@ impl Checkpoint {
         Self {
             scope,
             authority,
-            local: local.revision,
+            local: local.revision(),
             local_root: local.summary(Prefix::root()),
             remote_root: None,
             remote: remote_revision,
@@ -387,61 +278,18 @@ impl Checkpoint {
     /// Only call after these exact IDs have committed durably. External mutations
     /// invalidate the checkpoint; this never rebinds arbitrary changed indexes.
     pub fn acknowledge_insertions(&mut self, local: &mut RangeIndex, ids: &[EventId]) -> bool {
-        if self.local_root != local.summary(Prefix::root()) || self.local != local.revision {
+        if self.local_root != local.summary(Prefix::root()) || self.local != local.revision() {
             return false;
         }
         for id in ids {
             local.insert(*id);
         }
-        self.local = local.revision;
+        self.local = local.revision();
         self.local_root = local.summary(Prefix::root());
         true
     }
 }
 
-fn singleton_summary(prefix: Prefix, id: EventId) -> Option<Summary> {
-    if Prefix::new(prefix.bits(), id)? != prefix {
-        return None;
-    }
-    let mut summary = Summary {
-        count: 1,
-        digest: Sha256::digest([b"mesh-range-id-v1".as_slice(), &id].concat()).into(),
-    };
-    for bits in (prefix.bits()..256).rev() {
-        summary = if id[usize::from(bits) / 8] & (128 >> (bits % 8)) != 0 {
-            combine(bits, empty(), summary)
-        } else {
-            combine(bits, summary, empty())
-        };
-    }
-    Some(summary)
-}
-impl RangeIndex {
-    pub fn frame(&self, scope: [u8; 32], view: [u8; 32], prefix: Prefix) -> SummaryFrame {
-        let summary = self.summary(prefix);
-        let singleton = if summary.count == 1 {
-            self.ids.range(prefix.key()..).next().copied()
-        } else {
-            None
-        };
-        SummaryFrame {
-            scope,
-            view,
-            prefix,
-            summary,
-            singleton,
-            leaves: if (2..=32).contains(&summary.count) {
-                self.ids
-                    .range(prefix.key()..)
-                    .take(summary.count)
-                    .copied()
-                    .collect()
-            } else {
-                Vec::new()
-            },
-        }
-    }
-}
 impl Checkpoint {
     pub fn next_query(&self) -> Option<Prefix> {
         (!self.saturated)
@@ -476,7 +324,7 @@ impl Checkpoint {
         frame: SummaryFrame,
     ) -> Result<Vec<EventId>, RemoteError<()>> {
         if self.local_root != local.summary(Prefix::root())
-            || self.local != local.revision
+            || self.local != local.revision()
             || self.scope != scope
             || self.authority != authority
             || self.remote != revision
@@ -501,11 +349,11 @@ impl Checkpoint {
             return Ok(frame
                 .leaves
                 .into_iter()
-                .filter(|id| !local.ids.contains(id))
+                .filter(|id| !local.contains(id))
                 .collect());
         }
         if let Some(id) = frame.singleton {
-            return Ok(if local.ids.contains(&id) {
+            return Ok(if local.contains(&id) {
                 vec![]
             } else {
                 vec![id]
@@ -559,7 +407,7 @@ impl Checkpoint {
         revision: u64,
     ) -> bool {
         self.local_root == local.summary(Prefix::root())
-            && self.local == local.revision
+            && self.local == local.revision()
             && self.scope == scope
             && self.authority == authority
             && self.remote == revision
@@ -567,26 +415,6 @@ impl Checkpoint {
     }
 }
 
-/// Fallible reads for a disk-backed authorized snapshot. Storage failure is
-/// separate from protocol invalidation and must never be treated as equality.
-pub trait RangeRead {
-    type Error;
-    fn revision(&self) -> u64;
-    fn summary(&self, prefix: Prefix) -> Result<Summary, Self::Error>;
-    fn contains(&self, id: &EventId) -> Result<bool, Self::Error>;
-}
-impl RangeRead for RangeIndex {
-    type Error = std::convert::Infallible;
-    fn revision(&self) -> u64 {
-        self.revision
-    }
-    fn summary(&self, prefix: Prefix) -> Result<Summary, Self::Error> {
-        Ok(self.summary(prefix))
-    }
-    fn contains(&self, id: &EventId) -> Result<bool, Self::Error> {
-        Ok(self.ids.contains(id))
-    }
-}
 impl Checkpoint {
     pub fn for_reader<R: RangeRead + ?Sized>(
         scope: [u8; 32],
@@ -717,7 +545,7 @@ mod reader_tests {
             if self.fail.get() {
                 Err("storage unavailable")
             } else {
-                Ok(self.index.ids.contains(id))
+                Ok(self.index.contains(id))
             }
         }
     }
@@ -914,13 +742,13 @@ mod boundary_tests {
         for removed in &ids[..3] {
             assert!(index.remove(removed));
             let mut rebuilt = RangeIndex::default();
-            for id in ids.into_iter().filter(|id| index.ids.contains(id)) {
+            for id in ids.into_iter().filter(|id| index.contains(id)) {
                 rebuilt.insert(id);
             }
             for prefix in [Prefix::root(), Prefix::new(1, ids[3]).unwrap()] {
                 assert_eq!(index.summary(prefix), rebuilt.summary(prefix));
             }
-            assert!(index.stored_summaries() < 2 * index.ids.len());
+            assert!(index.stored_summaries() < 2 * index.summary(Prefix::root()).count);
         }
         assert_eq!(
             index.frame(SCOPE, VIEW, Prefix::root()).singleton,
@@ -1025,7 +853,16 @@ mod boundary_tests {
                 break;
             }
         }
-        assert_eq!(missing.into_iter().collect::<BTreeSet<_>>(), remote.ids);
+        assert_eq!(
+            missing.into_iter().collect::<BTreeSet<_>>(),
+            (0..33u8)
+                .map(|n| {
+                    let mut id = [0; 32];
+                    id[0] = n.saturating_mul(7);
+                    id
+                })
+                .collect::<BTreeSet<_>>()
+        );
         assert!(!checkpoint.has_pending());
     }
 
@@ -1192,7 +1029,7 @@ mod boundary_tests {
                 if call == 5 {
                     Err("interrupted leaf read")
                 } else {
-                    Ok(self.index.ids.contains(id))
+                    Ok(self.index.contains(id))
                 }
             }
         }

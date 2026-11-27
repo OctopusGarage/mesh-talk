@@ -49,6 +49,27 @@ pub struct Summary {
     pub count: usize,
     pub digest: [u8; 32],
 }
+impl Summary {
+    /// Canonical empty subtree, shared by memory and persistent adapters.
+    pub fn empty() -> Self {
+        empty()
+    }
+    /// Canonical leaf for an opaque record identifier.
+    pub fn leaf(id: EventId) -> Self {
+        Self {
+            count: 1,
+            digest: Sha256::digest([b"mesh-range-id-v1".as_slice(), &id].concat()).into(),
+        }
+    }
+    /// Combine the ordered children of a non-leaf prefix. Reject impossible
+    /// parent depths and count overflow before computing a canonical digest.
+    pub fn combine(parent: Prefix, left: Self, right: Self) -> Option<Self> {
+        parent.children()?;
+        left.count.checked_add(right.count)?;
+        Some(combine(parent.bits(), left, right))
+    }
+}
+
 fn empty() -> Summary {
     Summary {
         count: 0,
@@ -77,6 +98,10 @@ impl RangeIndex {
     /// 2*N-1; unary paths are reconstructed with at most 256 fixed-depth hashes.
     pub fn stored_summaries(&self) -> usize {
         self.nodes.len()
+    }
+    /// Membership lookup without exposing the index representation.
+    pub fn contains(&self, id: &EventId) -> bool {
+        self.ids.contains(id)
     }
     pub fn revision(&self) -> u64 {
         self.revision
@@ -517,7 +542,8 @@ impl Checkpoint {
     }
 }
 
-fn singleton_summary(prefix: Prefix, id: EventId) -> Option<Summary> {
+/// Canonical summary for one ID in this prefix; rejects an ID outside it.
+pub fn singleton_summary(prefix: Prefix, id: EventId) -> Option<Summary> {
     if Prefix::new(prefix.bits, id)? != prefix {
         return None;
     }

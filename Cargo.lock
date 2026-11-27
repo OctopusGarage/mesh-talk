@@ -3373,12 +3373,9 @@ dependencies = [
 name = "mesh-foundation-connect"
 version = "0.1.0-alpha.2"
 dependencies = [
- "bincode",
  "futures-util",
  "if-addrs",
  "log",
- "mesh-foundation-identity",
- "serde",
  "snow",
  "socket2",
  "tokio",
@@ -3392,20 +3389,6 @@ dependencies = [
  "aes-gcm 0.11.1",
  "bincode",
  "hkdf",
- "rand_core 0.6.4",
- "serde",
- "sha2 0.10.9",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "mesh-foundation-identity"
-version = "0.1.0-alpha.2"
-dependencies = [
- "bincode",
- "ed25519-dalek",
- "hex",
  "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",

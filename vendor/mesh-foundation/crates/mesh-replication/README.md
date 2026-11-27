@@ -2,7 +2,20 @@
 
 Bounded inventory reconciliation and record retrieval.
 
-Start with `CompleteInventory` for exact set differences and `inventory_session` for scoped exchange. There are no default application profiles; optional `mesh-connect` adds session adapters. Authorization and durable stores belong to the host.
+Choose the entry point by workload:
+
+- Small, finite sets: `CompleteInventory` and `inventory_session`.
+- Indexed incremental repair: `driver::SyncDriver` with an in-memory `RangeIndex`.
+- Persistent indexes: `range::RangeRead` and caller-owned checkpoint/commit orchestration.
+- Recent/older pages: `history::fetch_page`; page exhaustion is not whole-scope equality.
+
+Run `cargo run -p mesh-foundation-replication --example sqlite_sync` for a real
+SQLite reader, atomic opaque-body commits and reopen/idempotency. Its tests cover
+rollback, revocation, cancellation and SQL errors. Snapshot preparation is a
+small illustrative rebuild, not a scalable persistent index implementation.
+No example establishes application trust or supplies a background scheduler.
+
+ There are no default application profiles; optional `mesh-connect` adds session adapters. Authorization and durable stores belong to the host.
 
 ## Development and documentation
 

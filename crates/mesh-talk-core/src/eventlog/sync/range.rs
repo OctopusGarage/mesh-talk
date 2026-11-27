@@ -79,7 +79,7 @@ impl RangeRead for OwnedIndex {
     fn contains(&self, id: &[u8; 32]) -> Result<bool, LogError> {
         match &self.sql {
             Some(sql) => sql.contains(id),
-            None => Ok(self.index.contains(id).unwrap()),
+            None => Ok(self.index.contains(id)),
         }
     }
 }

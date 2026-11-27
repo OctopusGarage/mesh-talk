@@ -73,6 +73,7 @@ jobs:
         run: |
           node scripts/validation/standards.mjs
           node scripts/check-repository-hygiene.mjs
+          python vendor/mesh-foundation/scripts/sdk_snapshot.py verify vendor/mesh-foundation
       - name: Frontend static checks
         if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         working-directory: frontend

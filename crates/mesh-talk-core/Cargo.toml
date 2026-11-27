@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mesh-Talk core: a serverless, end-to-end-encrypted LAN messaging protocol — identity & device certificates, an encrypted event log with peer sync, Double Ratchet + sender-key forward secrecy, a Noise transport, LAN discovery, a store-and-forward post office, and the node runtime. UI-free; the basis for an SDK."
+description = "Mesh-Talk core: a serverless, end-to-end-encrypted LAN messaging protocol — identity & device certificates, an encrypted event log with peer sync, Double Ratchet + sender-key forward secrecy, a Noise transport, LAN discovery, a store-and-forward post office, and the node runtime. UI-free application runtime composed from Mesh Foundation mechanisms."
 
 [features]
 # TEST-ONLY: collapses the password KDFs (Argon2 + PBKDF2) to a trivial cost so downstream
@@ -30,7 +30,7 @@ path = "src/bin/mesh-talk-node.rs"
 [dependencies]
 mesh-talk-protocol = { path = "../mesh-talk-protocol" }
 mesh-replication = { package = "mesh-foundation-replication", path = "../../vendor/mesh-foundation/crates/mesh-replication" }
-mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect" }
+mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect", default-features = false }
 mesh-storage = { package = "mesh-foundation-storage", path = "../../vendor/mesh-foundation/crates/mesh-storage" }
 mesh-blob = { package = "mesh-foundation-blob", path = "../../vendor/mesh-foundation/crates/mesh-blob", features = ["mesh-connect"] }
 mesh-e2ee = { package = "mesh-foundation-e2ee", path = "../../vendor/mesh-foundation/crates/mesh-e2ee" }
@@ -75,7 +75,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Netwo
 [dev-dependencies]
 mesh-talk-protocol = { path = "../mesh-talk-protocol", features = ["test-observability"] }
 mesh-storage = { package = "mesh-foundation-storage", path = "../../vendor/mesh-foundation/crates/mesh-storage", features = ["test-observability"] }
-mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect", features = ["test-observability"] }
+mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect", default-features = false, features = ["test-observability"] }
 mesh-replication = { package = "mesh-foundation-replication", path = "../../vendor/mesh-foundation/crates/mesh-replication", features = ["test-observability"] }
 pbkdf2 = { workspace = true } # Independent reference for production-format fixtures.
 tokio = { workspace = true, features = ["test-util"] }

@@ -33,3 +33,34 @@ The protocol crate uses the SDK mailbox with default features disabled: it needs
 only generic quota mechanisms. Original chat envelopes, codec/spool profiles,
 recipient addressing and expiry scheduling remain application-owned. The SDK's
 new typed mailbox ports and optional MFOM2/spool adapters do not alter MTOM1 bytes.
+
+## Shared range core and application recovery
+
+The SDK owns `RangeIndex`, `RangeRead`, canonical summary construction and the
+summary frame codec. The application's range module re-exports those mechanisms;
+it does not maintain a second ID tree or summary hash implementation. Its
+checkpoint still owns blocked ancestors, ordered repair anchors, overlap-based
+strategy and finite recovery frontiers. The SQL index implements the SDK reader
+port under the existing selection lifetime and encrypted scratch owner. Do not
+move account/group authorization or causal repair policy into the SDK.
+
+## Updating the managed SDK
+
+From a clean, committed SDK checkout, run:
+
+```sh
+python3 scripts/sdk.py snapshot export ../mesh-talk/vendor/mesh-foundation
+python3 scripts/sdk.py snapshot verify ../mesh-talk/vendor/mesh-foundation --source .
+```
+
+`SOURCE` and `SNAPSHOT.json` are generated together. Updates reject local edits,
+missing/extra files and symlinks. CI runs the bundled verifier offline; explicit
+`--source` verification also binds hashes to the recorded SDK Git commit. Offline
+hashes alone are not proof against a deliberately forged manifest. Update the
+consumer lockfile and run affected range, SQL selection and session tests.
+Signed application discovery uses the application's existing profile; mesh-connect
+is consumed without its neutral signed-discovery default feature.
+
+SDK SQLite examples are illustrative contract coverage, not this application's
+SQL schema or performance benchmark. Forum's inventory/private-mailbox tests
+prove independent composition; its production post protocol is a separate owner.
