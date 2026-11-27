@@ -11,6 +11,11 @@ original device/account fingerprints and certificate signature domains, signed
 chat events and event kind indices, discovery roles and account proofs, legacy
 synchronization, pairwise relay envelopes and original mailbox wire/spool bytes.
 Adapters in mesh-talk-core import this crate; SDK primitives never depend on it.
+The historical device/account types are thin owners of profile and lifecycle
+metadata: Foundation owns secret material, key generation, cached public-key
+construction, signing and strict verification. Historical certificate input is
+constructed here and signed with the SDK primitive; neutral SDK certificate/ID
+profiles must never reinterpret existing application bytes.
 No existing identity, encrypted record or wire frame is silently reinterpreted
 under the SDK's neutral alpha.2 profiles.
 
@@ -42,10 +47,20 @@ shared snapshot/frame admission rules, including scope, authority, revision,
 pinned view and frontier qualification. Storage errors remain errors and failed
 reads do not advance the checkpoint or overlap counts. The application's range
 module re-exports those mechanisms without maintaining a second ID tree or
-summary hash implementation. Its checkpoint still owns blocked ancestors, ordered repair anchors, overlap-based
+summary hash implementation. Compressed-prefix reconstruction uses the SDK's
+`Prefix::common` and checked `Summary::lift`; the SQL adapter maintains its own
+transactional rows without another canonical lifting algorithm. Its checkpoint
+still owns blocked ancestors, ordered repair anchors, overlap-based
 strategy and finite recovery frontiers. The SQL index implements the SDK reader
 port under the existing selection lifetime and encrypted scratch owner. Do not
 move account/group authorization or causal repair policy into the SDK.
+
+Local-user credential codecs also use SDK signing material. Local user UUIDs,
+login/password policy, Base64 public keys and raw 32-byte secret storage remain
+application-owned and unchanged. The unpublished `KeyManager` Rust helper now
+accepts/returns the SDK signer rather than a dalek secret-key object; known
+workspace consumers infer that type. This source-level helper change does not
+change account/device identifiers, wire formats or credential records.
 
 ## Updating the managed SDK
 
@@ -90,3 +105,16 @@ authorize deletion of a verified backup. Export preserves both and reports the
 ambiguous target. Verify the backup, remove only the empty placeholder with
 `rmdir`, and retry. Empty directories remain supported for fresh installation
 when no recovery backup exists.
+
+## Persistent reader operation contracts
+
+The SDK also offers `reader::prepare` for standard bounded reader discovery.
+Prepared turns release continuation only after the host's synchronous atomic
+commit succeeds. The production SQL index is exercised against this contract
+with actual repository transactions, rejection, retry and selection retirement.
+The SDK's opt-in `test_support::check_reader` also checks this real SQL adapter
+against canonical summaries and membership probes; it is development-only and
+does not replace application-specific authorization/transaction tests.
+This is adapter conformance evidence, not a claim that production causal repair
+uses the standard SDK checkpoint. That recovery owner continues to use shared
+reader/frame qualification with its application-specific checkpoint.

@@ -11,6 +11,14 @@ pub struct Prefix {
     key: EventId,
 }
 impl Prefix {
+    /// Smallest canonical prefix containing both opaque IDs.
+    pub fn common(a: EventId, b: EventId) -> Self {
+        let bits = (0..256)
+            .find(|bit| (a[bit / 8] ^ b[bit / 8]) & (128 >> (bit % 8)) != 0)
+            .unwrap_or(256) as u16;
+        Self::new(bits, a).expect("common prefix depth is bounded")
+    }
+
     pub fn bits(self) -> u16 {
         self.bits
     }
@@ -50,6 +58,33 @@ pub struct Summary {
     pub digest: [u8; 32],
 }
 impl Summary {
+    /// Lift a compressed subtree through known-empty siblings to an ancestor.
+    /// The host must ensure there is no additional data on this unary path.
+    /// Unrelated/deeper prefixes and impossible subtree counts are rejected.
+    pub fn lift(self, from: Prefix, to: Prefix) -> Option<Self> {
+        if to.bits > from.bits || Prefix::new(to.bits, from.key)? != to {
+            return None;
+        }
+        if let Some(capacity) = 1usize.checked_shl(u32::from(256 - from.bits))
+            && self.count > capacity
+        {
+            return None;
+        }
+        if self.count == 0 {
+            return (self == Self::empty()).then_some(self);
+        }
+        let mut summary = self;
+        for bits in (to.bits..from.bits).rev() {
+            let parent = Prefix::new(bits, from.key)?;
+            summary = if from.key[usize::from(bits) / 8] & (128 >> (bits % 8)) != 0 {
+                Self::combine(parent, Self::empty(), summary)?
+            } else {
+                Self::combine(parent, summary, Self::empty())?
+            };
+        }
+        Some(summary)
+    }
+
     /// Canonical empty subtree, shared by memory and persistent adapters.
     pub fn empty() -> Self {
         empty()
@@ -126,23 +161,12 @@ impl RangeIndex {
             return empty();
         };
         let last = range.next_back().unwrap_or(first);
-        let mut depth = 256u16;
-        if first != last {
-            depth = (0..256)
-                .find(|bit| (first[bit / 8] ^ last[bit / 8]) & (128 >> (bit % 8)) != 0)
-                .unwrap() as u16;
-        }
-        let base = Prefix::new(depth, *first).unwrap();
-        let mut summary = *self.nodes.get(&base).expect("branch/leaf summary exists");
-        for bits in (p.bits..depth).rev() {
-            let right = first[usize::from(bits) / 8] & (128 >> (bits % 8)) != 0;
-            summary = if right {
-                combine(bits, empty(), summary)
-            } else {
-                combine(bits, summary, empty())
-            };
-        }
-        summary
+        let base = Prefix::common(*first, *last);
+        self.nodes
+            .get(&base)
+            .expect("branch/leaf summary exists")
+            .lift(base, p)
+            .expect("requested prefix contains the selected subtree")
     }
     pub fn insert(&mut self, id: EventId) -> bool {
         if !self.ids.insert(id) {
@@ -161,13 +185,7 @@ impl RangeIndex {
     fn update(&mut self, id: EventId) {
         let leaf = Prefix::new(256, id).unwrap();
         if self.ids.contains(&id) {
-            self.nodes.insert(
-                leaf,
-                Summary {
-                    count: 1,
-                    digest: Sha256::digest([b"mesh-range-id-v1".as_slice(), &id].concat()).into(),
-                },
-            );
+            self.nodes.insert(leaf, Summary::leaf(id));
         } else {
             self.nodes.remove(&leaf);
         }
@@ -558,21 +576,7 @@ impl Checkpoint {
 
 /// Canonical summary for one ID in this prefix; rejects an ID outside it.
 pub fn singleton_summary(prefix: Prefix, id: EventId) -> Option<Summary> {
-    if Prefix::new(prefix.bits, id)? != prefix {
-        return None;
-    }
-    let mut summary = Summary {
-        count: 1,
-        digest: Sha256::digest([b"mesh-range-id-v1".as_slice(), &id].concat()).into(),
-    };
-    for bits in (prefix.bits..256).rev() {
-        summary = if id[usize::from(bits) / 8] & (128 >> (bits % 8)) != 0 {
-            combine(bits, empty(), summary)
-        } else {
-            combine(bits, summary, empty())
-        };
-    }
-    Some(summary)
+    Summary::leaf(id).lift(Prefix::new(256, id)?, prefix)
 }
 impl RangeIndex {
     pub fn frame(&self, scope: [u8; 32], view: [u8; 32], prefix: Prefix) -> SummaryFrame {

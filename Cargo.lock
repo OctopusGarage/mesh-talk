@@ -3520,6 +3520,7 @@ dependencies = [
  "mesh-foundation-blob",
  "mesh-foundation-connect",
  "mesh-foundation-e2ee",
+ "mesh-foundation-identity",
  "mesh-foundation-replication",
  "mesh-foundation-storage",
  "mesh-talk-core",

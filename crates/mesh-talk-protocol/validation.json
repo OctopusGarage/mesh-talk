@@ -23,7 +23,7 @@
         "guide": "crates/mesh-talk-protocol/README.md",
         "invariants": [
           {
-            "name": "Historical Mesh Talk IDs, signature domains and wire discriminants remain byte-compatible.",
+            "name": "Historical Mesh Talk IDs, signature domains and wire discriminants remain byte-compatible; Foundation owns key material and signing primitives while application adapters retain historical identity/certificate bytes and creation metadata.",
             "reference": "crates/mesh-talk-protocol/README.md"
           }
         ]

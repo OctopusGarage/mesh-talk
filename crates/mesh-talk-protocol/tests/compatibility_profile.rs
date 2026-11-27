@@ -74,3 +74,35 @@ fn independent_historical_certificate_vector_preserves_exact_bytes() {
     assert_eq!(account.secret_bytes(), [1; 32]);
     assert_eq!(device.secret_bytes(), ([3; 32], [2; 32]));
 }
+
+#[test]
+fn delegated_verifier_rejects_noncanonical_and_small_order_signatures() {
+    let identity = DeviceIdentity::from_secret_bytes([3; 32], [2; 32]);
+    let message = b"strict legacy verification";
+    let mut signature = identity.sign(message);
+    assert!(DeviceIdentity::verify(
+        &identity.public().ed25519_pub,
+        message,
+        &signature
+    ));
+    // Ed25519 scalars must be canonical: S = group order L is invalid.
+    signature[32..].copy_from_slice(
+        &hex::decode("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010").unwrap(),
+    );
+    assert!(!DeviceIdentity::verify(
+        &identity.public().ed25519_pub,
+        message,
+        &signature
+    ));
+    // The compressed identity point has order one. Even an S=0,R=identity
+    // construction must never establish an author's identity.
+    let mut weak_public = [0; 32];
+    weak_public[0] = 1;
+    let mut weak_signature = [0; 64];
+    weak_signature[0] = 1;
+    assert!(!DeviceIdentity::verify(
+        &weak_public,
+        message,
+        &weak_signature
+    ));
+}

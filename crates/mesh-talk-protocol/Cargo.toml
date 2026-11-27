@@ -21,11 +21,11 @@ aes-gcm.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
 x25519-dalek.workspace = true
-ed25519-dalek.workspace = true
 zeroize.workspace = true
 rand_core.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect", default-features = false }
 tokio.workspace = true
 tempfile.workspace = true

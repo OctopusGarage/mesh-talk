@@ -6,14 +6,21 @@ Choose the entry point by workload:
 
 - Small, finite sets: `CompleteInventory` and `inventory_session`.
 - Indexed incremental repair: `driver::SyncDriver` with an in-memory `RangeIndex`.
-- Persistent indexes: `range::RangeRead` and caller-owned checkpoint/commit orchestration.
+- Persistent indexes: `reader::prepare` over `range::RangeRead`; prepared turns
+  release continuation only after the host's atomic commit callback succeeds.
+- Custom policy/causal checkpoints: `RangeRead`, `ReaderBinding` and frame
+  admission primitives, with application-owned repair and scheduling.
 - Recent/older pages: `history::fetch_page`; page exhaustion is not whole-scope equality.
 
 Run `cargo run -p mesh-foundation-replication --example sqlite_sync` for a real
 SQLite reader, atomic opaque-body commits and reopen/idempotency. Its tests cover
-rollback, revocation, cancellation and SQL errors. Snapshot preparation is a
-small illustrative rebuild, not a scalable persistent index implementation.
-No example establishes application trust or supplies a background scheduler.
+rollback, revocation, cancellation and SQL errors. Its compact persisted index is updated with bodies; snapshot preparation is
+read-only and does not rebuild the tree. The example is single-writer and
+append-only, not a production database or concurrent snapshot manager.
+With the development-only `test-observability` feature, reuse
+`test_support::check_reader` for sampled canonical adapter checks. Add your own
+transaction, authorization, retirement and reopen tests. No example establishes
+application trust or supplies a background scheduler.
 
  There are no default application profiles; optional `mesh-connect` adds session adapters. Authorization and durable stores belong to the host.
 

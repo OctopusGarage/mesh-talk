@@ -57,12 +57,10 @@ impl DeviceIdentity {
 
     /// The shareable public identity.
     pub fn public(&self) -> PublicIdentity {
-        {
-            let public = self.inner.public();
-            PublicIdentity {
-                ed25519_pub: public.ed25519_pub,
-                x25519_pub: public.x25519_pub,
-            }
+        let public = self.inner.public();
+        PublicIdentity {
+            ed25519_pub: public.ed25519_pub,
+            x25519_pub: public.x25519_pub,
         }
     }
 
