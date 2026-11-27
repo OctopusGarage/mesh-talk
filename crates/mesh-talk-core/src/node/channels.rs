@@ -260,18 +260,26 @@ impl ChannelControlInputs {
         }
     }
     async fn changed(&mut self, node: &Node) -> Option<bool> {
-        let force = tokio::select! {
+        let (force, cause) = tokio::select! {
             change = self.metadata.recv() => match change {
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => (true, "metadata"),
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
             },
-            change = self.network.changed() => { change.ok()?; true },
-            change = self.roster.changed() => { change.ok()?; false },
-            change = self.availability.changed() => { change.ok()?; false },
-            change = self.maintenance.changed() => { change.ok()?; false },
+            change = self.network.changed() => { change.ok()?; (true, "network") },
+            change = self.roster.changed() => { change.ok()?; (false, "roster") },
+            change = self.availability.changed() => { change.ok()?; (false, "availability") },
+            change = self.maintenance.changed() => { change.ok()?; (false, "maintenance") },
         };
         let (input, renewed) = node.channel_control_route_input(&mut self.deadlines);
         let changed = force || renewed || input != self.input;
+        #[cfg(test)]
+        if changed {
+            node.trace_account_client(&node.identity.public(), || format!(
+                "channel_control_input cause={cause} force={force} renewed={renewed} routes_changed={}", input != self.input,
+            ));
+        }
+        #[cfg(not(test))]
+        let _ = cause;
         self.input = input;
         Some(changed)
     }
@@ -5553,6 +5561,7 @@ mod fanout_tests {
     }
 
     struct ControlRetryProbe {
+        wake_reasons: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
         scans: Arc<std::sync::atomic::AtomicUsize>,
         dispatches: Arc<std::sync::atomic::AtomicUsize>,
         groups: Arc<std::sync::Mutex<HashSet<String>>>,
@@ -5567,6 +5576,7 @@ mod fanout_tests {
 
     fn control_retry_probe(node: &Node) -> ControlRetryProbe {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        let wake_reasons = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let scans = Arc::new(AtomicUsize::new(0));
         let dispatches = Arc::new(AtomicUsize::new(0));
         let groups = Arc::new(std::sync::Mutex::new(HashSet::new()));
@@ -5578,12 +5588,21 @@ mod fanout_tests {
         let (local_idle, idle_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (control_idle, control_idle_receiver) = tokio::sync::watch::channel(None);
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let wake_reasons = wake_reasons.clone();
             let scans = scans.clone();
             let dispatches = dispatches.clone();
             let groups = groups.clone();
             let per_group = per_group.clone();
             let local_lanes = local_lanes.clone();
             move |_, phase| {
+                if phase.starts_with("channel_control_input ") {
+                    let mut reasons = wake_reasons.lock().unwrap();
+                    if reasons.len() == 128 {
+                        reasons.pop_front();
+                    }
+                    reasons.push_back(phase.to_owned());
+                }
+
                 if phase == "channel_control_retry_wait_resumed"
                     || phase.starts_with("channel_control_retry_selected count=")
                 {
@@ -5625,6 +5644,7 @@ mod fanout_tests {
             }
         }));
         ControlRetryProbe {
+            wake_reasons,
             scans,
             dispatches,
             groups,
@@ -6016,6 +6036,7 @@ mod fanout_tests {
                     probe.dispatches.load(Ordering::SeqCst),
                 )).collect::<Vec<_>>();
                 phase.set("unchanged-source quiet window");
+                for probe in &probes { probe.wake_reasons.lock().unwrap().clear(); }
                 let before = snapshot();
                 assert!(before.iter().all(|(_, scans, dispatches)| *scans > 0 && *dispatches > 0), "both real control owners must have selected and completed outbound work before observation: {before:?}");
                 // No foreground preparation, manual retry, fake publisher or
@@ -6024,8 +6045,12 @@ mod fanout_tests {
                 let after = snapshot();
                 eprintln!("two full authenticated parents (source, scans, distributions): {before:?} -> {after:?}");
                 assert_eq!(before.iter().map(|row| row.0).collect::<Vec<_>>(), after.iter().map(|row| row.0).collect::<Vec<_>>(), "source movement indicates unfinished catch-up rather than a qualified unchanged-source replay regression");
-                assert_eq!(after, before, "successful retained controls must settle across two full authenticated parents before sparse repair");
-            }).await.unwrap_or_else(|_| panic!("real two-parent control fixture must finish within its bounded protocol window: phase={}", phase.get()));
+                let wake_reasons: Vec<_> = probes.iter().map(|probe| probe.wake_reasons.lock().unwrap().clone()).collect();
+                assert_eq!(after, before, "successful retained controls must settle across two full authenticated parents before sparse repair: wake_reasons={wake_reasons:?}");
+            }).await.unwrap_or_else(|_| {
+                let wake_reasons: Vec<_> = probes.iter().map(|probe| probe.wake_reasons.lock().unwrap().clone()).collect();
+                panic!("real two-parent control fixture must finish within its bounded protocol window: phase={} wake_reasons={wake_reasons:?}", phase.get());
+            });
         }).catch_unwind().await;
         for (node, worker) in nodes.iter().zip(workers) {
             stop_control_retry_owner(node, worker).await;
