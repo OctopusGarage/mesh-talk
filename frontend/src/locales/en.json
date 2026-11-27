@@ -1345,6 +1345,7 @@
     "linkFailed": "The link could not be opened. Try again or open the online manual in your browser."
   },
   "notificationPermission": {
+    "macFirstRequest": "Click Allow notifications here first, then respond to the macOS permission prompt. If Mesh-Talk is missing from system notification settings, start with this permission request.",
     "denied": "Notifications are blocked in system settings",
     "granted": "Allowed by your system",
     "prompt": "Allow notifications on this device",

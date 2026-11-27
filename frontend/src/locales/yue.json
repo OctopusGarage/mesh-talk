@@ -1345,6 +1345,7 @@
     "linkFailed": "開唔到連結。請再試，或者用瀏覽器開啟線上手冊。"
   },
   "notificationPermission": {
+    "macFirstRequest": "請先撳呢度嘅「允許通知」，再回應 macOS 權限提示。如果系統通知設定搵唔到 Mesh-Talk，請先喺呢度申請權限。",
     "denied": "系統設定已封鎖通知",
     "granted": "系統已允許通知",
     "prompt": "允許呢部裝置嘅通知",

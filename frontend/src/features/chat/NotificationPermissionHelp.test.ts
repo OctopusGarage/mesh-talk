@@ -80,6 +80,8 @@ it("offers an explicit request for not-yet-decided authorization", async () => {
   mocks.request.mockResolvedValue(denied);
   await render();
   expect(mocks.request).not.toHaveBeenCalled();
+  expect(host.textContent).toContain("Click Allow notifications here first");
+  expect(host.textContent).not.toContain("Notifications → Mesh-Talk");
   await click("Allow notifications");
   expect(mocks.request).toHaveBeenCalledOnce();
   expect(host.textContent).toContain("Notifications are blocked");

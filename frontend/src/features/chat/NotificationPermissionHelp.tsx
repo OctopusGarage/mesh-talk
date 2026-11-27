@@ -32,7 +32,9 @@ export function NotificationPermissionHelp({
   const allowed = status === "granted";
   const title = t(`notificationPermission.${status ?? "checking"}`);
   const instructions = t(
-    `notificationPermission.instructions.${permission?.platform ?? "other"}`,
+    status === "prompt" && permission?.platform === "macos"
+      ? "notificationPermission.macFirstRequest"
+      : `notificationPermission.instructions.${permission?.platform ?? "other"}`,
   );
   return (
     <div

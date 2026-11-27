@@ -1345,6 +1345,7 @@
     "linkFailed": "링크를 열지 못했습니다. 다시 시도하거나 브라우저에서 온라인 설명서를 여세요."
   },
   "notificationPermission": {
+    "macFirstRequest": "먼저 여기에서 알림 허용을 누르고 macOS 권한 요청에 응답하세요. 시스템 설정에 Mesh-Talk가 없다면 여기에서 권한을 요청하세요.",
     "denied": "시스템 설정에서 알림이 차단되어 있습니다",
     "granted": "시스템에서 허용됨",
     "prompt": "이 기기에서 알림 허용",

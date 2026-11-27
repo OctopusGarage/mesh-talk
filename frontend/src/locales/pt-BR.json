@@ -1345,6 +1345,7 @@
     "linkFailed": "Não foi possível abrir o link. Tente novamente ou abra o manual online no navegador."
   },
   "notificationPermission": {
+    "macFirstRequest": "Clique em Permitir notificações aqui e responda à solicitação do macOS. Se Mesh-Talk não aparecer nos ajustes do sistema, comece com esta solicitação de permissão.",
     "denied": "As notificações estão bloqueadas nas configurações do sistema",
     "granted": "Permitidas pelo sistema",
     "prompt": "Permitir notificações neste dispositivo",
