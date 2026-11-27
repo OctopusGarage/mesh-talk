@@ -1,0 +1,3 @@
+Act as the research sub-agent for this task.
+
+Read-only REQ-015 comparative research. Use primary official sources for delivery/custody/retention and backpressure (Matrix, XMPP or NATS), report 3 concrete tradeoffs with links, no edits. Focus on application delivery vs server retention guarantees.
