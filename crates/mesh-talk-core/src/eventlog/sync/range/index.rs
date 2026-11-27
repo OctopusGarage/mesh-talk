@@ -2,7 +2,8 @@
 //! SQL selection lifetime, blocked ancestors and recovery scheduling stay here.
 type EventId = [u8; 32];
 pub use mesh_replication::range::{
-    Prefix, RangeIndex, RangeRead, RemoteError, Summary, SummaryFrame, singleton_summary,
+    Prefix, RangeIndex, RangeRead, ReaderBinding, RemoteError, Summary, SummaryFrame,
+    singleton_summary,
 };
 use std::collections::BTreeSet;
 
@@ -165,11 +166,7 @@ impl Checkpoint {
         mut authorize: impl FnMut() -> bool,
         mut query: impl AsyncFnMut(Prefix) -> Result<SummaryFrame, E>,
     ) -> Result<Difference, RemoteError<E>> {
-        if self.local_root != local.summary(Prefix::root())
-            || self.local != local.revision()
-            || self.remote != remote_revision
-            || self.authority != authority
-            || self.remote_view.is_some_and(|v| v != view)
+        if !self.valid_remote_binding(local, self.scope, view, authority, remote_revision)
             || !authorize()
         {
             return Err(RemoteError::Invalidated);
@@ -188,17 +185,9 @@ impl Checkpoint {
             if !authorize() {
                 return Err(RemoteError::Invalidated);
             }
-            if frame.scope != self.scope || frame.view != view || frame.prefix != prefix {
-                return Err(RemoteError::InvalidFrame);
-            }
-            if let Some(id) = frame.singleton
-                && singleton_summary(prefix, id) != Some(frame.summary)
-            {
-                return Err(RemoteError::InvalidFrame);
-            }
-            if !frame.valid_leaves() {
-                return Err(RemoteError::InvalidFrame);
-            }
+            frame
+                .validate_for(self.scope, view, Some(prefix))
+                .map_err(|_| RemoteError::InvalidFrame)?;
             self.pending.pop();
             examined += 1;
             let a = local.summary(prefix);
@@ -318,23 +307,11 @@ impl Checkpoint {
         revision: u64,
         frame: SummaryFrame,
     ) -> Result<Vec<EventId>, RemoteError<()>> {
-        if self.local_root != local.summary(Prefix::root())
-            || self.local != local.revision()
-            || self.scope != scope
-            || self.authority != authority
-            || self.remote != revision
-            || self.remote_view.is_some_and(|v| v != view)
-        {
+        if !self.valid_remote_binding(local, scope, view, authority, revision) {
             return Err(RemoteError::Invalidated);
         }
-        let prefix = self.next_query().ok_or(RemoteError::InvalidFrame)?;
-        if frame.scope != scope
-            || frame.view != view
-            || frame.prefix != prefix
-            || !frame.valid_leaves()
-        {
-            return Err(RemoteError::InvalidFrame);
-        }
+        let prefix = frame.validate_for(scope, view, self.next_query())?;
+
         self.remote_view = Some(view);
         self.pending.pop();
         if local.summary(prefix) == frame.summary || frame.summary.count == 0 {
@@ -393,6 +370,16 @@ impl Checkpoint {
 }
 
 impl Checkpoint {
+    fn reader_binding(&self) -> ReaderBinding {
+        ReaderBinding {
+            scope: self.scope,
+            authority: self.authority,
+            local_revision: self.local,
+            local_root: self.local_root,
+            remote_revision: self.remote,
+            remote_view: self.remote_view,
+        }
+    }
     pub fn valid_remote_binding(
         &self,
         local: &RangeIndex,
@@ -401,12 +388,9 @@ impl Checkpoint {
         authority: [u8; 32],
         revision: u64,
     ) -> bool {
-        self.local_root == local.summary(Prefix::root())
-            && self.local == local.revision()
-            && self.scope == scope
-            && self.authority == authority
-            && self.remote == revision
-            && self.remote_view.is_none_or(|pinned| pinned == view)
+        self.reader_binding()
+            .valid_reader(local, scope, view, authority, revision)
+            .expect("in-memory range reads are infallible")
     }
 }
 
@@ -443,12 +427,8 @@ impl Checkpoint {
         authority: [u8; 32],
         revision: u64,
     ) -> Result<bool, R::Error> {
-        Ok(self.local_root == local.summary(Prefix::root())?
-            && self.local == local.revision()
-            && self.scope == scope
-            && self.authority == authority
-            && self.remote == revision
-            && self.remote_view.is_none_or(|v| v == view))
+        self.reader_binding()
+            .valid_reader(local, scope, view, authority, revision)
     }
     /// Reads all needed local facts before mutating discovery state. A failed
     /// SQL read therefore retains the exact prefix for retry.
@@ -464,16 +444,10 @@ impl Checkpoint {
         if !self.valid_reader_binding(local, scope, view, authority, revision)? {
             return Ok(Err(RemoteError::Invalidated));
         }
-        let Some(prefix) = self.next_query() else {
-            return Ok(Err(RemoteError::InvalidFrame));
+        let prefix = match frame.validate_for(scope, view, self.next_query()) {
+            Ok(prefix) => prefix,
+            Err(error) => return Ok(Err(error)),
         };
-        if frame.scope != scope
-            || frame.view != view
-            || frame.prefix != prefix
-            || !frame.valid_leaves()
-        {
-            return Ok(Err(RemoteError::InvalidFrame));
-        }
         let equal = local.summary(prefix)? == frame.summary || frame.summary.count == 0;
         let mut overlap_known = self.overlap_known;
         let mut overlap_missing = self.overlap_missing;

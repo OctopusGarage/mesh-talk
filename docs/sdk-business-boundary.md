@@ -37,9 +37,12 @@ new typed mailbox ports and optional MFOM2/spool adapters do not alter MTOM1 byt
 ## Shared range core and application recovery
 
 The SDK owns `RangeIndex`, `RangeRead`, canonical summary construction and the
-summary frame codec. The application's range module re-exports those mechanisms;
-it does not maintain a second ID tree or summary hash implementation. Its
-checkpoint still owns blocked ancestors, ordered repair anchors, overlap-based
+summary frame codec. `ReaderBinding` and `SummaryFrame::validate_for` own the
+shared snapshot/frame admission rules, including scope, authority, revision,
+pinned view and frontier qualification. Storage errors remain errors and failed
+reads do not advance the checkpoint or overlap counts. The application's range
+module re-exports those mechanisms without maintaining a second ID tree or
+summary hash implementation. Its checkpoint still owns blocked ancestors, ordered repair anchors, overlap-based
 strategy and finite recovery frontiers. The SQL index implements the SDK reader
 port under the existing selection lifetime and encrypted scratch owner. Do not
 move account/group authorization or causal repair policy into the SDK.

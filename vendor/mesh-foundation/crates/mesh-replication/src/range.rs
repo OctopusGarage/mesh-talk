@@ -360,6 +360,21 @@ impl SummaryFrame {
         };
         frame.valid_leaves().then_some(frame)
     }
+    /// Qualify a frame against the current scope, pinned view and frontier.
+    /// This checks protocol facts only; the host still authorizes the reader.
+    pub fn validate_for(
+        &self,
+        scope: [u8; 32],
+        view: [u8; 32],
+        prefix: Option<Prefix>,
+    ) -> Result<Prefix, RemoteError<()>> {
+        let prefix = prefix.ok_or(RemoteError::InvalidFrame)?;
+        if self.scope != scope || self.view != view || self.prefix != prefix || !self.valid_leaves()
+        {
+            return Err(RemoteError::InvalidFrame);
+        }
+        Ok(prefix)
+    }
     pub fn valid_leaves(&self) -> bool {
         if self.leaves.is_empty() {
             return self
@@ -458,17 +473,9 @@ impl Checkpoint {
             if !authorize() {
                 return Err(RemoteError::Invalidated);
             }
-            if frame.scope != self.scope || frame.view != view || frame.prefix != prefix {
-                return Err(RemoteError::InvalidFrame);
-            }
-            if let Some(id) = frame.singleton
-                && singleton_summary(prefix, id) != Some(frame.summary)
-            {
-                return Err(RemoteError::InvalidFrame);
-            }
-            if !frame.valid_leaves() {
-                return Err(RemoteError::InvalidFrame);
-            }
+            frame
+                .validate_for(self.scope, view, Some(prefix))
+                .map_err(|_| RemoteError::InvalidFrame)?;
             self.pending.pop();
             examined += 1;
             let a = local.summary(prefix);
@@ -660,6 +667,36 @@ pub trait RangeRead {
     fn summary(&self, prefix: Prefix) -> Result<Summary, Self::Error>;
     fn contains(&self, id: &EventId) -> Result<bool, Self::Error>;
 }
+/// Captured qualification facts for an authorized reader checkpoint.
+/// This value grants no permission and never mutates a reader or checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReaderBinding {
+    pub scope: [u8; 32],
+    pub authority: [u8; 32],
+    pub local_revision: u64,
+    pub local_root: Summary,
+    pub remote_revision: u64,
+    pub remote_view: Option<[u8; 32]>,
+}
+impl ReaderBinding {
+    /// Storage errors remain errors, never equality or policy invalidation.
+    /// An unpinned remote view accepts its first view; hosts pin it on commit.
+    pub fn valid_reader<R: RangeRead + ?Sized>(
+        &self,
+        local: &R,
+        scope: [u8; 32],
+        view: [u8; 32],
+        authority: [u8; 32],
+        revision: u64,
+    ) -> Result<bool, R::Error> {
+        Ok(self.local_root == local.summary(Prefix::root())?
+            && self.local_revision == local.revision()
+            && self.scope == scope
+            && self.authority == authority
+            && self.remote_revision == revision
+            && self.remote_view.is_none_or(|pinned| pinned == view))
+    }
+}
 impl RangeRead for RangeIndex {
     type Error = std::convert::Infallible;
     fn revision(&self) -> u64 {
@@ -706,12 +743,15 @@ impl Checkpoint {
         authority: [u8; 32],
         revision: u64,
     ) -> Result<bool, R::Error> {
-        Ok(self.local_root == local.summary(Prefix::root())?
-            && self.local == local.revision()
-            && self.scope == scope
-            && self.authority == authority
-            && self.remote == revision
-            && self.remote_view.is_none_or(|v| v == view))
+        ReaderBinding {
+            scope: self.scope,
+            authority: self.authority,
+            local_revision: self.local,
+            local_root: self.local_root,
+            remote_revision: self.remote,
+            remote_view: self.remote_view,
+        }
+        .valid_reader(local, scope, view, authority, revision)
     }
     /// Reads all needed local facts before mutating discovery state. A failed
     /// SQL read therefore retains the exact prefix for retry. Returned missing
@@ -729,16 +769,10 @@ impl Checkpoint {
         if !self.valid_reader_binding(local, scope, view, authority, revision)? {
             return Ok(Err(RemoteError::Invalidated));
         }
-        let Some(prefix) = self.next_query() else {
-            return Ok(Err(RemoteError::InvalidFrame));
+        let prefix = match frame.validate_for(scope, view, self.next_query()) {
+            Ok(prefix) => prefix,
+            Err(error) => return Ok(Err(error)),
         };
-        if frame.scope != scope
-            || frame.view != view
-            || frame.prefix != prefix
-            || !frame.valid_leaves()
-        {
-            return Ok(Err(RemoteError::InvalidFrame));
-        }
         let equal = local.summary(prefix)? == frame.summary || frame.summary.count == 0;
         let mut missing = Vec::new();
         if !equal {
@@ -828,5 +862,92 @@ mod reader_tests {
                 .unwrap(),
             vec![[3; 32]]
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn reader_binding_rejects_each_stale_qualification() {
+        let mut local = RangeIndex::default();
+        local.insert([3; 32]);
+        let binding = ReaderBinding {
+            scope: [1; 32],
+            authority: [2; 32],
+            local_revision: local.revision(),
+            local_root: local.summary(Prefix::root()),
+            remote_revision: 7,
+            remote_view: Some([4; 32]),
+        };
+        let valid = |b: ReaderBinding| {
+            b.valid_reader(&local, [1; 32], [4; 32], [2; 32], 7)
+                .unwrap()
+        };
+        assert!(valid(binding));
+        for stale in [
+            ReaderBinding {
+                scope: [9; 32],
+                ..binding
+            },
+            ReaderBinding {
+                authority: [9; 32],
+                ..binding
+            },
+            ReaderBinding {
+                local_revision: 8,
+                ..binding
+            },
+            ReaderBinding {
+                local_root: Summary::empty(),
+                ..binding
+            },
+            ReaderBinding {
+                remote_revision: 8,
+                ..binding
+            },
+            ReaderBinding {
+                remote_view: Some([9; 32]),
+                ..binding
+            },
+        ] {
+            assert!(!valid(stale));
+        }
+        assert!(valid(ReaderBinding {
+            remote_view: None,
+            ..binding
+        }));
+    }
+
+    #[test]
+    fn frame_admission_binds_scope_view_frontier_and_validates_leaves() {
+        let mut remote = RangeIndex::default();
+        remote.insert([3; 32]);
+        remote.insert([5; 32]);
+        let frame = remote.frame([1; 32], [4; 32], Prefix::root());
+        assert_eq!(
+            frame
+                .validate_for([1; 32], [4; 32], Some(Prefix::root()))
+                .unwrap(),
+            Prefix::root()
+        );
+        for (scope, view, prefix) in [
+            ([9; 32], [4; 32], Some(Prefix::root())),
+            ([1; 32], [9; 32], Some(Prefix::root())),
+            ([1; 32], [4; 32], Prefix::new(1, [0; 32])),
+            ([1; 32], [4; 32], None),
+        ] {
+            assert!(matches!(
+                frame.validate_for(scope, view, prefix),
+                Err(RemoteError::InvalidFrame)
+            ));
+        }
+        let mut malformed = frame.clone();
+        malformed.leaves = vec![[3; 32], [3; 32]];
+        assert!(matches!(
+            malformed.validate_for([1; 32], [4; 32], Some(Prefix::root())),
+            Err(RemoteError::InvalidFrame)
+        ));
     }
 }

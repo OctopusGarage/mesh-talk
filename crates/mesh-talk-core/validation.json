@@ -1485,7 +1485,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Fallible sync reads propagate local storage failures without successful empty history, fingerprint matches or custody claims; explicit peer rejection remains distinct and committed batch prefixes survive retries",
+            "name": "Fallible sync reads propagate local storage failures without successful empty history, fingerprint matches or custody claims; explicit peer rejection remains distinct and committed batch prefixes survive retries. SDK reader and frame qualification enforce the same scope, authority, revision, pinned-view and frontier rules for memory and SQL readers; failed reads never partially advance the application checkpoint or overlap counts",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
