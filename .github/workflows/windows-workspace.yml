@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       rust: ${{ steps.compiler.outputs.rust }}
+      archive_id: ${{ steps.workspace_archive.outputs.artifact-id }}
     defaults:
       run:
         shell: bash
@@ -114,6 +115,7 @@ jobs:
           eval "$(cargo llvm-cov show-env --sh)"
           node scripts/ci/windows-coverage.mjs produce "$RUNNER_TEMP/windows-workspace-archive"
       - name: Upload sealed workspace archive
+        id: workspace_archive
         if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/upload-artifact@v7
         with:
@@ -171,7 +173,8 @@ jobs:
       - uses: actions/download-artifact@v8
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
-          name: windows-workspace-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # A shard-only rerun retains its producer's original artifact ID.
+          artifact-ids: ${{ needs.build.outputs.archive_id }}
           path: ${{ runner.temp }}/windows-workspace-archive
       - name: Run validated serial shard and export partial coverage
         if: ${{ steps.scope.outputs.full == 'true' }}
