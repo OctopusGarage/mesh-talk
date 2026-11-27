@@ -38,3 +38,11 @@ it("treats absent legacy text as non-code", () => {
   expect(decodeCodeBlock(undefined)).toBeNull();
   expect(decodeCodeBlock(null)).toBeNull();
 });
+
+it("falls back to plain code for invalid language metadata without altering the body", () => {
+  const code = "  <script>literal</script>\n";
+  expect(decodeCodeBlock(encodeCodeBlock(code, 'html onclick="x"'))).toEqual({
+    code,
+    language: "",
+  });
+});

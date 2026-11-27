@@ -401,3 +401,51 @@ it("restores code mode and language from the existing draft and clears after acc
   expect(host.querySelector("textarea")!.value).toBe("");
   expect(host.querySelector("select")).toBeNull();
 });
+
+it("returns to ordinary text without losing the code draft", async () => {
+  const changed = vi.fn();
+  const code = "  first\n\tsecond\n";
+  await act(async () =>
+    root.render(
+      createElement(Composer, {
+        onSend: send,
+        initialDraft: "```rust\n" + code + "\n```",
+        onDraftChange: changed,
+        placeholder: "Message",
+        mentionNames: [],
+      }),
+    ),
+  );
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('[data-testid="composer-code"]')!
+      .click(),
+  );
+  expect(host.querySelector("textarea")!.value).toBe(code);
+  expect(host.querySelector("select")).toBeNull();
+  expect(changed).toHaveBeenLastCalledWith(code);
+  expect(document.activeElement).toBe(host.querySelector("textarea"));
+});
+
+it("keeps code paste on the native text path instead of staging clipboard files", async () => {
+  const pasteFiles = vi.fn();
+  await act(async () =>
+    root.render(
+      createElement(Composer, {
+        onSend: send,
+        initialDraft: "```\nx\n```",
+        onPasteFiles: pasteFiles,
+        placeholder: "Message",
+        mentionNames: [],
+      }),
+    ),
+  );
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { files: [new File(["x"], "code.png", { type: "image/png" })] },
+  });
+  await act(async () => host.querySelector("textarea")!.dispatchEvent(event));
+  expect(event.defaultPrevented).toBe(false);
+  expect(pasteFiles).not.toHaveBeenCalled();
+  expect(host.querySelector("textarea")!.value).toBe("x");
+});
