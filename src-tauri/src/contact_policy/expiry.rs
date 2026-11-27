@@ -391,17 +391,24 @@ mod tests {
         // its original failure before any app/store/temp-directory destruction.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tauri::async_runtime::block_on(async {
-                bob.probe_endpoint(([127, 0, 0, 1], alice_port).into())
-                    .await
-                    .unwrap();
+                // Provision real signed discovery just as the other native
+                // contact-policy fixture does. This expiry test does not use
+                // the shared GUI reactor's UDP-send timing as its setup oracle.
+                let announce = |sender: &NodeRuntime, port| {
+                    let proof = sender
+                        .handle()
+                        .signed_announce(sender.display_name(), sender.listen_tcp_port());
+                    assert!(proof.verify());
+                    let bytes = mesh_talk_core::discovery::announce::encode(&proof);
+                    std::net::UdpSocket::bind("127.0.0.1:0")
+                        .unwrap()
+                        .send_to(&bytes, (std::net::Ipv4Addr::LOCALHOST, port))
+                        .unwrap();
+                };
+                announce(&bob, alice_port);
                 {
                     let guard = nodes.0.read().await;
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .probe_endpoint(([127, 0, 0, 1], bob_port).into())
-                        .await
-                        .unwrap();
+                    announce(guard.as_ref().unwrap(), bob_port);
                 }
                 let query =
                     || crate::chat_commands::list_accounts(app.state(), app.state(), app.state());

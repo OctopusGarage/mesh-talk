@@ -5954,9 +5954,20 @@ mod fanout_tests {
                 // Explicit authenticated warmup is not the measured oracle: each
                 // full parent must serve the real session in both directions.
                 for (from, to) in [(0, 1), (1, 0)] {
-                    let mut connection = nodes[from].privacy_dial(addresses[to], &nodes[to].identity.public()).await.unwrap();
-                    let store = nodes[from].sync_store(&nodes[to].identity.public());
-                    super::super::session::request_round(&mut connection, &store, group).await.unwrap();
+                    loop {
+                        let mut connection = nodes[from].privacy_dial(addresses[to], &nodes[to].identity.public()).await.unwrap();
+                        let store = nodes[from].sync_store(&nodes[to].identity.public());
+                        match super::super::session::request_round(&mut connection, &store, group).await {
+                            Ok(_) => break,
+                            Err(super::super::session::SessionError::Store(LogError::StaleCursor)) => {},
+                            Err(error) if super::super::session_pool::retryable_sync_error(&error) => {},
+                            Err(error) => panic!("authenticated duplex warmup failed: {error}"),
+                        }
+                        // Concurrent control publication can invalidate this
+                        // setup stream. Reopen within the original outer budget;
+                        // the later unchanged-source window remains the oracle.
+                        tokio::task::yield_now().await;
+                    }
                 }
                 phase.set("local metadata query readiness");
                 for node in &nodes {
