@@ -2491,21 +2491,38 @@ impl Node {
                         else {
                             return (TransferOutcome::Held, false);
                         };
-                        let result =
-                            super::session::request_sync_turn_paged(&mut channel, &store, control)
-                                .await;
-                        #[cfg(test)]
-                        self.trace_account_client(&peer.public, || match &result {
-                            Ok(outcome) => format!(
-                                "delivery_receipt_followup complete={} limited={} applied={}",
-                                outcome.complete, outcome.limited, outcome.applied
-                            ),
-                            Err(error) => format!("delivery_receipt_followup error={error}"),
-                        });
-                        self.dispatch_received_sync_work(&store);
-                        self.emit_new_messages(control);
-                        if result.is_err() {
-                            return (TransferOutcome::Held, false);
+                        for tick in 0..4 {
+                            let result = super::session::request_sync_turn_paged(
+                                &mut channel,
+                                &store,
+                                control,
+                            )
+                            .await;
+                            #[cfg(test)]
+                            self.trace_account_client(&peer.public, || match &result {
+                                Ok(outcome) => format!(
+                                    "delivery_receipt_followup complete={} limited={} applied={}",
+                                    outcome.complete, outcome.limited, outcome.applied
+                                ),
+                                Err(error) => format!("delivery_receipt_followup error={error}"),
+                            });
+                            self.dispatch_received_sync_work(&store);
+                            self.emit_new_messages(control);
+                            match result {
+                                Err(_) => return (TransferOutcome::Held, false),
+                                Ok(outcome)
+                                    if !outcome.complete
+                                        && !outcome.limited
+                                        && tick + 1 < 4
+                                        && self.delivery_destination_allowed(destination) =>
+                                {
+                                    // Preparation and comparison are separate bounded
+                                    // turns. Preserve the authenticated stream and its
+                                    // original outer deadline while work remains.
+                                    tokio::task::yield_now().await;
+                                }
+                                Ok(_) => break,
+                            }
                         }
                     }
                     if held || !complete || conversation != destination.event.conversation_id {

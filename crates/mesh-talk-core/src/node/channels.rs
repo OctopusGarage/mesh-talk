@@ -6006,6 +6006,16 @@ mod fanout_tests {
                     assert!(!metadata.query_pending);
                     assert_eq!(metadata.announcement.unwrap().content.as_deref(), Some("signed metadata before observation"));
                 }
+                // Warmup may consume the original 15-second public presence
+                // lease under instrumentation. Qualify a fresh real signed
+                // observation before measuring unchanged routing inputs.
+                for (index, node) in nodes.iter().enumerate() {
+                    node.roster.lock().unwrap().update(
+                        &proofs[1 - index],
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                        &node.user_id(),
+                    );
+                }
                 phase.set("control owners idle observation");
                 // Observe retained CURRENT idle state, not queued historical
                 // acknowledgements. Leaving the real wait clears this state.
@@ -6035,6 +6045,14 @@ mod fanout_tests {
                     probe.scans.load(Ordering::SeqCst),
                     probe.dispatches.load(Ordering::SeqCst),
                 )).collect::<Vec<_>>();
+                // The unchanged-input oracle is valid only while the public
+                // route evidence remains live for the entire quiet window.
+                let quiet_end = Instant::now() + Duration::from_secs(3);
+                for node in &nodes {
+                    assert!(node.roster.lock().unwrap().peers().iter().all(|peer|
+                        peer.presence_deadline(Instant::now()).is_some_and(|deadline| deadline > quiet_end)
+                    ), "quiet observation requires live public routes throughout its window");
+                }
                 phase.set("unchanged-source quiet window");
                 for probe in &probes { probe.wake_reasons.lock().unwrap().clear(); }
                 let before = snapshot();
