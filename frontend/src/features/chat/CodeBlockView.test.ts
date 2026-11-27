@@ -36,6 +36,12 @@ it("renders code literally, copies only on request, and bounds long content", as
         .click(),
     );
     expect(host.querySelector("pre")!.className).toContain("max-h-[70vh]");
+    await act(async () =>
+      host
+        .querySelector<HTMLButtonElement>('[data-testid="code-expand"]')!
+        .click(),
+    );
+    expect(host.querySelector("pre")!.className).toContain("max-h-64");
   } finally {
     await act(async () => root.unmount());
     vi.unstubAllGlobals();
@@ -93,3 +99,25 @@ vi.mock("@/lib/sensitiveClipboard", () => ({
   copySensitiveText: vi.fn(async () => true),
 }));
 vi.mock("./DeliveryFooter", () => ({ DeliveryFooter: () => null }));
+
+it("renders short plain code without granting clipboard authority", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const host = document.createElement("div");
+  const root = createRoot(host);
+  try {
+    await act(async () =>
+      root.render(
+        createElement(CodeBlockView, {
+          block: { code: "<literal>", language: "" },
+        }),
+      ),
+    );
+    expect(host.querySelector("code")!.textContent).toBe("<literal>");
+    expect(host.querySelector('[data-testid="code-copy"]')).toBeNull();
+    expect(host.querySelector('[data-testid="code-expand"]')).toBeNull();
+    expect(host.querySelector("span")!.textContent).not.toBe("");
+  } finally {
+    await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+  }
+});
