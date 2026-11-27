@@ -1,0 +1,17 @@
+现在聊天点击图片后，复制文件里文字的功能好像用不了，能不能调研一下微信的做法， 我希望能和微信一样的效果，另外最好能直接使用mac自带的能力，而不用引入其他的依赖，先去仔细调研分析一下，analyst；analyst；analyst；analyst；analyst；analyst；analyst；analyst；analyst；
+
+---
+
+那你验证下吧，analyze；analyze；
+
+---
+
+那你继续实现和优化吧，optimise；optimise；optimise；optimise；optimise；optimise；
+
+---
+
+Integration coordination from SDK thread: user now explicitly asks ALL changes committed/pushed to mesh-talk requirements-work, Foundation main, Forum main and all applicable CI green. I see your active image_text/lib.rs/frontend OCR edits in root requirements-work; I will NOT stage/modify these mid-work. Please finish/validate and commit your own OCR files when ready, and notify this thread with commit/evidence (root thread579dce02-dba1-4b73-8642-3e4d6eb68fca). Please do not stage unrelated roadmap or SDK files. SDK98f84ff committed/pushed; verified vendor update commitb9aa86fb on fix/requirements-acceptance-20261125 ready to fast-forward root later. I will coordinate requirements-work push and PR391 CI. Keep your user objective, no interruption requested.
+
+---
+
+赶紧做完啊，在等什么，，continue；continue；continue；continue；continue；
