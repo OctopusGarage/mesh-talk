@@ -119,9 +119,19 @@ test("downloaded collectors preserve attempt, OS partitions and diagnostic produ
   try {
     for (const os of systems) for (let shard = 1; shard <= chromiumShardCount(os); shard++) {
       await mkdir(join(root, "portable", `chromium-portable-${os}-${shard}-2`), { recursive: true });
+      await writeFile(join(root, "portable", `chromium-portable-${os}-${shard}-2`, "shard.json"), JSON.stringify({ runAttempt: "2" }));
       const blob = join(root, "reports", `playwright-ui-${os}-${shard}-2`, "blob-report");
       await mkdir(blob, { recursive: true });
       await writeFile(join(blob, `report-${shard}.zip`), "fixture");
+    }
+    // A failed-job rerun replaces only Mac shard 3; all other producers remain attempt 1.
+    const { rename } = await import("node:fs/promises");
+    for (const os of systems) for (let shard = 1; shard <= chromiumShardCount(os); shard++) {
+      if (os === "macos-26-intel" && shard === 3) continue;
+      const previous = join(root, "portable", `chromium-portable-${os}-${shard}-2`);
+      await writeFile(join(previous, "shard.json"), JSON.stringify({ runAttempt: "1" }));
+      await rename(previous, join(root, "portable", `chromium-portable-${os}-${shard}-1`));
+      await rename(join(root, "reports", `playwright-ui-${os}-${shard}-2`), join(root, "reports", `playwright-ui-${os}-${shard}-1`));
     }
     const identity = { sourceSha: "a".repeat(40), runId: "17", runAttempt: "2" };
     const collected = [];
@@ -146,7 +156,7 @@ test("downloaded collectors preserve attempt, OS partitions and diagnostic produ
     for (const change of [{ runAttempt: "1" }, { linuxResult: "unknown" }, { linuxResult: "skipped", desktopResult: "skipped", windowsResult: "skipped" }]) {
       await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "negative"), { runAttempt: "2", linuxResult: "success", desktopResult: "success", windowsResult: "success", ...change }, options), /incomplete/);
     }
-    await rm(join(root, "reports", "playwright-ui-macos-26-intel-16-2"), { recursive: true });
+    await rm(join(root, "reports", "playwright-ui-macos-26-intel-16-1"), { recursive: true });
     rendered.length = 0;
     await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "missing"), { runAttempt: "2", linuxResult: "success", desktopResult: "success", windowsResult: "success" }, options));
     assert.deepEqual(rendered, [systems[0], systems[2]], "missing Mac evidence does not suppress available OS diagnostics");
@@ -163,4 +173,18 @@ test("balanced partitions preserve exact complete CLI identities and reject malf
   assert.equal(new Set(union.map(value => value.line)).size, 24);
   for (const report of [{ errors: [{}] }, { suites: [] }, { suites: [{ specs: [fixture.suites[0].specs[0], fixture.suites[0].specs[0]] }] }, { suites: [{ specs: [{ id: "a", file: "sample", title: "ambiguous › title", tests: [{ projectName: "chromium" }] }] }] }]) assert.throws(() => fullCaseInventory(report));
   for (const shard of ["0/8", "9/8", "1/0", "1/25"]) assert.throws(() => balancedCasePartition(fixture, shard));
+});
+
+test("mixed producer attempts retain exact inventory and reject future attempts", async () => {
+  const { validateShardInventory } = await import("../evals/chromium-evidence.mjs");
+  for (const [platform, total] of [["linux", 4], ["darwin", 16], ["win32", 4]]) {
+    const identity = { sourceSha: "a".repeat(40), runId: "17", runAttempt: "2", platform };
+    const manifests = Array.from({ length: total }, (_, i) => ({ schema: 1, ...identity, runAttempt: platform === "darwin" && i === 2 ? "2" : "1", shard: i + 1, total, paths: requiredBrowserPaths("core").filter((_, n) => n % total === i) }));
+    validateShardInventory(manifests, identity);
+    for (const patch of [{runAttempt:"3"}, {sourceSha:"b".repeat(40)}, {runId:"18"}, {shard:2}]) {
+      const bad = structuredClone(manifests); Object.assign(bad[0], patch);
+      assert.throws(() => validateShardInventory(bad, identity));
+    }
+    assert.throws(() => validateShardInventory(manifests.slice(1), identity));
+  }
 });

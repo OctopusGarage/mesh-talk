@@ -96,7 +96,7 @@ test("desktop browser burst waits for Health and WebKit with bounded admission w
   assert.match(job("linux"), /needs: \[scope\]/);
 });
 
-test("HTML reports require all platform-specific current-attempt shards", () => {
+test("HTML reports require all platform-specific same-run shards", () => {
   const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
   const complete = { desktop: "success", platforms };
   assert.equal(renderReports(complete).status, 0);
@@ -108,7 +108,7 @@ test("HTML reports require all platform-specific current-attempt shards", () => 
   const discovery = renderReports({ ...complete, discoveryFailure: true });
   assert.notEqual(discovery.status, 0);
   assert.deepEqual(discovery.rendered, [], "failed layout discovery cannot silently render an incomplete report");
-  assert.notEqual(renderReports({ ...complete, attempt: "2" }).status, 0, "another attempt cannot satisfy current artifacts");
+  assert.equal(renderReports({ ...complete, attempt: "2" }).status, 0, "earlier successful same-run producers remain available");
 });
 
 test("HTML presentation never substitutes for successful producer acceptance", () => {
@@ -238,7 +238,8 @@ test("HTML reports render admitted producers and distinguish skipped desktop fro
     for (const os of platforms) assert.notEqual(renderReports({ desktop, platforms, omit: `${os}-3` }).status, 0, `${os} missing shard`);
   }
   assert.notEqual(renderReports({ renderExit: "37" }).status, 0, "renderer failure remains a presentation failure");
-  assert.notEqual(renderReports({ attempt: "2" }).status, 0, "previous-attempt blobs cannot replace this attempt");
+  assert.equal(renderReports({ attempt: "2" }).status, 0, "same-run successful producers survive a partial rerun");
+  assert.notEqual(renderReports({ attempt: "4" }).status, 0, "future-attempt blobs are rejected");
   for (const result of ["", "unknown", "in_progress"]) {
     assert.notEqual(renderReports({ linux: result }).status, 0, `unknown Linux conclusion ${result}`);
     assert.notEqual(renderReports({ desktop: result, platforms }).status, 0, `unknown desktop conclusion ${result}`);

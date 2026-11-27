@@ -166,7 +166,7 @@ jobs:
       - uses: actions/download-artifact@v8
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
-          pattern: chromium-portable-*-${{ github.run_attempt }}
+          pattern: chromium-portable-*
           path: target/chromium-portable
       - name: Validate every OS and the complete portable inventory
         if: ${{ steps.scope.outputs.full == 'true' }}
@@ -202,7 +202,7 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v8
         with:
-          pattern: playwright-ui-*-${{ github.run_attempt }}
+          pattern: playwright-ui-*
           path: target/ui-reports
       - name: Render each OS report from its raw blobs
         env:
