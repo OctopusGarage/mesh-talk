@@ -955,3 +955,23 @@ mod admission_tests {
         ));
     }
 }
+
+impl<E: std::fmt::Display> std::fmt::Display for RemoteError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exchange(e) => write!(f, "remote exchange failed: {e}"),
+            Self::InvalidFrame => f.write_str("invalid remote summary frame"),
+            Self::Invalidated => {
+                f.write_str("remote snapshot or authorization invalidated; restart discovery")
+            }
+        }
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for RemoteError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Exchange(e) => Some(e),
+            _ => None,
+        }
+    }
+}

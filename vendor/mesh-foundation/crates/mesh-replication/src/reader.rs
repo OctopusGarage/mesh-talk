@@ -172,3 +172,35 @@ pub async fn prepare<R: RangeRead + ?Sized, Q>(
         },
     })
 }
+
+impl<R: std::fmt::Display, Q: std::fmt::Display> std::fmt::Display for PrepareError<R, Q> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLimits => f.write_str("invalid reader limits"),
+            Self::Read(e) => write!(f, "local read failed: {e}"),
+            Self::Query(e) => write!(f, "remote query failed: {e}"),
+            Self::Invalidated => {
+                f.write_str("reader snapshot or authorization invalidated; restart discovery")
+            }
+            Self::InvalidFrame => f.write_str("invalid remote summary frame"),
+            Self::RecordAllowance {
+                required,
+                allowance,
+            } => write!(
+                f,
+                "leaf batch requires {required} records but allowance is {allowance}; increase the record allowance"
+            ),
+        }
+    }
+}
+impl<R: std::error::Error + 'static, Q: std::error::Error + 'static> std::error::Error
+    for PrepareError<R, Q>
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(e) => Some(e),
+            Self::Query(e) => Some(e),
+            _ => None,
+        }
+    }
+}

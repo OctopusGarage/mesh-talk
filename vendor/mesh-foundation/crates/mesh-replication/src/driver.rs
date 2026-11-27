@@ -244,3 +244,57 @@ impl SyncDriver {
         }
     }
 }
+
+impl<F: std::fmt::Display> std::fmt::Display for FetchError<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exchange(e) => write!(f, "body exchange failed: {e}"),
+            Self::Invalidated => {
+                f.write_str("body snapshot or authorization invalidated; restart synchronization")
+            }
+        }
+    }
+}
+impl<F: std::error::Error + 'static> std::error::Error for FetchError<F> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Exchange(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+impl<Q: std::fmt::Display, F: std::fmt::Display, C: std::fmt::Display> std::fmt::Display
+    for DriverError<Q, F, C>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLimits => f.write_str("invalid synchronization limits"),
+            Self::Invalidated { progress } => write!(
+                f,
+                "synchronization invalidated after {} commits; restart synchronization",
+                progress.committed
+            ),
+            Self::Query { progress, error } => write!(
+                f,
+                "synchronization query failed after {} commits: {error}",
+                progress.committed
+            ),
+            Self::Pull { progress, error } => write!(
+                f,
+                "synchronization pull failed after {} commits: {error}",
+                progress.committed
+            ),
+        }
+    }
+}
+impl<Q: std::error::Error + 'static, F: std::error::Error + 'static, C: std::error::Error + 'static>
+    std::error::Error for DriverError<Q, F, C>
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Query { error, .. } => Some(error),
+            Self::Pull { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+}

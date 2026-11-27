@@ -1,6 +1,18 @@
-//! Bounded exact inventory comparison for an already authorized event range.
+//! Bounded inventory, indexed discovery and opaque-body retrieval for authorized scopes.
 //! A digest or inventory match does not grant read, write, or custody authority.
 
+//! # Choose the operation
+//!
+//! * Small complete sets: [`CompleteInventory`].
+//! * In-memory indexed body sync: [`driver::SyncDriver`].
+//! * Persistent snapshot discovery: [`reader::prepare`], then host body acceptance.
+//! * One selected body batch without acceptance: [`pull::fetch_records`].
+//! * Recent/older navigation: [`history::fetch_page`].
+//!
+//! The host owns authorization, durable transactions and scheduling. Successful
+//! discovery is not body durability. Development examples: `bounded_sync`,
+//! `sqlite_sync`, and `persistent_peer` (feature `mesh-connect`).
+//!
 //! # Example
 //!
 //! ```
