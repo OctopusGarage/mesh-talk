@@ -5623,7 +5623,10 @@ mod diagnostic_tests {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             }
-            held
+            // A signed receipt can retire this exact destination before the
+            // concurrent storage-confirmation branch returns. Both outcomes
+            // represent progress; custody alone still cannot mark Delivered.
+            held || sending.delivery_status(logical) == Some(super::DeliveryStatus::Delivered)
         });
         let healthy_task = task.id();
         owners.insert(healthy.clone(), task);
