@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, Monitor } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { SafetyNumber } from "@/components/identity";
+import type { SafetyNumber as SafetyNumberInfo } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -129,6 +131,7 @@ function AccountDevices({
             <div className="select-text break-all font-mono text-xs text-muted-foreground">
               {deviceId}
             </div>
+            <OwnSafetyNumber deviceId={deviceId} />
           </li>
           {siblings.map((device) => {
             const peer = peers.find(
@@ -178,5 +181,56 @@ function AccountDevices({
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** Mounted inside the account/runtime-keyed disclosure; no idle IPC or retained cache. */
+function OwnSafetyNumber({ deviceId }: { deviceId: string }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState<SafetyNumberInfo | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setValue(null);
+    setFailed(false);
+    void chat.safetyNumber(deviceId).then(
+      (result) => {
+        if (active) setValue(result);
+      },
+      () => {
+        if (active) setFailed(true);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [open, deviceId]);
+  return (
+    <div className="mt-2 space-y-2">
+      <Button
+        variant="outline"
+        size="sm"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        {t("personal.ownSafetyNumber")}
+      </Button>
+      {open && (
+        <>
+          <p className="text-xs text-muted-foreground">
+            {t("personal.ownSafetyHint")}
+          </p>
+          {value ? (
+            <SafetyNumber value={value.grouped} words={value.words} />
+          ) : (
+            <p role="status">
+              {t(failed ? "personal.devicesFailed" : "personal.devicesLoading")}
+            </p>
+          )}
+        </>
+      )}
+    </div>
   );
 }

@@ -1314,6 +1314,8 @@
     "viewNamed": "睇{{name}}嘅資料"
   },
   "personal": {
+    "ownSafetyNumber": "睇我嘅安全碼",
+    "ownSafetyHint": "呢個係本裝置嘅安全碼。請叫聯絡人核對驗證畫面入面嘅完整指紋。詞組只供輔助核對；其他已連結裝置有唔同指紋。",
     "title": "傳訊息畀自己",
     "description": "喺你嘅裝置之間同步筆記同檔案",
     "saved": "已儲存喺呢部裝置",

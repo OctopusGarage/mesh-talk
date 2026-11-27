@@ -1314,6 +1314,8 @@
     "viewNamed": "Ver perfil de {{name}}"
   },
   "personal": {
+    "ownSafetyNumber": "Ver mi número de seguridad",
+    "ownSafetyHint": "Número de seguridad de este dispositivo. Compara la huella completa con tu contacto. Las palabras son solo una ayuda; otros dispositivos tienen huellas diferentes.",
     "title": "Enviarte mensajes",
     "description": "Notas y archivos entre tus dispositivos",
     "saved": "Guardado en este dispositivo",

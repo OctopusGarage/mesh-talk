@@ -1314,6 +1314,8 @@
     "viewNamed": "{{name}} 님의 프로필 보기"
   },
   "personal": {
+    "ownSafetyNumber": "내 안전 번호 보기",
+    "ownSafetyHint": "이 기기의 안전 번호입니다. 연락처와 전체 지문을 비교하세요. 단어는 보조 수단이며 다른 기기의 지문은 다릅니다.",
     "title": "나에게 보내기",
     "description": "내 기기에서 함께 쓰는 메모와 파일",
     "saved": "이 기기에 저장됨",

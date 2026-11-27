@@ -243,3 +243,39 @@ it("pure sync status refreshes device status without rereading hostnames", async
   expect(chat.getDeviceHostnames).toHaveBeenCalledTimes(names + 2);
   expect(chat.getDeviceSyncStatus).toHaveBeenCalledTimes(statuses + 3);
 });
+
+it("loads this device safety number only on demand", async () => {
+  const safety = vi
+    .spyOn(chat, "safetyNumber")
+    .mockResolvedValue({ grouped: "this- device", words: ["amber", "basil"] });
+  await render();
+  const panel = await open();
+  expect(safety).not.toHaveBeenCalled();
+  const trigger = Array.from(panel.querySelectorAll("button")).find(
+    (b) => b.textContent === "View my safety number",
+  );
+  expect(trigger).toBeDefined();
+  await act(async () => trigger!.click());
+  expect(safety).toHaveBeenCalledWith("this-device");
+  expect(panel.textContent).toContain("this- device");
+  expect(panel.textContent).toContain("amber");
+  expect(panel.textContent).toContain("basil");
+});
+
+it("can retry a failed safety-number read by reopening the disclosure", async () => {
+  const safety = vi
+    .spyOn(chat, "safetyNumber")
+    .mockRejectedValueOnce(new Error("unavailable"))
+    .mockResolvedValueOnce({ grouped: "recovered", words: ["amber"] });
+  await render();
+  const panel = await open();
+  const trigger = Array.from(panel.querySelectorAll("button")).find(
+    (b) => b.textContent === "View my safety number",
+  )!;
+  await act(async () => trigger.click());
+  expect(panel.querySelector('[data-testid="safety-number"]')).toBeNull();
+  await act(async () => trigger.click());
+  await act(async () => trigger.click());
+  expect(safety).toHaveBeenCalledTimes(2);
+  expect(panel.textContent).toContain("recovered");
+});

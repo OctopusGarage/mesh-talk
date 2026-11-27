@@ -1314,6 +1314,8 @@
     "viewNamed": "查看{{name}}的资料"
   },
   "personal": {
+    "ownSafetyNumber": "查看我的安全码",
+    "ownSafetyHint": "这是本设备的安全码。请让联系人核对其验证界面中的完整指纹。词组仅供辅助核对；其他关联设备具有不同指纹。",
     "title": "给自己发消息",
     "description": "在你的设备之间同步笔记和文件",
     "saved": "已保存在此设备上",

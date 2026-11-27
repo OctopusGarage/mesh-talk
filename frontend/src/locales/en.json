@@ -1314,6 +1314,8 @@
     "viewNamed": "View {{name}}'s profile"
   },
   "personal": {
+    "ownSafetyNumber": "View my safety number",
+    "ownSafetyHint": "This device’s safety number. Ask your contact to compare the full fingerprint shown when verifying you. Words are only a quick aid; other linked devices have different fingerprints.",
     "title": "Message Yourself",
     "description": "Notes and files across your devices",
     "saved": "Saved on this device",

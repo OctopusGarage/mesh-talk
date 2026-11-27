@@ -1314,6 +1314,8 @@
     "viewNamed": "查看{{name}}的資料"
   },
   "personal": {
+    "ownSafetyNumber": "查看我的安全碼",
+    "ownSafetyHint": "這是本裝置的安全碼。請讓聯絡人核對其驗證介面中的完整指紋。詞組僅供輔助核對；其他關聯裝置具有不同指紋。",
     "title": "傳訊息給自己",
     "description": "在你的裝置之間同步筆記和檔案",
     "saved": "已儲存在此裝置上",

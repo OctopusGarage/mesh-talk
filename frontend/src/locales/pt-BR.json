@@ -1314,6 +1314,8 @@
     "viewNamed": "Ver perfil de {{name}}"
   },
   "personal": {
+    "ownSafetyNumber": "Ver meu número de segurança",
+    "ownSafetyHint": "Número de segurança deste dispositivo. Compare a impressão digital completa com seu contato. As palavras são apenas um auxílio; outros dispositivos têm impressões diferentes.",
     "title": "Envie mensagens para você",
     "description": "Notas e arquivos entre seus dispositivos",
     "saved": "Salvo neste dispositivo",

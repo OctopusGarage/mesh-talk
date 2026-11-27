@@ -2041,7 +2041,10 @@
         "frontend/src/lib/api/chat.ts",
         "frontend/e2e/personal-messages.spec.ts"
       ],
-      "frontend": ["src/features/chat/PersonalDevices.test.ts"],
+      "frontend": [
+        "src/features/chat/PersonalDevices.test.ts",
+        "src/features/chat/VerifyContactDialog.test.ts"
+      ],
       "escalation": [
         "Check hostname wrapping and local-device labeling in the device popover on native linked devices; browser mocks do not prove private transport."
       ],

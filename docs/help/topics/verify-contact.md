@@ -30,3 +30,9 @@ for the distinction between presentation and your verification decision.
 ## Further reference
 
 [Account and device identity](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/ARCHITECTURE.md)
+
+## Find your own safety number
+
+Open **Personal messages**, expand **Devices**, then choose **View my safety number** under **This device**. Share the full grouped fingerprint over a trusted channel so your contact can compare it with the device fingerprint in their verification dialog. The words are a quick aid, not a substitute for comparing the full fingerprint. Each linked device has its own fingerprint; the account ID is different.
+
+The number is loaded only when expanded. If loading fails, close and reopen the safety-number disclosure to retry.
