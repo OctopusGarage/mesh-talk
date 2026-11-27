@@ -1,0 +1,29 @@
+分析一下，为什么windows上的ubuntu上的mesh talk 的联系人列表会看不到haaland的，而mac2015上的mesh talk 的联系人列表也看不到ducan和stella的，但明明peer上的 都有的，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+分析一下，为什么ubuntu（在windows10上运行的）上的mesh talk 的联系人列表会看不到haaland的，而mac2015上的mesh talk 的联系人列表也看不到ducan和stella的，但明明peer上的 都有的，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+那这个规则实现错了，正常的实现是，离线的情况，在线肯定要显示啊，continue；continue；continue；continue；continue；continue；
+
+---
+
+离线后应该重新计算24小时过期，continue；continue；continue；continue；continue；
+
+---
+
+而且不是过滤，是删除掉这个离线过期的联系人信息，不要浪费本地空间，continue；continue；continue；continue；continue；
+
+---
+
+注意是从来没有聊天数据的情况下才删除，continue；continue；continue；continue；
+
+---
+
+注意复用目前的定时器之类的，不要另外起单独的线程去做，保持高性能，这个删除操作本身就不需要很精确，，continue；continue；continue；continue；，continue；continue；continue；continue；
+
+---
+
+修复完成后提交到requirements-work分支就行，continue；，continue；，continue；，continue；
