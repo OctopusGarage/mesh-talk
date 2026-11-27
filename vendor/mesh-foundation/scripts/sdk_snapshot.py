@@ -8,7 +8,7 @@ import re
 import subprocess
 import tempfile
 
-SELECTED = ('Cargo.toml', 'README.md', 'LICENSE', 'crates', 'scripts/sdk_snapshot.py')
+SELECTED = ('.gitattributes', 'Cargo.toml', 'README.md', 'LICENSE', 'crates', 'scripts/sdk_snapshot.py')
 MANIFEST = 'SNAPSHOT.json'
 
 

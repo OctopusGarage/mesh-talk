@@ -1,7 +1,8 @@
 {
   "format": 1,
-  "revision": "6083cf5cc971b77b2f6b90117765d1ba39e30e2d",
+  "revision": "4035fb861e1fa18e84a38991f0666074b1a4f943",
   "files": {
+    ".gitattributes": "c25bcb8f0cf0d1c04577b13169af840123e4e088d87ddae83739cff1a147d8c9",
     "Cargo.toml": "0f6359a5c019e378439101ce2cb00f97bf9e699f7b1d49e193b0909fc20e5bd3",
     "LICENSE": "f4ebbdafca2f695b5339eb7b6427c85df9d7667c90d4f9dacb270e6270cd8c4d",
     "README.md": "b26983f1dc20a0a12ca0e2f2d81b7faba61f20bbf8d061f72ccd57972438aeb0",
@@ -94,6 +95,6 @@
     "crates/mesh-storage/src/lib.rs": "92038c08f6988e165136f5ac5371fa364dc0ed78170748e3af77a6e4cc5ed79e",
     "crates/mesh-storage/src/record_log.rs": "2db8e6f2662154d3317383f38982d46066c8e163584797308b015932c885ef4f",
     "crates/mesh-storage/src/record_log_visitor_tests.rs": "51d58774d9b46aa7b37e2612b662047732da0762960bed90644d64cdbf73f9d5",
-    "scripts/sdk_snapshot.py": "3063e21b4ba74913be99db1c8f7d9aee53c7658c6ee49b6334da45d9bc133838"
+    "scripts/sdk_snapshot.py": "658bceebc0e4b3f902c647afbc1abd1a86119be3c0317b32d3adf3f6fa2de22c"
   }
 }
