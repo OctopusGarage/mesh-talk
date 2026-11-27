@@ -3397,6 +3397,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesh-foundation-identity"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "bincode",
+ "ed25519-dalek",
+ "hex",
+ "rand_core 0.6.4",
+ "serde",
+ "sha2 0.10.9",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "mesh-foundation-mailbox"
 version = "0.1.0-alpha.2"
 dependencies = [
@@ -3577,6 +3591,7 @@ dependencies = [
  "hkdf",
  "log",
  "mesh-foundation-connect",
+ "mesh-foundation-identity",
  "mesh-foundation-mailbox",
  "mesh-foundation-replication",
  "mesh-foundation-storage",

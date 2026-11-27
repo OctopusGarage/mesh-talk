@@ -9,6 +9,7 @@ publish = false
 test-observability = []
 
 [dependencies]
+mesh-identity = { package = "mesh-foundation-identity", path = "../../vendor/mesh-foundation/crates/mesh-identity" }
 mesh-mailbox = { package = "mesh-foundation-mailbox", path = "../../vendor/mesh-foundation/crates/mesh-mailbox", default-features = false }
 mesh-replication = { package = "mesh-foundation-replication", path = "../../vendor/mesh-foundation/crates/mesh-replication" }
 mesh-storage = { package = "mesh-foundation-storage", path = "../../vendor/mesh-foundation/crates/mesh-storage" }
