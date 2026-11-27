@@ -1,0 +1,9 @@
+现在聊天点击图片后，复制文件里文字的功能好像用不了，能不能调研一下微信的做法， 我希望能和微信一样的效果，另外最好能直接使用mac自带的能力，而不用引入其他的依赖，先去仔细调研分析一下，analyst；analyst；analyst；analyst；analyst；analyst；analyst；analyst；analyst；
+
+---
+
+那你验证下吧，analyze；analyze；
+
+---
+
+那你继续实现和优化吧，optimise；optimise；optimise；optimise；optimise；optimise；
