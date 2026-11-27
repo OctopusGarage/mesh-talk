@@ -7,8 +7,10 @@ part of Mesh Foundation's generic replication or transport interfaces.
 
 - `legacy_event`, `legacy_wire`, `legacy_round`: signed chat event vocabulary and
   existing bounded synchronization protocol.
-- `device` and `account`: existing Mesh Talk device/account identifiers and
-  certificate signing domains.
+- `device` and `account`: existing Mesh Talk device/account identifiers,
+  certificate signing domains and account creation metadata. They delegate key
+  material, generation, signing and strict verification to Foundation; they do
+  not call its neutral ID/certificate profile for historical data.
 - `discovery`: existing signed announcements, account certificates and relay role.
 - `mailbox`: existing recipient-pair envelopes and compatible delta/spool protocol.
 

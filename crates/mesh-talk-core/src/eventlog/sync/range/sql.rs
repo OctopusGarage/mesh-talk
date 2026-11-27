@@ -57,27 +57,14 @@ impl SqlIndex {
             return Ok(index::empty());
         };
         let last = edge("DESC")?.ok_or(LogError::StaleCursor)?;
-        let depth = if first == last {
-            256
-        } else {
-            (0..256)
-                .find(|bit| (first[bit / 8] ^ last[bit / 8]) & (128 >> (bit % 8)) != 0)
-                .ok_or(LogError::StaleCursor)? as u16
-        };
-        let base = Prefix::new(depth, first).ok_or(LogError::StaleCursor)?;
+        let base = Prefix::common(first, last);
+        let depth = base.bits();
         let (count,digest):(i64,Vec<u8>)=c.query_row("SELECT count,digest FROM participant_work.participant_sync_range_nodes WHERE view=?1 AND lane=?2 AND bits=?3 AND key=?4",params![self.view.as_slice(),self.lane.as_slice(),depth,base.key().as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        let mut summary = Summary {
+        let summary = Summary {
             count: usize::try_from(count).map_err(|_| LogError::StaleCursor)?,
             digest: digest.try_into().map_err(|_| LogError::StaleCursor)?,
         };
-        for bits in (p.bits()..depth).rev() {
-            summary = if first[usize::from(bits) / 8] & (128 >> (bits % 8)) != 0 {
-                index::combine(bits, index::empty(), summary)
-            } else {
-                index::combine(bits, summary, index::empty())
-            };
-        }
-        Ok(summary)
+        summary.lift(base, p).ok_or(LogError::StaleCursor)
     }
     /// Reuse a failed builder's namespace only after bounded retirement. A
     /// partial clear is never exposed as an authorized summary.
@@ -110,12 +97,11 @@ impl SqlIndex {
             for id in ids {
                 tx.execute("INSERT INTO participant_work.participant_sync_range_ids(view,lane,id) VALUES(?1,?2,?3)",params![self.view.as_slice(),self.lane.as_slice(),id.as_slice()])?;
                 let edge=|cmp:&str,order:&str|->Result<Option<[u8;32]>,LogError>{let bytes:Option<Vec<u8>>=tx.query_row(&format!("SELECT id FROM participant_work.participant_sync_range_ids WHERE view=?1 AND lane=?2 AND id {cmp} ?3 ORDER BY id {order} LIMIT 1"),params![self.view.as_slice(),self.lane.as_slice(),id.as_slice()],|r|r.get(0)).optional()?;bytes.map(|v|v.try_into().map_err(|_|LogError::StaleCursor)).transpose()};
-                let common=|a:[u8;32],b:[u8;32]|->u16{(0..256).find(|bit|(a[bit/8]^b[bit/8])&(128>>(bit%8))!=0).unwrap_or(256) as u16};
                 let neighbors=[edge("<","DESC")?,edge(">","ASC")?];
-                let closest=neighbors.into_iter().flatten().map(|n|common(*id,n)).max();
+                let closest=neighbors.into_iter().flatten().map(|n|Prefix::common(*id,n).bits()).max();
                 let first:[u8;32]=tx.query_row("SELECT id FROM participant_work.participant_sync_range_ids WHERE view=?1 AND lane=?2 ORDER BY id LIMIT 1",params![self.view.as_slice(),self.lane.as_slice()],|r|r.get::<_,Vec<u8>>(0))?.try_into().map_err(|_|LogError::StaleCursor)?;
                 let last:[u8;32]=tx.query_row("SELECT id FROM participant_work.participant_sync_range_ids WHERE view=?1 AND lane=?2 ORDER BY id DESC LIMIT 1",params![self.view.as_slice(),self.lane.as_slice()],|r|r.get::<_,Vec<u8>>(0))?.try_into().map_err(|_|LogError::StaleCursor)?;
-                let shared=common(first,last);
+                let shared=Prefix::common(first,last).bits();
                 let mut carry=Summary::leaf(*id);
                 self.put(tx,Prefix::new(256,*id).unwrap(),carry)?;
                 for bits in (0..256).rev(){

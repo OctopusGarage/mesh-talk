@@ -4,9 +4,8 @@
 //! stable cross-device handle. This module owns cryptographic identity and
 //! certificates; persistence and synchronization belong to their respective owners.
 
-use crate::{device::DeviceIdentity, random_signing_key};
+use crate::device::DeviceIdentity;
 use bincode::Options;
-use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -82,14 +81,14 @@ impl AccountPublic {
 /// A user's account secret and immutable creation metadata, persisted together
 /// in the encrypted account keystore and shared across linked devices.
 pub struct Account {
-    signing_key: SigningKey,
+    signing_key: mesh_identity::account::Account,
     created_at_ms: Option<u64>,
 }
 
 impl Account {
     pub fn generate() -> Self {
         Account {
-            signing_key: random_signing_key(),
+            signing_key: mesh_identity::account::Account::generate(),
             created_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()
@@ -100,7 +99,7 @@ impl Account {
 
     pub fn from_secret_bytes(ed25519_secret: [u8; 32]) -> Self {
         Account {
-            signing_key: SigningKey::from_bytes(&ed25519_secret),
+            signing_key: mesh_identity::account::Account::from_secret_bytes(ed25519_secret),
             created_at_ms: None,
         }
     }
@@ -115,7 +114,7 @@ impl Account {
             return None;
         }
         Some(Self {
-            signing_key: SigningKey::from_bytes(&ed25519_secret),
+            signing_key: mesh_identity::account::Account::from_secret_bytes(ed25519_secret),
             created_at_ms,
         })
     }
@@ -125,12 +124,12 @@ impl Account {
     }
 
     pub fn secret_bytes(&self) -> [u8; 32] {
-        self.signing_key.to_bytes()
+        self.signing_key.secret_bytes()
     }
 
     pub fn public(&self) -> AccountPublic {
         AccountPublic {
-            ed25519_pub: self.signing_key.verifying_key().to_bytes(),
+            ed25519_pub: self.signing_key.public().ed25519_pub,
         }
     }
 
@@ -142,14 +141,14 @@ impl Account {
     /// Used to authenticate account-level artifacts like the profile/avatar so a peer
     /// device cannot forge another account's profile.
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
-        self.signing_key.sign(message).to_bytes()
+        self.signing_key.sign(message)
     }
 
     /// Certify a device: sign the device's Ed25519 public key with the account key.
     pub fn certify(&self, device_ed25519_pub: &[u8; 32]) -> DeviceCertificate {
         let account_pub = self.public().ed25519_pub;
         let msg = cert_message(&account_pub, device_ed25519_pub);
-        let signature = self.signing_key.sign(&msg).to_bytes();
+        let signature = self.signing_key.sign(&msg);
         DeviceCertificate {
             account_ed25519_pub: account_pub,
             device_ed25519_pub: *device_ed25519_pub,

@@ -251,3 +251,33 @@ mod tests {
         assert_send_sync::<DeviceIdentity>();
     }
 }
+
+#[cfg(test)]
+mod strict_signature_tests {
+    use super::DeviceIdentity;
+    #[test]
+    fn noncanonical_scalar_and_small_order_identity_are_rejected() {
+        let device = DeviceIdentity::from_secret_bytes([3; 32], [2; 32]);
+        let message = b"strict verifier contract";
+        let mut signature = device.sign(message);
+        assert!(DeviceIdentity::verify(
+            &device.public().ed25519_pub,
+            message,
+            &signature
+        ));
+        signature[32..].copy_from_slice(
+            &hex::decode("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010")
+                .unwrap(),
+        );
+        assert!(!DeviceIdentity::verify(
+            &device.public().ed25519_pub,
+            message,
+            &signature
+        ));
+        let mut weak_key = [0; 32];
+        weak_key[0] = 1;
+        let mut weak_signature = [0; 64];
+        weak_signature[0] = 1;
+        assert!(!DeviceIdentity::verify(&weak_key, message, &weak_signature));
+    }
+}

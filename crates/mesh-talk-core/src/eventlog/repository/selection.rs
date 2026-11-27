@@ -985,6 +985,17 @@ mod sql_range_tests {
                 memory.summary(Prefix::root())
             );
         }
+        mesh_replication::test_support::check_reader(
+            &sql,
+            &memory,
+            &[
+                Prefix::root(),
+                Prefix::new(128, ids[0]).unwrap(),
+                Prefix::new(256, ids[0]).unwrap(),
+            ],
+            &[ids[0], [255; 32]],
+        )
+        .unwrap();
         let prior = sql.summary(Prefix::root()).unwrap();
         let mut fresh = [9; 32];
         fresh[0] = 7;
@@ -1281,5 +1292,104 @@ mod cache_charge_tests {
             views, 1,
             "one-row cleanup budget leaves the view for the next turn"
         );
+    }
+}
+
+#[cfg(test)]
+mod sdk_reader_contract_tests {
+    use super::super::tests::{database, event};
+    use super::*;
+    use crate::eventlog::sync::{
+        network::NetworkSyncStore,
+        range::index::{RangeIndex, RangeRead},
+    };
+    use mesh_replication::{
+        range::{Checkpoint, Prefix, Progress},
+        reader::{self, PrepareError, ReaderLimits, ReaderSource},
+    };
+
+    #[tokio::test]
+    async fn sdk_prepared_reader_uses_sql_snapshot_and_atomic_host_callback() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository =
+            EventRepository::new(database(&directory), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let signer = crate::identity::device::DeviceIdentity::generate();
+        let first = event(&signer, 1, vec![], 1, EventKind::Message);
+        let second = event(&signer, 2, vec![first.id], 2, EventKind::Message);
+        repository.append(&first).unwrap();
+        let view = repository.open_view(&first.conversation_id).unwrap();
+        let selection = repository.begin_selection(&view, 1, 512).unwrap().unwrap();
+        let mut local = selection.range_index(0);
+        local.insert_page(&[*first.id.as_bytes()]).unwrap();
+        let mut remote = RangeIndex::default();
+        remote.insert(*first.id.as_bytes());
+        remote.insert(*second.id.as_bytes());
+        let source = ReaderSource {
+            scope: *first.conversation_id.as_bytes(),
+            authority: [2; 32],
+            view: [3; 32],
+            revision: remote.revision(),
+        };
+        let checkpoint =
+            Checkpoint::for_reader(source.scope, source.authority, &local, source.revision)
+                .unwrap();
+        let prepared = reader::prepare(
+            &checkpoint,
+            &local,
+            source,
+            ReaderLimits::default(),
+            || true,
+            async |p| Ok::<_, ()>(remote.frame(source.scope, source.view, p)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.missing(), &[*second.id.as_bytes()]);
+        let allowed = std::cell::Cell::new(false);
+        let commit = || {
+            repository.database.transaction(|tx| {
+                assert!(!tx.is_autocommit());
+                if !allowed.get() {
+                    return Err(LogError::StaleCursor);
+                }
+                repository.append_on(tx, &second)?;
+                Ok(())
+            })
+        };
+        assert!(prepared.commit(|_| commit()).is_err());
+        assert!(repository.get(&second.id).unwrap().is_none());
+        assert_eq!(checkpoint.next_query(), Some(Prefix::root()));
+        allowed.set(true);
+        let prepared = reader::prepare(
+            &checkpoint,
+            &local,
+            source,
+            ReaderLimits::default(),
+            || true,
+            async |p| Ok::<_, ()>(remote.frame(source.scope, source.view, p)),
+        )
+        .await
+        .unwrap();
+        let (next, difference) = prepared.commit(|_| commit()).unwrap();
+        assert_eq!(difference.progress, Progress::Complete);
+        assert_eq!(repository.get(&second.id).unwrap(), Some(second));
+        assert_eq!(
+            local.summary(Prefix::root()).unwrap().count,
+            1,
+            "the selected index retains its finite cut"
+        );
+        drop(selection);
+        assert!(matches!(
+            reader::prepare(
+                &next,
+                &local,
+                source,
+                ReaderLimits::default(),
+                || true,
+                async |_| panic!("retired SQL selection cannot query")
+            )
+            .await,
+            Err(PrepareError::<LogError, ()>::Read(LogError::StaleCursor))
+        ));
     }
 }

@@ -2,22 +2,8 @@
 //! self-certifying device ID derived from the signing public key. The historical
 //! `user_id()` spelling does not refer to a local sign-in UUID or account ID.
 
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
-
-use super::random_signing_key;
-
-#[cfg(test)]
-thread_local! {
-    static PUBLIC_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-fn derive_x_public(secret: &StaticSecret) -> [u8; 32] {
-    #[cfg(test)]
-    PUBLIC_DERIVATIONS.with(|calls| calls.set(calls.get() + 1));
-    X25519Public::from(secret).to_bytes()
-}
 
 /// The public half of a device identity — safe to share on the network.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,71 +32,58 @@ impl PublicIdentity {
 
 /// A device's secret identity. Hold in memory only; persist via `keystore`.
 pub struct DeviceIdentity {
-    signing_key: SigningKey,
-    dh_secret: StaticSecret,
-    public: PublicIdentity,
+    inner: mesh_identity::device::DeviceIdentity,
 }
 
 impl DeviceIdentity {
-    /// Generate a fresh identity from the OS CSPRNG.
     pub fn generate() -> Self {
-        Self::from_keys(random_signing_key(), StaticSecret::random())
-    }
-
-    /// Reconstruct from raw secret-key bytes (used by the keystore on load).
-    pub fn from_secret_bytes(ed25519_secret: [u8; 32], x25519_secret: [u8; 32]) -> Self {
-        let signing_key = SigningKey::from_bytes(&ed25519_secret);
-        let dh_secret = StaticSecret::from(x25519_secret);
-        Self::from_keys(signing_key, dh_secret)
-    }
-
-    fn from_keys(signing_key: SigningKey, dh_secret: StaticSecret) -> Self {
-        let public = PublicIdentity {
-            ed25519_pub: signing_key.verifying_key().to_bytes(),
-            x25519_pub: derive_x_public(&dh_secret),
-        };
         Self {
-            signing_key,
-            dh_secret,
-            public,
+            inner: mesh_identity::device::DeviceIdentity::generate(),
         }
     }
 
-    /// The two 32-byte secret scalars, for sealing into the keystore.
+    pub fn from_secret_bytes(ed25519_secret: [u8; 32], x25519_secret: [u8; 32]) -> Self {
+        Self {
+            inner: mesh_identity::device::DeviceIdentity::from_secret_bytes(
+                ed25519_secret,
+                x25519_secret,
+            ),
+        }
+    }
+
     pub fn secret_bytes(&self) -> ([u8; 32], [u8; 32]) {
-        (self.signing_key.to_bytes(), self.dh_secret.to_bytes())
+        self.inner.secret_bytes()
     }
 
     /// The shareable public identity.
     pub fn public(&self) -> PublicIdentity {
-        self.public.clone()
+        let public = self.inner.public();
+        PublicIdentity {
+            ed25519_pub: public.ed25519_pub,
+            x25519_pub: public.x25519_pub,
+        }
     }
 
     pub fn user_id(&self) -> String {
-        self.public.user_id()
+        self.public().user_id()
     }
 
     /// Sign a message with the Ed25519 signing key.
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
-        self.signing_key.sign(message).to_bytes()
+        self.inner.sign(message)
     }
 
     /// Verify a signature against a raw Ed25519 public key.
     pub fn verify(ed25519_pub: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
-        let Ok(vk) = VerifyingKey::from_bytes(ed25519_pub) else {
-            return false;
-        };
-        // verify_strict rejects non-canonical / small-order signatures (malleability), so
-        // a signature can't be massaged into a different valid form for the same message.
-        // All signatures we produce via `sign` are canonical, so this never rejects ours.
-        vk.verify_strict(message, &ed25519_dalek::Signature::from_bytes(signature))
-            .is_ok()
+        mesh_identity::device::DeviceIdentity::verify(ed25519_pub, message, signature)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 
     #[test]
     fn generated_identity_signs_and_exposes_matching_public() {
@@ -197,25 +170,15 @@ mod tests {
             &signature
         ));
         let other = StaticSecret::from([31; 32]);
-        let expected_shared = identity
-            .dh_secret
-            .diffie_hellman(&X25519Public::from(&other));
+        let expected_shared = StaticSecret::from(x).diffie_hellman(&X25519Public::from(&other));
         let actual_shared = other.diffie_hellman(&X25519Public::from(identity.public().x25519_pub));
         assert!(expected_shared.as_bytes() == actual_shared.as_bytes());
-        let mut observed = Vec::new();
         for count in [32, 128] {
-            PUBLIC_DERIVATIONS.with(|calls| calls.set(0));
             for _ in 0..count {
                 assert!(identity.public() == expected);
                 assert!(identity.user_id() == expected_id);
             }
-            observed.push(PUBLIC_DERIVATIONS.with(|calls| calls.get()));
         }
-        assert_eq!(
-            observed,
-            [0, 0],
-            "immutable public and device-ID reads must not repeat X25519 derivation"
-        );
     }
 
     #[test]

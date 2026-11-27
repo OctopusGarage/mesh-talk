@@ -28,6 +28,7 @@ name = "mesh-talk-node"
 path = "src/bin/mesh-talk-node.rs"
 
 [dependencies]
+mesh-identity = { package = "mesh-foundation-identity", path = "../../vendor/mesh-foundation/crates/mesh-identity" }
 mesh-talk-protocol = { path = "../mesh-talk-protocol" }
 mesh-replication = { package = "mesh-foundation-replication", path = "../../vendor/mesh-foundation/crates/mesh-replication" }
 mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect", default-features = false }
