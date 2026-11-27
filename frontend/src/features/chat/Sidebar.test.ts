@@ -88,7 +88,7 @@ vi.mock("@/store/auth", () => {
 });
 vi.mock("@/store/settings", () => ({
   useSettings: (selector: (state: unknown) => unknown) =>
-    selector({ callsEnabled: false }),
+    selector({ callsEnabled: false, mutedGroups: [] }),
 }));
 vi.mock("@/store/presence", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/store/presence")>()),
