@@ -1,5 +1,26 @@
 # Product roadmap
 
+## REQ-012 — Desktop UI technology and native experience
+
+**Status:** Deferred. Resume with a baseline for the current desktop app.
+
+Evaluate the reported WebView memory use and loading feel on macOS, Windows
+and Linux. Web is an optional comparison. Keep three options open: tune the
+existing Tauri UI, add another client backed by the shared core, or migrate.
+
+- **Baseline:** Use equivalent release builds, data and workflows. Measure
+  usable startup, process-tree memory, idle CPU and energy, and responsiveness
+  during navigation, long conversation scrolling and media use. Attribute
+  costs across the host, renderer, loading and core work.
+- **Native experience:** Verify Chinese IME, keyboard and accessibility,
+  window scaling, tray, notifications, attachments and calling behavior.
+- **Candidate review:** Verify GPUI, GPUI Kit, Slint, Iced and Rune against
+  their current primary sources. Compare platform support, rendering model,
+  licensing, packaging and update compatibility, and maintenance costs.
+- **Acceptance:** Produce a reproducible baseline and a recommendation based
+  on equivalent workflows. Prototype only when it can resolve a specific
+  decision. A second UI or migration needs a feature-parity and coexistence plan.
+
 ## REQ-026 — Personal feed, profile and sharing
 
 **Status:** Deferred. Revisit audience and delivery rules before implementation.
