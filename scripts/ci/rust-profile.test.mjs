@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-test("ordinary CI uses line tables consistently without changing specialized profiles", () => {
-  for (const name of ["ci.yml", "windows-workspace.yml", "e2e-backend.yml"]) {
+test("CI and sanitizer archives use line tables without changing mutation or release profiles", () => {
+  for (const name of ["ci.yml", "windows-workspace.yml", "e2e-backend.yml", "sanitizers.yml"]) {
     const workflow = readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
     for (const profile of ["DEV", "TEST"]) assert.match(workflow, new RegExp(`^  CARGO_PROFILE_${profile}_DEBUG: line-tables-only$`, "m"), name);
   }
-  for (const name of ["sanitizers.yml", "mutants.yml", "release.yml"]) {
+  for (const name of ["mutants.yml", "release.yml"]) {
     const workflow = readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
     assert.doesNotMatch(workflow, /CARGO_PROFILE_(?:DEV|TEST)_DEBUG/);
   }
