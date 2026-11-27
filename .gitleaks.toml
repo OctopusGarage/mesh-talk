@@ -35,3 +35,13 @@ condition = "AND"
 paths = ['''(^|/)crates/mesh-talk-core/src/node/group_file_authorization_tests\.rs$''']
 regexTarget = "secret"
 regexes = ['''^recipient\.x25519_pub$''']
+
+# Verified SHA-256 of the public SDK sender-key source, not key material.
+# Bind the exception to this exact digest, manifest path and scanner rule.
+[[allowlists]]
+description = "Public SDK source digest in the managed snapshot inventory"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)vendor/mesh-foundation/SNAPSHOT\.json$''']
+regexTarget = "secret"
+regexes = ['''^4ec30300db3cc93d4ceffc144ccf857b9d92481848ac301f4fdc1fa18f3ea2c1$''']
