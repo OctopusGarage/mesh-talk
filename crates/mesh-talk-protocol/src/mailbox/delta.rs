@@ -1,118 +1,45 @@
-//! Bounded delta selection over a finite mailbox prefix.
-
+//! Historical cursor binding over the SDK's generic finite-window engine.
 use crate::legacy_event::EventId;
 use crate::mailbox::rpc::{MailboxCursor, MailboxDeltaPage};
+pub use mesh_mailbox::delta::DeltaError;
+use mesh_mailbox::delta::{DeltaCursor, DeltaPosition, WindowSelection};
+pub type DeltaScan = mesh_mailbox::delta::WindowScan<MailboxCursor, EventId>;
 
-/// A page's authorization and SQL transaction are owned by the caller.
 pub enum DeltaSelection {
     Unchanged(MailboxDeltaPage),
     Scan(DeltaScan),
 }
-
-pub struct DeltaScan {
-    cursor: MailboxCursor,
-    upper: i64,
-    revision: i64,
-    reset: bool,
-    ids: Vec<EventId>,
-    limit: usize,
-    complete: bool,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub enum DeltaError {
-    InvalidLimit,
-    InvalidOrdinal,
-    OrdinalExhausted,
-}
-
 impl DeltaSelection {
     pub fn open(
         current: &MailboxCursor,
         prior: Option<&MailboxCursor>,
         limit: usize,
     ) -> Result<Self, DeltaError> {
+        // This historical profile's allowance and first-seen binding stay here.
         if limit == 0 || limit > 1500 {
             return Err(DeltaError::InvalidLimit);
         }
-        let prior_valid = prior.filter(|cursor| cursor.accepts(current));
-        let reset = prior.is_some() && prior_valid.is_none();
-        if let Some(cursor) = prior_valid.filter(|p| {
-            p.window.is_none() && p.revision == current.revision && p.after == current.after
-        }) {
-            return Ok(Self::Unchanged(MailboxDeltaPage {
-                cursor: cursor.clone(),
-                ids: vec![],
-                complete: true,
-                reset: false,
-            }));
-        }
-        let cursor = prior_valid.cloned().unwrap_or_else(|| MailboxCursor {
-            after: 0,
-            revision: 0,
-            ..current.clone()
-        });
-        let (upper, revision) = cursor.window.unwrap_or((current.after, current.revision));
-        Ok(Self::Scan(DeltaScan {
-            cursor,
-            upper,
-            revision,
-            reset,
-            ids: Vec::with_capacity(limit),
-            limit,
-            complete: true,
-        }))
+        Ok(match WindowSelection::open(current, prior, limit)? {
+            WindowSelection::Unchanged(page) => Self::Unchanged(page),
+            WindowSelection::Scan(scan) => Self::Scan(scan),
+        })
     }
 }
-
-impl DeltaScan {
-    pub fn lower(&self) -> i64 {
-        self.cursor.after
+impl DeltaCursor for MailboxCursor {
+    fn accepts(&self, current: &Self) -> bool {
+        MailboxCursor::accepts(self, current)
     }
-
-    pub fn upper(&self) -> i64 {
-        self.upper
+    fn position(&self) -> DeltaPosition {
+        DeltaPosition {
+            after: self.after,
+            revision: self.revision,
+            window: self.window,
+        }
     }
-
-    pub fn query_limit(&self) -> i64 {
-        (self.limit + 1) as i64
-    }
-
-    /// Test the next row before decoding its ID. A lookahead row proves that
-    /// another page exists and remains unconsumed.
-    pub fn accept_row(&mut self) -> bool {
-        if self.ids.len() == self.limit {
-            self.complete = false;
-        }
-        self.complete
-    }
-
-    pub fn push(&mut self, ordinal: i64, id: EventId) -> Result<(), DeltaError> {
-        if ordinal < self.cursor.after || ordinal < 0 || ordinal >= self.upper {
-            return Err(DeltaError::InvalidOrdinal);
-        }
-        if !self.accept_row() {
-            return Err(DeltaError::InvalidLimit);
-        }
-        self.cursor.after = ordinal.checked_add(1).ok_or(DeltaError::OrdinalExhausted)?;
-        self.ids.push(id);
-        Ok(())
-    }
-
-    pub fn finish(mut self) -> MailboxDeltaPage {
-        if self.complete {
-            self.cursor.after = self.upper;
-            self.cursor.revision = self.revision;
-            self.cursor.window = None;
-        } else {
-            self.cursor.window = Some((self.upper, self.revision));
-        }
-        MailboxDeltaPage {
-            cursor: self.cursor,
-            ids: self.ids,
-            complete: self.complete,
-            reset: self.reset,
-        }
+    fn set_position(&mut self, position: DeltaPosition) {
+        self.after = position.after;
+        self.revision = position.revision;
+        self.window = position.window;
     }
 }
 
@@ -197,5 +124,37 @@ mod tests {
         scan.push(3, EventId::new([1; 32])).unwrap();
         assert!(scan.push(2, EventId::new([2; 32])).is_err());
         assert_eq!(scan.lower(), 4);
+    }
+}
+
+#[cfg(test)]
+mod compatibility_binding_tests {
+    use super::*;
+    use crate::legacy_event::ConversationId;
+    #[test]
+    fn historical_first_seen_change_resets_the_shared_window() {
+        let prior = MailboxCursor {
+            store_uuid: [1; 16],
+            conversation: ConversationId::new([2; 32]),
+            epoch: 1,
+            first_seen: Some(10),
+            revision: 4,
+            after: 20,
+            window: None,
+        };
+        let current = MailboxCursor {
+            first_seen: Some(11),
+            ..prior.clone()
+        };
+        let DeltaSelection::Scan(scan) = DeltaSelection::open(&current, Some(&prior), 1).unwrap()
+        else {
+            panic!("binding change must reset")
+        };
+        let page = scan.finish();
+        assert!(page.reset);
+        assert_eq!(page.cursor.first_seen, Some(11));
+        assert_eq!(page.cursor.store_uuid, current.store_uuid);
+        assert_eq!(page.cursor.conversation, current.conversation);
+        assert!(DeltaSelection::open(&current, None, 1501).is_err());
     }
 }

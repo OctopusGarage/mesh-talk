@@ -127,3 +127,6 @@ docs/superpowers/
 *.rej
 *.bak
 *.tmp
+
+# Stable OS lease inodes next to managed SDK snapshots.
+.mesh-*.snapshot-lock

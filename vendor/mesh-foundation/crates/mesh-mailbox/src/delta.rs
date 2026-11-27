@@ -1,24 +1,43 @@
-//! Bounded delta selection over a finite mailbox prefix.
+//! Bounded finite-window paging with host-owned cursor binding and record IDs.
+use crate::{RecordId, model::MailboxCursor};
 
-use crate::RecordId;
-use crate::model::{MailboxCursor, MailboxDeltaPage};
-
-/// A page's authorization and SQL transaction are owned by the caller.
-pub enum DeltaSelection {
-    Unchanged(MailboxDeltaPage),
-    Scan(DeltaScan),
+/// Source-local positions. Identity, authorization and lifecycle stay in the host cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeltaPosition {
+    pub after: i64,
+    pub revision: i64,
+    pub window: Option<(i64, i64)>,
 }
-
-pub struct DeltaScan {
-    cursor: MailboxCursor,
+/// A host qualifies its complete binding before the shared window engine resumes.
+/// `set_position` must preserve all identity, epoch and application metadata.
+pub trait DeltaCursor: Clone {
+    fn accepts(&self, current: &Self) -> bool;
+    fn position(&self) -> DeltaPosition;
+    fn set_position(&mut self, position: DeltaPosition);
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WindowPage<C, I> {
+    pub cursor: C,
+    pub ids: Vec<I>,
+    pub complete: bool,
+    pub reset: bool,
+}
+pub enum WindowSelection<C, I> {
+    Unchanged(WindowPage<C, I>),
+    Scan(WindowScan<C, I>),
+}
+pub struct WindowScan<C, I> {
+    cursor: C,
     upper: i64,
     revision: i64,
     reset: bool,
-    ids: Vec<RecordId>,
+    ids: Vec<I>,
     limit: usize,
     complete: bool,
 }
-
+/// Existing neutral profile names remain concrete convenience aliases.
+pub type DeltaSelection = WindowSelection<MailboxCursor, RecordId>;
+pub type DeltaScan = WindowScan<MailboxCursor, RecordId>;
 #[derive(Debug, Eq, PartialEq)]
 pub enum DeltaError {
     InvalidLimit,
@@ -26,12 +45,8 @@ pub enum DeltaError {
     OrdinalExhausted,
 }
 
-impl DeltaSelection {
-    pub fn open(
-        current: &MailboxCursor,
-        prior: Option<&MailboxCursor>,
-        limit: usize,
-    ) -> Result<Self, DeltaError> {
+impl<C: DeltaCursor, I> WindowSelection<C, I> {
+    pub fn open(current: &C, prior: Option<&C>, limit: usize) -> Result<Self, DeltaError> {
         if limit == 0
             || i64::try_from(limit)
                 .ok()
@@ -42,26 +57,33 @@ impl DeltaSelection {
         }
         let prior_valid = prior.filter(|cursor| cursor.accepts(current));
         let reset = prior.is_some() && prior_valid.is_none();
+        let now = current.position();
         if let Some(cursor) = prior_valid.filter(|p| {
-            p.window.is_none() && p.revision == current.revision && p.after == current.after
+            let p = p.position();
+            p.window.is_none() && p.revision == now.revision && p.after == now.after
         }) {
-            return Ok(Self::Unchanged(MailboxDeltaPage {
+            return Ok(Self::Unchanged(WindowPage {
                 cursor: cursor.clone(),
                 ids: vec![],
                 complete: true,
                 reset: false,
             }));
         }
-        let cursor = prior_valid.cloned().unwrap_or_else(|| MailboxCursor {
-            after: 0,
-            revision: 0,
-            ..current.clone()
+        let cursor = prior_valid.cloned().unwrap_or_else(|| {
+            let mut cursor = current.clone();
+            cursor.set_position(DeltaPosition {
+                after: 0,
+                revision: 0,
+                ..now
+            });
+            cursor
         });
-        let (upper, revision) = cursor.window.unwrap_or((current.after, current.revision));
+        let position = cursor.position();
+        let (upper, revision) = position.window.unwrap_or((now.after, now.revision));
         let mut ids = Vec::new();
         ids.try_reserve_exact(limit)
             .map_err(|_| DeltaError::InvalidLimit)?;
-        Ok(Self::Scan(DeltaScan {
+        Ok(Self::Scan(WindowScan {
             cursor,
             upper,
             revision,
@@ -72,60 +94,74 @@ impl DeltaSelection {
         }))
     }
 }
-
-impl DeltaScan {
+impl<C: DeltaCursor, I> WindowScan<C, I> {
     pub fn lower(&self) -> i64 {
-        self.cursor.after
+        self.cursor.position().after
     }
-
     pub fn upper(&self) -> i64 {
         self.upper
     }
-
     pub fn query_limit(&self) -> i64 {
         (self.limit + 1) as i64
     }
-
-    /// Test the next row before decoding its ID. A lookahead row proves that
-    /// another page exists and remains unconsumed.
+    /// Lookahead proves another page exists without acknowledging its row.
     pub fn accept_row(&mut self) -> bool {
         if self.ids.len() == self.limit {
             self.complete = false;
         }
         self.complete
     }
-
-    pub fn push(&mut self, ordinal: i64, id: RecordId) -> Result<(), DeltaError> {
-        if ordinal < self.cursor.after || ordinal < 0 || ordinal >= self.upper {
+    pub fn push(&mut self, ordinal: i64, id: I) -> Result<(), DeltaError> {
+        let position = self.cursor.position();
+        if ordinal < position.after || ordinal < 0 || ordinal >= self.upper {
             return Err(DeltaError::InvalidOrdinal);
         }
         if !self.accept_row() {
             return Err(DeltaError::InvalidLimit);
         }
-        self.cursor.after = ordinal.checked_add(1).ok_or(DeltaError::OrdinalExhausted)?;
+        self.cursor.set_position(DeltaPosition {
+            after: ordinal.checked_add(1).ok_or(DeltaError::OrdinalExhausted)?,
+            ..position
+        });
         self.ids.push(id);
         Ok(())
     }
-
-    /// A host budget stopped before the next unconsumed row.
     pub fn defer_remaining(&mut self) {
         self.complete = false;
     }
-
-    pub fn finish(mut self) -> MailboxDeltaPage {
+    pub fn finish(mut self) -> WindowPage<C, I> {
+        let mut position = self.cursor.position();
         if self.complete {
-            self.cursor.after = self.upper;
-            self.cursor.revision = self.revision;
-            self.cursor.window = None;
+            position.after = self.upper;
+            position.revision = self.revision;
+            position.window = None;
         } else {
-            self.cursor.window = Some((self.upper, self.revision));
+            position.window = Some((self.upper, self.revision));
         }
-        MailboxDeltaPage {
+        self.cursor.set_position(position);
+        WindowPage {
             cursor: self.cursor,
             ids: self.ids,
             complete: self.complete,
             reset: self.reset,
         }
+    }
+}
+impl DeltaCursor for MailboxCursor {
+    fn accepts(&self, current: &Self) -> bool {
+        MailboxCursor::accepts(self, current)
+    }
+    fn position(&self) -> DeltaPosition {
+        DeltaPosition {
+            after: self.after,
+            revision: self.revision,
+            window: self.window,
+        }
+    }
+    fn set_position(&mut self, position: DeltaPosition) {
+        self.after = position.after;
+        self.revision = position.revision;
+        self.window = position.window;
     }
 }
 

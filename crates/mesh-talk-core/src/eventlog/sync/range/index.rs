@@ -10,12 +10,7 @@ pub(super) fn empty() -> Summary {
     Summary::empty()
 }
 pub(super) fn combine(bits: u16, left: Summary, right: Summary) -> Summary {
-    Summary::combine(
-        Prefix::new(bits, [0; 32]).expect("canonical prefix"),
-        left,
-        right,
-    )
-    .expect("valid non-leaf summary with bounded count")
+    Summary::combine_at_depth(bits, left, right).expect("valid non-leaf summary with bounded count")
 }
 
 #[derive(Clone, Debug)]

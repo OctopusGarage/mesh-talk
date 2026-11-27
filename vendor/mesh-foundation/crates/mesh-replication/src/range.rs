@@ -64,9 +64,16 @@ impl Summary {
     /// Combine the ordered children of a non-leaf prefix. Reject impossible
     /// parent depths and count overflow before computing a canonical digest.
     pub fn combine(parent: Prefix, left: Self, right: Self) -> Option<Self> {
-        parent.children()?;
+        Self::combine_at_depth(parent.bits(), left, right)
+    }
+    /// Persistent adapters can combine at a known parent depth without creating
+    /// a synthetic prefix. The digest uses depth and ordered children only.
+    pub fn combine_at_depth(bits: u16, left: Self, right: Self) -> Option<Self> {
+        if bits >= 256 {
+            return None;
+        }
         left.count.checked_add(right.count)?;
-        Some(combine(parent.bits(), left, right))
+        Some(combine(bits, left, right))
     }
 }
 

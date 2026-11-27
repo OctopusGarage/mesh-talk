@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Export reviewed SDK snapshots; verify contents offline or against a Git checkout."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
+import os
+import shutil
+import stat
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -86,31 +90,82 @@ def verify_snapshot(destination, source=None):
     return marker
 
 
+def backup_path(destination):
+    destination = Path(destination).resolve()
+    return destination.with_name('.' + destination.name + '.snapshot-backup')
+
+
+@contextmanager
+def destination_lock(destination):
+    # Keep the inode stable across directory replacement. The OS releases the
+    # lease after a crash; the cached one-byte file is never an ownership flag.
+    destination = Path(destination).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    path = destination.with_name('.mesh-' + destination.name + '.snapshot-lock')
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or (hasattr(os, 'getuid') and info.st_uid != os.getuid()):
+            raise ValueError('unsafe snapshot lease file')
+        if info.st_size == 0:
+            os.write(fd, b'0')
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise ValueError(f'snapshot destination is busy: {destination}') from error
+        yield
+    finally:
+        os.close(fd)
+
+
+def _verify_existing(destination, source):
+    current = disk_files(destination)
+    if not current:
+        return
+    if MANIFEST in current:
+        verify_snapshot(destination, source)
+        return
+    try:
+        prior = current.pop('SOURCE').decode().strip()
+    except (KeyError, UnicodeError) as error:
+        raise ValueError('unrecognized snapshot destination') from error
+    if current != source_files(source, prior):
+        raise ValueError('legacy snapshot differs from its Git source')
+
+
 def export_snapshot(source, destination):
     if Path(destination).is_symlink():
-        raise ValueError("snapshot destination must not be a symlink")
+        raise ValueError('snapshot destination must not be a symlink')
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if destination == source or source in destination.parents:
         raise ValueError('destination must be outside the source checkout')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination_lock(destination):
+        return _export_locked(source, destination)
+
+
+def _export_locked(source, destination):
     if git(source, 'status', '--porcelain', '--untracked-files=normal').strip():
         raise ValueError('commit SDK changes before exporting a snapshot')
     revision = git(source, 'rev-parse', 'HEAD').decode().strip()
     files = source_files(source, revision)
+    backup = backup_path(destination)
+    if backup.exists() or backup.is_symlink():
+        _verify_existing(backup, source)
+        if destination.exists() or destination.is_symlink():
+            _verify_existing(destination, source)
+            shutil.rmtree(backup)
+        else:
+            backup.rename(destination)
     if destination.exists() or destination.is_symlink():
-        current = disk_files(destination)
-        if current:
-            if MANIFEST in current:
-                verify_snapshot(destination, source)
-            else:
-                # Adopt the old SOURCE-only layout only when every byte matches
-                # its historical commit. Never overwrite unrelated consumer work.
-                try:
-                    prior = current.pop('SOURCE').decode().strip()
-                except (KeyError, UnicodeError) as error:
-                    raise ValueError('unrecognized snapshot destination') from error
-                if current != source_files(source, prior):
-                    raise ValueError('legacy snapshot differs from its Git source')
-    destination.parent.mkdir(parents=True, exist_ok=True)
+        _verify_existing(destination, source)
     with tempfile.TemporaryDirectory(prefix='.mesh-snapshot-', dir=destination.parent) as temp:
         staged = Path(temp) / 'snapshot'
         staged.mkdir()
@@ -121,18 +176,19 @@ def export_snapshot(source, destination):
         (staged / 'SOURCE').write_text(revision + '\n')
         (staged / MANIFEST).write_text(json.dumps({'format': 1, 'revision': revision, 'files': digests(files)}, indent=2) + '\n')
         verify_snapshot(staged, source)
-        # Keep the verified old snapshot recoverable until the staged tree is
-        # installed. A failed rename restores it; no partial file copy is exposed.
-        backup = Path(temp) / 'previous'
-        existed = destination.exists()
-        if existed:
+        if destination.exists():
             destination.rename(backup)
         try:
             staged.rename(destination)
-        except OSError:
-            if existed:
-                backup.rename(destination)
-            raise
+        except OSError as install_error:
+            if backup.exists():
+                try:
+                    backup.rename(destination)
+                except OSError as restore_error:
+                    raise OSError(f'snapshot install and restore failed; preserved backup: {backup}') from restore_error
+            raise install_error
+        if backup.exists():
+            shutil.rmtree(backup)
     return revision
 
 

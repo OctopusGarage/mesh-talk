@@ -41,3 +41,28 @@ fn independent_adapter_uses_the_same_canonical_summary_rules() {
         None
     );
 }
+
+#[test]
+fn depth_only_adapters_share_the_checked_hash_without_constructing_prefixes() {
+    let left = Summary::leaf([1; 32]);
+    let right = Summary::leaf([2; 32]);
+    for depth in 0..256 {
+        assert_eq!(
+            Summary::combine_at_depth(depth, left, right),
+            Summary::combine(Prefix::new(depth, [0; 32]).unwrap(), left, right)
+        );
+    }
+    assert_eq!(Summary::combine_at_depth(256, left, right), None);
+    assert_eq!(Summary::combine_at_depth(u16::MAX, left, right), None);
+    assert_eq!(
+        Summary::combine_at_depth(
+            0,
+            Summary {
+                count: usize::MAX,
+                digest: [0; 32]
+            },
+            left
+        ),
+        None
+    );
+}

@@ -35,13 +35,8 @@ pub struct MailboxCursor {
     pub window: Option<(i64, i64)>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct MailboxDeltaPage {
-    pub cursor: MailboxCursor,
-    pub ids: Vec<EventId>,
-    pub complete: bool,
-    pub reset: bool,
-}
+// Generic page shape; the historical cursor/event fields retain their exact wire layout.
+pub type MailboxDeltaPage = mesh_mailbox::delta::WindowPage<MailboxCursor, EventId>;
 
 impl MailboxCursor {
     pub fn accepts(&self, current: &Self) -> bool {

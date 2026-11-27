@@ -30,7 +30,7 @@ Both in-memory test helpers and durable checkpoint paths propagate candidate err
 Checkpoint encoding and delayed/consumed-message semantics remain unchanged.
 
 The protocol crate uses the SDK mailbox with default features disabled: it needs
-only generic quota mechanisms. Original chat envelopes, codec/spool profiles,
+generic quota and finite-window pagination mechanisms. Original chat envelopes, codec/spool profiles,
 recipient addressing and expiry scheduling remain application-owned. The SDK's
 new typed mailbox ports and optional MFOM2/spool adapters do not alter MTOM1 bytes.
 
@@ -64,3 +64,20 @@ is consumed without its neutral signed-discovery default feature.
 SDK SQLite examples are illustrative contract coverage, not this application's
 SQL schema or performance benchmark. Forum's inventory/private-mailbox tests
 prove independent composition; its production post protocol is a separate owner.
+
+## Historical mailbox paging through the shared engine
+
+The application cursor implements the SDK `DeltaCursor` port and retains its
+`first_seen`, account/conversation and epoch qualification. The SDK owns ordinal
+advancement, lookahead, upper-window retention and completion/reset transitions.
+The application wrapper retains the historical 1500-record request ceiling.
+The page is a concrete alias of the generic four-field SDK page; MTOM1 cursor
+fields/order, record IDs and existing serialization remain unchanged and covered
+by independent compatibility fixtures. First-seen changes still force a reset.
+
+Snapshot updates use an OS-held destination lease and preserve a verified sibling
+backup if both installation and rollback fail. Retry from a clean reviewed SDK
+checkout verifies recovery state before restoring or cleaning it. Never remove
+an unknown backup or treat an existing lease file as proof of a live owner.
+The ignored `.mesh-NAME.snapshot-lock` sibling inode coordinates processes even
+when their temporary-directory environments differ.

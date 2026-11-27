@@ -61,13 +61,8 @@ pub struct MailboxCursor {
     pub window: Option<(i64, i64)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct MailboxDeltaPage {
-    pub cursor: MailboxCursor,
-    pub ids: Vec<RecordId>,
-    pub complete: bool,
-    pub reset: bool,
-}
+/// Neutral profile page; the generic window engine also serves host-owned cursors.
+pub type MailboxDeltaPage = crate::delta::WindowPage<MailboxCursor, RecordId>;
 
 impl MailboxCursor {
     pub fn accepts(&self, current: &Self) -> bool {

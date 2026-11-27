@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "revision": "4035fb861e1fa18e84a38991f0666074b1a4f943",
+  "revision": "f06bd4ccc819bec9e1f79bab8bec3b18ba2e230d",
   "files": {
     ".gitattributes": "c25bcb8f0cf0d1c04577b13169af840123e4e088d87ddae83739cff1a147d8c9",
     "Cargo.toml": "0f6359a5c019e378439101ce2cb00f97bf9e699f7b1d49e193b0909fc20e5bd3",
@@ -53,9 +53,9 @@
     "crates/mesh-mailbox/examples/typed_mailbox.rs": "0d34b45d9c5d27df9bfedb1ecd177e25f01c2f109dcc911bc8309d4878777cfb",
     "crates/mesh-mailbox/src/capacity.rs": "771b2c5fe4ad22485c481ca978b65d54d2ad80d5f81b9f4c057921a804fef9e1",
     "crates/mesh-mailbox/src/client.rs": "d5d10e062aa02066cd12e8d69282157b6f86d6053650dd0969b88a747d6b62b1",
-    "crates/mesh-mailbox/src/delta.rs": "e9372b59d5c3b14caa939c71578bca567b35d5415e82240d195bedcdaff233f7",
+    "crates/mesh-mailbox/src/delta.rs": "a323bb8826443fd54b41471d4ac5fe93e1dbfaaf13e48517597288c4a7888a52",
     "crates/mesh-mailbox/src/lib.rs": "2dba82a6cbfc65062a3d5f05bbb9e18a03788b943c5c1d4dd70b06bac35a07e0",
-    "crates/mesh-mailbox/src/model.rs": "8a4465caca41948409ca7ffd4dc952bb6c2729578c53db1fc8351421f22dfedc",
+    "crates/mesh-mailbox/src/model.rs": "fedf418514210a1a133a8091a346ff54a6c7b684d29e00423a89f4802baed561",
     "crates/mesh-mailbox/src/ports.rs": "8c58b6610074bf2551c43827d076c96c2f65fd5e219ed79289d1834a026edfec",
     "crates/mesh-mailbox/src/rpc.rs": "978d23f44cd045d6580a377081892448793e0ad0f59a027d3e0a216f6a310cbf",
     "crates/mesh-mailbox/src/service.rs": "6d32667920f588fb188e5996b094865a5a0cf160e0d840409267e762cb6fc2cf",
@@ -66,6 +66,7 @@
     "crates/mesh-mailbox/tests/separation.rs": "cfcd435d7c78445c658b91deb3c9d39e4b6e3a4ef80779ce11b1ca6ccba2289c",
     "crates/mesh-mailbox/tests/spool_policy.rs": "c90c7a136b1488e48e9014178280157f0f128dd95d39e79bc47c3e1f091af89a",
     "crates/mesh-mailbox/tests/tcp_spool.rs": "4fcb8aa54ee29cdb2264bfd658af06984fed5f2369c5024d8b90225c66965802",
+    "crates/mesh-mailbox/tests/window.rs": "eaa41f445a5e89b209fa6f4d92d8695180ad3c703875250e521b006cb55fc894",
     "crates/mesh-mailbox/tests/wire_budgets.rs": "2386d2d8fc9a22c0ec13ea044498d9dae157098827be581a3470936a30384240",
     "crates/mesh-replication/Cargo.toml": "77c3f9b997da951b55959e85be4127609dc8447eb0ed3829da582b77652d3562",
     "crates/mesh-replication/LICENSE": "f4ebbdafca2f695b5339eb7b6427c85df9d7667c90d4f9dacb270e6270cd8c4d",
@@ -79,7 +80,7 @@
     "crates/mesh-replication/src/lib.rs": "f982bd0fba16e3eefbef87523560ab2f0f210cd60a335c48efa2597346dc1e8c",
     "crates/mesh-replication/src/pull.rs": "dbece8aadc204951cd93e379ebeee8883fb6801c419691b345221d91cceee02c",
     "crates/mesh-replication/src/pull/session.rs": "2fa3f4365bb221bf02d76c2932515a74079167397fd994ba9146ac442f16489a",
-    "crates/mesh-replication/src/range.rs": "387a95f01888c63570635f90c77c87afc812c6f702b6f7eac006de20b0f7f79d",
+    "crates/mesh-replication/src/range.rs": "333a784d8df41c0c7ef9cd479fdc4bb33c4114a83ed25b8f0599abaf5ec2153b",
     "crates/mesh-replication/src/session.rs": "7f4eddfe716e79c50492efc0f92d90f2d5509d5e2cb6d0342282595bdba79402",
     "crates/mesh-replication/tests/default_profile.rs": "ab7745164dc33bd58729ff8084dbe7aa6b18d8fca65520b24b0b6723c43847aa",
     "crates/mesh-replication/tests/driver.rs": "273811297793b89c595c0941bacc93e28c714ced6ea8b0136e6f064291eb187a",
@@ -87,7 +88,7 @@
     "crates/mesh-replication/tests/inventory.rs": "cca580e076ebd4fd2ba19cf579709ae9b0d03d55a50db78e6b3824392f6a886c",
     "crates/mesh-replication/tests/pull.rs": "fb1f11372b6d30a48dd305ccc947bb1a6790cd287392d85eff2f540185930e9d",
     "crates/mesh-replication/tests/range.rs": "dc3c2b8c5f8a2c4f18a0c3231fdbbb8eb0f97bd19f749dc69c506c61370fb00e",
-    "crates/mesh-replication/tests/range_adapter.rs": "fe18dad9cd25572094a5cd57e9ebbf6331316cddd16b49b1ec5b4385af68fb2a",
+    "crates/mesh-replication/tests/range_adapter.rs": "569b5e2d93c55e38897671cc84d57e4aef68272facfd41952e6091c8976ada81",
     "crates/mesh-replication/tests/session.rs": "b60435705da9a4d1ce3401bfa965aac2e81bd2841a849ecfb1b0ad1eab04018b",
     "crates/mesh-storage/Cargo.toml": "36bcea7710c441f2d23a869bcec7ebb365109961313e3e2ef7f9f390b06765c8",
     "crates/mesh-storage/LICENSE": "f4ebbdafca2f695b5339eb7b6427c85df9d7667c90d4f9dacb270e6270cd8c4d",
@@ -95,6 +96,6 @@
     "crates/mesh-storage/src/lib.rs": "92038c08f6988e165136f5ac5371fa364dc0ed78170748e3af77a6e4cc5ed79e",
     "crates/mesh-storage/src/record_log.rs": "2db8e6f2662154d3317383f38982d46066c8e163584797308b015932c885ef4f",
     "crates/mesh-storage/src/record_log_visitor_tests.rs": "51d58774d9b46aa7b37e2612b662047732da0762960bed90644d64cdbf73f9d5",
-    "scripts/sdk_snapshot.py": "658bceebc0e4b3f902c647afbc1abd1a86119be3c0317b32d3adf3f6fa2de22c"
+    "scripts/sdk_snapshot.py": "dd5cbde775720a6cc329427811298e1d83d67e59ab75bef0e4a2f165c3242037"
   }
 }

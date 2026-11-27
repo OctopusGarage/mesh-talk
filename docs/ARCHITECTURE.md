@@ -81,7 +81,7 @@ existing authenticated protocol and indexed event repository to implement them.
 The node owns group membership, key distribution, and account trust. It also
 schedules discovery, reconnects, and relay maintenance. Its mailbox service
 uses the application-owned compatibility dispatcher and indexed custody store;
-only generic capacity mechanisms come from the SDK.
+generic capacity and finite-window paging mechanisms come from the SDK.
 Other hosts can use the library's bounded spool with their own admission and
 expiry scheduling. File transfers use the library's chunk primitives while
 Mesh Talk owns the manifest and transfer lifecycle.
