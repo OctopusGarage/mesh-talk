@@ -417,52 +417,21 @@ test("archive layout bounds v1 binaries and v2 Cargo object metadata", () => {
   const example = metadata(path.join(target, "debug", "examples", "example"));
   example["rust-binaries"].lib.kind = "example";
   verifyLayout(example);
-  const v2 = path.join(
-    target,
-    "debug",
-    "build",
-    "archive-fixture",
-    "0123456789abcdef",
-  );
+  const v2 = path.join(target, "debug", "build", "archive-fixture", "0123456789abcdef");
   assert.deepEqual(verifyLayout(metadata(path.join(v2, "out", "unit"))), [
-    path.join(
-      "debug",
-      "build",
-      "archive-fixture",
-      "0123456789abcdef",
-      "fingerprint",
-    ),
+    path.join("debug", "build", "archive-fixture", "0123456789abcdef", "fingerprint"),
   ]);
   for (const binary of [
     path.join(target, "custom-build", "debug", "deps", "unit"),
     path.join(target, "release", "deps", "unit"),
     "relative/debug/deps/unit",
-    path.join(
-      target,
-      "debug",
-      "build",
-      "archive-fixture",
-      "short",
-      "out",
-      "unit",
-    ),
+    path.join(target, "debug", "build", "archive-fixture", "short", "out", "unit"),
     path.join(v2, "other", "unit"),
-    path.join(
-      target,
-      "release",
-      "build",
-      "archive-fixture",
-      "0123456789abcdef",
-      "out",
-      "unit",
-    ),
+    path.join(target, "release", "build", "archive-fixture", "0123456789abcdef", "out", "unit"),
   ])
     assert.throws(() => verifyLayout(metadata(binary)), /layout/);
   const separate = metadata(path.join(target, "debug", "deps", "unit"));
-  separate["rust-build-meta"]["build-directory"] = path.join(
-    target,
-    "separate",
-  );
+  separate["rust-build-meta"]["build-directory"] = path.join(target, "separate");
   assert.throws(() => verifyLayout(separate), /separate build/);
 });
 
@@ -792,9 +761,7 @@ test("Mac debug bundles follow exactly selected executable metadata, including e
       "target-directory": target,
       "non-test-binaries": { pkg: [{ kind: "bin-exe", path: "debug/helper" }] },
     },
-    "rust-binaries": {
-      lib: { "binary-path": path.join(target, "debug", "deps", "unit") },
-    },
+    "rust-binaries": { lib: { "binary-path": path.join(target, "debug", "deps", "unit") } },
   };
   assert.deepEqual(macDebugSymbolPaths(binaries, root), [
     path.join(target, "debug", "deps", "unit"),

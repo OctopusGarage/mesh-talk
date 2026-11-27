@@ -226,31 +226,10 @@ async function fileHash(file) {
   for await (const chunk of createReadStream(file)) hash.update(chunk);
   return hash.digest("hex");
 }
-export async function command(
-  args,
-  {
-    env = process.env,
-    receipt,
-    progress,
-    phase = "command",
-    liveStdout = false,
-    binary = "cargo",
-    signal,
-    maxOutputBytes = 128 * 1024 * 1024,
-  } = {},
-) {
-  assert.ok(
-    Number.isSafeInteger(maxOutputBytes) &&
-      maxOutputBytes > 0 &&
-      maxOutputBytes <= 128 * 1024 * 1024,
-    "Invalid CI command output limit",
-  );
-  const record = (event) => {
-    if (progress)
-      appendFileSync(
-        progress,
-        `${JSON.stringify({ at: new Date().toISOString(), phase, ...event })}\n`,
-      );
+export async function command(args, { env = process.env, receipt, progress, phase = "command", liveStdout = false, binary = "cargo", signal, maxOutputBytes = 128 * 1024 * 1024 } = {}) {
+  assert.ok(Number.isSafeInteger(maxOutputBytes) && maxOutputBytes > 0 && maxOutputBytes <= 128 * 1024 * 1024, "Invalid CI command output limit");
+  const record = event => {
+    if (progress) appendFileSync(progress, `${JSON.stringify({ at: new Date().toISOString(), phase, ...event })}\n`);
   };
   const files = [];
   try {
@@ -263,61 +242,32 @@ export async function command(
     record({ event: "started", binary, args });
     signal?.throwIfAborted();
     return await new Promise((resolve, reject) => {
-      const child = spawn(binary, args, {
-        env,
-        windowsHide: true,
-        detached: process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const child = spawn(binary, args, { env, windowsHide: true, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
       const output = [];
       const bytes = [0, 0];
-      let failure,
-        stopping = false,
-        outputRejected = false;
+      let failure, stopping = false, outputRejected = false;
       let cleanup = Promise.resolve();
-      const stop = (error) => {
+      const stop = error => {
         failure ??= error;
         if (stopping || !child.pid) return;
         stopping = true;
         if (process.platform === "win32") {
-          cleanup = new Promise((done) => {
-            const killer = spawn(
-              "taskkill.exe",
-              ["/PID", String(child.pid), "/T", "/F"],
-              { windowsHide: true, stdio: "ignore" },
-            );
-            killer.on("error", (error) => {
-              failure = error;
-              child.kill();
-            });
-            killer.on("close", (code) => {
-              if (code !== 0) {
-                failure = new Error(
-                  "Windows child-tree termination could not be verified",
-                );
-                child.kill();
-              }
+          cleanup = new Promise(done => {
+            const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+            killer.on("error", error => { failure = error; child.kill(); });
+            killer.on("close", code => {
+              if (code !== 0) { failure = new Error("Windows child-tree termination could not be verified"); child.kill(); }
               done();
             });
           });
         } else {
-          try {
-            process.kill(-child.pid, "SIGTERM");
-          } catch (error) {
-            if (error.code !== "ESRCH") failure = error;
-          }
+          try { process.kill(-child.pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") failure = error; }
           // As in the validation stage owner, finish group cleanup even when
           // the leader exits before a descendant with independent stdio.
-          cleanup = new Promise((done) =>
-            setTimeout(() => {
-              try {
-                process.kill(-child.pid, "SIGKILL");
-              } catch (error) {
-                if (error.code !== "ESRCH") failure = error;
-              }
-              done();
-            }, 2000),
-          );
+          cleanup = new Promise(done => setTimeout(() => {
+            try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") failure = error; }
+            done();
+          }, 2000));
         }
       };
       const interrupted = () => stop(new Error("CI command interrupted"));
@@ -326,28 +276,16 @@ export async function command(
       signal?.addEventListener("abort", interrupted, { once: true });
       if (signal?.aborted) interrupted();
       child.on("spawn", () => {
-        try {
-          record({ event: "spawned", pid: child.pid });
-        } catch (error) {
-          stop(error);
-        }
+        try { record({ event: "spawned", pid: child.pid }); } catch (error) { stop(error); }
       });
       const capture = (index, chunk) => {
         if (outputRejected) return;
         try {
-          assert.ok(
-            chunk.length <= maxOutputBytes - bytes[index],
-            "CI command output exceeded its byte limit",
-          );
+          assert.ok(chunk.length <= maxOutputBytes - bytes[index], "CI command output exceeded its byte limit");
           if (files[index] !== undefined) {
             let written = 0;
             while (written < chunk.length) {
-              const count = writeSync(
-                files[index],
-                chunk,
-                written,
-                chunk.length - written,
-              );
+              const count = writeSync(files[index], chunk, written, chunk.length - written);
               assert.ok(count > 0, "CI command receipt write made no progress");
               written += count;
             }
@@ -356,13 +294,10 @@ export async function command(
           else if (liveStdout) process.stdout.write(chunk);
           bytes[index] += chunk.length;
           if (index === 0) output.push(chunk);
-        } catch (error) {
-          outputRejected = true;
-          stop(error);
-        }
+        } catch (error) { outputRejected = true; stop(error); }
       };
-      child.stdout.on("data", (chunk) => capture(0, chunk));
-      child.stderr.on("data", (chunk) => capture(1, chunk));
+      child.stdout.on("data", chunk => capture(0, chunk));
+      child.stderr.on("data", chunk => capture(1, chunk));
       child.on("error", stop);
       child.on("close", async (code, childSignal) => {
         await cleanup;
@@ -370,24 +305,11 @@ export async function command(
         process.off("SIGTERM", interrupted);
         signal?.removeEventListener("abort", interrupted);
         try {
-          record({
-            event: "closed",
-            code,
-            signal: childSignal,
-            stdoutBytes: bytes[0],
-            stderrBytes: bytes[1],
-            failed: !!failure || code !== 0,
-          });
+          record({ event: "closed", code, signal: childSignal, stdoutBytes: bytes[0], stderrBytes: bytes[1], failed: !!failure || code !== 0 });
           if (failure) throw failure;
-          assert.equal(
-            code,
-            0,
-            `${binary} ${args.join(" ")} failed: ${code}/${childSignal}`,
-          );
+          assert.equal(code, 0, `${binary} ${args.join(" ")} failed: ${code}/${childSignal}`);
           resolve(Buffer.concat(output).toString("utf8"));
-        } catch (error) {
-          reject(error);
-        }
+        } catch (error) { reject(error); }
       });
     });
   } finally {
@@ -396,192 +318,89 @@ export async function command(
 }
 function tool(binary, args) {
   const result = spawnSync(binary, args, { encoding: "utf8" });
-  assert.ok(
-    !result.error && result.status === 0,
-    `${binary} ${args.join(" ")} failed`,
-  );
+  assert.ok(!result.error && result.status === 0, `${binary} ${args.join(" ")} failed`);
   return result.stdout.trim();
 }
 
 export function inventory(listing) {
   const rows = [];
-  assert.ok(
-    listing["rust-suites"] && Number.isInteger(listing["test-count"]),
-    "Invalid nextest inventory",
-  );
+  assert.ok(listing["rust-suites"] && Number.isInteger(listing["test-count"]), "Invalid nextest inventory");
   for (const [binaryId, suite] of Object.entries(listing["rust-suites"])) {
     assert.equal(suite.status, "listed", `Unlisted test binary: ${binaryId}`);
     for (const [name, test] of Object.entries(suite.testcases)) {
       assert.equal(test.kind, "test", "Unsupported benchmark/custom test kind");
       assert.equal(typeof test.ignored, "boolean", "Missing ignored marker");
-      assert.ok(
-        ["matches", "mismatch"].includes(test["filter-match"]?.status),
-        "Missing filter result",
-      );
-      rows.push({
-        id: `${binaryId}::${name}`,
-        eventName: `${suite["package-name"]}::${suite["binary-name"]}$${name}`,
-        ignored: test.ignored,
-        selected: test["filter-match"].status === "matches",
-      });
+      assert.ok(["matches", "mismatch"].includes(test["filter-match"]?.status), "Missing filter result");
+      rows.push({ id: `${binaryId}::${name}`, eventName: `${suite["package-name"]}::${suite["binary-name"]}$${name}`, ignored: test.ignored, selected: test["filter-match"].status === "matches" });
     }
   }
   rows.sort((a, b) => a.id.localeCompare(b.id, "en"));
-  assert.equal(
-    rows.length,
-    listing["test-count"],
-    "nextest inventory count mismatch",
-  );
-  assert.equal(
-    new Set(rows.map((row) => row.id)).size,
-    rows.length,
-    "Duplicate test inventory",
-  );
-  assert.equal(
-    new Set(rows.map((row) => row.eventName)).size,
-    rows.length,
-    "Ambiguous event identity",
-  );
+  assert.equal(rows.length, listing["test-count"], "nextest inventory count mismatch");
+  assert.equal(new Set(rows.map(row => row.id)).size, rows.length, "Duplicate test inventory");
+  assert.equal(new Set(rows.map(row => row.eventName)).size, rows.length, "Ambiguous event identity");
   return rows;
 }
 
-export function verifyPartition(
-  all,
-  shards,
-  expectedPartitions = windowsPartitions.length,
-) {
-  assert.ok(
-    Number.isSafeInteger(expectedPartitions) && expectedPartitions > 0,
-    "Invalid expected partition count",
-  );
-  assert.equal(
-    shards.length,
-    expectedPartitions,
-    "Unexpected number of partitions",
-  );
-  assert.ok(
-    all.length && all.some((row) => !row.ignored),
-    "Empty full partition inventory",
-  );
-  assert.ok(
-    all.every((row) => row.selected === !row.ignored),
-    "Full partition has hidden filters or changed ignored behavior",
-  );
-  const stable = (rows) => rows.map(({ selected: _selected, ...rest }) => rest);
-  const expected = all
-    .filter((row) => row.selected)
-    .map((row) => row.id)
-    .sort();
+export function verifyPartition(all, shards, expectedPartitions = windowsPartitions.length) {
+  assert.ok(Number.isSafeInteger(expectedPartitions) && expectedPartitions > 0, "Invalid expected partition count");
+  assert.equal(shards.length, expectedPartitions, "Unexpected number of partitions");
+  assert.ok(all.length && all.some(row => !row.ignored), "Empty full partition inventory");
+  assert.ok(all.every(row => row.selected === !row.ignored), "Full partition has hidden filters or changed ignored behavior");
+  const stable = rows => rows.map(({ selected: _selected, ...rest }) => rest);
+  const expected = all.filter(row => row.selected).map(row => row.id).sort();
   const actual = [];
   for (const shard of shards) {
-    assert.equal(
-      canonical(stable(shard)),
-      canonical(stable(all)),
-      "partition inventory drift",
-    );
-    assert.ok(
-      shard.some((row) => row.selected),
-      "Empty runnable partition",
-    );
-    assert.ok(
-      shard.every((row) => !row.ignored || !row.selected),
-      "partition executes ignored tests",
-    );
-    actual.push(...shard.filter((row) => row.selected).map((row) => row.id));
+    assert.equal(canonical(stable(shard)), canonical(stable(all)), "partition inventory drift");
+    assert.ok(shard.some(row => row.selected), "Empty runnable partition");
+    assert.ok(shard.every(row => !row.ignored || !row.selected), "partition executes ignored tests");
+    actual.push(...shard.filter(row => row.selected).map(row => row.id));
   }
-  assert.equal(
-    canonical(actual.sort()),
-    canonical(expected),
-    "partition omission or duplicate execution",
-  );
+  assert.equal(canonical(actual.sort()), canonical(expected), "partition omission or duplicate execution");
 }
 
 export function verifyExecution(text, expected) {
-  const passed = [],
-    started = [];
+  const passed = [], started = [];
   const suites = new Map();
-  const selected = new Set(
-    expected.filter((row) => row.selected).map((row) => row.eventName),
-  );
+  const selected = new Set(expected.filter(row => row.selected).map(row => row.eventName));
   for (const line of text.split(/\r?\n/u).filter(Boolean)) {
     const event = JSON.parse(line);
-    assert.ok(
-      ["suite", "test"].includes(event.type),
-      "Unknown execution receipt type",
-    );
+    assert.ok(["suite", "test"].includes(event.type), "Unknown execution receipt type");
     if (event.type === "suite") {
-      assert.ok(
-        event.nextest?.crate &&
-          event.nextest?.test_binary &&
-          event.nextest?.kind,
-        "Missing execution suite identity",
-      );
+      assert.ok(event.nextest?.crate && event.nextest?.test_binary && event.nextest?.kind, "Missing execution suite identity");
       const key = canonical(event.nextest);
-      assert.ok(
-        ["started", "ok"].includes(event.event),
-        "Unsuccessful execution suite",
-      );
-      if (event.event === "started")
-        suites.set(key, (suites.get(key) ?? 0) + 1);
+      assert.ok(["started", "ok"].includes(event.event), "Unsuccessful execution suite");
+      if (event.event === "started") suites.set(key, (suites.get(key) ?? 0) + 1);
       else {
         assert.equal(event.failed, 0, "Failed execution suite");
-        assert.ok(
-          suites.get(key) > 0,
-          "Execution suite finished without starting",
-        );
+        assert.ok(suites.get(key) > 0, "Execution suite finished without starting");
         suites.set(key, suites.get(key) - 1);
       }
     } else {
-      assert.ok(
-        ["started", "ok", "ignored"].includes(event.event),
-        "Unexpected execution event",
-      );
-      assert.ok(
-        !(event.event === "ignored" && selected.has(event.name)),
-        "Selected execution was ignored",
-      );
-      if (event.event === "started" && selected.has(event.name))
-        started.push(event.name);
+      assert.ok(["started", "ok", "ignored"].includes(event.event), "Unexpected execution event");
+      assert.ok(!(event.event === "ignored" && selected.has(event.name)), "Selected execution was ignored");
+      if (event.event === "started" && selected.has(event.name)) started.push(event.name);
       if (event.event === "ok") passed.push(event.name);
     }
     assert.ok(event.event !== "failed", "Failed execution receipt");
   }
-  assert.ok(
-    [...suites.values()].every((open) => open === 0),
-    "Unfinished execution suite",
-  );
-  assert.equal(
-    canonical(started.sort()),
-    canonical([...selected].sort()),
-    "execution receipt missing or duplicate starts",
-  );
-  assert.equal(
-    canonical(passed.sort()),
-    canonical([...selected].sort()),
-    "execution receipt missing, duplicate or unexpected tests",
-  );
+  assert.ok([...suites.values()].every(open => open === 0), "Unfinished execution suite");
+  assert.equal(canonical(started.sort()), canonical([...selected].sort()), "execution receipt missing or duplicate starts");
+  assert.equal(canonical(passed.sort()), canonical([...selected].sort()), "execution receipt missing, duplicate or unexpected tests");
 }
 
 export function validateLcov(text) {
   const blocks = text.trim().split("end_of_record");
   assert.equal(blocks.pop().trim(), "", "coverage record is incomplete");
-  let measured = 0,
-    positive = 0;
+  let measured = 0, positive = 0;
   for (const block of blocks) {
     assert.match(block, /^SF:.+$/mu, "coverage source is missing");
-    for (const line of block
-      .split(/\r?\n/u)
-      .filter((line) => line.startsWith("DA:"))) {
+    for (const line of block.split(/\r?\n/u).filter(line => line.startsWith("DA:"))) {
       const match = /^DA:([1-9]\d*),(\d+)(?:,[a-fA-F0-9]+)?$/u.exec(line);
       assert.ok(match, "Invalid coverage line");
-      measured++;
-      positive += Number(match[2]) > 0;
+      measured++; positive += Number(match[2]) > 0;
     }
   }
-  assert.ok(
-    measured > 0 && positive > 0,
-    "coverage contains no executed measured lines",
-  );
+  assert.ok(measured > 0 && positive > 0, "coverage contains no executed measured lines");
   return { measuredLines: measured, coveredLines: positive };
 }
 
@@ -644,20 +463,10 @@ export function verifyTargets(listing, metadata, profileName = "windows") {
   );
 }
 
-export function validateProfilePath(
-  profile,
-  root,
-  directory = path.join(root, "target"),
-) {
-  assert.ok(
-    typeof profile === "string" && path.isAbsolute(profile),
-    "LLVM_PROFILE_FILE must be absolute",
-  );
+export function validateProfilePath(profile, root, directory = path.join(root, "target")) {
+  assert.ok(typeof profile === "string" && path.isAbsolute(profile), "LLVM_PROFILE_FILE must be absolute");
   const relative = path.relative(directory, profile);
-  assert.ok(
-    relative && !relative.startsWith("..") && !path.isAbsolute(relative),
-    "LLVM_PROFILE_FILE must remain under workspace/target",
-  );
+  assert.ok(relative && !relative.startsWith("..") && !path.isAbsolute(relative), "LLVM_PROFILE_FILE must remain under workspace/target");
 }
 
 // Consumer reruns reuse the immutable artifact selected by the producer job.
@@ -802,10 +611,9 @@ async function identity(
     nextestConfigSha256: await fileHash(".config/nextest.toml"),
     runnerSha256: await fileHash(fileURLToPath(import.meta.url)),
     runId: process.env.GITHUB_RUN_ID,
-    runAttempt:
-      profile.name === "windows"
-        ? windowsProducerAttempt(process.env)
-        : process.env.GITHUB_RUN_ATTEMPT,
+    runAttempt: profile.name === "windows"
+      ? windowsProducerAttempt(process.env)
+      : process.env.GITHUB_RUN_ATTEMPT,
   };
 }
 async function list(args, options) {
@@ -851,17 +659,12 @@ export function verifyLayout(binaries, root, profileName = "windows") {
     const directory = normalize(path.dirname(binary["binary-path"]));
     const relative = path.relative(target, directory);
     const parts = relative.split(path.sep);
-    const v2 =
-      parts.length === 5 &&
-      parts[0] === "debug" &&
-      parts[1] === "build" &&
-      /^[a-zA-Z0-9_-]+$/u.test(parts[2]) &&
-      /^[a-f0-9]{16}$/u.test(parts[3]) &&
-      parts[4] === "out";
-    assert.ok(
-      path.isAbsolute(binary["binary-path"]) && (directory === expected || v2),
-      `Unsupported build layout/profile; observed ${JSON.stringify({ kind: binary.kind, path: binary["binary-path"], expected })}`,
-    );
+    const v2 = parts.length === 5 && parts[0] === "debug" &&
+      parts[1] === "build" && /^[a-zA-Z0-9_-]+$/u.test(parts[2]) &&
+      /^[a-f0-9]{16}$/u.test(parts[3]) && parts[4] === "out";
+    assert.ok(path.isAbsolute(binary["binary-path"]) &&
+      (directory === expected || v2),
+      `Unsupported build layout/profile; observed ${JSON.stringify({ kind: binary.kind, path: binary["binary-path"], expected })}`);
     if (v2) fingerprints.add(path.join(...parts.slice(0, 4), "fingerprint"));
   }
   return [...fingerprints].sort();
@@ -892,15 +695,11 @@ export function macDebugSymbolPaths(binaries, root) {
 function verifyObjectMetadata(target, paths) {
   for (const relative of paths) {
     const directory = path.join(target, relative);
-    assert.ok(
-      existsSync(directory) && statSync(directory).isDirectory(),
-      "Missing Cargo object discovery metadata",
-    );
+    assert.ok(existsSync(directory) && statSync(directory).isDirectory(),
+      "Missing Cargo object discovery metadata");
     const actual = path.relative(realpathSync(target), realpathSync(directory));
-    assert.ok(
-      actual && !actual.startsWith("..") && !path.isAbsolute(actual),
-      "Cargo object discovery metadata escaped the target",
-    );
+    assert.ok(actual && !actual.startsWith("..") && !path.isAbsolute(actual),
+      "Cargo object discovery metadata escaped the target");
   }
 }
 async function verifyMacDebugSymbols(
@@ -956,11 +755,7 @@ export async function produce(
     "--list-type",
     "binaries-only",
   ]);
-  const fingerprints = verifyLayout(
-    selectedBinaries,
-    process.cwd(),
-    profile.name,
-  );
+  const fingerprints = verifyLayout(selectedBinaries, process.cwd(), profile.name);
   const extras = [];
   if (profile.instrumented) {
     // cargo-llvm-cov discovers v2 objects through Cargo's sibling fingerprint
@@ -1020,18 +815,9 @@ export async function produce(
     "--list-type",
     "binaries-only",
   ]);
-  const archivedFingerprints = verifyLayout(
-    binaries,
-    process.cwd(),
-    profile.name,
-  );
-  assert.deepEqual(
-    archivedFingerprints,
-    fingerprints,
-    "Archived object metadata inventory differs",
-  );
-  if (profile.instrumented)
-    verifyObjectMetadata(path.join(probe, "target"), fingerprints);
+  const archivedFingerprints = verifyLayout(binaries, process.cwd(), profile.name);
+  assert.deepEqual(archivedFingerprints, fingerprints, "Archived object metadata inventory differs");
+  if (profile.instrumented) verifyObjectMetadata(path.join(probe, "target"), fingerprints);
   if (!profile.instrumented)
     await verifyMacDebugSymbols(binaries, process.cwd(), debugSymbols, probe);
   const binaryFile = path.join(directory, "producer-binaries.json");
@@ -1106,10 +892,7 @@ export async function produce(
 
 export function consumerFailurePolicy(env = process.env) {
   const value = env.MESH_WINDOWS_FAIL_FAST;
-  assert.ok(
-    value === undefined || value === "0" || value === "1",
-    "MESH_WINDOWS_FAIL_FAST must be 0 or 1",
-  );
+  assert.ok(value === undefined || value === "0" || value === "1", "MESH_WINDOWS_FAIL_FAST must be 0 or 1");
   return value === "1" ? "--fail-fast" : "--no-fail-fast";
 }
 
@@ -1142,8 +925,7 @@ export async function extractLinuxArchive(
     );
   };
   assert.ok(
-    !contains(evidenceRoot, actualParent) &&
-      !contains(actualParent, evidenceRoot),
+    !contains(evidenceRoot, actualParent) && !contains(actualParent, evidenceRoot),
     "Linux runtime staging and evidence must not overlap",
   );
   assert.ok(
@@ -1191,13 +973,7 @@ export async function extractLinuxArchive(
 export async function prepareArchive(
   directory,
   output,
-  {
-    profile: profileName = "windows",
-    manifestSha256,
-    archiveSha256,
-    fixtureRuntime,
-    signal,
-  } = {},
+  { profile: profileName = "windows", manifestSha256, archiveSha256, fixtureRuntime, signal } = {},
 ) {
   signal?.throwIfAborted();
   const profile = archiveProfile(profileName);
@@ -1290,8 +1066,7 @@ export async function prepareArchive(
           evidence("extract"),
         );
   const fingerprints = verifyLayout(binaries, process.cwd(), profile.name);
-  if (profile.instrumented)
-    verifyObjectMetadata(targetDirectory(process.cwd(), profile), fingerprints);
+  if (profile.instrumented) verifyObjectMetadata(targetDirectory(process.cwd(), profile), fingerprints);
   if (!profile.instrumented)
     await verifyMacDebugSymbols(binaries, process.cwd(), manifest.debugSymbols);
   const binaryFile = path.join(output, "consumer-binaries.json");
@@ -1331,43 +1106,14 @@ export async function prepareArchive(
     expected,
     "Consumer partition differs from producer inventory",
   );
-  return {
-    directory,
-    output,
-    profile,
-    fixtureRuntime,
-    manifest,
-    manifestSha256: await fileHash(path.join(directory, "manifest.json")),
-    expected,
-    observed,
-    listings,
-    binaries,
-    metadata,
-    reuse,
-    evidence,
-  };
+  return { directory, output, profile, fixtureRuntime, manifest, manifestSha256: await fileHash(path.join(directory, "manifest.json")), expected, observed, listings, binaries, metadata, reuse, evidence };
 }
 
 export async function verifyPreparedArchive(prepared) {
   const { directory, profile, fixtureRuntime, manifest, evidence } = prepared;
-  verifyIdentity(
-    manifest.identity,
-    await identity(
-      (phase) => evidence(`final-${phase}`),
-      profile,
-      fixtureRuntime,
-    ),
-  );
-  assert.equal(
-    await fileHash(path.join(directory, "workspace.tar.zst")),
-    manifest.archiveSha256,
-    "Archive changed during execution",
-  );
-  assert.equal(
-    await fileHash(path.join(directory, "manifest.json")),
-    prepared.manifestSha256,
-    "Manifest changed during execution",
-  );
+  verifyIdentity(manifest.identity, await identity(phase => evidence(`final-${phase}`), profile, fixtureRuntime));
+  assert.equal(await fileHash(path.join(directory, "workspace.tar.zst")), manifest.archiveSha256, "Archive changed during execution");
+  assert.equal(await fileHash(path.join(directory, "manifest.json")), prepared.manifestSha256, "Manifest changed during execution");
 }
 
 export async function consume(
@@ -1387,13 +1133,7 @@ export async function consume(
     profile.partitions.includes(shard),
     `shard must be an integer from 1 through ${profile.partitions.length}`,
   );
-  const prepared = await prepareArchive(directory, output, {
-    profile: profileName,
-    manifestSha256,
-    archiveSha256,
-    fixtureRuntime,
-    signal,
-  });
+  const prepared = await prepareArchive(directory, output, { profile: profileName, manifestSha256, archiveSha256, fixtureRuntime, signal });
   const { manifest, observed, reuse, evidence, expected } = prepared;
   writeJson(path.join(output, "expected-inventory.json"), expected[shard]);
   writeJson(path.join(output, "input-identity.json"), {
