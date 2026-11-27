@@ -1,0 +1,9 @@
+分析一下，为什么windows上的ubuntu上的mesh talk 的联系人列表会看不到haaland的，而mac2015上的mesh talk 的联系人列表也看不到ducan和stella的，但明明peer上的 都有的，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+分析一下，为什么ubuntu（在windows10上运行的）上的mesh talk 的联系人列表会看不到haaland的，而mac2015上的mesh talk 的联系人列表也看不到ducan和stella的，但明明peer上的 都有的，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+那这个规则实现错了，正常的实现是，离线的情况，在线肯定要显示啊，continue；continue；continue；continue；continue；continue；
