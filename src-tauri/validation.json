@@ -1630,6 +1630,39 @@
         "Require two packaged macOS builds with distinct code hashes: convenience-mode restart and update must restore without Keychain or device-owner prompts; protected-mode startup and cancellation must retain manual recovery. Mocks do not prove native prompt behavior."
       ],
       "consumers": ["frontend-sensitive-operations"]
+    },
+    {
+      "id": "desktop-group-mute",
+      "paths": [
+        "src-tauri/src/settings.rs",
+        "src-tauri/src/events.rs",
+        "src-tauri/src/chat_commands/state.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "events::notification_policy_tests",
+            "muted_groups_are_local_account_settings_with_legacy_defaults"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Apply local account group notification preferences at native presentation authority.",
+        "guide": "docs/module-boundaries.md#group-notification-attention",
+        "invariants": [
+          {
+            "name": "Muted ordinary alerts remain suppressed; existing mention eligibility respects global privacy and focus.",
+            "reference": "docs/help/topics/notifications.md#mute-a-group"
+          }
+        ]
+      },
+      "consumers": [
+        "frontend-group-mute"
+      ],
+      "escalation": [
+        "Real macOS/Windows native notifications and lock/account replacement evidence remain required."
+      ]
     }
   ],
   "prScenarios": [

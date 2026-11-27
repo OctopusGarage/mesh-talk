@@ -188,7 +188,12 @@
     "strandedAlone": "Não vê ninguém? Conecte-se sem Wi-Fi",
     "strandedNoNetwork": "Sem conexão com uma rede. Configure uma conexão direta",
     "peopleOnLan": "Pessoas observadas online por este cliente: {{count}}",
-    "previousAccountGroups": "Grupos de contas anteriores ({{count}})"
+    "previousAccountGroups": "Grupos de contas anteriores ({{count}})",
+    "muteGroup": "Silenciar notificações do grupo",
+    "unmuteGroup": "Ativar notificações do grupo",
+    "muteFailed": "Não foi possível salvar a preferência",
+    "groupMuted": "Silenciar notificações do grupo",
+    "mutedUnread": "{{count}} não lidas (silenciado)"
   },
   "recovery": {
     "simpleIntro": "Salve uma cópia da sua conta e do histórico de mensagens. Os backups só são feitos quando você escolhe.",

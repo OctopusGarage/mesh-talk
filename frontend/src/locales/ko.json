@@ -188,7 +188,12 @@
     "strandedAlone": "아무도 보이지 않나요? Wi-Fi 없이 연결하기",
     "strandedNoNetwork": "네트워크에 연결되어 있지 않습니다. 직접 연결을 설정하세요",
     "peopleOnLan": "이 클라이언트에서 온라인으로 확인한 사용자: {{count}}명",
-    "previousAccountGroups": "이전 계정의 그룹 ({{count}})"
+    "previousAccountGroups": "이전 계정의 그룹 ({{count}})",
+    "muteGroup": "그룹 알림 끄기",
+    "unmuteGroup": "그룹 알림 켜기",
+    "muteFailed": "알림 설정을 저장하지 못했습니다",
+    "groupMuted": "그룹 알림 끄기",
+    "mutedUnread": "읽지 않은 메시지 {{count}}개 (알림 꺼짐)"
   },
   "recovery": {
     "simpleIntro": "계정과 메시지 기록의 사본을 저장합니다. 백업은 직접 선택할 때만 실행됩니다.",

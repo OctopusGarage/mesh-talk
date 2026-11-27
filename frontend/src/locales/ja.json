@@ -188,7 +188,12 @@
     "strandedAlone": "誰も見つからない？Wi-Fiなしで接続",
     "strandedNoNetwork": "ネットワーク未接続 · 直接つなぐ",
     "peopleOnLan": "このクライアントでオンライン確認：{{count}} 人",
-    "previousAccountGroups": "以前のアカウントのグループ（{{count}}）"
+    "previousAccountGroups": "以前のアカウントのグループ（{{count}}）",
+    "muteGroup": "グループ通知をミュート",
+    "unmuteGroup": "グループ通知のミュートを解除",
+    "muteFailed": "通知設定を保存できませんでした",
+    "groupMuted": "グループ通知をミュート",
+    "mutedUnread": "未読 {{count}} 件（ミュート中）"
   },
   "recovery": {
     "simpleIntro": "アカウントとメッセージ履歴のコピーを保存します。バックアップは操作したときだけ実行されます。",

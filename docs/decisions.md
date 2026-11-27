@@ -161,3 +161,16 @@ opportunistic convenience, not the extraction contract. VisionKit interactive
 overlays remain deferred until their asynchronous native path has real completion
 and selection evidence. Bounds and lifecycle belong to
 [inline media presentation](module-boundaries.md#inline-media-presentation).
+
+## Group notification muting preserves unread history
+
+Group muting is an account-local device preference, separate from message reception
+and read state. Ordinary muted messages retain recoverable unread history while
+row and application badges project only attention-worthy messages. Existing
+name-based mentions retain their notification exception; whole-message code
+blocks do not contain actionable mentions. Native presentation applies current
+settings under the existing session authority, preserving localized notification
+previews. See [notification help](help/topics/notifications.md#mute-a-group) and
+[module ownership](module-boundaries.md#group-notification-attention). Focused
+policy and persistence regressions cover the contract; physical macOS/Windows
+notification and resource acceptance remain pending.

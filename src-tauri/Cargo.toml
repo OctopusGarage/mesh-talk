@@ -15,6 +15,7 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
+regex = "1"
 # The protocol core (the SDK layer this app is built on).
 mesh-talk-core = { path = "../crates/mesh-talk-core" }
 mesh-talk-integrations = { path = "../crates/mesh-talk-integrations" }

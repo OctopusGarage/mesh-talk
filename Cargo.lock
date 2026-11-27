@@ -3469,6 +3469,7 @@ dependencies = [
  "rand_core 0.6.4",
  "raw-window-handle",
  "rcgen",
+ "regex",
  "reqwest",
  "security-framework 3.7.0",
  "security-framework-sys",

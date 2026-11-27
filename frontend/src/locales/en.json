@@ -188,7 +188,12 @@
     "strandedAlone": "Can't see anyone? Connect without Wi-Fi",
     "strandedNoNetwork": "Not on any network — set up a direct link",
     "peopleOnLan": "People observed online by this client: {{count}}",
-    "previousAccountGroups": "Previous account groups ({{count}})"
+    "previousAccountGroups": "Previous account groups ({{count}})",
+    "muteGroup": "Mute group notifications",
+    "unmuteGroup": "Unmute group notifications",
+    "muteFailed": "Could not save notification preference",
+    "groupMuted": "Mute group notifications",
+    "mutedUnread": "{{count}} unread (muted)"
   },
   "recovery": {
     "simpleIntro": "Save a copy of your account and message history. Backups run only when you choose.",

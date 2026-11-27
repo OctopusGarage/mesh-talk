@@ -20,9 +20,19 @@ pub(crate) fn dispatch_runtime_presentation<R: Runtime>(
     present: impl FnOnce(&tauri::AppHandle<R>) + Send + 'static,
 ) -> Result<PresentationCompletion, tauri::Error> {
     let queued_app = app.clone();
-    queue_runtime_presentation(
-        authority.clone(),
-        move || present(&queued_app),
+    queue_authorized_presentation(
+        authority.queued_current_with_session(move |info| {
+            if let Some(state) = queued_app.try_state::<NotificationContextState>()
+                && let Ok(mut name) = state.2.lock()
+            {
+                *name = if info.user.display_name.is_empty() {
+                    info.user.login_name().to_owned()
+                } else {
+                    info.user.display_name.clone()
+                };
+            }
+            present(&queued_app);
+        }),
         |task| app.run_on_main_thread(task),
     )
 }
@@ -46,15 +56,21 @@ impl Drop for PresentationCompletion {
     }
 }
 
+#[cfg(test)]
 fn queue_runtime_presentation<E>(
     authority: crate::chat_commands::RuntimeAuthority,
     present: impl FnOnce() + Send + 'static,
     enqueue: impl FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), E>,
 ) -> Result<PresentationCompletion, E> {
+    queue_authorized_presentation(authority.queued_current(present), enqueue)
+}
+
+fn queue_authorized_presentation<E>(
+    present: impl FnOnce() + Send + 'static,
+    enqueue: impl FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), E>,
+) -> Result<PresentationCompletion, E> {
     let (finished, completion) = tokio::sync::oneshot::channel();
-    let pending: PendingPresentation = Arc::new(std::sync::Mutex::new(Some(Box::new(
-        authority.queued_current(present),
-    ))));
+    let pending: PendingPresentation = Arc::new(std::sync::Mutex::new(Some(Box::new(present))));
     let queued = Arc::downgrade(&pending);
     enqueue(Box::new(move || {
         // The runtime task owns the payload until actual execution. Cancelling
@@ -77,6 +93,7 @@ fn queue_runtime_presentation<E>(
 pub struct NotificationContextState(
     Arc<Mutex<NotificationContext>>,
     Arc<Mutex<crate::channel_reception::ReceptionLedger>>,
+    Arc<Mutex<String>>,
 );
 
 #[derive(Clone, Default)]
@@ -91,6 +108,7 @@ enum NotificationTarget<'a> {
     Dm(&'a str),
     Channel(&'a str),
     File,
+    MentionedChannel(&'a str),
 }
 
 #[tauri::command]
@@ -124,6 +142,55 @@ pub fn set_notification_context(
     Ok(())
 }
 
+/// Match the frontend whole-message code-card contract before mention classification.
+fn is_code_message(text: &str) -> bool {
+    let Some((opening, rest)) = text.split_once('\n') else {
+        return false;
+    };
+    let fence_len = opening.bytes().take_while(|byte| *byte == b'`').count();
+    if fence_len < 3 {
+        return false;
+    }
+    let language = &opening[fence_len..];
+    if language.len() > 32
+        || !language
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_+-".contains(&byte))
+    {
+        return false;
+    }
+    let fence = &opening[..fence_len];
+    let ending = format!("\n{fence}");
+    rest.strip_suffix(&ending)
+        .is_some_and(|code| !code.split('\n').any(|line| line == fence))
+}
+
+/// Preserve the existing display-name mention convention; this is not identity metadata.
+fn mentions_display_name(text: &str, name: &str) -> bool {
+    if name.is_empty() || is_code_message(text) {
+        return false;
+    }
+    // Bound the cache to one display name; never retain message content.
+    static MATCHER: std::sync::OnceLock<Mutex<Option<(String, regex::Regex)>>> =
+        std::sync::OnceLock::new();
+    let Ok(mut cache) = MATCHER.get_or_init(|| Mutex::new(None)).lock() else {
+        return false;
+    };
+    if cache.as_ref().is_none_or(|(cached, _)| cached != name) {
+        let pattern = format!(
+            r"(?i)(?:^|[^\p{{L}}\p{{N}}_@])@{}(?:$|[^\p{{L}}\p{{N}}_-])",
+            regex::escape(name)
+        );
+        let Ok(matcher) = regex::Regex::new(&pattern) else {
+            return false;
+        };
+        *cache = Some((name.to_owned(), matcher));
+    }
+    cache
+        .as_ref()
+        .is_some_and(|(_, matcher)| matcher.is_match(text))
+}
+
 fn notification_payload(
     settings: &crate::settings::AppSettings,
     focused: bool,
@@ -132,6 +199,11 @@ fn notification_payload(
     title: &str,
     body: &str,
 ) -> Option<(String, String)> {
+    if let NotificationTarget::Channel(channel) = target
+        && settings.muted_groups.iter().any(|id| id == channel)
+    {
+        return None;
+    }
     if !settings.notifications {
         return None;
     }
@@ -142,7 +214,8 @@ fn notification_payload(
             NotificationTarget::Dm(device) => {
                 context.active_peer_devices.iter().any(|id| id == device)
             }
-            NotificationTarget::Channel(channel) => {
+            NotificationTarget::Channel(channel)
+            | NotificationTarget::MentionedChannel(channel) => {
                 context.active_channel.as_deref() == Some(channel)
             }
             NotificationTarget::File => true,
@@ -605,7 +678,23 @@ fn publish_channel_message<R: Runtime>(
     match decision.alert {
         Alert::Live => notify_if_unfocused(
             app_handle,
-            NotificationTarget::Channel(&event.channel_id),
+            if !event.own_device
+                && event.protection.is_none()
+                && app_handle
+                    .try_state::<NotificationContextState>()
+                    .and_then(|state| {
+                        state
+                            .2
+                            .lock()
+                            .ok()
+                            .map(|name| mentions_display_name(&event.text, &name))
+                    })
+                    .unwrap_or(false)
+            {
+                NotificationTarget::MentionedChannel(&event.channel_id)
+            } else {
+                NotificationTarget::Channel(&event.channel_id)
+            },
             presentation
                 .as_ref()
                 .map_or_else(
@@ -748,6 +837,86 @@ fn publish_file_received<R: Runtime>(
 
 #[cfg(test)]
 mod notification_policy_tests {
+    #[test]
+    fn group_mute_preserves_only_explicit_mention_attention() {
+        let mut settings = crate::settings::AppSettings {
+            muted_groups: vec!["group".into()],
+            ..Default::default()
+        };
+        let context = super::NotificationContext::default();
+        assert!(
+            super::notification_payload(
+                &settings,
+                false,
+                &context,
+                super::NotificationTarget::Channel("group"),
+                "Group",
+                "hello"
+            )
+            .is_none()
+        );
+        assert!(
+            super::notification_payload(
+                &settings,
+                false,
+                &context,
+                super::NotificationTarget::MentionedChannel("group"),
+                "Group",
+                "@Alice"
+            )
+            .is_some()
+        );
+        settings.notifications = false;
+        assert!(
+            super::notification_payload(
+                &settings,
+                false,
+                &context,
+                super::NotificationTarget::MentionedChannel("group"),
+                "Group",
+                "@Alice"
+            )
+            .is_none()
+        );
+        assert!(super::mentions_display_name(
+            "hi @Alice Smith!",
+            "Alice Smith"
+        ));
+        assert!(super::mentions_display_name("@亏麻了 !!!", "亏麻了"));
+        assert!(!super::mentions_display_name("mail@alice.com", "alice"));
+        assert!(!super::mentions_display_name("@alice_2", "alice"));
+        assert!(super::mentions_display_name("@ſ", "s"));
+        assert!(!super::mentions_display_name(
+            "```python\n@alice\n```",
+            "alice"
+        ));
+        assert!(super::mentions_display_name(
+            "text ```\n@alice\n```",
+            "alice"
+        ));
+        assert!(!super::mentions_display_name("@alice²", "alice"));
+    }
+
+    #[test]
+    fn queued_presentation_reuses_current_session_identity_without_relocking() {
+        let (_, _, authority) = presentation_authority();
+        let observed = Arc::new(Mutex::new(String::new()));
+        let result = observed.clone();
+        let mut queued = None;
+        let _completion = queue_authorized_presentation(
+            authority.queued_current_with_session(move |info| {
+                *result.lock().unwrap() = info.user.display_name.clone();
+            }),
+            |task| {
+                queued = Some(task);
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
+        queued.unwrap()();
+        assert_eq!(*observed.lock().unwrap(), "Fixture");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn unavailable_native_provider_is_best_effort_at_the_unfocused_message_boundary() {

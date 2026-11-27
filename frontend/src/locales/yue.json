@@ -188,7 +188,12 @@
     "strandedAlone": "找不到其他人？嘗試無網絡直連",
     "strandedNoNetwork": "未連接至任何網絡 · 設定直連",
     "peopleOnLan": "呢個客戶端已知在線 {{count}} 人",
-    "previousAccountGroups": "之前帳戶嘅群組（{{count}}）"
+    "previousAccountGroups": "之前帳戶嘅群組（{{count}}）",
+    "muteGroup": "群組訊息免打擾",
+    "unmuteGroup": "恢復群組訊息提醒",
+    "muteFailed": "儲存唔到通知設定",
+    "groupMuted": "群組訊息免打擾",
+    "mutedUnread": "{{count}} 則未讀訊息（免打擾）"
   },
   "recovery": {
     "simpleIntro": "儲存帳號同訊息記錄嘅副本。備份只會喺你手動操作嗰陣進行。",

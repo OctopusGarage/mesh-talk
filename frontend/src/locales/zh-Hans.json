@@ -188,7 +188,12 @@
     "strandedAlone": "找不到人？试试无网直连",
     "strandedNoNetwork": "未连接任何网络 · 设置直连",
     "peopleOnLan": "当前客户端已知在线 {{count}} 人",
-    "previousAccountGroups": "此前账号的群（{{count}}）"
+    "previousAccountGroups": "此前账号的群（{{count}}）",
+    "muteGroup": "群消息免打扰",
+    "unmuteGroup": "恢复群消息提醒",
+    "muteFailed": "无法保存通知设置",
+    "groupMuted": "群消息免打扰",
+    "mutedUnread": "{{count}} 条未读消息（免打扰）"
   },
   "recovery": {
     "simpleIntro": "保存账号和消息记录的副本。备份仅在你手动操作时进行。",

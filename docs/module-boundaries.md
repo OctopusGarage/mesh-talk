@@ -1631,6 +1631,19 @@ and unchanged composer/message text. Real Windows 10 WebView2 acceptance must al
 check colors, selection/copy, deletion, reply/search/reaction surfaces and zoom;
 other-host Chromium and DOM assertions do not establish native visual acceptance.
 
+## Group notification attention
+
+`frontend/src/store/groupMute.ts` projects attention without changing reception or
+read receipts. Group-row and app/tray badges exclude muted ordinary unread; the
+unread review still lists raw unread for recovery. Local account settings own
+`muted_groups`; the portable allowlist excludes this device preference. Native
+presentation reads the current policy, including after queued work executes.
+Existing display-name mention matching supplies the exception, with its existing
+ambiguity; this feature adds no wire identity metadata or broadcast exception.
+Preference writes are serialized and generation checked. No polling or secondary
+message queue is introduced. Native macOS/Windows banners and resource behavior
+require platform acceptance beyond focused policy tests.
+
 ## Code-block messages
 
 `frontend/src/lib/codeBlock.ts` owns whole-message fenced-code encoding and

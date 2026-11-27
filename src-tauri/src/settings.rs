@@ -96,6 +96,8 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub notification_preview: bool,
     #[serde(default)]
+    pub muted_groups: Vec<String>,
+    #[serde(default)]
     pub auto_lock_seconds: u32,
     #[serde(default)]
     pub lock_when_hidden: bool,
@@ -139,6 +141,7 @@ impl Default for AppSettings {
             ringtone: default_ringtone(),
             privacy_level: PrivacyLevel::Balanced,
             notification_preview: true,
+            muted_groups: Vec::new(),
             auto_lock_seconds: 0,
             lock_when_hidden: false,
             confirm_sensitive_copy: false,
@@ -198,6 +201,8 @@ struct AccountSettings {
     ringtone: String,
     privacy_level: PrivacyLevel,
     notification_preview: bool,
+    #[serde(default)]
+    muted_groups: Vec<String>,
     auto_lock_seconds: u32,
     lock_when_hidden: bool,
     confirm_sensitive_copy: bool,
@@ -228,6 +233,7 @@ impl From<&AppSettings> for AccountSettings {
             ringtone: value.ringtone.clone(),
             privacy_level: value.privacy_level,
             notification_preview: value.notification_preview,
+            muted_groups: value.muted_groups.clone(),
             auto_lock_seconds: value.auto_lock_seconds,
             lock_when_hidden: value.lock_when_hidden,
             confirm_sensitive_copy: value.confirm_sensitive_copy,
@@ -258,6 +264,7 @@ impl AccountSettings {
             ringtone: self.ringtone.clone(),
             privacy_level: self.privacy_level,
             notification_preview: self.notification_preview,
+            muted_groups: self.muted_groups.clone(),
             auto_lock_seconds: self.auto_lock_seconds,
             lock_when_hidden: self.lock_when_hidden,
             confirm_sensitive_copy: self.confirm_sensitive_copy,
@@ -886,6 +893,18 @@ fn require_settings_account(
 
 fn normalize_settings(mut settings: AppSettings) -> Result<AppSettings, CommandError> {
     settings.screenshot_shortcuts.validate()?;
+    if settings.muted_groups.len() > 4096
+        || settings
+            .muted_groups
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+    {
+        return Err(CommandError::InvalidInput(
+            "Invalid muted group list".into(),
+        ));
+    }
+    settings.muted_groups.sort();
+    settings.muted_groups.dedup();
     let level = settings.privacy_level;
     settings = settings.with_privacy_level(level);
     let hub = settings.bridge_hub_id.trim();
@@ -2241,6 +2260,29 @@ mod tests {
         let back: AppSettings = serde_json::from_str(&json).expect("deserializes");
         assert!(back.calls_enabled);
         assert_eq!(back.ringtone, "marimba");
+    }
+
+    #[test]
+    fn muted_groups_are_local_account_settings_with_legacy_defaults() {
+        let legacy: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.muted_groups.is_empty());
+        let mut settings = AppSettings {
+            muted_groups: vec!["group".into()],
+            ..Default::default()
+        };
+        let account = AccountSettings::from(&settings);
+        let encoded = serde_json::to_string(&account).unwrap();
+        let restored: AccountSettings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            restored
+                .with_global(&GlobalSettings::default())
+                .muted_groups,
+            vec!["group"]
+        );
+        assert!(AccountSettings::default().muted_groups.is_empty());
+        assert!(!shared::values(&settings).contains_key("settings.muted_groups"));
+        settings.muted_groups = vec![String::new()];
+        assert!(normalize_settings(settings).is_err());
     }
 
     #[test]

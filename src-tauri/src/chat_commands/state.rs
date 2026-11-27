@@ -360,6 +360,7 @@ impl RuntimeAuthority {
     /// Acquire authority only when the queued operation executes. Inbound events
     /// can query native windows, whose getters synchronously rendezvous with the
     /// main thread; holding the session while dispatching would invert that wait.
+    #[cfg(test)]
     pub(crate) fn queued_current<F: FnOnce() + Send + 'static>(
         &self,
         operation: F,
@@ -367,6 +368,19 @@ impl RuntimeAuthority {
         let authority = self.clone();
         move || {
             let _ = authority.current(|_| operation());
+        }
+    }
+    /// Reuse the held session authority without attempting to acquire its lock again.
+    pub(crate) fn queued_current_with_session<F>(
+        &self,
+        operation: F,
+    ) -> impl FnOnce() + Send + 'static + use<F>
+    where
+        F: FnOnce(&SessionInfo) + Send + 'static,
+    {
+        let authority = self.clone();
+        move || {
+            let _ = authority.current(|info| operation(info));
         }
     }
 }

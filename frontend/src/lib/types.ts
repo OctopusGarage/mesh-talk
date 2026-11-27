@@ -419,6 +419,7 @@ export interface AppSettings {
   /** Preset name; custom means individual privacy controls differ from a preset. */
   privacy_level: "balanced" | "private" | "strict" | "custom";
   notification_preview: boolean;
+  muted_groups?: string[];
   auto_lock_seconds: number;
   lock_when_hidden: boolean;
   confirm_sensitive_copy: boolean;

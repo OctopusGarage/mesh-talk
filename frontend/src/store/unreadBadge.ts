@@ -1,15 +1,38 @@
+import { useSettings } from "./settings";
+import { groupAttentionCount } from "./groupMute";
 import { create } from "zustand";
 import { chat } from "@/lib/api/chat";
 import { createBadgeSync } from "@/lib/badgeSync";
 import { captureRuntimeOwner } from "./ownership";
 import { useChat } from "./chat";
 
-export function unreadTotal(state: {
-  unread: Record<string, number>;
-  pendingUnknownUnread: Record<string, number>;
-}): number {
+export function unreadTotal(
+  state: {
+    unread: Record<string, number>;
+    pendingUnknownUnread: Record<string, number>;
+    ledger?: Record<
+      string,
+      Record<
+        string,
+        { seen: boolean; suppressed?: boolean; mentioned?: boolean }
+      >
+    >;
+  },
+  muted: readonly string[] = useSettings.getState().mutedGroups,
+): number {
+  const ledger = state.ledger ?? {};
   return [
-    ...Object.values(state.unread),
+    ...Object.entries(state.unread).map(([key, count]) =>
+      groupAttentionCount(
+        count,
+        key.startsWith("channel:") && muted.includes(key.slice(8)),
+        (key.startsWith("channel:") && muted.includes(key.slice(8))
+          ? Object.values(ledger[key] ?? {})
+          : []
+        ).filter((entry) => !entry.seen && !entry.suppressed && entry.mentioned)
+          .length,
+      ),
+    ),
     ...Object.values(state.pendingUnknownUnread),
   ].reduce(
     (sum, count) =>
@@ -45,9 +68,13 @@ export function startUnreadBadge(owner: string): () => void {
   const unsubscribe = useChat.subscribe((state, previous) => {
     if (
       state.unread !== previous.unread ||
+      state.ledger !== previous.ledger ||
       state.pendingUnknownUnread !== previous.pendingUnknownUnread
     )
       sync.update(unreadTotal(state));
+  });
+  const unsubscribeSettings = useSettings.subscribe((state, previous) => {
+    if (state.mutedGroups !== previous.mutedGroups) retry();
   });
   let frame = 0;
   const onFocus = () => {
@@ -66,6 +93,7 @@ export function startUnreadBadge(owner: string): () => void {
   retry();
   return () => {
     unsubscribe();
+    unsubscribeSettings();
     sync.stop();
     cancelAnimationFrame(frame);
     window.removeEventListener("focus", onFocus);

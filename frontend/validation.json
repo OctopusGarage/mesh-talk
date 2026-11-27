@@ -2899,6 +2899,35 @@
           }
         ]
       }
+    },
+    {
+      "id": "frontend-group-mute",
+      "paths": [
+        "frontend/src/store/groupMute.ts",
+        "frontend/src/store/groupMute.test.ts",
+        "frontend/src/store/settings.ts",
+        "frontend/src/store/unreadBadge.ts",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx"
+      ],
+      "frontend": [
+        "src/store/groupMute.test.ts",
+        "src/features/chat/sidebar/ConversationRow.test.ts",
+        "src/store/unreadBadge.test.ts",
+        "src/store/settings.test.ts"
+      ],
+      "capability": {
+        "summary": "Mute ordinary group attention while preserving raw unread and existing mention exceptions.",
+        "guide": "docs/module-boundaries.md#group-notification-attention",
+        "invariants": [
+          {
+            "name": "Muting changes attention only; real unread and history remain recoverable.",
+            "reference": "docs/help/topics/notifications.md#mute-a-group"
+          }
+        ]
+      },
+      "escalation": [
+        "Native macOS/Windows verify muted ordinary live/file/catchup notifications and mention privacy/focus behavior."
+      ]
     }
   ],
   "prScenarios": [
