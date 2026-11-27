@@ -1,0 +1,54 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M8DWWNPC0JH9M71VC5CY5GGT",
+  "strategy": "manual-commit",
+  "branch": "requirements-work",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/decisions.md",
+    "docs/module-boundaries.md",
+    "docs/privacy-controls.md",
+    "frontend/src/lib/types.ts",
+    "frontend/src/store/chat.test.ts",
+    "frontend/src/store/chat.ts",
+    "frontend/validation.json",
+    "src-tauri/src/chat_commands/account.rs",
+    "src-tauri/src/chat_commands/models.rs",
+    "src-tauri/src/chat_commands/presence.rs",
+    "src-tauri/src/contact_policy.rs",
+    "src-tauri/src/contact_policy/expiry.rs",
+    "src-tauri/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 66570,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 17634944,
+    "output_tokens": 32777,
+    "api_call_count": 81,
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 4,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 4,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
