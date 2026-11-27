@@ -289,6 +289,12 @@ pub async fn list_accounts(
                 .cached_peer_snapshot()
                 .map_err(|error| error.to_string())?;
             peers.sort_by_key(|peer| std::cmp::Reverse(peer.last_seen));
+            let observed_at = std::time::Instant::now();
+            let online = peers
+                .iter()
+                .filter(|peer| super::presence::peer_is_online(peer, observed_at))
+                .filter_map(|peer| peer.account_id.clone())
+                .collect();
             let live = peers
                 .into_iter()
                 .filter_map(|p| p.account_id.map(|id| (id, p.name, p.post_office)))
@@ -335,8 +341,17 @@ pub async fn list_accounts(
                                 &owner,
                                 rt.account_id(),
                                 &mut rows,
-                                &ever_history,
                                 now_ms,
+                                crate::contact_policy::ContactExpiryInputs {
+                                    ever_history: &ever_history,
+                                    online: &online,
+                                    deleted: &deleted,
+                                    history_for_absent: &|accounts| {
+                                        rt.handle()
+                                            .accounts_with_ever_history(accounts)
+                                            .map_err(|error| error.to_string())
+                                    },
+                                },
                             ) {
                                 log::warn!("Contact expiry unavailable: {error}");
                             }

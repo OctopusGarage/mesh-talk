@@ -781,8 +781,8 @@ const contactHistoryHints = createContactHistoryRefresh(requestContactRoster);
 function accountRosterProjection(peers: PeerInfo[]): string {
   return JSON.stringify(
     peers
-      .map(({ user_id, account_id, name, post_office }) =>
-        JSON.stringify([user_id, account_id, name, post_office]),
+      .map(({ user_id, account_id, name, post_office, online }) =>
+        JSON.stringify([user_id, account_id, name, post_office, online]),
       )
       .sort(),
   );

@@ -193,33 +193,45 @@ groups. See [personal conversation removal](../CONTEXT.md#conversations-and-hist
 
 ### Discovered contacts without chat history
 
-A discovered account that has never had durable sent messages, received messages
-or file cards disappears from local contact lists 24 hours after its first local
-roster observation. The clock belongs to the local profile and current account;
-continuous discovery, name changes, extra devices and application restarts do not
-renew it. Existing installations start that clock on their first observation after
-upgrade because discovery heartbeat timestamps cannot establish an account's age.
-Deadlines use the device's wall clock. Once an expiry is committed, later clock
-corrections or restarts do not make that never-chatted contact visible again.
+An account that has never had durable sent messages, received messages or file
+cards is retained while online. After all its ordinary certified devices go
+offline, the next existing roster observation starts a local 24-hour grace
+period. Returning online cancels that deadline; a later disconnect starts a new
+24-hour period. Public Online uses the same fresh observations and bounded
+reconnect tolerance as the presence UI, not mere retained dial routes. Explicit
+hide/delete controls retain precedence.
+
+After the offline grace period, the host removes the unused contact row and its
+local pending-contact record, including its account key and clock. No automatic
+expiry tombstone is retained. Stale offline routing records cannot recreate a
+contact; a new online discovery can. Protocol identity/routing retention and
+personal deletion remain with their existing owners, and automatic cleanup does
+not publish a contact deletion or affect delivery, shared groups or permissions.
 
 Any durable message or file history protects the account, including after local
 history is cleared or pruned: the authenticated transcript conversation index
-retains that historical fact. History erased before that index existed cannot be
-reconstructed. New incoming messages can make an expired contact visible again.
-This automatic presentation policy never publishes personal contact deletion,
-erases history or verified identities, or changes discovery, routing and delivery.
+retains that historical fact. Sticky history facts from older journals remain
+protected too. History erased before either evidence source existed cannot be
+reconstructed. Classification failures never authorize reclamation.
 
 The host checks indexed conversation metadata in batches of at most 128 without
-reading message bodies. Its separate local journal retains first-observation
-clocks, completed-expiry markers and sticky observed-history flags for up to 4096 accounts per local
-profile/account, at most 512 KiB on read. Expired and history-protected keys remain
-to prevent rediscovery from renewing their clocks. At capacity, new
-untracked contacts remain visible; storage and eligibility-query failures also
-preserve visible contacts. Recovery never replaces unreadable journal data with
-an empty clock set. Unchanged roster observations do not write the journal. The
-frontend schedules only the earliest pending deadline and refreshes after expiry
-or a first committed direct message/file;
-there is no recurring expiry maintenance task after pending work is gone.
+reading message bodies, including pending contacts absent from the live roster.
+Its existing local journal holds online/pending contacts and sticky historical
+facts for at most 4096 accounts and 512 KiB per local profile/account. Reclamation
+releases pending-contact capacity. At capacity, untracked online contacts remain
+visible; no unbounded tracking is added. An entirely absent peer remains visible
+through its recorded grace period. Existing offline deadlines survive restart;
+if no observation exists for downtime, restart starts the grace period
+conservatively. Older first-discovery clocks cannot establish offline age and are
+migrated conservatively when read. Unreadable journals are preserved for recovery.
+Unchanged online or offline observations do not write the journal.
+
+Cleanup reuses the existing roster/presence invalidations, activation/recovery
+reads and earliest-contact-deadline scheduler. It adds no thread, recurring poll
+or independent cleanup task, and need not run at the exact expiry instant. Online
+and history-protected rows carry no contact-expiry deadline. When pending work is
+gone, no contact cleanup timer remains. Unchanged heartbeat presence reuses the
+account list; online/offline transitions recheck it.
 Repeated backfill from an unmapped device shares a two-second leading/trailing
 refresh window with at most 256 device hints and one pending deadline. The first
 message from a distinct device still triggers prompt eligibility checking; an

@@ -864,6 +864,8 @@
       "paths": [
         "src-tauri/src/contact_policy.rs",
         "src-tauri/src/contact_policy/",
+        "src-tauri/src/chat_commands/models.rs",
+        "src-tauri/src/chat_commands/presence.rs",
         "src-tauri/src/chat_commands/account.rs",
         "src-tauri/src/owner_commands/group_operations.rs",
         "crates/mesh-talk-core/src/node/account_documents/personal.rs"
@@ -897,7 +899,7 @@
             "reference": "docs/network-design-reference.md#personal-conversation-removal"
           },
           {
-            "name": "Never-used discovered accounts expire after one nonrenewing local 24-hour clock; durable sent, received or file history remains protected after clear. Expiry changes presentation only and fails open on clock or history-query errors.",
+            "name": "Never-chatted contacts remain online, get a new 24-hour grace period after each observed disconnect, and have their pending metadata physically removed after offline expiry. No expiry tombstones or separate cleanup worker remain. Durable sent, received or file history and sticky legacy history survive clear; explicit hide/delete wins. Restart/migration preserve conservative offline age; failed history or storage reads never authorize deletion.",
             "reference": "docs/privacy-controls.md#discovered-contacts-without-chat-history"
           }
         ]

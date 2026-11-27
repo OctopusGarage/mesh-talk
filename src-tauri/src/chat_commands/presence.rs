@@ -65,6 +65,14 @@ pub struct PresenceInfo {
     member_keys: Option<Vec<String>>,
 }
 
+/// The same public Online condition for contact eligibility and peer snapshots.
+/// Private dial routes and infrastructure devices cannot establish Online.
+pub(super) fn peer_is_online(peer: &PeerRecord, now: Instant) -> bool {
+    !peer.post_office
+        && (peer.reconnect_remaining(now).as_secs() > 0
+            || peer.presence_routes(now).next().is_some())
+}
+
 fn post_office_sources(peers: &[PeerRecord]) -> HashMap<SocketAddr, PresencePostOffice> {
     let mut sources: HashMap<SocketAddr, PresencePostOffice> = HashMap::new();
     for peer in peers.iter().filter(|peer| peer.post_office) {
@@ -159,7 +167,7 @@ fn add_peer_with_sources(
         entry.last_seen_secs = Some(entry.last_seen_secs.map_or(age, |old| old.min(age)));
     }
     let fresh = !evidence.is_empty();
-    if remaining > 0 || fresh {
+    if peer_is_online(peer, now) {
         // A generous adaptive lease is a loss-tolerance budget, not a latency
         // measurement. Fresh observations on any path remain healthy; only
         // delayed observations warrant the quality hint while retaining Online.

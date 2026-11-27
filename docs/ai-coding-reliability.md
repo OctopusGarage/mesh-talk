@@ -672,6 +672,15 @@ older pending work; failed items pin a cursor; unbounded retries flood a queue;
 or a completion signal arrives between checking a condition and registering a
 waiter, leaving work asleep indefinitely.
 
+A presentation cache gate must include every semantic input to its eligibility
+rule, including online/offline transitions when presence overrides automatic
+expiry. Retained routing or historical expiry alone cannot establish current
+visibility. The [contact expiry owner](../src-tauri/src/contact_policy/expiry.rs)
+checks live presence, offline grace and attributable history before reclaiming
+its pending record; the
+[chat roster regressions](../frontend/src/store/chat.test.ts) require online
+restoration, offline grace/deletion and no account reload on unchanged heartbeats.
+
 A producer revision gate must precede expensive routing filters and projection
 hydration. Computing that gate must not repeatedly materialize unchanged metadata.
 Keep a bounded canonical digest at the existing content owner, invalidate it with

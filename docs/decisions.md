@@ -129,3 +129,16 @@ While an ordered forward repair is active, defer reverse preparation for that
 turn. This preserves its captured dependency prefix and avoids reconstructing an
 unfinished reverse plan against a newer logical generation. Resume the reverse
 lane after repair; neither deferral nor an exhausted repair page proves equality.
+
+## Reclaim never-chatted contacts only after an offline grace period
+
+Retain online contacts. Each observed transition to offline starts a new local
+24-hour grace period, which reconnect cancels. Expiry deletes the unused contact's
+pending record rather than preserving a permanent filter/tombstone; stale offline
+routes cannot recreate it. Ever-chatted accounts remain protected after history
+clear. Explicit hide/delete controls keep precedence. The
+[contact policy](privacy-controls.md#discovered-contacts-without-chat-history)
+owns the storage migration, bounds and recovery contract. Reuse existing roster
+observations and contact-deadline scheduling; no separate cleanup worker or exact
+timing guarantee is needed. Regressions cover lifecycle transitions, actual
+metadata reclamation, history protection and unchanged-input no-write behavior.

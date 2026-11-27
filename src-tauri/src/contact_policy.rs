@@ -2,6 +2,7 @@
 
 mod deletion;
 mod expiry;
+pub(crate) use expiry::ContactExpiryInputs;
 // Glob also forwards Tauri command macros.
 pub use deletion::*;
 

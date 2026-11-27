@@ -7,6 +7,8 @@ pub struct PeerInfo {
     pub name: String,
     pub addr: String,
     pub post_office: bool,
+    /// Current public presence, independent of retained dial routes.
+    pub online: bool,
     /// True when this device has a directly discovered LAN route.
     pub discovered_on_lan: bool,
     /// A known direct application route, including routed/Tailscale discovery.
@@ -20,6 +22,7 @@ pub struct PeerInfo {
 impl From<mesh_talk_core::discovery::PeerRecord> for PeerInfo {
     fn from(peer: mesh_talk_core::discovery::PeerRecord) -> Self {
         Self {
+            online: super::presence::peer_is_online(&peer, std::time::Instant::now()),
             discovered_on_lan: peer.has_lan_route(),
             directly_reachable: peer.has_direct_route(),
             user_id: peer.public.user_id(),
@@ -152,6 +155,27 @@ mod peer_route_tests {
         discovery::{Announce, Roster},
         identity::{account::Account, device::DeviceIdentity},
     };
+
+    #[test]
+    fn peer_info_online_tracks_presence_not_retained_routes() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Contact", 47475);
+        let mut roster = Roster::default();
+        roster.update(&proof, "192.168.1.2".parse().unwrap(), "self");
+        let mut peer = roster.get(&device.user_id()).unwrap().clone();
+        assert_eq!(
+            serde_json::to_value(PeerInfo::from(peer.clone())).unwrap()["online"],
+            true
+        );
+        for route in &mut peer.routes {
+            route.last_seen -= std::time::Duration::from_secs(600);
+            route.presence_expires_at = None;
+        }
+        assert_eq!(
+            serde_json::to_value(PeerInfo::from(peer)).unwrap()["online"],
+            false
+        );
+    }
 
     #[test]
     fn peer_info_preserves_direct_routed_and_gateway_provenance() {

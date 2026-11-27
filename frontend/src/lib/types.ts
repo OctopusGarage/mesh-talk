@@ -30,6 +30,8 @@ export interface LogoutResult {
 }
 
 export interface PeerInfo {
+  /** Current public presence; absent only with an older desktop backend. */
+  online?: boolean;
   user_id: string;
   name: string;
   addr: string;

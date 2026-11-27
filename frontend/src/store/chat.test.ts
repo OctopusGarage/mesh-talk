@@ -1000,6 +1000,8 @@ it("reuses account reads for unchanged heartbeat facts and retries failed change
       { name: "Renamed" },
       { user_id: "replacement" },
       { account_id: "rebound" },
+      { online: true },
+      { online: false },
       { post_office: true },
     ]) {
       peers = peers.map((peer, index) =>
@@ -1026,6 +1028,82 @@ it("reuses account reads for unchanged heartbeat facts and retries failed change
     useChat.setState((state) => ({ identityEpoch: state.identityEpoch + 1 }));
     await heartbeat();
     expect(count()).toBe(++before);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("restores expired contacts on online transitions without reloading unchanged heartbeats", async () => {
+  vi.useFakeTimers();
+  let online = false;
+  let reads = 0;
+  let offlineDeadline = 0;
+  invoke.mockImplementation((command: string) => {
+    const identity = { owner: "host", device_id: "me", account_id: "myacct" };
+    const peers = [
+      {
+        user_id: "peer",
+        account_id: "friend",
+        name: "Friend",
+        post_office: false,
+        addr: "same",
+        online,
+      },
+    ];
+    if (command === "owner_node_identity") return Promise.resolve(identity);
+    if (command === "list_peers") return Promise.resolve(peers);
+    if (command === "owner_roster_observation")
+      return Promise.resolve({ identity, peers, people: {} });
+    if (command === "list_accounts") {
+      reads++;
+      return Promise.resolve(
+        online || Date.now() < offlineDeadline
+          ? [
+              {
+                account_id: "friend",
+                names: ["Friend"],
+                device_count: 1,
+                contact_expires_at_ms: online ? null : offlineDeadline,
+              },
+            ]
+          : [],
+      );
+    }
+    return Promise.resolve([]);
+  });
+  const heartbeat = async () => {
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().accounts).toEqual([]);
+    const initialReads = reads;
+    online = true;
+    await heartbeat();
+    expect(useChat.getState().accounts.map((row) => row.account_id)).toEqual([
+      "friend",
+    ]);
+    expect(reads).toBe(initialReads + 1);
+    await heartbeat();
+    expect(reads).toBe(initialReads + 1);
+    online = false;
+    offlineDeadline = Date.now() + 400;
+    await heartbeat();
+    expect(useChat.getState().accounts[0].contact_expires_at_ms).toBe(
+      offlineDeadline,
+    );
+    expect(reads).toBe(initialReads + 2);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(useChat.getState().accounts).toEqual([]);
+    expect(reads).toBe(initialReads + 3);
   } finally {
     stop();
     vi.useRealTimers();
