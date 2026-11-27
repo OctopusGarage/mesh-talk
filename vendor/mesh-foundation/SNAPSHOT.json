@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "revision": "6034396f697cdae8a73a16dc157beecbc2677a99",
+  "revision": "0aca20d10262aa7c0126d958bc7627d05f8a2424",
   "files": {
     ".gitattributes": "c25bcb8f0cf0d1c04577b13169af840123e4e088d87ddae83739cff1a147d8c9",
     "Cargo.toml": "0f6359a5c019e378439101ce2cb00f97bf9e699f7b1d49e193b0909fc20e5bd3",
@@ -27,7 +27,7 @@
     "crates/mesh-connect/src/frame.rs": "489ebd3c69f408a7b9a2db44da1f4400b6ae7c3d4b2fbe311f7b4847aee09782",
     "crates/mesh-connect/src/handshake.rs": "40d40a9ad885bbcd5419c5a230f8f04173db05c2600bf00ec10f6b77fb83b398",
     "crates/mesh-connect/src/lib.rs": "bd311f1cf3b0ce80846634532342b99bf74b6712224b831790147266ff1160d8",
-    "crates/mesh-connect/src/net.rs": "150450b70cf9ab3fe4548964a2657e96d57119902272ef559b944e4e34a5d202",
+    "crates/mesh-connect/src/net.rs": "30150f4aaffa213cbe2cf2d5cccdc24d03f28519bd07e497902480d374231aeb",
     "crates/mesh-connect/src/session.rs": "59323ab14785f92ead99dca8a5abb2452653ed2e0115128324f85d64cc417d62",
     "crates/mesh-connect/tests/connect.rs": "10be62fc6a17c6fe78378c3c6e152645b16b1afa3929b381e65c588019aeb8fc",
     "crates/mesh-e2ee/Cargo.toml": "a577380e6be8975021f5240839a80a116da56570dbef1c7b15a2bd74ddd247d3",

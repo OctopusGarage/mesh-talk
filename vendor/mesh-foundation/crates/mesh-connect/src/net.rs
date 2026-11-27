@@ -114,18 +114,16 @@ fn join_group(sock: &UdpSocket, group: Ipv4Addr) {
     for iface in ipv4_interface_addrs() {
         let _ = sock.join_multicast_v4(group, iface);
     }
-    // Winsock can select loopback for local multicast. Co-resident desktop/CLI
-    // processes must receive it even when non-loopback adapters are present.
-    #[cfg(windows)]
+    // Co-resident processes need explicit membership on loopback, independent
+    // of the default LAN route or a virtual adapter.
     let _ = sock.join_multicast_v4(group, Ipv4Addr::LOCALHOST);
     // Fallback: let the OS pick the interface, in case enumeration missed one.
     let _ = sock.join_multicast_v4(group, Ipv4Addr::UNSPECIFIED);
 }
 
-/// Winsock's default multicast interface can be loopback or a virtual adapter.
+/// The default multicast interface may omit co-resident processes or other adapters.
 /// Publish on every joined IPv4 interface instead of silently missing the LAN.
 /// The caller must hold the discovery visibility/scope guard throughout this send.
-#[cfg(windows)]
 pub async fn send_discovery_multicast(bytes: &[u8], target: SocketAddr) -> std::io::Result<()> {
     let mut interfaces = ipv4_interface_addrs();
     if interfaces.is_empty() {
@@ -138,7 +136,6 @@ pub async fn send_discovery_multicast(bytes: &[u8], target: SocketAddr) -> std::
     multicast_on_interfaces(bytes, target, &interfaces).await
 }
 
-#[cfg(any(windows, test))]
 async fn multicast_on_interfaces(
     bytes: &[u8],
     target: SocketAddr,
@@ -310,10 +307,10 @@ mod tests {
         assert!(a.local_addr().is_ok());
     }
 
-    #[cfg(windows)]
     #[tokio::test]
     async fn discovery_socket_receives_multicast_from_loopback() {
         let receiver = discovery_socket(0).unwrap();
+        let second = discovery_socket(receiver.local_addr().unwrap().port()).unwrap();
         let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         socket2::SockRef::from(&sender)
             .set_multicast_if_v4(&Ipv4Addr::LOCALHOST)
@@ -332,7 +329,14 @@ mod tests {
         let (size, source) =
             tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut bytes))
                 .await
-                .expect("a Windows discovery socket must receive co-resident multicast")
+                .expect("a discovery socket must receive co-resident multicast")
+                .unwrap();
+        assert_eq!(&bytes[..size], b"local discovery");
+        assert!(source.ip().is_loopback());
+        let (size, source) =
+            tokio::time::timeout(Duration::from_secs(2), second.recv_from(&mut bytes))
+                .await
+                .unwrap()
                 .unwrap();
         assert_eq!(&bytes[..size], b"local discovery");
         assert!(source.ip().is_loopback());
