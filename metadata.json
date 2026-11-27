@@ -3,7 +3,7 @@
   "checkpoint_id": "01M8E9PK70BTPAG2CVJTM2G8HV",
   "strategy": "manual-commit",
   "branch": "requirements-work",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     "docs/roadmap.md"
   ],
@@ -21,25 +21,39 @@
       "compact_transcript": "/1/transcript.jsonl",
       "content_hash": "/1/content_hash.txt",
       "prompt": "/1/prompt.txt"
+    },
+    {
+      "metadata": "/2/metadata.json",
+      "transcript": "/2/full.jsonl",
+      "compact_transcript": "/2/transcript.jsonl",
+      "content_hash": "/2/content_hash.txt",
+      "prompt": "/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 3161,
+    "input_tokens": 6181,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 1263616,
-    "output_tokens": 676,
-    "api_call_count": 6,
+    "cache_read_tokens": 1869568,
+    "output_tokens": 1664,
+    "api_call_count": 10,
+    "subagent_tokens": {
+      "input_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 0,
+      "api_call_count": 0
+    },
     "subagent_tokens_complete": true
   },
   "redaction": {
-    "replacements": 1516,
+    "replacements": 7266,
     "layers": {
-      "betterleaks": 0,
+      "betterleaks": 2,
       "connection_string": 0,
       "credential_key": 0,
       "credential_value": 0,
       "credentialed_uri": 0,
-      "entropy": 1518,
+      "entropy": 7266,
       "key_context": 0,
       "provider_token": 0,
       "shell_stdin": 0
