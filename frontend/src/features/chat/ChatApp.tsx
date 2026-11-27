@@ -31,7 +31,7 @@ import { DeliveryRecoveryProvider } from "./DeliveryRecoveryProvider";
 
 export function ChatApp() {
   const recoveryFocus = useRef<HTMLDivElement>(null);
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const motionOK = useMotionOK();
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
@@ -133,12 +133,16 @@ export function ChatApp() {
       notificationContext,
     ) as [string[], string | null];
     void chatApi
-      .setNotificationContext(activePeerDevices, activeChannel)
+      .setNotificationContext(
+        activePeerDevices,
+        activeChannel,
+        i18n.resolvedLanguage,
+      )
       .catch(() => {});
     return () => {
       void chatApi.setNotificationContext([], null).catch(() => {});
     };
-  }, [notificationContext, generation]);
+  }, [notificationContext, generation, i18n.resolvedLanguage]);
 
   useEffect(() => {
     if (owner) return startUnreadBadge(owner);

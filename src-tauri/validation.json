@@ -1482,6 +1482,7 @@
         "src-tauri/src/reception_host.rs",
         "src-tauri/src/reception_host/",
         "src-tauri/src/events.rs",
+        "src-tauri/src/events/",
         "src-tauri/src/runtime_bootstrap.rs"
       ],
       "rust": [
@@ -1490,6 +1491,7 @@
           "filters": [
             "reception_host::",
             "events::notification_policy_tests::",
+            "events::presentation::tests::",
             "runtime_bootstrap::tests::"
           ]
         }
@@ -1633,6 +1635,7 @@
         "src-tauri/src/state.rs",
         "src-tauri/src/runtime_bootstrap.rs",
         "src-tauri/src/events.rs",
+        "src-tauri/src/events/",
         "src-tauri/src/commands.rs",
         "src-tauri/src/services/",
         "src-tauri/src/owner_commands.rs",

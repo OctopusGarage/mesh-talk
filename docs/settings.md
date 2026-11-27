@@ -423,3 +423,32 @@ readers, or physical-network delivery. Full-suite gates remain separate.
 help action can select a category and focus its control after loading, without
 changing the saved value. Opening Settings normally still starts at App behavior.
 See the [user guide](help/README.md).
+
+### Native notification previews
+
+Native previews use conversation names for groups and contact names for direct
+messages. Group bodies prefix the sender name. Local contact/group aliases take
+precedence over known names; account profiles and retained verified routes provide
+offline names. Missing names use a readable localized fallback, never an internal
+account, device or conversation fingerprint. Names are presentation, not identity
+or authorization evidence.
+
+The existing reception worker prepares at most eight previews per observation
+before the main-thread presentation fence. It performs no network lookup, starts
+no new timer and retains only that batch until presentation or cancellation.
+Group names use point lookups rather than enumerating group history. Aliases are
+read once per nonempty batch and revalidated against the originating login and
+lock revision. There is no additional startup or idle work.
+
+Inline images, videos and validated stickers have type-specific summaries;
+ordinary attachments show a sanitized basename. Protected attachments never expose
+filenames or sticker metadata. Disabling previews or locking the app still hides
+identity and content. The active renderer supplies its interface language; without
+it, preparation uses the saved account language and then English. Native previews
+are capped at 80 characters and titles at 80 characters. Existing catch-up alert
+policy and runtime cancellation retain ownership of delivery.
+
+Regression owners are `events::presentation::tests::`,
+`events::notification_policy_tests::` and `reception_host::`. Native OS rendering
+and delivery still require an installed application check on each supported OS;
+unit tests do not certify system banner appearance.

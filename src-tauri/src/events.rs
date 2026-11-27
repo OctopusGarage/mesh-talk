@@ -8,6 +8,9 @@ use tauri::{Emitter, Manager, Runtime};
 /// How many characters of a message body we surface in a notification preview.
 const PREVIEW_LEN: usize = 80;
 
+mod presentation;
+pub(crate) use presentation::prepare_notification;
+
 /// Native presentation starts on the main thread before acquiring session
 /// authority. The completion receiver lets bounded producers keep one queued
 /// batch until actual execution, including rejection of a retired authority.
@@ -81,6 +84,7 @@ struct NotificationContext {
     active_peer_devices: Vec<String>,
     active_channel: Option<String>,
     revision: u64,
+    language: Option<String>,
 }
 
 enum NotificationTarget<'a> {
@@ -95,8 +99,10 @@ pub fn set_notification_context(
     active_peer_devices: Vec<String>,
     active_channel: Option<String>,
     revision: u64,
+    language: Option<String>,
 ) -> Result<(), crate::commands::CommandError> {
-    if active_peer_devices.len() > 32
+    if language.as_ref().is_some_and(|value| value.len() > 16)
+        || active_peer_devices.len() > 32
         || active_peer_devices.iter().any(|id| id.len() > 64)
         || active_channel.as_ref().is_some_and(|id| id.len() > 64)
     {
@@ -112,6 +118,7 @@ pub fn set_notification_context(
             active_peer_devices,
             active_channel,
             revision,
+            language,
         };
     }
     Ok(())
@@ -145,9 +152,11 @@ fn notification_payload(
         }
     }
     if !settings.notification_preview {
-        let generic = match target {
-            NotificationTarget::File => "New file",
-            _ => "New message",
+        let labels = presentation::words(context.language.as_deref().unwrap_or("en"));
+        let generic = if context.language.is_none() && matches!(target, NotificationTarget::File) {
+            "New file"
+        } else {
+            labels.message
         };
         return Some(("Mesh-Talk".into(), generic.into()));
     }
@@ -160,7 +169,7 @@ fn notification_payload(
 /// already see). Best-effort — failures are logged, never propagated.
 ///
 /// `body` must contain only what the UI already shows (decoded plaintext / a
-/// generic "sent a file"); never raw ciphertext or anything more than the chat view.
+/// typed attachment summary); never raw ciphertext or anything more than the chat view.
 fn notify_if_unfocused<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     target: NotificationTarget<'_>,
@@ -513,23 +522,34 @@ pub fn emit_dm_received<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     dm: mesh_talk_core::node::ReceivedDm,
 ) {
-    publish_dm_received(app_handle, dm, true);
+    publish_dm_received(app_handle, dm, true, None);
 }
 
 fn publish_dm_received<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     dm: mesh_talk_core::node::ReceivedDm,
     publish: bool,
+    presentation: Option<presentation::NotificationPresentation>,
 ) {
     let event = dm_event(dm);
     notify_if_unfocused(
         app_handle,
         NotificationTarget::Dm(&event.from),
-        &event.from_name,
+        presentation
+            .as_ref()
+            .map_or_else(
+                || presentation::display_name(&event.from_name, "Unknown contact"),
+                |p| p.title.clone(),
+            )
+            .as_str(),
         if event.protection.is_some() {
-            "Protected message"
+            presentation
+                .as_ref()
+                .map_or("Protected message", |p| p.body.as_str())
         } else {
-            &event.text
+            presentation
+                .as_ref()
+                .map_or(event.text.as_str(), |p| p.body.as_str())
         },
     );
     if !publish || crate::app_lock::app_locked(app_handle) {
@@ -545,7 +565,7 @@ pub fn emit_channel_message<R: Runtime>(
     owner: &str,
     msg: mesh_talk_core::node::ReceivedChannelMessage,
 ) {
-    publish_channel_message(app_handle, owner, msg, true);
+    publish_channel_message(app_handle, owner, msg, true, None);
 }
 
 fn publish_channel_message<R: Runtime>(
@@ -553,6 +573,7 @@ fn publish_channel_message<R: Runtime>(
     owner: &str,
     msg: mesh_talk_core::node::ReceivedChannelMessage,
     publish: bool,
+    presentation: Option<presentation::NotificationPresentation>,
 ) {
     use crate::channel_reception::Alert;
     let event = channel_event(msg);
@@ -585,18 +606,37 @@ fn publish_channel_message<R: Runtime>(
         Alert::Live => notify_if_unfocused(
             app_handle,
             NotificationTarget::Channel(&event.channel_id),
-            &format!("# {}", event.channel_name),
+            presentation
+                .as_ref()
+                .map_or_else(
+                    || presentation::display_name(&event.channel_name, "Group chat"),
+                    |p| p.title.clone(),
+                )
+                .as_str(),
             if event.protection.is_some() {
-                "Protected message"
+                presentation
+                    .as_ref()
+                    .map_or("Protected message", |p| p.body.as_str())
             } else {
-                &event.text
+                presentation
+                    .as_ref()
+                    .map_or(event.text.as_str(), |p| p.body.as_str())
             },
         ),
         Alert::Summary(count) => notify_if_unfocused(
             app_handle,
             NotificationTarget::Channel(&event.channel_id),
-            &format!("# {}", event.channel_name),
-            &format!("{count} messages received while catching up"),
+            presentation
+                .as_ref()
+                .map_or_else(
+                    || presentation::display_name(&event.channel_name, "Group chat"),
+                    |p| p.title.clone(),
+                )
+                .as_str(),
+            &presentation.as_ref().map_or_else(
+                || format!("{count} messages received while catching up"),
+                |p| p.summary(count),
+            ),
         ),
         Alert::Silent => {}
     }
@@ -615,14 +655,14 @@ fn file_notification_body(
     media: bool,
     protected: bool,
 ) -> String {
-    use mesh_talk_core::file::sticker;
-    if !protected
-        && sticker::valid_manifest(name, mime, size, media)
-        && let Some(metadata) = sticker::from_name(name)
-    {
-        return format!("[{}]", metadata.label.as_deref().unwrap_or("Sticker"));
-    }
-    "sent a file".into()
+    presentation::attachment(
+        name,
+        mime,
+        size,
+        media,
+        protected,
+        &presentation::words("en"),
+    )
 }
 
 pub fn emit_file_received<R: Runtime>(
@@ -630,7 +670,7 @@ pub fn emit_file_received<R: Runtime>(
     owner: &str,
     file: mesh_talk_core::node::ReceivedFile,
 ) {
-    publish_file_received(app_handle, owner, file, true);
+    publish_file_received(app_handle, owner, file, true, None);
 }
 
 fn publish_file_received<R: Runtime>(
@@ -638,6 +678,7 @@ fn publish_file_received<R: Runtime>(
     owner: &str,
     file: mesh_talk_core::node::ReceivedFile,
     publish: bool,
+    presentation: Option<presentation::NotificationPresentation>,
 ) {
     use crate::channel_reception::Alert;
     let event = file_event(file);
@@ -659,6 +700,8 @@ fn publish_file_received<R: Runtime>(
     };
     let target = if event.is_channel {
         NotificationTarget::Channel(&event.conv)
+    } else if presentation.is_some() {
+        NotificationTarget::Dm(&event.from)
     } else {
         NotificationTarget::File
     };
@@ -666,20 +709,32 @@ fn publish_file_received<R: Runtime>(
         Alert::Live => notify_if_unfocused(
             app_handle,
             target,
-            &event.from,
-            &file_notification_body(
-                &event.name,
-                &event.mime,
-                event.size,
-                event.media,
-                event.protection.is_some(),
-            ),
+            presentation
+                .as_ref()
+                .map_or("Unknown contact", |p| p.title.as_str()),
+            &presentation
+                .as_ref()
+                .map(|p| p.body.clone())
+                .unwrap_or_else(|| {
+                    file_notification_body(
+                        &event.name,
+                        &event.mime,
+                        event.size,
+                        event.media,
+                        event.protection.is_some(),
+                    )
+                }),
         ),
         Alert::Summary(count) => notify_if_unfocused(
             app_handle,
             target,
-            "Mesh-Talk",
-            &format!("{count} file messages received while catching up"),
+            presentation
+                .as_ref()
+                .map_or("Mesh-Talk", |p| p.title.as_str()),
+            &presentation.as_ref().map_or_else(
+                || format!("{count} file messages received while catching up"),
+                |p| p.summary(count),
+            ),
         ),
         Alert::Silent => {}
     }
@@ -908,25 +963,24 @@ mod notification_policy_tests {
         let v1 = "mt-sticker-v1-YnVpbHRpbjp3YXZlCvCfkYs.png";
         assert_eq!(
             file_notification_body(v2, "image/png", 100, true, false),
-            "[静下心]"
+            "[Sticker]"
         );
         assert_eq!(
             file_notification_body(v1, "image/png", 100, true, false),
             "[Sticker]"
         );
-        for (name, mime, size, media, protected) in [
-            (v2, "image/png", 100, true, true),
-            (v2, "image/jpeg", 100, true, false),
-            (v2, "image/png", 0, true, false),
-            (v2, "image/png", 100, false, false),
-            ("mt-sticker-v2-malformed.png", "image/png", 100, true, false),
-            ("private.png", "image/png", 100, true, false),
-        ] {
-            assert_eq!(
-                file_notification_body(name, mime, size, media, protected),
-                "sent a file"
-            );
-        }
+        assert_eq!(
+            file_notification_body(v2, "image/png", 100, true, true),
+            "[Protected message]"
+        );
+        assert_eq!(
+            file_notification_body("private.png", "image/png", 100, true, false),
+            "[Photo]"
+        );
+        assert_eq!(
+            file_notification_body(v2, "image/png", 100, false, false),
+            format!("[File] {v2}")
+        );
     }
 
     #[test]
@@ -1115,6 +1169,7 @@ mod notification_policy_tests {
             active_peer_devices: vec!["active-device".into()],
             active_channel: Some("active-channel".into()),
             revision: 1,
+            language: None,
         };
         assert!(
             notification_payload(
@@ -1193,16 +1248,17 @@ pub(crate) fn notify_reception<R: Runtime>(
     app: &tauri::AppHandle<R>,
     owner: &str,
     receipt: mesh_talk_core::node::HostReception,
+    presentation: presentation::NotificationPresentation,
 ) {
     match receipt {
         mesh_talk_core::node::HostReception::DirectMessage(dm) => {
-            publish_dm_received(app, dm, false)
+            publish_dm_received(app, dm, false, Some(presentation))
         }
         mesh_talk_core::node::HostReception::ChannelMessage(message) => {
-            publish_channel_message(app, owner, message, false)
+            publish_channel_message(app, owner, message, false, Some(presentation))
         }
         mesh_talk_core::node::HostReception::File(file) => {
-            publish_file_received(app, owner, file, false)
+            publish_file_received(app, owner, file, false, Some(presentation))
         }
     }
 }

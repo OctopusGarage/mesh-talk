@@ -7,10 +7,17 @@ import { useAuth } from "@/store/auth";
 import type { PeerInfo } from "@/lib/types";
 import { ChatApp } from "./ChatApp";
 
-const mocks = vi.hoisted(() => ({ shell: vi.fn(), invoke: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  shell: vi.fn(),
+  invoke: vi.fn(),
+  language: "en",
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string) => key,
+    i18n: { resolvedLanguage: mocks.language },
+  }),
 }));
 vi.mock("./Sidebar", () => ({
   Sidebar: () => {
@@ -51,6 +58,7 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   mocks.invoke.mockReset().mockResolvedValue(undefined);
   mocks.shell.mockClear();
+  mocks.language = "en";
   useAuth.setState({ user: null, generation: 1 });
   useChat.setState({
     ready: false,
@@ -149,4 +157,18 @@ it("publishes conversation changes and clears on generation replacement and unmo
       (revision, index) => index === 0 || revision > revisions[index - 1],
     ),
   ).toBe(true);
+});
+
+it("publishes language changes without requiring a conversation change", async () => {
+  await mount();
+  expect(contexts()[contexts().length - 1]).toMatchObject({
+    language: "en",
+    activeChannel: "channel-a",
+  });
+  mocks.language = "zh-Hans";
+  await mount();
+  expect(contexts()[contexts().length - 1]).toMatchObject({
+    language: "zh-Hans",
+    activeChannel: "channel-a",
+  });
 });

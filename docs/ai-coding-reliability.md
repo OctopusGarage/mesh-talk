@@ -158,6 +158,13 @@ Apply the same semantic boundary to native effects: the mounted
 unchanged notification context through peer freshness and ordering changes,
 while real conversation/device-set changes, session replacement and unmount
 retain publication and cleanup. Native revision admission still fences stale calls.
+Native previews must project names and typed content rather than render transport
+identifiers. Prepare alias/profile/group lookups on the bounded reception worker,
+then retain only sanitized presentation text through main-thread authority checks.
+The [preview owner](../src-tauri/src/events/presentation.rs) and its
+`notification_preparation_uses_aliases_group_names_and_safe_unknown_fallback`
+regression cover missing identity metadata, group files and contact aliases;
+protected-content controls must also reject filenames and sticker metadata.
 Prepare bulk data outside shared commit guards, then reacquire the required
 guards and revalidate before atomic publication. Keep critical sections small
 without splitting a transaction or permitting stale side effects. Replacing a

@@ -142,3 +142,13 @@ owns the storage migration, bounds and recovery contract. Reuse existing roster
 observations and contact-deadline scheduling; no separate cleanup worker or exact
 timing guarantee is needed. Regressions cover lifecycle transitions, actual
 metadata reclamation, history protection and unchanged-input no-write behavior.
+
+## Native notification presentation
+
+Prepare contact/group names and typed message summaries on the existing bounded
+reception worker, before main-thread presentation. Reuse local favorites, signed
+account profiles and retained verified routing identities; never expose a raw
+fingerprint as a display-name fallback. Keep transport payload identifiers intact.
+This replaces separate text/file title conventions without adding a renderer or
+network dependency. See [notification previews](settings.md#native-notification-previews)
+for privacy, language, resource and verification boundaries.

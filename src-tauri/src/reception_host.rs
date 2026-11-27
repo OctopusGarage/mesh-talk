@@ -271,11 +271,23 @@ pub(crate) async fn native_alerts<R: tauri::Runtime>(
         if receipts.is_empty() {
             continue;
         }
+        let aliases = app
+            .try_state::<crate::state::AppState>()
+            .map(|state| crate::favorites::notification_aliases(&state, authority.lease.owner()))
+            .unwrap_or_default();
+        let receipts: Vec<_> = receipts
+            .into_iter()
+            .map(|receipt| {
+                let presentation =
+                    crate::events::prepare_notification(&app, &node, &receipt, &aliases);
+                (receipt, presentation)
+            })
+            .collect();
         let owner = authority.lease.owner().to_owned();
         let completion =
             match crate::events::dispatch_runtime_presentation(&app, &authority, move |app| {
-                for receipt in receipts {
-                    crate::events::notify_reception(app, &owner, receipt);
+                for (receipt, presentation) in receipts {
+                    crate::events::notify_reception(app, &owner, receipt, presentation);
                 }
             }) {
                 Ok(completion) => completion,

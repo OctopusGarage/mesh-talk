@@ -466,10 +466,12 @@ export const chat = {
   setNotificationContext: (
     activePeerDevices: string[],
     activeChannel: string | null,
+    language?: string,
   ) =>
     invoke<void>("set_notification_context", {
       activePeerDevices,
       activeChannel,
+      language,
       revision: nextBadgeRevision(),
     }),
 

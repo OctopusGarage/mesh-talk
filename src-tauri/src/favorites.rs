@@ -123,6 +123,26 @@ async fn update_favorite(
     .map_err(|_| CommandError::Internal("Favorites update terminated".into()))?
 }
 
+/// Read aliases for a bounded native-notification batch on its background owner.
+/// Revalidate the captured login and lock revision after IO; never called on the UI thread.
+pub(crate) fn notification_aliases(app: &AppState, owner: &str) -> HashMap<String, String> {
+    let Ok((lease, revision, path)) = capture_favorites(app, owner) else {
+        return HashMap::new();
+    };
+    let file: FavoritesFile = config_store::read_account(&path);
+    if config_store::with_account_lease(app, &lease, FAVORITES_FILE, |_| {
+        app.app_lock().with_unchanged_revision(revision, || Ok(()))
+    })
+    .is_err()
+    {
+        return HashMap::new();
+    }
+    file.contacts
+        .into_iter()
+        .filter_map(|(id, record)| record.custom_alias.map(|alias| (id, alias)))
+        .collect()
+}
+
 /// Snapshot every favorites entry the user has set (pin and/or alias).
 #[tauri::command]
 pub async fn get_favorites(
