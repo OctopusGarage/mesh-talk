@@ -1775,5 +1775,15 @@
     "denied": "群組語音會議未接受你嘅加入要求。",
     "unreachable": "連接唔到群組語音會議。",
     "failed": "有參加者嘅聲音連接失敗。"
+  },
+  "codeBlock": {
+    "compose": "代碼區塊",
+    "language": "代碼語言",
+    "plainText": "純文字",
+    "placeholder": "貼上或輸入代碼…",
+    "hint": "Enter 換行，撳傳送按鈕傳送代碼區塊。",
+    "copy": "複製代碼",
+    "expand": "展開代碼",
+    "collapse": "收起代碼"
   }
 }

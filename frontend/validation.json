@@ -2,6 +2,45 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-code-blocks",
+      "paths": [
+        "frontend/src/lib/codeBlock.ts",
+        "frontend/src/lib/codeBlock.test.ts",
+        "frontend/src/lib/mentions.tsx",
+        "frontend/src/lib/mentions.test.ts",
+        "frontend/src/features/chat/CodeBlockView.tsx",
+        "frontend/src/features/chat/CodeBlockView.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerAdmission.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/ProtectedMessage.tsx",
+        "frontend/src/features/chat/MessageBubble.test.ts",
+        "frontend/e2e/composer-layout.spec.ts"
+      ],
+      "frontend": [
+        "src/lib/codeBlock.test.ts",
+        "src/lib/mentions.test.ts",
+        "src/features/chat/CodeBlockView.test.ts",
+        "src/features/chat/ComposerAdmission.test.ts",
+        "src/features/chat/MessageBubble.test.ts",
+        "src/features/chat/protectedReveal.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Compose and display literal code blocks over existing encrypted text and durable drafts.",
+        "guide": "docs/module-boundaries.md#code-block-messages",
+        "invariants": [
+          {
+            "name": "Code whitespace and embedded fences survive admission; code never becomes HTML, links or mentions. Failed sends retain the draft; protected reveal keeps its existing lifetime and copy restrictions.",
+            "reference": "docs/ai-coding-reliability.md#r08-durable-state-and-failure-semantics"
+          }
+        ]
+      },
+      "escalation": [
+        "Check narrow light/dark layouts, keyboard entry, conversation draft restore, long-line scrolling and native clipboard permissions. Include e2e/composer-layout.spec.ts and e2e/ui-visual-regression.spec.ts for browser acceptance."
+      ]
+    },
+    {
       "id": "frontend-windows-country-flags",
       "paths": [
         "frontend/src/features/chat/AboutDialog.tsx",

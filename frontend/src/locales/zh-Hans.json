@@ -1775,5 +1775,15 @@
     "denied": "群语音会议未接受你的加入请求。",
     "unreachable": "无法连接群语音会议。",
     "failed": "一位参会者的音频连接失败。"
+  },
+  "codeBlock": {
+    "compose": "代码块",
+    "language": "代码语言",
+    "plainText": "纯文本",
+    "placeholder": "粘贴或输入代码…",
+    "hint": "Enter 换行，点击发送按钮发送代码块。",
+    "copy": "复制代码",
+    "expand": "展开代码",
+    "collapse": "收起代码"
   }
 }

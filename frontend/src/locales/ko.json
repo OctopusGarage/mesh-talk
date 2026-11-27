@@ -1775,5 +1775,15 @@
     "denied": "참여 요청이 승인되지 않았습니다.",
     "unreachable": "회의에 연결할 수 없습니다.",
     "failed": "참가자의 오디오 연결에 실패했습니다."
+  },
+  "codeBlock": {
+    "compose": "코드 블록",
+    "language": "코드 언어",
+    "plainText": "일반 텍스트",
+    "placeholder": "코드를 붙여넣거나 입력하세요…",
+    "hint": "Enter로 줄을 바꿉니다. 보내기 버튼으로 코드 블록을 전송하세요.",
+    "copy": "코드 복사",
+    "expand": "코드 펼치기",
+    "collapse": "코드 접기"
   }
 }

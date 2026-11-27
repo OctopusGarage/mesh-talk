@@ -1775,5 +1775,15 @@
     "denied": "A reunião não aceitou sua solicitação.",
     "unreachable": "Não foi possível conectar à reunião.",
     "failed": "A conexão de áudio de um participante falhou."
+  },
+  "codeBlock": {
+    "compose": "Bloco de código",
+    "language": "Linguagem do código",
+    "plainText": "Texto simples",
+    "placeholder": "Cole ou escreva código…",
+    "hint": "Enter insere uma linha. Use Enviar para enviar o bloco.",
+    "copy": "Copiar código",
+    "expand": "Expandir código",
+    "collapse": "Recolher código"
   }
 }

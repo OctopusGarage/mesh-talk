@@ -326,3 +326,78 @@ it.each(["own admission", "parent admission", "same event loop"])(
     }
   },
 );
+
+it("composes literal code without Enter sending and retains it after rejection", async () => {
+  send.mockReturnValue(false);
+  await render();
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('[data-testid="composer-code"]')!
+      .click(),
+  );
+  const input = host.querySelector<HTMLTextAreaElement>("textarea")!;
+  const code = "  @alice\n\t<script>https://example.com</script>\n\n```\n";
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(input, code);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () =>
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    ),
+  );
+  expect(send).not.toHaveBeenCalled();
+  await click();
+  expect(send.mock.calls[0][0]).toBe("````\n" + code + "\n````");
+  expect(input.value).toBe(code);
+  expect(host.querySelector('[role="alert"]')).not.toBeNull();
+});
+
+it("does not send an empty code block", async () => {
+  await act(async () =>
+    root.render(
+      createElement(Composer, {
+        onSend: send,
+        initialDraft: "```\n  \n```",
+        placeholder: "Message",
+        mentionNames: [],
+      }),
+    ),
+  );
+  await click();
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("restores code mode and language from the existing draft and clears after acceptance", async () => {
+  const changed = vi.fn();
+  await act(async () =>
+    root.render(
+      createElement(Composer, {
+        onSend: send,
+        initialDraft: "```rust\n  fn main() {}\n\n```",
+        onDraftChange: changed,
+        placeholder: "Message",
+        mentionNames: [],
+      }),
+    ),
+  );
+  expect(host.querySelector("textarea")!.value).toBe("  fn main() {}\n");
+  const language = host.querySelector<HTMLSelectElement>("select")!;
+  expect(language.value).toBe("rust");
+  await act(async () => {
+    language.value = "python";
+    language.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(changed).toHaveBeenLastCalledWith("```python\n  fn main() {}\n\n```");
+  await click();
+  expect(send).toHaveBeenCalledWith("```python\n  fn main() {}\n\n```");
+  expect(host.querySelector("textarea")!.value).toBe("");
+  expect(host.querySelector("select")).toBeNull();
+});

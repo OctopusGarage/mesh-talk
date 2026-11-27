@@ -1649,6 +1649,14 @@ bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
 do not remove backpressure to make a benchmark look faster.
 
+Presentation classifiers shared with history/IPC consumers must tolerate absent
+legacy fields before calling string methods. A frontend static type does not
+validate older or partial projections. Keep unknown input as the existing
+nonmatching/fallback result, rather than throwing during unread reconstruction.
+The code-block classifier owns this check in
+[`codeBlock.ts`](../frontend/src/lib/codeBlock.ts); its absent-text regression and
+`chat.test.ts`'s persisted-identity lock/unlock scenario protect the boundary.
+
 Apply cheap exact-ID rejection before per-row export queries without skipping
 current view, owner, budget or cursor checks. Reuse compiled fixed SQL through the
 existing bounded statement cache; always execute it against current parameters

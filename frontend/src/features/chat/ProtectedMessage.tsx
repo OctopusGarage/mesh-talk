@@ -1,3 +1,5 @@
+import { decodeCodeBlock } from "@/lib/codeBlock";
+import { CodeBlockView } from "./CodeBlockView";
 import { createProtectedImageUrl } from "./protectedImage";
 import { useEffect, useRef, useState } from "react";
 import { LockKeyhole } from "lucide-react";
@@ -124,6 +126,8 @@ export function ProtectedMessage({
       document.removeEventListener("visibilitychange", visibility);
     };
   }, [id, protection, image, mime]);
+  const codeBlock =
+    state.text === null || image ? null : decodeCodeBlock(state.text);
   const reveal = () => {
     window.dispatchEvent(new Event("protected-message-reveal"));
     setVerifying(false);
@@ -153,6 +157,8 @@ export function ProtectedMessage({
                 draggable={false}
                 className="max-h-80 max-w-full object-contain"
               />
+            ) : codeBlock ? (
+              <CodeBlockView block={codeBlock} />
             ) : (
               state.text
             )}

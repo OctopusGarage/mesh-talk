@@ -1775,5 +1775,15 @@
     "denied": "The group voice meeting did not accept your join.",
     "unreachable": "Could not reach the group voice meeting.",
     "failed": "A participant’s audio connection failed."
+  },
+  "codeBlock": {
+    "compose": "Code block",
+    "language": "Code language",
+    "plainText": "Plain text",
+    "placeholder": "Paste or write code…",
+    "hint": "Enter inserts a new line. Use Send to send the code block.",
+    "copy": "Copy code",
+    "expand": "Expand code",
+    "collapse": "Collapse code"
   }
 }

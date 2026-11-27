@@ -1775,5 +1775,15 @@
     "denied": "群組語音會議未接受你的加入請求。",
     "unreachable": "無法連線至群組語音會議。",
     "failed": "一位與會者的音訊連線失敗。"
+  },
+  "codeBlock": {
+    "compose": "程式碼區塊",
+    "language": "程式語言",
+    "plainText": "純文字",
+    "placeholder": "貼上或輸入程式碼…",
+    "hint": "Enter 換行，點擊傳送按鈕傳送程式碼區塊。",
+    "copy": "複製程式碼",
+    "expand": "展開程式碼",
+    "collapse": "收起程式碼"
   }
 }

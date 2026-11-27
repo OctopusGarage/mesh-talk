@@ -120,3 +120,36 @@ test("Enter confirms IME composition before it can send", async ({ page }) => {
     page.getByTestId("message-bubble").getByText("composing a message"),
   ).toBeVisible();
 });
+
+test("code blocks preserve literal content through compose and send", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  await waitForChatShell(page);
+  await page.getByTestId(`conversation-row-${BOB}`).click();
+  await page.getByTestId("composer-code").click();
+  await page
+    .getByLabel("Code language", { exact: true })
+    .selectOption("typescript");
+  const input = page.getByTestId("composer-input");
+  const code = '  const html = "<b>@alice https://example.com</b>";\n\n```';
+  await input.fill(code);
+  await input.press("End");
+  await input.press("Enter");
+  await expect(input).toHaveValue(code + "\n");
+  await expect(page.getByTestId("message-code-block")).toHaveCount(0);
+  await page.getByTestId("composer-send").click();
+  const card = page.getByTestId("message-code-block").last();
+  await expect(card).toBeVisible();
+  await expect(card.locator("code")).toHaveText(code + "\n", {
+    useInnerText: false,
+  });
+  expect(await card.locator("code").textContent()).toBe(code + "\n");
+  await expect(card.locator("a, b")).toHaveCount(0);
+  await expect(card.getByTestId("code-copy")).toBeVisible();
+  await expect(input).toHaveValue("");
+});

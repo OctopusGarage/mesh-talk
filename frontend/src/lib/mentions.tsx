@@ -1,3 +1,4 @@
+import { decodeCodeBlock } from "./codeBlock";
 import { Fragment } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -10,6 +11,7 @@ export type Segment = { text: string; kind: "plain" | "mention" | "link" };
 
 /** Split `text` into ordered plain / @mention / URL segments (pure — unit-testable). */
 export function messageSegments(text: string): Segment[] {
+  if (decodeCodeBlock(text)) return [{ text, kind: "plain" }];
   return text
     .split(TOKEN_RE)
     .filter((s) => s.length > 0)
@@ -64,7 +66,7 @@ export function renderWithMentions(
 
 /** Does this text @-mention the given display name? */
 export function mentionsName(text: string, name: string): boolean {
-  if (!name) return false;
+  if (!name || decodeCodeBlock(text)) return false;
   const re = new RegExp(
     `(?:^|[^\\p{L}\\p{N}_@])@${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_-])`,
     "iu",

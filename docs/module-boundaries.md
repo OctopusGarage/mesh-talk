@@ -1630,3 +1630,42 @@ country-flags browser scenario protect selection, local loading, ligature shapin
 and unchanged composer/message text. Real Windows 10 WebView2 acceptance must also
 check colors, selection/copy, deletion, reply/search/reaction surfaces and zoom;
 other-host Chromium and DOM assertions do not establish native visual acceptance.
+
+## Code-block messages
+
+`frontend/src/lib/codeBlock.ts` owns whole-message fenced-code encoding and
+recognition. Code blocks use the existing encrypted text transport, stored text,
+draft and durable-admission owners; there is no new wire type or schema. The
+encoder chooses a backtick fence longer than any run in the body and adds exactly
+one delimiter newline on each side, preserving body whitespace, CRLF and embedded
+fences. Only complete, whole-message LF-delimited fences with a bounded language
+token become code cards. Mixed prose, malformed fences and unsupported fence
+syntax retain ordinary text presentation. Absent legacy text is non-code and
+must not throw during historical unread reconstruction. Older clients show the
+readable fence.
+
+`Composer.tsx` derives code mode from that same draft string, so conversation
+switches, re-edit and failed admissions retain code and language without another
+draft owner. The explicit code control converts the current draft in either
+direction. Enter inserts a newline in code mode; Send uses the existing admission
+and protection settings. Whitespace-only code cannot be sent. Language selection
+labels the snippet; it does not execute or load a compiler or syntax engine.
+
+`CodeBlockView.tsx` renders escaped literal text in a horizontally scrollable,
+height-bounded card. It never renders HTML, interprets mentions or opens URLs.
+The shared `mentionsName` excludes complete code blocks from channel mention
+classification in live and historical consumers. Normal bubble copy uses the
+existing sensitive clipboard policy and copies the body without fence metadata;
+clipboard failures use the bubble's existing error feedback. Protected messages
+retain their existing reveal lifetime and disable code-copy controls; no additional
+plaintext cache or lifetime is introduced. Forwarding, favorites, search and old
+clients retain the canonical fenced text; compact projections may show fences.
+
+Parsing occurs only for current drafts or rendered messages, and editor DOM exists
+only in the active composer. There are no startup tasks, polling, new dependencies
+or background syntax workers. Existing text admission/resource limits remain
+owned by the send path. Codec, literal-rendering, mention and admission regressions
+are selected in `frontend/validation.json`. Browser/native acceptance must check
+narrow layouts, light/dark contrast, keyboard focus, long-line scrolling, clipboard
+permissions and conversation restore; unit assertions do not establish visual or
+native clipboard acceptance.

@@ -1,3 +1,5 @@
+import { decodeCodeBlock } from "@/lib/codeBlock";
+import { CodeBlockView } from "./CodeBlockView";
 import { canForward } from "./forwarding/selection";
 import { ForwardedRecordPreview } from "./forwarding/ForwardedRecordPreview";
 import { isForwardedRecord } from "@/lib/forwardedRecord";
@@ -8,7 +10,7 @@ import {
   useAutomaticDownloads,
 } from "@/lib/automaticDownloads";
 import { createAttachmentDecision } from "./attachments/attachmentDecision";
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useMemo, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Star,
@@ -426,6 +428,10 @@ export function MessageBubble({
   const setError = useChat((s) => s.setError);
   const installedPacks = usePacks((s) => s.packs);
   const displayedText = m.protection ? t("protectedMessage.label") : m.text;
+  const codeBlock = useMemo(
+    () => decodeCodeBlock(displayedText),
+    [displayedText],
+  );
   const mine = m.fromMe;
   const localPreview = useOutgoingMediaPreview(
     mine && !readOnly && !m.protection ? m.clientId : undefined,
@@ -448,7 +454,10 @@ export function MessageBubble({
     const lease = captureChatOwnership();
     if (!m.text || m.protection) return;
     try {
-      await copySensitiveText(displayedText, t("settings.confirmCopyPrompt"));
+      await copySensitiveText(
+        codeBlock?.code ?? displayedText,
+        t("settings.confirmCopyPrompt"),
+      );
     } catch (e) {
       if (lease.current()) setError(errorMessage(e));
     }
@@ -715,6 +724,11 @@ export function MessageBubble({
                     isPersonal={isPersonal}
                     readOnly={readOnly}
                     localPreview={localPreview}
+                  />
+                ) : codeBlock ? (
+                  <CodeBlockView
+                    block={codeBlock}
+                    onCopy={() => void copyText()}
                   />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
