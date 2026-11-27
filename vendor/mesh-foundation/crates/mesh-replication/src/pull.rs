@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 mod session;
 pub use session::{
-    MAX_RECORD_FRAME, RecordExchangeError, pull_over_session, pull_over_session_bounded,
-    serve_record_request,
+    MAX_RECORD_FRAME, RecordExchangeError, fetch_records, pull_over_session,
+    pull_over_session_bounded, serve_record_request,
 };
 
 #[derive(Clone, Copy, Debug)]

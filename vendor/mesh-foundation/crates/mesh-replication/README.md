@@ -2,6 +2,10 @@
 
 Bounded inventory reconciliation and record retrieval.
 
+The entry points below describe unreleased alpha.2. Start with the
+[first-integration guide](../../docs/getting-started.md) for version selection,
+a complete persistent peer recipe and typed failure handling.
+
 Choose the entry point by workload:
 
 - Small, finite sets: `CompleteInventory` and `inventory_session`.
@@ -11,6 +15,12 @@ Choose the entry point by workload:
 - Custom policy/causal checkpoints: `RangeRead`, `ReaderBinding` and frame
   admission primitives, with application-owned repair and scheduling.
 - Recent/older pages: `history::fetch_page`; page exhaustion is not whole-scope equality.
+
+Run `cargo run --locked -p mesh-foundation-replication --features mesh-connect --example persistent_peer`
+for pinned loopback TCP, bounded body fetching, SQLite commit, reopen and append
+catchup. Its example-private store is shared with `sqlite_sync`, not another
+production database implementation. `pull::fetch_records` retrieves a single
+validated batch without acknowledging durable acceptance.
 
 Run `cargo run -p mesh-foundation-replication --example sqlite_sync` for a real
 SQLite reader, atomic opaque-body commits and reopen/idempotency. Its tests cover
@@ -22,7 +32,7 @@ With the development-only `test-observability` feature, reuse
 transaction, authorization, retirement and reopen tests. No example establishes
 application trust or supplies a background scheduler.
 
- There are no default application profiles; optional `mesh-connect` adds session adapters. Authorization and durable stores belong to the host.
+There are no default application profiles; optional `mesh-connect` adds session adapters. Authorization and durable stores belong to the host.
 
 ## Development and documentation
 

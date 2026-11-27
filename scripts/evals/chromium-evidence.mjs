@@ -73,7 +73,9 @@ export function validateShardInventory(manifests, identity) {
   const seen = new Set(), paths = [];
   for (const manifest of manifests) {
     assert.equal(manifest.schema, 1, "Unsupported portable shard schema");
-    for (const field of ["sourceSha", "runId", "runAttempt", "platform"]) assert.equal(manifest[field], identity[field], `Wrong portable shard ${field}`);
+    for (const field of ["sourceSha", "runId", "platform"]) assert.equal(manifest[field], identity[field], `Wrong portable shard ${field}`);
+    assert.match(manifest.runAttempt ?? "", /^[1-9]\d*$/, "Invalid producer attempt");
+    assert.ok(BigInt(manifest.runAttempt) <= BigInt(identity.runAttempt), "Future producer attempt");
     assert.equal(manifest.total, total, "Unexpected portable shard total");
     assert.ok(Number.isInteger(manifest.shard) && manifest.shard >= 1 && manifest.shard <= total && !seen.has(manifest.shard), "Invalid or duplicate portable shard");
     seen.add(manifest.shard);
@@ -124,19 +126,38 @@ export async function collectShards(input, expectedIdentity) {
   }
   validateShardInventory(manifests, expectedIdentity);
   for (const [index, root] of roots.entries()) {
-    await validateBrowserEvidence(resolve(root, "results.json"), { ...expectedIdentity, expectedPaths: manifests[index].paths });
+    await validateBrowserEvidence(resolve(root, "results.json"), { ...expectedIdentity, runAttempt: manifests[index].runAttempt, expectedPaths: manifests[index].paths });
   }
   console.log(`Validated all ${requiredBrowserPaths("core").length} ${expectedIdentity.platform} Chromium portable scenarios from ${chromiumShardCount(expectedIdentity.platform)} full-suite shards`);
 }
 
 const operatingSystems = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
+export async function latestShardArtifact(input, prefix, os, shard, runAttempt) {
+  const stem = `${prefix}-${os}-${shard}-`;
+  const candidates = (await readdir(input)).filter(name => name.startsWith(stem));
+  const attempts = new Map();
+  for (const name of candidates) {
+    const attempt = name.slice(stem.length);
+    assert.match(attempt, /^[1-9]\d*$/, "Malformed producer artifact attempt");
+    assert.ok(BigInt(attempt) <= BigInt(runAttempt), "Future producer artifact attempt");
+    assert.ok(!attempts.has(BigInt(attempt)), "Duplicate producer artifact attempt");
+    attempts.set(BigInt(attempt), name);
+  }
+  assert.ok(attempts.size, `Missing ${os} shard ${shard} artifact`);
+  const attempt = [...attempts.keys()].reduce((a, b) => a > b ? a : b);
+  return { path: resolve(input, attempts.get(attempt)), runAttempt: String(attempt) };
+}
+
 export async function collectDownloadedShards(input, output, expectedIdentity, { collect = collectShards } = {}) {
   for (const os of operatingSystems) {
     const platform = platforms[os];
     const destination = resolve(output, platform);
     await mkdir(destination, { recursive: true });
     for (let shard = 1; shard <= chromiumShardCount(os); shard++) {
-      await rename(resolve(input, `chromium-portable-${os}-${shard}-${expectedIdentity.runAttempt}`), resolve(destination, String(shard)));
+      const selected = await latestShardArtifact(input, "chromium-portable", os, shard, expectedIdentity.runAttempt);
+      const manifest = JSON.parse(await readFile(resolve(selected.path, "shard.json"), "utf8"));
+      assert.equal(manifest.runAttempt, selected.runAttempt, "Artifact differs from producer attempt");
+      await rename(selected.path, resolve(destination, String(shard)));
     }
     await collect(destination, { ...expectedIdentity, platform });
   }
@@ -159,7 +180,8 @@ export async function renderDownloadedReports(input, output, { runAttempt, linux
     let available = true;
     for (let shard = 1; shard <= chromiumShardCount(os); shard++) {
       try {
-        const source = resolve(input, `playwright-ui-${os}-${shard}-${runAttempt}`, "blob-report");
+        const selected = await latestShardArtifact(input, "playwright-ui", os, shard, runAttempt);
+        const source = resolve(selected.path, "blob-report");
         const blobs = (await readdir(source)).filter(name => name.endsWith(".zip"));
         assert.ok(blobs.length, "No report blobs");
         for (const blob of blobs) await copyFile(resolve(source, blob), resolve(destination, blob));

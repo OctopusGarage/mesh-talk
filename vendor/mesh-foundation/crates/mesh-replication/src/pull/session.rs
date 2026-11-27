@@ -44,6 +44,56 @@ impl<Io: std::error::Error + 'static, Store: std::error::Error + 'static> std::e
     }
 }
 
+/// Fetch one bounded batch of opaque bodies without committing them.
+/// The caller owns authorization, verification, and persistence. Empty selections
+/// return immediately after limit validation. Discard the session after an error.
+pub async fn fetch_records<S: ReconciliationSession>(
+    session: &mut S,
+    scope: [u8; 32],
+    ids: &[EventId],
+    limits: PullLimits,
+) -> Result<Vec<Record>, RecordExchangeError<S::Error>> {
+    if !valid_limits(limits)
+        || ids.len() > limits.records_per_batch
+        || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len()
+    {
+        return Err(RecordExchangeError::InvalidFrame);
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = request_records(session, scope, ids, limits).await?;
+    validate_batch(ids, &records, limits.bytes_per_batch)
+        .map_err(|_| RecordExchangeError::InvalidFrame)?;
+    Ok(records)
+}
+
+// Shared wire exchange. Existing pull operations retain their public semantic
+// rejection variants in validate_batch; standalone fetch validates before return.
+async fn request_records<S: ReconciliationSession>(
+    session: &mut S,
+    scope: [u8; 32],
+    ids: &[EventId],
+    limits: PullLimits,
+) -> Result<Vec<Record>, RecordExchangeError<S::Error>> {
+    let mut request = Vec::with_capacity(REQUEST_HEADER + ids.len() * 32);
+    request.extend_from_slice(REQUEST);
+    request.extend_from_slice(&scope);
+    request.extend_from_slice(&(limits.bytes_per_batch as u32).to_be_bytes());
+    for id in ids {
+        request.extend_from_slice(id);
+    }
+    session
+        .send(&request)
+        .await
+        .map_err(RecordExchangeError::Transport)?;
+    let response = session
+        .recv()
+        .await
+        .map_err(RecordExchangeError::Transport)?;
+    decode_response(&response, &scope, ids.len(), limits.bytes_per_batch)
+}
+
 /// Pull from a peer that serves the default record profile. The caller owns
 /// scope authorization and must verify and commit each batch as in [pull_missing].
 pub async fn pull_over_session<S: ReconciliationSession, Commit>(
@@ -65,22 +115,16 @@ pub async fn pull_over_session<S: ReconciliationSession, Commit>(
         local,
         limits,
         async |ids, budget| {
-            let mut request = Vec::with_capacity(REQUEST_HEADER + ids.len() * 32);
-            request.extend_from_slice(REQUEST);
-            request.extend_from_slice(&scope);
-            request.extend_from_slice(&(budget as u32).to_be_bytes());
-            for id in ids {
-                request.extend_from_slice(id);
-            }
-            session
-                .send(&request)
-                .await
-                .map_err(RecordExchangeError::Transport)?;
-            let response = session
-                .recv()
-                .await
-                .map_err(RecordExchangeError::Transport)?;
-            decode_response(&response, &scope, ids.len(), budget)
+            request_records(
+                session,
+                scope,
+                ids,
+                PullLimits {
+                    records_per_batch: limits.records_per_batch,
+                    bytes_per_batch: budget,
+                },
+            )
+            .await
         },
         commit,
     )
@@ -109,22 +153,16 @@ pub async fn pull_over_session_bounded<S: ReconciliationSession, Commit>(
         limits,
         turn,
         async |ids, budget| {
-            let mut request = Vec::with_capacity(REQUEST_HEADER + ids.len() * 32);
-            request.extend_from_slice(REQUEST);
-            request.extend_from_slice(&scope);
-            request.extend_from_slice(&(budget as u32).to_be_bytes());
-            for id in ids {
-                request.extend_from_slice(id);
-            }
-            session
-                .send(&request)
-                .await
-                .map_err(RecordExchangeError::Transport)?;
-            let response = session
-                .recv()
-                .await
-                .map_err(RecordExchangeError::Transport)?;
-            decode_response(&response, &scope, ids.len(), budget)
+            request_records(
+                session,
+                scope,
+                ids,
+                PullLimits {
+                    records_per_batch: limits.records_per_batch,
+                    bytes_per_batch: budget,
+                },
+            )
+            .await
         },
         commit,
     )

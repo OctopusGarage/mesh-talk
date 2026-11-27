@@ -119,7 +119,7 @@ test("ASan workflow retains required name as strict full-union check with one ar
   assert.match(workflow, /MESH_ASAN_SHARDS_RESULT: \$\{\{ needs.shards.result \}\}/u);
   assert.ok(workflow.includes(`cargo-nextest@${versions.nextest}`));
   assert.match(workflow, /name: asan-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}-shard-\$\{\{ matrix.shard \}\}/u);
-  assert.match(workflow, /pattern: asan-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}-shard-\*/u);
+  assert.match(workflow, /pattern: asan-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\*-shard-\*/u);
   const storage = workflow.split(/^      - /mu).find(step => step.startsWith("name: Preserve runner storage measurements\n"));
   assert.match(storage, /uses: actions\/upload-artifact@/u);
   assert.match(storage, /name: runner-storage-/u);
@@ -391,4 +391,50 @@ test("ASan bounds compiler concurrency after cache restoration while preserving 
   assert.ok(producer.indexOf("Swatinem/rust-cache") < producer.indexOf("CARGO_BUILD_JOBS:"));
   assert.match(workflow, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/u);
   assert.match(workflow, /RUST_TEST_THREADS: "1"/u);
+});
+
+
+test("ASan seals producer attempt separately from consumer attempt", async t => {
+  const { verifyArchive } = await load();
+  const directory = temporary(t);
+  const archiveBytes = "sealed compiled archive";
+  const archiveSha256 = hash(archiveBytes);
+  const manifest = { schema: 1, identity: { ...identity, runAttempt: "1" }, archiveSha256, fullSha256: hash(JSON.stringify(full)), full };
+  const bytes = JSON.stringify(manifest);
+  writeFileSync(path.join(directory, "archive.json"), bytes);
+  writeFileSync(path.join(directory, "core.tar.zst"), archiveBytes);
+  const consumer = { ...identity, archive: { runAttempt: "1", sha256: archiveSha256, manifestSha256: hash(bytes) } };
+  await verifyArchive(directory, consumer);
+  await assert.rejects(verifyArchive(directory, { ...consumer, archive: { ...consumer.archive, runAttempt: "2" } }), /identity/u);
+  writeFileSync(path.join(directory, "core.tar.zst"), "tampered");
+  await assert.rejects(verifyArchive(directory, consumer), /digest/u);
+});
+
+test("ASan collector accepts complete individually sealed mixed-attempt evidence", async t => {
+  const { artifactName, collectAsan } = await load();
+  const root = temporary(t);
+  for (const bundle of bundles()) {
+    const actual = { ...identity, runAttempt: bundle.receipt.shard === 3 ? "2" : "1" };
+    bundle.receipt.identity = actual;
+    const directory = path.join(root, artifactName(actual, bundle.receipt.shard));
+    smokeFixture(directory);
+    const smoke = JSON.parse(readFileSync(path.join(directory, "smoke.json")));
+    writeFileSync(path.join(directory, "smoke.json"), JSON.stringify({ ...smoke, identity: actual }));
+    for (const [name, value] of [["receipt", bundle.receipt], ["full", bundle.full], ["selected", bundle.selected]]) writeFileSync(path.join(directory, `${name}.json`), JSON.stringify(value));
+    writeFileSync(path.join(directory, "execution.jsonl"), bundle.execution);
+  }
+  assert.equal(collectAsan(root, identity).shards, 8);
+  const directory = path.join(root, artifactName({ ...identity, runAttempt: "1" }, 1));
+  rmSync(directory, { recursive: true });
+  assert.throws(() => collectAsan(root, identity), /Missing/u);
+});
+
+test("trusted archive inputs distinguish producer attempt from hexadecimal digests", async () => {
+  const { archiveBinding } = await load();
+  const env = { MESH_ASAN_ARCHIVE_SHA256: "a".repeat(64), MESH_ASAN_MANIFEST_SHA256: "b".repeat(64), MESH_ASAN_PRODUCER_ATTEMPT: "1" };
+  assert.deepEqual(archiveBinding(env, "2"), { sha256: env.MESH_ASAN_ARCHIVE_SHA256, manifestSha256: env.MESH_ASAN_MANIFEST_SHA256, runAttempt: "1" });
+  assert.equal(archiveBinding({}, "2"), null);
+  for (const changed of [{ MESH_ASAN_ARCHIVE_SHA256: "bad" }, { MESH_ASAN_MANIFEST_SHA256: "" }, { MESH_ASAN_PRODUCER_ATTEMPT: "" }, { MESH_ASAN_PRODUCER_ATTEMPT: "3" }]) {
+    assert.throws(() => archiveBinding({ ...env, ...changed }, "2"), /digest|producer attempt/u);
+  }
 });

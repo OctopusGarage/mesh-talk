@@ -59,6 +59,7 @@ jobs:
       cargo: ${{ steps.cohort.outputs.cargo }}
       archive_sha256: ${{ steps.build.outputs.archive_sha256 }}
       manifest_sha256: ${{ steps.build.outputs.manifest_sha256 }}
+      producer_attempt: ${{ github.run_attempt }}
       artifact_id: ${{ steps.archive.outputs.artifact-id }}
     steps:
       - name: Checkout
@@ -144,6 +145,7 @@ jobs:
       MESH_ASAN_TOOLCHAIN: ${{ needs.cohort.outputs.toolchain }}
       MESH_ASAN_RUSTC: ${{ needs.cohort.outputs.rustc }}
       MESH_ASAN_CARGO: ${{ needs.cohort.outputs.cargo }}
+      MESH_ASAN_PRODUCER_ATTEMPT: ${{ needs.cohort.outputs.producer_attempt }}
       MESH_ASAN_ARCHIVE_SHA256: ${{ needs.cohort.outputs.archive_sha256 }}
       MESH_ASAN_MANIFEST_SHA256: ${{ needs.cohort.outputs.manifest_sha256 }}
       # Keep production case budgets and one instrumented test per runner.
@@ -193,6 +195,7 @@ jobs:
       MESH_ASAN_TOOLCHAIN: ${{ needs.cohort.outputs.toolchain }}
       MESH_ASAN_RUSTC: ${{ needs.cohort.outputs.rustc }}
       MESH_ASAN_CARGO: ${{ needs.cohort.outputs.cargo }}
+      MESH_ASAN_PRODUCER_ATTEMPT: ${{ needs.cohort.outputs.producer_attempt }}
       MESH_ASAN_ARCHIVE_SHA256: ${{ needs.cohort.outputs.archive_sha256 }}
       MESH_ASAN_MANIFEST_SHA256: ${{ needs.cohort.outputs.manifest_sha256 }}
       MESH_ASAN_SHARDS_RESULT: ${{ needs.shards.result }}
@@ -215,7 +218,7 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/download-artifact@v8
         with:
-          pattern: asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-shard-*
+          pattern: asan-${{ github.sha }}-${{ github.run_id }}-*-shard-*
           path: tmp/asan-union
       - name: Verify every actual shard and complete exact-source union
         if: ${{ steps.scope.outputs.full == 'true' }}

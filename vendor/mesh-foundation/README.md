@@ -15,7 +15,7 @@ and [delivery guide](docs/sdk-delivery.md) for installation and local developmen
 security-audit claim. Linux, macOS and Windows are covered by the SDK CI matrix.
 The tested toolchain is Rust 1.99.0; an MSRV has not been established.
 
-[Quick start](#quick-start) · [Composition](docs/sdk-composition.md) ·
+[Quick start](#quick-start) · [First integration](docs/getting-started.md) · [Composition](docs/sdk-composition.md) ·
 [Delivery](docs/sdk-delivery.md) · [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
 
@@ -28,6 +28,10 @@ for explicit recent/older pages and fallible disk-backed range readers. Installe
 retain their published behavior.
 
 ## Quick start
+
+Choose your version first: the registry commands below target published alpha.1.
+The [first-integration guide](docs/getting-started.md) covers unreleased alpha.2,
+including task-to-entry-point selection and a persistent peer exchange.
 
 Install published packages using explicit aliases and exact alpha pins:
 

@@ -21,6 +21,14 @@ in ignored `tmp/` or PR/CI artifacts; durable decisions belong in the owning gui
 For producer/consumer artifact handoffs, pass the successful upload's immutable
 artifact ID instead of rediscovering it by name. Keep source, run, attempt and
 content-digest validation at the consumer; an artifact ID alone is not acceptance.
+A partial rerun may reuse a successful producer from an earlier attempt of the
+same workflow run. Keep that producer's attempt in its sealed archive/evidence,
+and record the current consumer attempt separately. Select the latest eligible
+artifact for each required role/shard, then verify its own attempt together with
+the unchanged source, run, compiler/configuration and content bindings. Reject
+missing, ambiguous, future or mismatched evidence; a newer failed producer must
+not be hidden by silently falling back to older successful output. Full inventory
+and upstream-success requirements still apply after a partial rerun.
 Release evidence recording and upload retain their verified-draft prerequisite but run
 after final publication failure or cancellation. Keep failure summaries actionable and
 source-bound. Nonpublishing branch runs retain workflow-artifact evidence without requiring
