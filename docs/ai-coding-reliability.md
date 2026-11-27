@@ -137,6 +137,8 @@ eventually returns. See `checked_at_lock_revision` in
 regression in [shared login tests](../src-tauri/src/shared_account_login/tests.rs),
 and queued notification tests in [runtime state](../src-tauri/src/chat_commands/state.rs).
 
+Account security mutations follow the same boundary: hold namespace serialization through preparation and publication, but acquire session and app-lock authority only around the prepared atomic replacement. Never retain the enrollment pending mutex while acquiring namespace or session authority. Same-seed imports retain local recovery consumption; verification metadata must not mutate shared configuration. Regression owners are identity account-security persisted tests and runtime-admission security publication tests.
+
 ## R02: Thread and scheduler progress
 
 **Failure pattern:** an `async` function performs blocking disk, crypto, OS-provider

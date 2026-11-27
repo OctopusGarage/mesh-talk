@@ -2250,7 +2250,7 @@
         "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
         "invariants": [
           {
-            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account’s data.",
+            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account\u2019s data.",
             "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
           },
           {
@@ -2930,6 +2930,35 @@
       },
       "escalation": [
         "Native macOS/Windows verify muted ordinary live/file/catchup notifications and mention privacy/focus behavior."
+      ]
+    },
+    {
+      "id": "frontend-account-totp",
+      "paths": [
+        "frontend/src/lib/api/accountTotp.ts",
+        "frontend/src/lib/api/accountTotp.test.ts",
+        "frontend/src/features/chat/settings/AccountTotpSettings.tsx",
+        "frontend/src/features/chat/settings/AccountTotpSettings.test.ts"
+      ],
+      "frontend": [
+        "src/lib/api/accountTotp.test.ts",
+        "src/features/chat/settings/AccountTotpSettings.test.ts",
+        "src/features/auth/LoginScreen.test.ts",
+        "src/features/chat/settings/SecuritySettings.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Optional account TOTP enrollment and login with session-local secrets and explicit publication retry.",
+        "guide": "SECURITY.md#optional-account-two-factor-authentication",
+        "invariants": [
+          {
+            "name": "Unknown status is not disabled; stale session/runtime results cannot restore enrollment material.",
+            "reference": "docs/ai-coding-reliability.md#r08-durable-state-and-failure-semantics"
+          }
+        ]
+      },
+      "escalation": [
+        "Native primary reauthentication, authenticator scanning, lock/logout and offline trusted-device propagation require real desktop acceptance."
       ]
     }
   ],

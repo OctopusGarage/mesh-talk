@@ -174,3 +174,21 @@ previews. See [notification help](help/topics/notifications.md#mute-a-group) and
 [module ownership](module-boundaries.md#group-notification-attention). Focused
 policy and persistence regressions cover the contract; physical macOS/Windows
 notification and resource acceptance remain pending.
+
+## Optional account authentication policy uses private account access
+
+TOTP is account-scoped and disabled by default. Its versioned policy travels in
+private account login records; local replay and throttle state never travels.
+Authenticated installation uses generation CAS and rejects equal-generation
+policy conflicts. Legacy records without security policy remain compatible;
+explicit unknown formats fail closed. Setup requires fresh native identity
+verification, one session/lock-bound pending enrollment, and confirmation before
+durable activation. Native mutation results expose pending publication separately
+from local acceptance. This does not provide independent protection against
+password-plus-file compromise or distributed replay/rollback protection.
+
+### Local TOTP recovery consumption
+
+Recovery verifiers remain immutable policy configuration. Consumption is bounded encrypted local history scoped to the enrollment seed; same-seed imports preserve it, while a new seed resets it. Local proof attempts and consumption do not advance shared policy generations. Offline devices cannot guarantee globally single-use recovery codes.
+
+Native acceptance selectors in src-tauri/validation.json exercise stalled begin, confirm and disable preparation through the command mutation path, plus signed loopback pairing and desktop policy installation. Preparation must permit session invalidation before release; stale operations must return errors without publishing seeds, policy or recovery consumption. Loopback evidence does not establish physical-machine interoperability, native authenticator behavior, or measured startup/idle resource budgets.

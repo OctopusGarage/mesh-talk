@@ -16,6 +16,7 @@
 // Tauri desktop shell over it.
 pub mod account_documents;
 pub mod account_profile;
+mod account_security;
 pub mod app_lock;
 pub mod avatars;
 mod background_command;
@@ -386,6 +387,12 @@ pub fn run_tauri_configured(
                 owner_commands::owner_account_history,
                 owner_commands::owner_delivery_statuses,
                 commands::login,
+                account_security::account_totp_status,
+                account_security::account_totp_begin,
+                account_security::account_totp_confirm,
+                account_security::account_totp_disable,
+                account_security::account_totp_cancel,
+                account_security::account_totp_retry_sync,
                 device_enrollment::begin_device_enrollment,
                 device_enrollment::probe_device_enrollment,
                 device_enrollment::complete_device_enrollment,

@@ -3,9 +3,7 @@
   "contracts": [
     {
       "id": "desktop-group-voice-admission",
-      "paths": [
-        "src-tauri/src/chat_commands/messaging.rs"
-      ],
+      "paths": ["src-tauri/src/chat_commands/messaging.rs"],
       "capability": {
         "summary": "Gate live group-voice device admission on the experimental calls preference and the current signed group membership.",
         "guide": "docs/help/topics/calls.md",
@@ -19,7 +17,9 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["settings::tests::old_settings_json_without_the_new_fields_loads_with_defaults"]
+          "filters": [
+            "settings::tests::old_settings_json_without_the_new_fields_loads_with_defaults"
+          ]
         }
       ],
       "escalation": [
@@ -811,10 +811,7 @@
         },
         {
           "package": "mesh-talk-core",
-          "filters": [
-            "lan_review_text",
-            "discovery::scope::"
-          ]
+          "filters": ["lan_review_text", "discovery::scope::"]
         }
       ],
       "capability": {
@@ -1407,6 +1404,7 @@
       "id": "desktop-account-login",
       "paths": [
         "src-tauri/src/shared_account_login.rs",
+        "src-tauri/src/account_security.rs",
         "src-tauri/src/shared_account_login/",
         "src-tauri/src/services/user.rs",
         "src-tauri/src/services/auth_service.rs",
@@ -1424,6 +1422,8 @@
           "package": "mesh-talk",
           "filters": [
             "shared_account_login::tests::",
+            "account_security::tests::",
+            "runtime_admission::integration_lease_tests::prepared_security_publication",
             "services::auth_service::tests::",
             "desktop_session::",
             "commands::tests::",
@@ -1657,11 +1657,40 @@
           }
         ]
       },
-      "consumers": [
-        "frontend-group-mute"
-      ],
+      "consumers": ["frontend-group-mute"],
       "escalation": [
         "Real macOS/Windows native notifications and lock/account replacement evidence remain required."
+      ]
+    },
+    {
+      "id": "desktop-totp-integrated-acceptance",
+      "paths": [
+        "src-tauri/src/account_security.rs",
+        "src-tauri/src/shared_account_login/tests.rs"
+      ],
+      "capability": {
+        "summary": "Reject stale native TOTP preparation and install account policy through loopback device pairing.",
+        "guide": "docs/ai-coding-reliability.md",
+        "invariants": [
+          {
+            "name": "Preparation releases session authority; stale publication cannot expose enrollment secrets or consume recovery proof.",
+            "reference": "docs/ai-coding-reliability.md"
+          }
+        ]
+      },
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "shared_account_login::tests::actual_totp_",
+            "shared_account_login::tests::totp_retry_unknown",
+            "shared_account_login::tests::totp_equal_generation",
+            "shared_account_login::tests::v4_pairing_adopts_login"
+          ]
+        }
+      ],
+      "escalation": [
+        "Native authenticator, physical machines, and startup/idle resource measurements remain manual evidence."
       ]
     }
   ],

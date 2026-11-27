@@ -188,8 +188,11 @@ impl IdentityManager {
         old_password: &str,
         new_password: &str,
     ) -> Result<(), IdentityError> {
+        let _namespace_lock = self.account_login_namespace_lock()?;
         // Authenticate with old password
         self.authenticate_user(username, old_password)?;
+
+        let security = self.security_read(username, old_password)?;
 
         // Read credentials with old password
         let mut credentials: UserCredentials = self
@@ -210,6 +213,15 @@ impl IdentityManager {
                 username,
                 "meta/credentials.json",
                 &credentials,
+                new_password,
+            )
+            .map_err(|e| IdentityError::StorageError(e.to_string()))?;
+
+        self.file_manager
+            .write_encrypted_file(
+                username,
+                "meta/account-security.enc",
+                &security,
                 new_password,
             )
             .map_err(|e| IdentityError::StorageError(e.to_string()))?;

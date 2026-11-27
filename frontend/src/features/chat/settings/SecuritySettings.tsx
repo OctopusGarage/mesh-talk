@@ -1,3 +1,4 @@
+import { AccountTotpSettings } from "./AccountTotpSettings";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { EyeOff, KeyRound, Plug, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -193,6 +194,7 @@ export function SecuritySettings({
           />
         )}
       </SettingsSection>
+      <AccountTotpSettings />
       <SettingsSection title={t("settings.sections.clipboard")}>
         <SettingsRow
           id="setting-confirm-copy"

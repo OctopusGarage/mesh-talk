@@ -24,7 +24,11 @@ interface AuthState {
   clearError: () => void;
   /** Restore the live native session, or cold saved login when "stay signed in" is on. */
   tryAutoLogin: () => Promise<void>;
-  login: (username: string, password: string) => Promise<boolean>;
+  login: (
+    username: string,
+    password: string,
+    totp?: string,
+  ) => Promise<boolean>;
   register: (username: string, password: string) => Promise<boolean>;
   enrollDevice: (
     enrollmentId: string,
@@ -120,9 +124,9 @@ export const useAuth = create<AuthState>((set, get) => ({
     }
   },
 
-  login: (username, password) =>
+  login: (username, password, totp) =>
     enterAuthenticatedSession(
-      () => auth.login(username, password),
+      () => auth.login(username, password, totp),
       get().createdUsername === username,
       set,
       get,

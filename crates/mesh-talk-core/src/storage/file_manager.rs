@@ -6,6 +6,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Clone)]
 pub struct FileManager {
@@ -144,7 +145,7 @@ impl FileManager {
         self.create_user_directory(username)?;
 
         // Serialize the data
-        let serialized_data = serialize_data(data)?;
+        let serialized_data = Zeroizing::new(serialize_data(data)?);
 
         // Generate salt and derive key
         let salt = generate_salt();
@@ -222,7 +223,7 @@ impl FileManager {
         let key = EncryptionKey::from_password(password, &salt)?;
 
         // Decrypt the data
-        let decrypted_data = decrypt_data(ciphertext, &nonce, &key)?;
+        let decrypted_data = Zeroizing::new(decrypt_data(ciphertext, &nonce, &key)?);
 
         // Deserialize the data
         let deserialized_data = deserialize_data(&decrypted_data)?;

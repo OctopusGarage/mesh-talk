@@ -191,6 +191,7 @@ impl AppLock {
             })
             .unwrap_or(false);
         if locked {
+            *app.totp_pending.lock().unwrap() = None;
             *app.drafts.lock().unwrap() = None;
             let _ = handle.emit("app-locked", ());
         }
@@ -241,6 +242,7 @@ pub fn lock_app(
             Ok::<(), CommandError>(())
         })
         .map_err(CommandError::Authorization)??;
+    *app.totp_pending.lock().unwrap() = None;
     *app.drafts.lock().unwrap() = None;
     Ok(())
 }

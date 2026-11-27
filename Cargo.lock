@@ -3471,6 +3471,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest",
+ "ring",
  "security-framework 3.7.0",
  "security-framework-sys",
  "semver",

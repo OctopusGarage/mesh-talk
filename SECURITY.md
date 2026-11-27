@@ -141,3 +141,31 @@ the SBOM, then verify:
 
 A failed checksum or signature means the download was tampered with or did not come from
 this project — do not run it.
+
+## Optional account two-factor authentication
+
+Account TOTP is OFF by default. Security settings read the native status before
+showing enabled or disabled; an unavailable status is not evidence of disabled
+protection. Enroll once for the account across trusted devices. Scan the locally
+rendered QR code or enter the manual seed in an authenticator, save the single-use
+recovery codes securely, acknowledge that they are saved, then confirm with a
+six-digit authenticator code. Recovery codes are displayed only during enrollment.
+A failed confirmation consumes pending enrollment: restart setup rather than
+retrying its old seed. Cancel discards displayed setup material.
+
+Login accepts an authenticator code or a recovery code. Keep recovery codes separate
+from account credentials; each successful recovery use consumes that code. Losing
+both the authenticator and all recovery codes can prevent account access.
+Native primary reauthentication remains required for TOTP lifecycle changes.
+This feature does not imply factor enforcement for every sensitive operation.
+
+Local durable enable/disable success and account publication are separate outcomes.
+A pending synchronization warning offers an explicit publication retry. Offline
+trusted devices receive policy changes only after reconnecting; do not assume
+immediate revocation or globally synchronized recovery-code consumption.
+The settings view owns secrets only for its mounted session and clears them on
+cancel, completion, lock/session generation change, runtime replacement or unmount.
+It performs one status read on entry and explicit reads after actions, with no
+polling, timers, persistent secrets or remote QR service. Desktop retained-memory,
+CPU, native reauthentication and multi-device propagation acceptance still require
+real-platform measurements and scenarios.

@@ -386,6 +386,49 @@ mod integration_lease_tests {
     }
 
     #[test]
+    fn prepared_security_publication_rejects_logout_without_blocking_it() {
+        let (_root, app, node, user) = fixture();
+        let manager = app.auth_service().identity_manager().clone();
+        manager.register_user("integration", "pw").unwrap();
+        app.session().publish("token".into(), user, "pw".into());
+        let admission = RuntimeAdmission::capture_current(&app, &node).unwrap();
+        let (ready, entered) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let incoming = mesh_talk_core::identity::account_security::AccountSecurity {
+                version: 1,
+                generation: 1,
+                ..Default::default()
+            };
+            manager.import_account_security_if("integration", "pw", 0, incoming, |commit| {
+                ready.send(()).unwrap();
+                resume.recv().unwrap();
+                admission
+                    .app
+                    .session()
+                    .matching(admission.lease(), |_| commit())
+                    .map_err(|e| {
+                        mesh_talk_core::identity::errors::IdentityError::StorageError(e.to_string())
+                    })?
+            })
+        });
+        entered
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .unwrap();
+        app.session().clear();
+        release.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert_eq!(
+            app.auth_service()
+                .identity_manager()
+                .export_account_security("integration", "pw")
+                .unwrap()
+                .generation,
+            0
+        );
+    }
+
+    #[test]
     fn integrations_lease_rejects_logout() {
         let (_root, app, node, user) = fixture();
         let lease = app.session().publish("old".into(), user, "pw".into());

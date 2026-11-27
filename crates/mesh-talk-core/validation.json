@@ -2,6 +2,20 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-account-security",
+      "paths": [
+        "crates/mesh-talk-core/src/identity/account_security.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "identity::account_security::"
+          ]
+        }
+      ]
+    },
+    {
       "id": "core-account-group-operations",
       "paths": [
         "crates/mesh-talk-core/src/node/account_group/",

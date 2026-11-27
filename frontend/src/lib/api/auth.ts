@@ -39,8 +39,12 @@ export const auth = {
     }),
   cancelDeviceEnrollment: (enrollmentId: string) =>
     invoke<void>("cancel_device_enrollment", { enrollmentId }),
-  login: (username: string, password: string) =>
-    invoke<LoginResult>("login", { username, password }),
+  login: (username: string, password: string, totp?: string) =>
+    invoke<LoginResult>("login", {
+      username,
+      password,
+      ...(totp === undefined ? {} : { totp }),
+    }),
   register: (username: string, password: string) =>
     invoke<RegisterResult>("register", { username, password }),
   retrySavedSession: (owner: string) =>

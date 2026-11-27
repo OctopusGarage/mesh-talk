@@ -250,12 +250,14 @@ pub async fn login<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     username: String,
     password: String,
+    totp: Option<String>,
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
     settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<LoginResult, CommandError> {
     let clock = crate::logger::work_trace_enabled().then(std::time::Instant::now);
-    let outcome = login_impl(username, password.clone(), app_state.inner()).await?;
+    let outcome =
+        login_impl_with_totp(username, password.clone(), totp, app_state.inner(), None).await?;
     if let Some(clock) = clock {
         log::info!(
             target: crate::logger::STARTUP_LOG_TARGET,
@@ -425,6 +427,7 @@ pub async fn auto_login<R: tauri::Runtime>(
             );
             Ok(Some(user_info))
         }
+        Err(CommandError::InvalidInput(ref message)) if message == "TOTP_REQUIRED" => Ok(None),
         // Stored secret no longer authenticates (e.g. password changed elsewhere): forget it
         // and fall back to manual login rather than surfacing a hard error on every launch.
         _ => {
@@ -695,6 +698,7 @@ fn forget_logged_out<R: tauri::Runtime>(
     crate::session_store::clear(username);
 }
 
+#[cfg(test)]
 async fn login_impl(
     username: String,
     password: String,
@@ -706,6 +710,16 @@ async fn login_impl(
 async fn login_impl_guarded(
     username: String,
     password: String,
+    app_state: &AppState,
+    saved_login: Option<(u64, &crate::settings::SettingsState)>,
+) -> CommandResult<AuthOutcome> {
+    login_impl_with_totp(username, password, None, app_state, saved_login).await
+}
+
+async fn login_impl_with_totp(
+    username: String,
+    password: String,
+    totp: Option<String>,
     app_state: &AppState,
     saved_login: Option<(u64, &crate::settings::SettingsState)>,
 ) -> CommandResult<AuthOutcome> {
@@ -744,7 +758,7 @@ async fn login_impl_guarded(
             // future is cancelled. Publication belongs to this actual result.
             let _auth = auth_operation;
             let (user, token, lease) =
-                auth_service.login_session(normalized_username, raw_password)?;
+                auth_service.login_session_with_totp(normalized_username, raw_password, totp)?;
             Ok::<_, AuthError>(AuthOutcome {
                 user: user.clone(),
                 lease,
@@ -857,6 +871,7 @@ pub async fn logout<R: tauri::Runtime>(
 }
 
 fn logout_impl(app_state: &AppState) -> CommandResult<LogoutResult> {
+    *app_state.totp_pending.lock().unwrap() = None;
     let session = require_session(app_state)?;
     app_state
         .auth_service()

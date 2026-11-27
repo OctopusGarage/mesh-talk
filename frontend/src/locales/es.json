@@ -1793,5 +1793,22 @@
     "copy": "Copiar código",
     "expand": "Expandir código",
     "collapse": "Contraer código"
+  },
+  "totp": {
+    "title": "Autenticación de dos factores de la cuenta",
+    "scope": "Desactivada por defecto. Configúrala una vez para la cuenta y sus dispositivos de confianza. Los dispositivos sin conexión reciben cambios al reconectarse. No protege todas las acciones sensibles.",
+    "on": "Activada localmente",
+    "off": "Desactivada",
+    "failed": "No se pudo completar la acción. Si falló la confirmación, reinicia la configuración con un código nuevo.",
+    "pending": "Guardado localmente. La sincronización de la cuenta está pendiente; reintenta la publicación.",
+    "seed": "Clave de configuración manual",
+    "recovery": "Guarda estos códigos de recuperación de un solo uso en un lugar seguro. Solo se muestran durante la configuración.",
+    "ack": "He guardado mis códigos de recuperación.",
+    "code": "Código del autenticador o de recuperación",
+    "confirm": "Confirmar configuración",
+    "disable": "Desactivar",
+    "enable": "Configurar",
+    "required": "Introduce el código de seis dígitos del autenticador o un código de recuperación.",
+    "invalid": "Código inválido o ya usado. Prueba uno nuevo."
   }
 }

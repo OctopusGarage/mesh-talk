@@ -77,3 +77,14 @@ it.each(SUPPORTED_LANGUAGES)(
     expect(html).toContain('autoComplete="current-password"');
   },
 );
+
+it.each(["TOTP_REQUIRED", "TOTP_INVALID"])(
+  "localizes %s inline",
+  async (error) => {
+    authState.error = error;
+    await i18n.changeLanguage("en");
+    expect(alertText()).toBe(
+      i18n.t(error === "TOTP_REQUIRED" ? "totp.required" : "totp.invalid"),
+    );
+  },
+);

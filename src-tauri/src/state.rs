@@ -21,6 +21,7 @@ pub use crate::desktop_session::{SessionInfo, SessionState};
 /// node runs out of [`crate::chat_commands::NodeState`].)
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) totp_pending: Arc<Mutex<Option<crate::account_security::Pending>>>,
     pub(crate) enrollment: crate::device_enrollment::EnrollmentState,
     pub(crate) drafts: Arc<Mutex<Option<crate::drafts::DraftStorage>>>,
     app_lock: crate::app_lock::AppLock,
@@ -49,6 +50,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(auth_service: AuthService) -> Self {
         Self {
+            totp_pending: Arc::new(Mutex::new(None)),
             enrollment: crate::device_enrollment::EnrollmentState::default(),
             drafts: Arc::new(Mutex::new(None)),
             app_lock: crate::app_lock::AppLock::default(),

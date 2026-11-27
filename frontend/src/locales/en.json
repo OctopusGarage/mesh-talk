@@ -1793,5 +1793,22 @@
     "copy": "Copy code",
     "expand": "Expand code",
     "collapse": "Collapse code"
+  },
+  "totp": {
+    "title": "Account two-factor authentication",
+    "scope": "Off by default. Enroll once for this account across trusted devices. Offline devices receive changes only after reconnecting; this does not protect every sensitive action.",
+    "on": "Enabled locally",
+    "off": "Off",
+    "failed": "Unable to complete this action. If confirmation failed, restart setup with a new code.",
+    "pending": "Saved locally. Account synchronization is pending; retry publication.",
+    "seed": "Manual authenticator setup key",
+    "recovery": "Save these single-use recovery codes securely. They are shown only during setup.",
+    "ack": "I have saved my recovery codes.",
+    "code": "Authenticator code or recovery code",
+    "confirm": "Confirm enrollment",
+    "disable": "Disable",
+    "enable": "Set up",
+    "required": "Enter your six-digit authenticator code or a recovery code.",
+    "invalid": "Invalid or already used code. Try a fresh code."
   }
 }

@@ -29,6 +29,7 @@ export function LoginScreen() {
   const [tab, setTab] = useState<"signin" | "register">("signin");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [totp, setTotp] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -92,7 +93,7 @@ export function LoginScreen() {
     e.preventDefault();
     setNotice(null);
     if (tab === "signin") {
-      await login(username.trim(), password);
+      await login(username.trim(), password, totp || undefined);
     } else {
       await register(username.trim(), password);
       // Creation and entry are distinct outcomes: never register twice after a
@@ -108,6 +109,7 @@ export function LoginScreen() {
     setTab(v as "signin" | "register");
     clearError();
     setPassword("");
+    setTotp("");
     setShowPassword(false);
     setNotice(null);
   };
@@ -215,7 +217,11 @@ export function LoginScreen() {
                     autoComplete="username"
                     value={username}
                     disabled={loading}
-                    onChange={(e) => setUsername(e.target.value)}
+                    onChange={(e) => {
+                      setUsername(e.target.value);
+                      setTotp("");
+                      clearError();
+                    }}
                     className="placeholder:italic"
                     placeholder={t(
                       tab === "register"
@@ -296,6 +302,18 @@ export function LoginScreen() {
                   </p>
                 </div>
 
+                {tab === "signin" && (
+                  <div>
+                    <Label htmlFor="totp">{t("totp.code")}</Label>
+                    <Input
+                      id="totp"
+                      autoComplete="one-time-code"
+                      value={totp}
+                      onChange={(e) => setTotp(e.target.value)}
+                      disabled={loading}
+                    />
+                  </div>
+                )}
                 {stayError && (
                   <div
                     role="alert"
@@ -326,7 +344,11 @@ export function LoginScreen() {
                   >
                     {error === "Invalid username or password"
                       ? t("login.invalidCredentials")
-                      : error}
+                      : error.includes("TOTP_REQUIRED")
+                        ? t("totp.required")
+                        : error.includes("TOTP_INVALID")
+                          ? t("totp.invalid")
+                          : error}
                   </p>
                 )}
                 {notice && (
