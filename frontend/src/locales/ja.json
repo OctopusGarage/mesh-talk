@@ -771,7 +771,12 @@
     "folderUnknown": "フォルダーを確認できません",
     "folderLoadFailed": "ダウンロードフォルダーを読み込めませんでした: {{error}}",
     "receiveUnknown": "現在の設定を取得できません",
-    "receiveLoadFailed": "受信ポリシーを読み込めませんでした：{{error}}"
+    "receiveLoadFailed": "受信ポリシーを読み込めませんでした：{{error}}",
+    "extractText": "文字を抽出",
+    "recognizingText": "文字を認識中…",
+    "noTextFound": "文字が見つかりません",
+    "textRecognitionFailed": "文字を認識できませんでした。もう一度お試しください。",
+    "copyAllText": "すべての文字をコピー"
   },
   "linkDevice": {
     "syncTitle": "この端末で同期",

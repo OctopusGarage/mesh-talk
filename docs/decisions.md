@@ -152,3 +152,12 @@ fingerprint as a display-name fallback. Keep transport payload identifiers intac
 This replaces separate text/file title conventions without adding a renderer or
 network dependency. See [notification previews](settings.md#native-notification-previews)
 for privacy, language, resource and verification boundaries.
+
+## Image text extraction uses system Vision
+
+Ordinary macOS image previews use explicit on-demand Vision OCR and a selectable
+text panel, without an external OCR engine or model. WebKit image selection is an
+opportunistic convenience, not the extraction contract. VisionKit interactive
+overlays remain deferred until their asynchronous native path has real completion
+and selection evidence. Bounds and lifecycle belong to
+[inline media presentation](module-boundaries.md#inline-media-presentation).

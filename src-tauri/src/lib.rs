@@ -33,6 +33,7 @@ pub mod events;
 pub mod favorites;
 mod google_drive;
 mod history_storage;
+mod image_text;
 mod integrations;
 mod lan_review;
 mod lan_review_http;
@@ -376,6 +377,7 @@ pub fn run_tauri_configured(
                 owner_commands::owner_enqueue_text,
                 owner_commands::owner_reveal_message,
                 owner_commands::owner_reveal_image,
+                image_text::owner_recognize_image_text,
                 owner_commands::owner_enqueue_channel_text,
                 owner_commands::owner_enqueue_channel_sticker,
                 owner_commands::owner_enqueue_channel_file,

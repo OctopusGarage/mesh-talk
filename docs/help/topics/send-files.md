@@ -39,10 +39,15 @@ check that the destination is writable, then use the file's retry action.
 ## Copy text from an image
 
 In the macOS desktop app, click an ordinary image in the conversation to enlarge
-it. Move the pointer over the words, pause briefly, then drag to select the text.
-Press **Command-C**, or right-click the selection and choose **Copy text**. Recognition
-uses macOS Live Text and depends on the system's support for the image and language.
-When zoomed in, hold **Option** while dragging to select text rather than pan.
+it, then choose **Extract text** from the top-left button or the image menu.
+Recognition uses the Mac's system Vision framework. Select the words you need in
+the result panel and copy them, or choose **Copy all text**. Clipboard privacy
+settings still apply. If recognition fails, choose **Retry**; a blank image shows
+**No text found**. Closing the panel or preview releases its result.
+
+Recognition requires macOS 10.15 or later and varies by image quality and supported
+language. Large images are reduced before recognition. This action extracts text;
+it does not reproduce the original document layout.
 
 ## Image actions
 

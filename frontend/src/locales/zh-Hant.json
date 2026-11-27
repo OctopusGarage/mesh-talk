@@ -771,7 +771,12 @@
     "folderUnknown": "無法取得資料夾",
     "folderLoadFailed": "無法載入下載資料夾：{{error}}",
     "receiveUnknown": "目前設定無法使用",
-    "receiveLoadFailed": "無法載入接收原則：{{error}}"
+    "receiveLoadFailed": "無法載入接收原則：{{error}}",
+    "extractText": "擷取文字",
+    "recognizingText": "正在辨識文字…",
+    "noTextFound": "未發現文字",
+    "textRecognitionFailed": "文字辨識失敗，請重試",
+    "copyAllText": "複製全部文字"
   },
   "linkDevice": {
     "syncTitle": "在本裝置上同步",

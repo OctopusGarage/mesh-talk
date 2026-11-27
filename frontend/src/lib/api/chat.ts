@@ -134,6 +134,8 @@ function mediaBytes(bytes: ArrayBuffer | number[]): ArrayBuffer {
 }
 
 export const chat = {
+  recognizeImageText: (owner: string, png: string) =>
+    invoke<string>("owner_recognize_image_text", { owner, png }),
   reactionSummaries: (
     owner: string,
     kind: "account" | "channel",

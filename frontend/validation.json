@@ -2369,7 +2369,9 @@
         "frontend/e2e/video-player-layout.spec.ts",
         "frontend/e2e/fixtures/video-metadata.json",
         "frontend/src/features/chat/MessageBubble.media.test.ts",
-        "frontend/e2e/media-message-presentation.spec.ts"
+        "frontend/e2e/media-message-presentation.spec.ts",
+        "frontend/src/features/chat/ImageTextResult.tsx",
+        "frontend/src/features/chat/ImageTextResult.test.ts"
       ],
       "frontend": [
         "src/features/chat/MediaPreview.test.ts",
@@ -2381,7 +2383,8 @@
         "src/features/chat/useConversationViewport.test.ts",
         "src/features/chat/protectedImage.test.ts",
         "src/features/chat/ReceiveProgress.test.ts",
-        "src/features/chat/MessageBubble.media.test.ts"
+        "src/features/chat/MessageBubble.media.test.ts",
+        "src/features/chat/ImageTextResult.test.ts"
       ],
       "capability": {
         "summary": "Fit decoded images to their original proportions within bounded thumbnails, reuse known geometry on virtualized remounts within bounded session ownership, and support bounded full-size image zoom and pan.",

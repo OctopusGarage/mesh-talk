@@ -771,7 +771,12 @@
     "folderUnknown": "无法获取文件夹",
     "folderLoadFailed": "无法加载下载文件夹：{{error}}",
     "receiveUnknown": "当前设置不可用",
-    "receiveLoadFailed": "无法加载接收策略：{{error}}"
+    "receiveLoadFailed": "无法加载接收策略：{{error}}",
+    "extractText": "提取文字",
+    "recognizingText": "正在识别文字…",
+    "noTextFound": "未发现文字",
+    "textRecognitionFailed": "文字识别失败，请重试",
+    "copyAllText": "复制全部文字"
   },
   "linkDevice": {
     "syncTitle": "在本设备上同步",

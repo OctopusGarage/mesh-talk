@@ -1557,7 +1557,11 @@
     },
     {
       "id": "desktop-inline-media-preview",
-      "paths": ["src-tauri/src/chat_commands/files.rs", "src-tauri/src/lib.rs"],
+      "paths": [
+        "src-tauri/src/chat_commands/files.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/image_text.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
@@ -1568,7 +1572,8 @@
             "owner_commands::tests::registered_protected_image_reveal_requires_exact_authority_and_blocks_ordinary_reads",
             "owner_commands::tests::registered_plaintext_and_trust_commands_reject_replaced_entry_authority",
             "chat_commands::files::tests::preview_deadline_bounds_runtime_writer_wait_without_starting_work",
-            "chat_commands::files::tests::preview_timeout_keeps_actual_worker_owned_without_holding_session_lock"
+            "chat_commands::files::tests::preview_timeout_keeps_actual_worker_owned_without_holding_session_lock",
+            "image_text::tests::"
           ]
         }
       ],

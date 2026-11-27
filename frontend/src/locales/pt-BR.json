@@ -771,7 +771,12 @@
     "folderUnknown": "Pasta indisponível",
     "folderLoadFailed": "Não foi possível carregar a pasta de downloads: {{error}}",
     "receiveUnknown": "Configuração atual indisponível",
-    "receiveLoadFailed": "Não foi possível carregar a política de recebimento: {{error}}"
+    "receiveLoadFailed": "Não foi possível carregar a política de recebimento: {{error}}",
+    "extractText": "Extrair texto",
+    "recognizingText": "Reconhecendo texto…",
+    "noTextFound": "Nenhum texto encontrado",
+    "textRecognitionFailed": "Falha ao reconhecer o texto. Tente novamente.",
+    "copyAllText": "Copiar todo o texto"
   },
   "linkDevice": {
     "syncTitle": "Sincronização neste dispositivo",

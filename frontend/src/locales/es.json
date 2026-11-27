@@ -771,7 +771,12 @@
     "folderUnknown": "Carpeta no disponible",
     "folderLoadFailed": "No se pudo cargar la carpeta de descargas: {{error}}",
     "receiveUnknown": "Ajuste actual no disponible",
-    "receiveLoadFailed": "No se pudo cargar la política de recepción: {{error}}"
+    "receiveLoadFailed": "No se pudo cargar la política de recepción: {{error}}",
+    "extractText": "Extraer texto",
+    "recognizingText": "Reconociendo texto…",
+    "noTextFound": "No se encontró texto",
+    "textRecognitionFailed": "No se pudo reconocer el texto. Inténtalo de nuevo.",
+    "copyAllText": "Copiar todo el texto"
   },
   "linkDevice": {
     "syncTitle": "Sincronización en este dispositivo",

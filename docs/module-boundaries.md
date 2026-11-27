@@ -170,8 +170,19 @@ The ordinary-image lightbox owns pointer-anchored wheel zoom (1–8 times the
 window-fit size), double-click zoom, bounded pointer dragging, fit reset and
 keyboard zoom (+/−/0). Resize clamps the current position; reopening resets it.
 Controls remain outside the clipped image stage. Escape restores trigger focus.
-On macOS, unzoomed images retain native text selection; Option/Alt-drag bypasses
-panning when zoomed. Actual recognition and selection require WKWebView evidence.
+On macOS, **Extract text** invokes the system Vision recognizer on explicit demand
+and displays selectable text with a copy-all action. `ImageTextResult.tsx` owns the
+source-scoped result and retry state; `image_text.rs` owns native admission and OCR.
+Input is PNG bounded to 8 MiB and four million pixels; the renderer downsamples to
+at most 2560 pixels per edge. One actual blocking worker retains global capacity
+through completion, even after the 20-second observer deadline. No OCR work runs
+at startup or idle, and no result is persisted or cached across previews. Session
+and runtime authority are checked before admission and response; closed or replaced
+previews discard completions. Text copying uses the existing sensitive clipboard
+policy, including selected-text copy events. Native multilingual recognition has
+a manual fixture selector; browser mocks do not certify real WKWebView selection.
+The existing opportunistic WebKit selection remains available unzoomed, with
+Option/Alt bypassing panning when zoomed; it is not the extraction provider.
 Ordinary-image context actions use the shared accessible menu, suppress WebKit
 browser defaults and reuse the attachment save/reveal owners. `ui/lib/imageClipboard.ts`
 exports the entire decoded image as PNG, starts the write within user activation,

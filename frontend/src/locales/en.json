@@ -771,7 +771,12 @@
     "folderUnknown": "Folder unavailable",
     "folderLoadFailed": "Couldn’t load the download folder: {{error}}",
     "receiveUnknown": "Current setting unavailable",
-    "receiveLoadFailed": "Couldn’t load the receiving policy: {{error}}"
+    "receiveLoadFailed": "Couldn’t load the receiving policy: {{error}}",
+    "extractText": "Extract text",
+    "recognizingText": "Recognizing text…",
+    "noTextFound": "No text found",
+    "textRecognitionFailed": "Text recognition failed. Try again.",
+    "copyAllText": "Copy all text"
   },
   "linkDevice": {
     "syncTitle": "Sync on this device",
