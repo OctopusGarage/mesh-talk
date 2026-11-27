@@ -1,0 +1,15 @@
+现在有时候通知烂的文字为什么有bug。不能正常显示人名或者群名，或者直接显示【表情】【图片】【文件】之类的，直接显示一段hash，看起来很垃圾，体验很差，排查一下哪里有问题，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+[Attached image "Screenshot 2026-11-26 at 10.23.01.png" is saved at: /Users/kingsonwu/.t3/userdata/attachments/7faa03f2-8905-4e19-a77d-b4c128d57d99-ba687cd8-dc58-4f2a-8e1a-52477a556cbf.png]
+
+---
+
+你调研一下正常的IM软件都是怎么处理的吧，没见过现在处理这么恶心的，看起来一点都不专业优雅，分析一下，research and analyze; research and analyze; research and analyze; research and analyze;
+
+---
+
+那你全面优化修复一下吧，analyze；，analyze；，analyze；
+
+---
+
+把修复代码提交到requirements-work分支，continue；continue；continue；
