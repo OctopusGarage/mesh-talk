@@ -125,10 +125,12 @@ def destination_lock(destination):
         os.close(fd)
 
 
-def _verify_existing(destination, source):
+def _verify_existing(destination, source, *, allow_empty=False):
     current = disk_files(destination)
     if not current:
-        return
+        if allow_empty:
+            return
+        raise ValueError(f"empty directory is not a verified snapshot: {destination}")
     if MANIFEST in current:
         verify_snapshot(destination, source)
         return
@@ -165,7 +167,7 @@ def _export_locked(source, destination):
         else:
             backup.rename(destination)
     if destination.exists() or destination.is_symlink():
-        _verify_existing(destination, source)
+        _verify_existing(destination, source, allow_empty=True)
     with tempfile.TemporaryDirectory(prefix='.mesh-snapshot-', dir=destination.parent) as temp:
         staged = Path(temp) / 'snapshot'
         staged.mkdir()

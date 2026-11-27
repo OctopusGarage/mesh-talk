@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "revision": "f06bd4ccc819bec9e1f79bab8bec3b18ba2e230d",
+  "revision": "7a19102571c43aaf112c28940db47ed0b5ff6f0e",
   "files": {
     ".gitattributes": "c25bcb8f0cf0d1c04577b13169af840123e4e088d87ddae83739cff1a147d8c9",
     "Cargo.toml": "0f6359a5c019e378439101ce2cb00f97bf9e699f7b1d49e193b0909fc20e5bd3",
@@ -96,6 +96,6 @@
     "crates/mesh-storage/src/lib.rs": "92038c08f6988e165136f5ac5371fa364dc0ed78170748e3af77a6e4cc5ed79e",
     "crates/mesh-storage/src/record_log.rs": "2db8e6f2662154d3317383f38982d46066c8e163584797308b015932c885ef4f",
     "crates/mesh-storage/src/record_log_visitor_tests.rs": "51d58774d9b46aa7b37e2612b662047732da0762960bed90644d64cdbf73f9d5",
-    "scripts/sdk_snapshot.py": "dd5cbde775720a6cc329427811298e1d83d67e59ab75bef0e4a2f165c3242037"
+    "scripts/sdk_snapshot.py": "d36b821e48ffe9939c58d95b28e15fb9c520aeda2feedc986eff4e2f036bcf36"
   }
 }

@@ -81,3 +81,9 @@ checkout verifies recovery state before restoring or cleaning it. Never remove
 an unknown backup or treat an existing lease file as proof of a live owner.
 The ignored `.mesh-NAME.snapshot-lock` sibling inode coordinates processes even
 when their temporary-directory environments differ.
+
+During recovery, an empty target directory is not an installed snapshot and cannot
+authorize deletion of a verified backup. Export preserves both and reports the
+ambiguous target. Verify the backup, remove only the empty placeholder with
+`rmdir`, and retry. Empty directories remain supported for fresh installation
+when no recovery backup exists.
