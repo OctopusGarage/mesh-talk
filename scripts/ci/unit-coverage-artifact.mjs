@@ -25,16 +25,25 @@ if (!/^[a-f0-9]{40}$/.test(identity.sourceSha || "") || !identity.workflow ||
 }
 let artifact = input;
 if (mode === "restore-latest") {
-  const prefix = `ui-unit-coverage-${identity.sourceSha}-${identity.runId}-`;
-  const attempts = (await readdir(input)).map(name => {
-    if (!name.startsWith(prefix)) throw new Error("Unexpected unit coverage artifact");
-    const attempt = name.slice(prefix.length);
-    if (!/^[1-9]\d*$/.test(attempt) || BigInt(attempt) > BigInt(identity.runAttempt)) throw new Error("Invalid producer attempt");
-    return { name, attempt };
-  }).sort((a, b) => BigInt(a.attempt) < BigInt(b.attempt) ? 1 : -1);
-  if (!attempts.length) throw new Error("Missing unit coverage producer artifact");
-  artifact = resolve(input, attempts[0].name);
-  identity.runAttempt = attempts[0].attempt;
+  const entries = await readdir(input);
+  if (entries.includes("provenance.json")) {
+    // download-artifact v8 flattens a single match even with merge-multiple=false.
+    if (entries.length !== 2 || !entries.includes("lcov.info")) throw new Error("Unexpected unit coverage artifact files");
+    const manifest = JSON.parse(await readFile(resolve(input, "provenance.json"), "utf8"));
+    if (!/^[1-9]\d*$/.test(manifest.runAttempt || "") || BigInt(manifest.runAttempt) > BigInt(identity.runAttempt)) throw new Error("Invalid producer attempt");
+    identity.runAttempt = manifest.runAttempt;
+  } else {
+    const prefix = `ui-unit-coverage-${identity.sourceSha}-${identity.runId}-`;
+    const attempts = (await readdir(input)).map(name => {
+      if (!name.startsWith(prefix)) throw new Error("Unexpected unit coverage artifact");
+      const attempt = name.slice(prefix.length);
+      if (!/^[1-9]\d*$/.test(attempt) || BigInt(attempt) > BigInt(identity.runAttempt)) throw new Error("Invalid producer attempt");
+      return { name, attempt };
+    }).sort((a, b) => BigInt(a.attempt) < BigInt(b.attempt) ? 1 : -1);
+    if (!attempts.length) throw new Error("Missing unit coverage producer artifact");
+    artifact = resolve(input, attempts[0].name);
+    identity.runAttempt = attempts[0].attempt;
+  }
 }
 const lcov = await readFile(mode === "seal" ? input : resolve(artifact, "lcov.info"));
 const sha256 = createHash("sha256").update(lcov).digest("hex");

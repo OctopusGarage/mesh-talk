@@ -157,3 +157,17 @@ test("browser coverage consumer rerun selects the latest completed attempt of ea
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(await readFile(path.join(f.output, "shard-1-0.json"), "utf8")), { "http://localhost/src/app.tsx": [10] });
 });
+
+
+test("unit coverage consumer rerun accepts the single-artifact flat download layout", async t => {
+  const f = await unitFixture(t);
+  assert.equal(f.run("seal").status, 0);
+  const result = f.run("restore-latest", { GITHUB_RUN_ATTEMPT: "3" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readFile(f.output, "utf8"), f.lcov);
+  assert.notEqual(f.run("restore-latest", { GITHUB_RUN_ATTEMPT: "1" }).status, 0);
+  assert.notEqual(f.run("restore-latest", { GITHUB_SHA: "b".repeat(40) }).status, 0);
+  assert.notEqual(f.run("restore-latest", { GITHUB_RUN_ID: "5678" }).status, 0);
+  await writeFile(path.join(f.artifact, "lcov.info"), "SF:src/changed.ts\nDA:1,1\n");
+  assert.notEqual(f.run("restore-latest", { GITHUB_RUN_ATTEMPT: "3" }).status, 0);
+});
