@@ -645,7 +645,7 @@ retired and follows the existing transport retry policy. It is not recycled as a
 clean `Limited` range turn. New-profile `More`/`Limited` retain the explicit fair
 continuation/sparse-repair behavior described above.
 
-See [bounded synchronization verification](bounded-sync-verification.md) for the
+See [bounded synchronization verification](bounded-sync.md) for the
 verified runtime scope, test profile and remaining cold-index limitations.
 
 Retained range plans account heap separately from derived SQL storage: enforce

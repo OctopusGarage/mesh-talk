@@ -3358,6 +3358,8 @@ dependencies = [
 [[package]]
 name = "mesh-foundation-blob"
 version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e1c46bff634c889d921ed74315ac0b08905663d6ec7fa1995006e0ce25ad93d"
 dependencies = [
  "aes-gcm 0.11.1",
  "futures-util",
@@ -3372,6 +3374,8 @@ dependencies = [
 [[package]]
 name = "mesh-foundation-connect"
 version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c6787411e2a6b27c4220b73c9ca8da16afdb633dd6ea3eb4014a301c062c43f"
 dependencies = [
  "futures-util",
  "if-addrs",
@@ -3385,6 +3389,8 @@ dependencies = [
 [[package]]
 name = "mesh-foundation-e2ee"
 version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9939d60bb53fbaa2745346e57f9b27d5d98ac2a5a97c655a95238e12282da718"
 dependencies = [
  "aes-gcm 0.11.1",
  "bincode",
@@ -3399,6 +3405,8 @@ dependencies = [
 [[package]]
 name = "mesh-foundation-identity"
 version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99ee10b31c8eaf0911d29d0432ff6f4e1a553f48eecee68b85a73ecb98304319"
 dependencies = [
  "bincode",
  "ed25519-dalek",
@@ -3413,6 +3421,8 @@ dependencies = [
 [[package]]
 name = "mesh-foundation-mailbox"
 version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "437044cad8511249a6b4eaa26c4d6c6a413a46d6d3e6690de772cbbd6855b551"
 dependencies = [
  "mesh-foundation-replication",
  "serde",
@@ -3422,6 +3432,8 @@ dependencies = [
 [[package]]
 name = "mesh-foundation-replication"
 version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e1259648328b2a2c7058af266ff81147b831f40f8865db34b66918022070a3"
 dependencies = [
  "sha2 0.10.9",
 ]
@@ -3429,6 +3441,8 @@ dependencies = [
 [[package]]
 name = "mesh-foundation-storage"
 version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "379e69ae6e2f1a23114f40ea89fda8eb05cd6bcfa8b5fa31e4a364479e71c34a"
 dependencies = [
  "aes-gcm 0.11.1",
  "bincode",

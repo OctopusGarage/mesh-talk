@@ -1,4 +1,0 @@
-# Preserve SDK source and snapshot digests across platform checkouts.
-* text=auto eol=lf
-*.png binary
-*.svg text eol=lf

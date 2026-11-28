@@ -372,7 +372,6 @@
     {
       "id": "workspace-toolchain",
       "paths": [
-        "vendor/mesh-foundation/",
         "Cargo.toml",
         "Cargo.lock",
         ".cargo/",

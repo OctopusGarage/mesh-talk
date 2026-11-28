@@ -3,8 +3,8 @@
 Mesh Foundation supplies generic authenticated byte sessions, opaque replication,
 cryptographic state machines, encrypted records, mailbox quota mechanisms and
 verified blob transfer. It does not own chat events, group permissions or App
-lifecycle. The managed vendor copy records its reviewed SDK commit in
-`vendor/mesh-foundation/SOURCE`.
+lifecycle. The consumer pins the coordinated SDK packages to `=0.1.0-alpha.2` on crates.io;
+Cargo.lock records their registry checksums.
 
 `mesh-talk-protocol` is application-owned and not published. It preserves the
 original device/account fingerprints and certificate signature domains, signed
@@ -62,26 +62,21 @@ accepts/returns the SDK signer rather than a dalek secret-key object; known
 workspace consumers infer that type. This source-level helper change does not
 change account/device identifiers, wire formats or credential records.
 
-## Updating the managed SDK
+## Updating the SDK
 
-From a clean, committed SDK checkout, run:
+Upgrade all Mesh Foundation dependencies together, regenerate Cargo.lock and run
+session, range and SQL selection tests. Published alphas are immutable and exact
+pins prevent unintended prerelease upgrades.
+
+For local development with a matching SDK version:
 
 ```sh
-python3 scripts/sdk.py snapshot export ../mesh-talk/vendor/mesh-foundation
-python3 scripts/sdk.py snapshot verify ../mesh-talk/vendor/mesh-foundation --source .
+python3 ../mesh-foundation/scripts/sdk.py patch --source crates-io > /tmp/mesh-talk-sdk.toml
+cargo --config /tmp/mesh-talk-sdk.toml test -p mesh-talk-core --lib
 ```
 
-`SOURCE` and `SNAPSHOT.json` are generated together. Updates reject local edits,
-missing/extra files and symlinks. CI runs the bundled verifier offline; explicit
-`--source` verification also binds hashes to the recorded SDK Git commit. Offline
-hashes alone are not proof against a deliberately forged manifest. Update the
-consumer lockfile and run affected range, SQL selection and session tests.
-Signed application discovery uses the application's existing profile; mesh-connect
-is consumed without its neutral signed-discovery default feature.
-
-SDK SQLite examples are illustrative contract coverage, not this application's
-SQL schema or performance benchmark. Forum's inventory/private-mailbox tests
-prove independent composition; its production post protocol is a separate owner.
+The override is temporary and stays outside the repository. Restore lockfile
+changes caused by local overrides and validate without the override before committing.
 
 ## Historical mailbox paging through the shared engine
 

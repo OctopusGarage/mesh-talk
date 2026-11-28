@@ -1461,7 +1461,6 @@
     {
       "id": "core-eventlog",
       "paths": [
-        "vendor/mesh-foundation/crates/mesh-replication/",
         "crates/mesh-talk-core/src/eventlog/"
       ],
       "rust": [
@@ -1564,10 +1563,7 @@
     {
       "id": "core-file",
       "paths": [
-        "crates/mesh-talk-core/src/file/",
-        "vendor/mesh-foundation/crates/mesh-blob/",
-        "vendor/mesh-foundation/README.md",
-        "vendor/mesh-foundation/LICENSE"
+        "crates/mesh-talk-core/src/file/"
       ],
       "rust": [
         {
@@ -1583,7 +1579,6 @@
     {
       "id": "core-identity",
       "paths": [
-        "vendor/mesh-foundation/crates/mesh-identity/",
         "crates/mesh-talk-core/src/identity/",
         "crates/mesh-talk-core/src/node/account_devices.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs"
@@ -1638,7 +1633,6 @@
     {
       "id": "core-postoffice",
       "paths": [
-        "vendor/mesh-foundation/crates/mesh-mailbox/",
         "crates/mesh-talk-core/src/postoffice/",
         "crates/mesh-talk-core/src/bin/mesh-talk-node/federation_runtime.rs",
         "crates/mesh-talk-core/src/bin/mesh-talk-node.rs",
@@ -1742,8 +1736,7 @@
     {
       "id": "core-ratchet",
       "paths": [
-        "crates/mesh-talk-core/src/ratchet/",
-        "vendor/mesh-foundation/crates/mesh-e2ee/"
+        "crates/mesh-talk-core/src/ratchet/"
       ],
       "rust": [
         {
@@ -1865,7 +1858,6 @@
         ]
       },
       "paths": [
-        "vendor/mesh-foundation/crates/mesh-storage/",
         "crates/mesh-talk-core/src/storage/"
       ],
       "rust": [
@@ -1894,7 +1886,6 @@
     {
       "id": "core-transport",
       "paths": [
-        "vendor/mesh-foundation/crates/mesh-connect/",
         "crates/mesh-talk-core/src/transport/"
       ],
       "rust": [

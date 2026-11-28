@@ -9,10 +9,10 @@ publish = false
 test-observability = []
 
 [dependencies]
-mesh-identity = { package = "mesh-foundation-identity", path = "../../vendor/mesh-foundation/crates/mesh-identity" }
-mesh-mailbox = { package = "mesh-foundation-mailbox", path = "../../vendor/mesh-foundation/crates/mesh-mailbox", default-features = false }
-mesh-replication = { package = "mesh-foundation-replication", path = "../../vendor/mesh-foundation/crates/mesh-replication" }
-mesh-storage = { package = "mesh-foundation-storage", path = "../../vendor/mesh-foundation/crates/mesh-storage" }
+mesh-identity = { version = "=0.1.0-alpha.2", package = "mesh-foundation-identity" }
+mesh-mailbox = { version = "=0.1.0-alpha.2", package = "mesh-foundation-mailbox", default-features = false }
+mesh-replication = { version = "=0.1.0-alpha.2", package = "mesh-foundation-replication" }
+mesh-storage = { version = "=0.1.0-alpha.2", package = "mesh-foundation-storage" }
 bincode.workspace = true
 serde.workspace = true
 hex.workspace = true
@@ -26,6 +26,6 @@ rand_core.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
-mesh-connect = { package = "mesh-foundation-connect", path = "../../vendor/mesh-foundation/crates/mesh-connect", default-features = false }
+mesh-connect = { version = "=0.1.0-alpha.2", package = "mesh-foundation-connect", default-features = false }
 tokio.workspace = true
 tempfile.workspace = true

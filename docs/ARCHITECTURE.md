@@ -64,7 +64,7 @@ session authorization continues to enclose synchronous commits.
 
 ### Mesh Foundation libraries
 
-Mesh Talk composes selected mechanisms from the seven-crate [Mesh Foundation source snapshot](../vendor/mesh-foundation/README.md). The application-owned `mesh-talk-protocol` retains historical identity, discovery and mailbox formats.
+Mesh Talk composes selected mechanisms from the seven-crate [Mesh Foundation SDK](https://github.com/OctopusGarage/mesh-foundation). The application-owned `mesh-talk-protocol` retains historical identity, discovery and mailbox formats.
 
 | Library | Reusable implementation |
 | --- | --- |
