@@ -965,7 +965,7 @@ test("macOS native notification coverage is appended once after defaults and bef
   assert.match(native, /--test-concurrency=1 [^\n]*scripts\/ci\/notification-native\.test\.mjs/u);
 });
 
-test("Linux archive consumers reuse the producer's pinned tools in the same attempt", () => {
+test("Linux archive consumers reuse the producer's pinned tools across consumer attempts", () => {
   const producer = read("ci.yml");
   const consumer = read("linux-workspace-consumer.yml");
   assert.match(producer, /toolsArtifactId: \$\{\{ steps\.validation_tools\.outputs\.artifact-id \}\}/u);
@@ -976,4 +976,25 @@ test("Linux archive consumers reuse the producer's pinned tools in the same atte
   assert.match(consumer, /install -m 0755 "\$tools\/cargo-nextest" "\$tools\/cargo-llvm-cov" "\$cargo_bin\/"/u);
   assert.match(consumer, /cargo-nextest" --version/);
   assert.match(consumer, /cargo-llvm-cov" llvm-cov --version/u);
+});
+
+
+test("Linux sealed tool identity permits a consumer rerun without accepting another source or run", () => {
+  const consumer = read("linux-workspace-consumer.yml");
+  const validation = consumer.match(/          # Validate producer attempt[\s\S]*?          # End producer attempt validation/u)?.[0];
+  assert.ok(validation, "producer attempt validation must be present");
+  const script = "set -e\n" + validation.replace(/^          /gm, "");
+  const sha = "a".repeat(40);
+  for (const [identity, expected] of [
+    [`${sha} 123 1`, 0], [`${sha} 123 2`, 0],
+    [`${sha} 123 3`, 1], [`${sha} 456 1`, 1],
+    [`${"b".repeat(40)} 123 1`, 1], [`${sha} 123 0`, 1],
+    [`${sha} 123 999999999999999999999999999999`, 1], [`${sha} 123 invalid`, 1], [`${sha} 123 1 extra`, 1],
+  ]) {
+    const result = spawnSync("bash", ["-c", script.replace("< identity", "<<< \"$TEST_IDENTITY\"").replace("diff -u identity", "diff -u <(printf '%s\\n' \"$TEST_IDENTITY\")")], {
+      encoding: "utf8",
+      env: { ...process.env, GITHUB_SHA: sha, GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2", TEST_IDENTITY: identity },
+    });
+    assert.equal(result.status === 0 ? 0 : 1, expected, `${identity}: ${result.stderr}`);
+  }
 });

@@ -109,7 +109,14 @@ jobs:
           cd "$tools"
           printf '%s  SHA256SUMS\n' "$TOOLS_MANIFEST_SHA" | sha256sum --check --strict
           sha256sum --check --strict SHA256SUMS
-          diff -u identity <(printf '%s\n' "$GITHUB_SHA $GITHUB_RUN_ID $GITHUB_RUN_ATTEMPT")
+          # Validate producer attempt after authenticating the sealed manifest.
+          read -r producer_source producer_run producer_attempt extra < identity
+          test "$producer_source" = "$GITHUB_SHA"
+          test "$producer_run" = "$GITHUB_RUN_ID"
+          [[ "$producer_attempt" =~ ^[1-9][0-9]*$ && -z "$extra" ]] || exit 1
+          test "$producer_attempt" -le "$GITHUB_RUN_ATTEMPT"
+          diff -u identity <(printf '%s\n' "$GITHUB_SHA $GITHUB_RUN_ID $producer_attempt")
+          # End producer attempt validation
           # The sealed coverage environment binds the absolute Rust compiler wrapper path.
           cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
           mkdir -p "$cargo_bin"
