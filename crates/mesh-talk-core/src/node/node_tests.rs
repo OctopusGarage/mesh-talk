@@ -13940,6 +13940,7 @@ async fn group_reception_projection_failure_case(failed_rollback: bool, restart:
         node.clone()
             .run_channel_recovery_loop(Arc::new(tokio::sync::Notify::new())),
     );
+    let mut observed_events = prefix.into_iter().collect::<Vec<_>>();
     let started = std::time::Instant::now();
     let last_sequence = std::cell::Cell::new(None);
     let terminal_pending = std::cell::Cell::new(true);
@@ -13951,7 +13952,13 @@ async fn group_reception_projection_failure_case(failed_rollback: bool, restart:
             match node.reception_effects.head() {
                 Ok(head) => {
                     last_sequence.set(Some(head.sequence));
-                    terminal_pending.set(head.sequence != 66);
+                    observed_events.extend(std::iter::from_fn(|| rx.try_recv().ok()));
+                    // The durable terminal commits before legacy publication.
+                    // Keep the producer alive until both consumer boundaries agree.
+                    terminal_pending.set(
+                        head.sequence != 66
+                            || !observed_events.iter().any(|event| event.reception_only),
+                    );
                     if !terminal_pending.get() {
                         break;
                     }
@@ -13983,7 +13990,7 @@ async fn group_reception_projection_failure_case(failed_rollback: bool, restart:
         read_failed.get(),
         polls.get()
     );
-    let events = prefix
+    let events = observed_events
         .into_iter()
         .chain(std::iter::from_fn(|| rx.try_recv().ok()));
     let (terminals, received): (Vec<_>, Vec<_>) = events.partition(|event| event.reception_only);
